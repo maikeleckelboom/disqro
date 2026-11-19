@@ -18,9 +18,9 @@ Build on Windows x64 with Rustup, Visual Studio C++ Build Tools, the Windows SDK
 .\target\release\disqro.exe
 ```
 
-Choose **Open folder** or press **Ctrl+O**. Double-click a track to start listening. A folder, an audio file, or a CUE sheet can also be passed as the first argument. Opening a file or sheet starts playback.
+Open a folder from Places, the folder tree, the address bar (**Ctrl+L**), or **Ctrl+O**. Double-click a track to start listening, or right-click it to play it next or add it to the queue. A folder, an audio file, or a CUE sheet can also be passed as the first argument. Opening a file or sheet starts playback.
 
-The first build browses folders, reads tags and cover art, plays individual CUE tracks, and lets you seek on a waveform built from the recording. It remembers your workspace, table columns, folder, and volume. See the [listening workspace notes](docs/listening-workspace.md) for format coverage, shortcuts, and verification.
+This build has an editable address bar with breadcrumbs, customizable Places, a persistent play queue that mixes CUE chapters and single files, a notification-area icon with background playback, and Windows media controls. It reads tags and cover art, plays individual CUE tracks, and seeks on a waveform built from the recording. It remembers your workspace, queue, Places, columns, folder, and volume. See the [listening workspace notes](docs/listening-workspace.md) for controls, format coverage, measurements, and what is still unverified.
 
 ## Product direction
 
