@@ -150,6 +150,13 @@ impl Browser {
     pub fn revision(&self) -> u64 {
         self.generation
     }
+    pub fn list_focus(&self, cx: &App) -> FocusHandle {
+        if self.listing_discs() {
+            self.discs.read(cx).focus_handle(cx)
+        } else {
+            self.table.read(cx).focus_handle(cx)
+        }
+    }
     pub fn listing_discs(&self) -> bool {
         self.prefs.albums && self.disc.is_none()
     }
@@ -157,7 +164,7 @@ impl Browser {
         if let Some(d) = self.discs.read(cx).delegate().items.get(ix) {
             self.disc = Some(d.id.clone());
             self.filter(cx);
-            self.table.read(cx).focus_handle(cx).focus(window, cx);
+            self.list_focus(cx).focus(window, cx);
             cx.notify();
         }
     }
@@ -166,11 +173,7 @@ impl Browser {
         cx.emit(ViewChanged);
         self.disc = None;
         self.filter(cx);
-        if albums {
-            self.discs.read(cx).focus_handle(cx).focus(window, cx);
-        } else {
-            self.table.read(cx).focus_handle(cx).focus(window, cx);
-        }
+        self.list_focus(cx).focus(window, cx);
         cx.notify();
     }
     pub fn can_go_back(&self) -> bool {
@@ -355,12 +358,12 @@ impl Browser {
         }
         self.filter(cx);
         cx.notify();
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let mut reveal = reveal;
             let mut first = true;
             while let Ok(batch) = events.recv().await {
                 if this
-                    .update(cx, |b, cx| {
+                    .update_in(cx, |b, window, cx| {
                         if b.generation != revision {
                             return;
                         }
@@ -392,7 +395,7 @@ impl Browser {
                             }
                         }
                         if let Some(request) = &reveal
-                            && b.reveal(request, cx)
+                            && b.reveal(request, window, cx)
                         {
                             reveal = None;
                         }
@@ -422,7 +425,7 @@ impl Browser {
             });
         }));
     }
-    fn reveal(&mut self, request: &Reveal, cx: &mut App) -> bool {
+    fn reveal(&mut self, request: &Reveal, window: &mut Window, cx: &mut App) -> bool {
         let item = self
             .table
             .read(cx)
@@ -442,8 +445,12 @@ impl Browser {
             .cloned();
         let Some(item) = item else { return false };
         if self.prefs.albums {
+            let list_had_focus = self.list_focus(cx).is_focused(window);
             self.disc = Some(DiscId::of(&item));
             self.filter(cx);
+            if list_had_focus {
+                self.list_focus(cx).focus(window, cx);
+            }
         }
         self.table.update(cx, |t, cx| {
             if let Some(i) = t.delegate().rows.iter().position(|t| t.same_item(&item)) {

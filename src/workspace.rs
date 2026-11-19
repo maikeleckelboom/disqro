@@ -237,8 +237,7 @@ impl Workspace {
         app.browser.update(cx, |b, cx| {
             b.load(folder, is_file.then_some(Reveal::Play(target)), window, cx)
         });
-        let table = app.browser.read(cx).table.clone();
-        table.read(cx).focus_handle(cx).focus(window, cx);
+        app.browser.read(cx).list_focus(cx).focus(window, cx);
         if let Some(notice) = profile_notice {
             window.push_notification(notice, cx);
         }

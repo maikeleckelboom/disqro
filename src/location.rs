@@ -204,8 +204,7 @@ impl LocationBar {
     /// Like Explorer, leaving the address bar returns to the file list, so
     /// the keyboard keeps working.
     fn focus_list(&self, window: &mut Window, cx: &mut App) {
-        let table = self.browser.read(cx).table.clone();
-        table.read(cx).focus_handle(cx).focus(window, cx);
+        self.browser.read(cx).list_focus(cx).focus(window, cx);
     }
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request += 1;
@@ -238,8 +237,8 @@ impl LocationBar {
                 match target {
                     Target::Folder => {
                         bar.editing = false;
-                        bar.focus_list(window, cx);
                         bar.browser.update(cx, |b, cx| b.open(path, window, cx));
+                        bar.focus_list(window, cx);
                     }
                     Target::Playable => {
                         bar.editing = false;
