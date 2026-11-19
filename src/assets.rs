@@ -30,9 +30,16 @@ gpui_kit::assets::icon_assets!(
         X,
         Pencil,
         RefreshCw,
-        TriangleAlert
+        TriangleAlert,
+        ListPlus,
+        Library,
+        Trash,
+        Copy,
+        FolderSearch
     ]
 );
+/// A filled variant of Lucide's heart (ISC licence), for liked tracks.
+pub const HEART_FILL: &str = "icons/heart-fill.svg";
 pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
@@ -41,6 +48,7 @@ impl AssetSource for Assets {
         }
         let custom = embedded!(
             "brand/compact.png",
+            "icons/heart-fill.svg",
             "files/16/folder.svg",
             "files/20/folder-music.svg",
             "files/20/drive.svg"

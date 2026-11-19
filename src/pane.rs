@@ -1,11 +1,13 @@
 use crate::{
     audio::Command,
-    browser::Browser,
-    library::{clock, display_name},
+    browser::{Browser, Location},
+    catalog::Targets,
+    library::{TrackList, clock},
     player::Player,
     queue_view::QueueView,
     sidebar::Sidebar,
     table::ROW_HEIGHT,
+    table::queue_targets,
     theme::materials,
 };
 use gpui_kit::{
@@ -74,24 +76,37 @@ impl Panel for Pane {
                 let count = b.count;
                 let total = b.duration.unwrap_or_default();
                 let discs = b.discs.read(cx).delegate().items.len();
+                let catalog = b.catalog.read(cx);
+                let indexing = match &b.location {
+                    Location::Library(Some(r)) => {
+                        catalog.collection(*r).and_then(|c| c.status.clone())
+                    }
+                    Location::Library(None) => {
+                        catalog.collections.iter().find_map(|c| c.status.clone())
+                    }
+                    _ => None,
+                };
+                let tracks = |n: usize| format!("{n} {}", if n == 1 { "track" } else { "tracks" });
                 let detail = if b.busy {
-                    format!("Scanning · {count} tracks")
+                    format!("Scanning · {}", tracks(count))
                 } else if count == 0 {
                     String::new()
                 } else if b.listing_discs() {
-                    format!("{discs} discs · {count} tracks")
+                    format!("{discs} discs · {}", tracks(count))
                 } else if total > 0. {
-                    format!(
-                        "{count} {} · {}",
-                        if count == 1 { "track" } else { "tracks" },
-                        clock(total)
-                    )
+                    format!("{} · {}", tracks(count), clock(total))
                 } else {
-                    format!("{count} {}", if count == 1 { "track" } else { "tracks" })
+                    tracks(count)
                 };
+                let detail = match indexing {
+                    Some(status) if detail.is_empty() => status,
+                    Some(status) => format!("{detail} · {status}"),
+                    None => detail,
+                };
+                let subfolders = b.location.is_folder() && b.prefs.recursive;
                 (
-                    b.album.clone().unwrap_or_else(|| display_name(&b.path)),
-                    if b.prefs.recursive {
+                    b.title(cx),
+                    if subfolders {
                         if detail.is_empty() {
                             "Including subfolders".into()
                         } else {
@@ -150,9 +165,13 @@ impl Panel for Pane {
             return None;
         }
         let b = self.browser.read(cx);
+        let indexed_album = matches!(b.location, Location::Album { .. });
+        if !b.can_list_discs() && !indexed_album {
+            return None;
+        }
         let albums = b.prefs.albums;
         let browser = self.browser.clone();
-        let back = b.disc.is_some();
+        let back = b.disc.is_some() || indexed_album;
         Some(vec![
             Button::new("collection-view")
                 .ghost()
@@ -178,60 +197,105 @@ impl Panel for Pane {
         match self.kind {
             Kind::Queue => self.queue.read(cx).panel_menu(menu, cx),
             Kind::Tracks => {
-                let tracks: crate::library::TrackList =
-                    self.browser.read(cx).table.read(cx).delegate().rows.clone();
-                let empty = tracks.is_empty();
+                let b = self.browser.read(cx);
+                let table = b.table.read(cx).delegate();
+                let all = table.all_targets();
+                let empty = all.is_empty();
+                let location = b.location.clone();
+                let catalog = b.catalog.clone();
+                let in_library = catalog
+                    .read(cx)
+                    .collections
+                    .iter()
+                    .any(|c| b.path.starts_with(&c.root.path));
+                let player = self.player.clone();
                 let send = {
-                    let player = self.player.clone();
-                    move |c: Command, cx: &mut App| player.update(cx, |p, cx| p.command(c, cx))
+                    let (catalog, player) = (catalog.clone(), player.clone());
+                    move |targets: Targets, shuffle: Option<bool>, cx: &mut App| {
+                        let command: Box<dyn FnOnce(TrackList) -> Command> = match shuffle {
+                            None => Box::new(Command::Enqueue),
+                            Some(false) => Box::new(|t| Command::Play(t, 0)),
+                            Some(true) => Box::new(|t: TrackList| {
+                                let start = fastrand::usize(..t.len());
+                                Command::Play(t, start)
+                            }),
+                        };
+                        if let Some(on) = shuffle {
+                            player.update(cx, |p, cx| p.command(Command::Shuffle(on), cx));
+                        }
+                        queue_targets(&catalog, &player, targets, command, cx);
+                    }
                 };
                 let (s1, s2, s3) = (send.clone(), send.clone(), send);
-                let (t1, t2, t3) = (tracks.clone(), tracks.clone(), tracks);
+                let (t1, t2, t3) = (all.clone(), all.clone(), all);
                 let browser = self.browser.clone();
                 let scope = browser.clone();
-                let recursive = browser.read(cx).prefs.recursive;
-                menu.item(
-                    PopupMenuItem::new("Include Subfolders")
-                        .checked(recursive)
-                        .on_click(move |_, w, cx| {
-                            scope.update(cx, |b, cx| {
-                                b.prefs.recursive = !b.prefs.recursive;
-                                b.reload(w, cx);
-                            });
-                        }),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new("Play All")
-                        .icon(IconName::Play)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| {
-                            s1(Command::Shuffle(false), cx);
-                            s1(Command::Play(t1.clone(), 0), cx)
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Shuffle All")
-                        .icon(IconName::Shuffle)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| {
-                            let start = fastrand::usize(..t2.len());
-                            s2(Command::Shuffle(true), cx);
-                            s2(Command::Play(t2.clone(), start), cx)
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Add All to Queue")
-                        .icon(IconName::ListEnd)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| s3(Command::Enqueue(t3.clone()), cx)),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new("Refresh")
+                let recursive = b.prefs.recursive;
+                let folder = b.path.clone();
+                let menu = match &location {
+                    Location::Folder(_) => menu
+                        .item(
+                            PopupMenuItem::new("Include Subfolders")
+                                .checked(recursive)
+                                .on_click(move |_, w, cx| {
+                                    scope.update(cx, |b, cx| {
+                                        b.prefs.recursive = !b.prefs.recursive;
+                                        b.reload(w, cx);
+                                    });
+                                }),
+                        )
+                        .separator(),
+                    _ => menu,
+                };
+                let menu = menu
+                    .item(
+                        PopupMenuItem::new("Play All")
+                            .icon(IconName::Play)
+                            .disabled(empty)
+                            .on_click(move |_, _, cx| s1(t1.clone(), Some(false), cx)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Shuffle All")
+                            .icon(IconName::Shuffle)
+                            .disabled(empty)
+                            .on_click(move |_, _, cx| s2(t2.clone(), Some(true), cx)),
+                    )
+                    .item(
+                        PopupMenuItem::new("Add All to Queue")
+                            .icon(IconName::ListEnd)
+                            .disabled(empty)
+                            .on_click(move |_, _, cx| s3(t3.clone(), None, cx)),
+                    )
+                    .separator();
+                match location {
+                    Location::Folder(_) => menu
+                        .when(!in_library, |menu| {
+                            menu.item(
+                                PopupMenuItem::new("Add Folder to Library")
+                                    .icon(IconName::Library)
+                                    .on_click(move |_, _, cx| {
+                                        catalog.update(cx, |c, cx| c.add_root(folder.clone(), cx))
+                                    }),
+                            )
+                        })
+                        .item(
+                            PopupMenuItem::new("Refresh")
+                                .icon(IconName::RefreshCw)
+                                .on_click(move |_, w, cx| {
+                                    browser.update(cx, |b, cx| b.reload(w, cx))
+                                }),
+                        ),
+                    Location::Library(root) | Location::Album { root, .. } => menu.item(
+                        PopupMenuItem::new(if root.is_some() {
+                            "Rescan Collection"
+                        } else {
+                            "Rescan Collections"
+                        })
                         .icon(IconName::RefreshCw)
                         .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.reload(w, cx))),
-                )
+                    ),
+                    Location::Liked | Location::Playlist(_) => menu,
+                }
             }
             _ => menu,
         }
@@ -258,7 +322,9 @@ impl Pane {
                     .child(div().truncate().child(notice.clone())),
             );
         }
-        if b.listing_discs() && !b.discs.read(cx).delegate().items.is_empty() {
+        if b.listing_discs()
+            && (!b.location.is_folder() || !b.discs.read(cx).delegate().items.is_empty())
+        {
             return view.child(
                 div().flex_1().min_h_0().child(
                     DataTable::new(&b.discs)
@@ -271,14 +337,19 @@ impl Pane {
             );
         }
         view.child(
-            div().flex_1().min_h_0().text_size(px(13.)).child(
-                DataTable::new(&b.table)
-                    .accessibility_label("Recordings")
-                    .bordered(false)
-                    .stripe(false)
-                    .header_row_height(px(30.))
-                    .with_size(gpui_kit::component::Size::Size(px(ROW_HEIGHT))),
-            ),
+            div()
+                .key_context("MusicTracks")
+                .flex_1()
+                .min_h_0()
+                .text_size(px(13.))
+                .child(
+                    DataTable::new(&b.table)
+                        .accessibility_label("Recordings")
+                        .bordered(false)
+                        .stripe(false)
+                        .header_row_height(px(30.))
+                        .with_size(gpui_kit::component::Size::Size(px(ROW_HEIGHT))),
+                ),
         )
     }
 }

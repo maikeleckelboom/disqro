@@ -1,8 +1,10 @@
 use crate::{
-    collection::{DiscId, Discs, ViewPrefs},
+    catalog::{Catalog, CatalogEvent},
+    collection::{Disc, DiscId, Discs, ViewPrefs},
     discovery::Scanner,
     library::{self, Track, TrackList},
     player::{Player, PlayerEvent},
+    store::{PlaylistId, RootId, Scope, Term, Ticket},
     table::{LayoutColumn, MusicTable},
 };
 use gpui_kit::{
@@ -14,12 +16,34 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 const HISTORY: usize = 100;
+
+/// What the Recordings panel shows: a folder on disk, read as it is, or a
+/// view of the persistent library.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Location {
+    Folder(PathBuf),
+    /// One registered collection, or all of them.
+    Library(Option<RootId>),
+    Album {
+        root: Option<RootId>,
+        id: crate::store::AlbumId,
+        title: String,
+    },
+    Liked,
+    Playlist(PlaylistId),
+}
+impl Location {
+    pub fn is_folder(&self) -> bool {
+        matches!(self, Self::Folder(_))
+    }
+}
 
 /// What to do with a file once its folder is open.
 #[derive(Clone)]
@@ -33,7 +57,9 @@ pub struct ViewChanged;
 impl EventEmitter<ViewChanged> for Browser {}
 
 pub struct Browser {
+    /// The current folder, or the last one while a library view is shown.
     pub path: PathBuf,
+    pub location: Location,
     pub album: Option<String>,
     pub folder_count: usize,
     pub notice: Option<String>,
@@ -41,8 +67,9 @@ pub struct Browser {
     pub tree: Entity<TreeState>,
     pub table: Entity<TableState<MusicTable>>,
     pub search: Entity<InputState>,
-    back: Vec<PathBuf>,
-    forward: Vec<PathBuf>,
+    pub catalog: Entity<Catalog>,
+    back: Vec<Location>,
+    forward: Vec<Location>,
     raw: Vec<Option<Arc<Track>>>,
     pub prefs: ViewPrefs,
     pub discs: Entity<TableState<Discs>>,
@@ -57,6 +84,7 @@ pub struct Browser {
     paths: Vec<PathBuf>,
     generation: u64,
     query: String,
+    albums: Ticket,
 }
 pub fn music_home() -> PathBuf {
     crate::places::known_path(crate::places::Known::Music)
@@ -66,6 +94,7 @@ pub fn music_home() -> PathBuf {
 impl Browser {
     pub fn new(
         player: Entity<Player>,
+        catalog: Entity<Catalog>,
         columns: Vec<LayoutColumn>,
         prefs: ViewPrefs,
         window: &mut Window,
@@ -75,7 +104,7 @@ impl Browser {
         let browser = cx.weak_entity();
         let table = cx.new(|cx| {
             TableState::new(
-                MusicTable::new(player.clone(), columns, browser),
+                MusicTable::new(player.clone(), catalog.clone(), columns, browser),
                 window,
                 cx,
             )
@@ -120,12 +149,36 @@ impl Browser {
             _ => {}
         })
         .detach();
+        cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
+            CatalogEvent::Content => b.library_changed(cx),
+            CatalogEvent::Changed => {
+                // A removed collection or playlist cannot stay open.
+                let gone = match &b.location {
+                    Location::Library(Some(r)) | Location::Album { root: Some(r), .. } => {
+                        b.catalog.read(cx).collection(*r).is_none()
+                    }
+                    Location::Playlist(p) => b.catalog.read(cx).playlist(*p).is_none(),
+                    _ => false,
+                };
+                if gone && b.catalog.read(cx).loaded {
+                    b.location = Location::Library(None);
+                    b.disc = None;
+                    b.filter(cx);
+                    cx.emit(ViewChanged);
+                }
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
         Self {
             path: PathBuf::new(),
+            location: Location::Folder(PathBuf::new()),
             album: None,
             tree,
             table,
             search,
+            catalog,
             raw: vec![],
             prefs,
             discs,
@@ -145,6 +198,7 @@ impl Browser {
             notice: None,
             busy: false,
             folder_count: 0,
+            albums: Ticket::default(),
         }
     }
     pub fn revision(&self) -> u64 {
@@ -157,11 +211,37 @@ impl Browser {
             self.table.read(cx).focus_handle(cx)
         }
     }
+    /// Albums / CDs applies to folders and collections.
+    pub fn can_list_discs(&self) -> bool {
+        matches!(self.location, Location::Folder(_) | Location::Library(_))
+    }
     pub fn listing_discs(&self) -> bool {
-        self.prefs.albums && self.disc.is_none()
+        self.prefs.albums && self.disc.is_none() && self.can_list_discs()
+    }
+    /// The library view the table shows, if any.
+    fn scope(&self) -> Option<Scope> {
+        Some(match &self.location {
+            Location::Folder(_) => return None,
+            Location::Library(root) => Scope::Library(*root),
+            Location::Album { id, .. } => Scope::Album(*id),
+            Location::Liked => Scope::Liked,
+            Location::Playlist(p) => Scope::Playlist(*p),
+        })
     }
     pub fn show_disc(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(d) = self.discs.read(cx).delegate().items.get(ix) {
+            if let (Location::Library(root), Some(id)) = (&self.location, d.id.album()) {
+                self.show(
+                    Location::Album {
+                        root: *root,
+                        id,
+                        title: d.title.clone(),
+                    },
+                    window,
+                    cx,
+                );
+                return;
+            }
             self.disc = Some(d.id.clone());
             self.filter(cx);
             self.list_focus(cx).focus(window, cx);
@@ -170,6 +250,10 @@ impl Browser {
     }
     pub fn view(&mut self, albums: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.albums = albums;
+        if let Location::Album { root, .. } = self.location {
+            self.show(Location::Library(root), window, cx);
+            return;
+        }
         cx.emit(ViewChanged);
         self.disc = None;
         self.filter(cx);
@@ -182,14 +266,24 @@ impl Browser {
     pub fn can_go_forward(&self) -> bool {
         !self.forward.is_empty()
     }
-    fn filter(&mut self, cx: &mut App) {
+    fn filter(&mut self, cx: &mut Context<Self>) {
+        self.albums.next();
+        if let Some(scope) = self.scope() {
+            self.filter_library(scope, cx);
+        } else {
+            self.filter_folder(cx);
+        }
+    }
+    fn filter_folder(&mut self, cx: &mut App) {
+        let terms = Term::parse(&self.query);
+        let catalog = self.catalog.read(cx);
         let rows: TrackList = self
             .raw
             .iter()
             .flatten()
             .filter(|t| {
                 self.disc.as_ref().is_none_or(|d| d.contains(t))
-                    && (self.query.is_empty() || crate::collection::matches(t, &self.query))
+                    && crate::collection::matches(t, &terms, || catalog.mark_of(t))
             })
             .cloned()
             .collect();
@@ -201,26 +295,12 @@ impl Browser {
             .map(|t| t.album.clone());
         if self.listing_discs() {
             let items = Discs::group(&rows, &self.covers, &self.path);
-            self.discs.update(cx, |table, cx| {
-                let selected = table
-                    .selected_row()
-                    .and_then(|i| table.delegate().items.get(i))
-                    .map(|d| d.id.clone());
-                table.delegate_mut().items = items;
-                if let Some(ix) =
-                    selected.and_then(|id| table.delegate().items.iter().position(|d| d.id == id))
-                {
-                    table.set_selected_row(ix, cx);
-                } else {
-                    table.clear_selection(cx);
-                }
-                cx.notify();
-            });
+            self.set_discs(items, cx);
         }
         self.table.update(cx, |t, cx| {
             if let Some(selected) = t
                 .selected_row()
-                .and_then(|i| t.delegate().rows.get(i))
+                .and_then(|i| t.delegate().track(i))
                 .cloned()
             {
                 self.selected = Some(selected);
@@ -247,10 +327,11 @@ impl Browser {
             } else {
                 "No supported recordings in this folder".into()
             };
-            t.delegate_mut().set_rows(rows);
-            if let Some(ix) =
-                selected.and_then(|item| t.delegate().rows.iter().position(|r| r.same_item(item)))
-            {
+            t.delegate_mut().set_rows(rows, cx);
+            if let Some(ix) = selected.and_then(|item| {
+                (0..t.delegate().len())
+                    .find(|&i| t.delegate().track(i).is_some_and(|r| r.same_item(item)))
+            }) {
                 t.set_selected_row(ix, cx);
             } else {
                 t.clear_selection(cx);
@@ -258,7 +339,140 @@ impl Browser {
             cx.notify();
         });
     }
-    /// Opens a folder and records the current one in the Back history.
+    fn set_discs(&mut self, items: Vec<Disc>, cx: &mut App) {
+        self.discs.update(cx, |table, cx| {
+            let selected = table
+                .selected_row()
+                .and_then(|i| table.delegate().items.get(i))
+                .map(|d| d.id.clone());
+            table.delegate_mut().items = items;
+            if let Some(ix) =
+                selected.and_then(|id| table.delegate().items.iter().position(|d| d.id == id))
+            {
+                table.set_selected_row(ix, cx);
+            } else {
+                table.clear_selection(cx);
+            }
+            cx.notify();
+        });
+    }
+    fn filter_library(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        self.album = None;
+        self.busy = false;
+        let empty: SharedString = if !self.query.is_empty() {
+            "No matching tracks".into()
+        } else {
+            match &self.location {
+                Location::Liked => {
+                    "No liked tracks yet. Like a track from its menu or with Alt+L.".into()
+                }
+                Location::Playlist(_) => {
+                    "This playlist is empty. Add tracks from their menu or drag them here.".into()
+                }
+                Location::Library(_) if self.catalog.read(cx).collections.is_empty() => {
+                    "Add a music folder to the library to browse it here.".into()
+                }
+                _ => "No tracks found yet".into(),
+            }
+        };
+        self.table.update(cx, |t, _| {
+            t.delegate_mut().empty = empty;
+        });
+        let search = self.query.clone();
+        if self.listing_discs() {
+            self.load_albums(cx);
+        }
+        self.table
+            .update(cx, |t, cx| t.delegate_mut().show_library(scope, search, cx));
+    }
+    fn load_albums(&mut self, cx: &mut Context<Self>) {
+        let (Location::Library(root), Some(store)) =
+            (self.location.clone(), self.catalog.read(cx).handle())
+        else {
+            return;
+        };
+        let search = self.query.clone();
+        let generation = self.albums.next();
+        let albums = store.query(&self.albums, generation, move |s| s.albums(root, &search));
+        let ticket = self.albums.clone();
+        cx.spawn(async move |this, cx| {
+            let result = match albums.await {
+                Ok(albums) => {
+                    cx.background_spawn(async move {
+                        let mut items = Vec::with_capacity(albums.len());
+                        for album in albums {
+                            if !ticket.is_current(generation) {
+                                return Err(crate::store::Cancelled.into());
+                            }
+                            items.push(Disc::from_album(album));
+                        }
+                        Ok(items)
+                    })
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            let _ = this.update(cx, |b, cx| {
+                if !b.albums.is_current(generation)
+                    || b.location != Location::Library(root)
+                    || !b.listing_discs()
+                {
+                    return;
+                }
+                let items = match result {
+                    Ok(items) => items,
+                    Err(e) if crate::store::is_cancelled(&e) => return,
+                    Err(e) => {
+                        b.notice = Some(format!("{e:#}"));
+                        Vec::new()
+                    }
+                };
+                b.count = items.iter().map(|d| d.count).sum();
+                b.duration = Some(items.iter().map(Disc::duration).sum());
+                b.set_discs(items, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// The table finished listing a library view.
+    pub fn library_listed(&mut self, count: usize, duration: f64, cx: &mut Context<Self>) {
+        if self.scope().is_some() {
+            self.table
+                .read(cx)
+                .delegate()
+                .player
+                .clone()
+                .update(cx, |p, cx| {
+                    if p.can_start != (count > 0) {
+                        p.can_start = count > 0;
+                        cx.notify();
+                    }
+                });
+        }
+        if self.scope().is_some() && !self.listing_discs() {
+            self.count = count;
+            self.duration = Some(duration);
+            cx.notify();
+        }
+    }
+    /// Likes, ratings, playlists or an index scan changed library rows.
+    fn library_changed(&mut self, cx: &mut Context<Self>) {
+        match self.scope() {
+            Some(scope) if self.listing_discs() => self.filter_library(scope, cx),
+            Some(_) => self.table.update(cx, |t, cx| t.delegate_mut().query(cx)),
+            // Folder rows only need filtering again when marks decide them.
+            None if Term::parse(&self.query)
+                .iter()
+                .any(|t| matches!(t, Term::Rating(_) | Term::Liked(_))) =>
+            {
+                self.filter_folder(cx)
+            }
+            None => self.table.update(cx, |_, cx| cx.notify()),
+        }
+    }
+
+    /// Opens a folder and records the current view in the Back history.
     pub fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.open_revealing(path, None, window, cx);
     }
@@ -269,30 +483,90 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !crate::places::same_path(&self.path, &path) && !self.path.as_os_str().is_empty() {
-            self.back.push(std::mem::take(&mut self.path));
+        self.remember(&Location::Folder(path.clone()));
+        self.load(path, reveal, window, cx);
+    }
+    /// Shows a library view and records the current view in the history.
+    pub fn show(&mut self, location: Location, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember(&location);
+        self.enter(location, window, cx);
+    }
+    fn remember(&mut self, next: &Location) {
+        let same = match (&self.location, next) {
+            (Location::Folder(a), Location::Folder(b)) => {
+                a.as_os_str().is_empty() || crate::places::same_path(a, b)
+            }
+            (a, b) => a == b,
+        };
+        if !same {
+            self.back.push(self.location.clone());
             if self.back.len() > HISTORY {
                 self.back.remove(0);
             }
             self.forward.clear();
         }
-        self.load(path, reveal, window, cx);
+    }
+    fn enter(&mut self, location: Location, window: &mut Window, cx: &mut Context<Self>) {
+        match location {
+            Location::Folder(path) => self.load(path, None, window, cx),
+            location => {
+                if self.location != location {
+                    self.disc = None;
+                    self.search.update(cx, |s, cx| s.set_value("", window, cx));
+                    self.query.clear();
+                }
+                self.task.take();
+                self.generation += 1;
+                self.busy = false;
+                self.notice = None;
+                self.raw.clear();
+                self.location = location;
+                self.count = 0;
+                self.duration = None;
+                if self.paths.is_empty() && !self.path.as_os_str().is_empty() {
+                    self.refresh_tree(cx);
+                }
+                cx.emit(ViewChanged);
+                self.filter(cx);
+                self.list_focus(cx).focus(window, cx);
+                cx.notify();
+            }
+        }
     }
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = self.back.pop() {
-            self.forward.push(std::mem::take(&mut self.path));
-            self.load(p, None, window, cx);
+        if let Some(l) = self.back.pop() {
+            self.forward.push(self.location.clone());
+            self.enter(l, window, cx);
         }
     }
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = self.forward.pop() {
-            self.back.push(std::mem::take(&mut self.path));
-            self.load(p, None, window, cx);
+        if let Some(l) = self.forward.pop() {
+            self.back.push(self.location.clone());
+            self.enter(l, window, cx);
         }
     }
     pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(parent) = self.path.parent().map(Path::to_owned) {
-            self.open(parent, window, cx);
+        match &self.location {
+            Location::Folder(_) => {
+                if let Some(parent) = self.path.parent().map(Path::to_owned) {
+                    self.open(parent, window, cx);
+                }
+            }
+            Location::Album { root, .. } => self.show(Location::Library(*root), window, cx),
+            _ if self.disc.is_some() => {
+                self.disc = None;
+                self.filter(cx);
+                self.list_focus(cx).focus(window, cx);
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+    pub fn can_go_up(&self) -> bool {
+        match self.location {
+            Location::Folder(_) => self.path.parent().is_some(),
+            Location::Album { .. } => true,
+            _ => self.disc.is_some(),
         }
     }
     pub fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -317,8 +591,30 @@ impl Browser {
         .detach();
     }
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.path.clone();
-        self.load(path, None, window, cx);
+        match self.location.clone() {
+            Location::Folder(_) => {
+                let path = self.path.clone();
+                self.load(path, None, window, cx);
+            }
+            Location::Library(root) | Location::Album { root, .. } => {
+                let ids: Vec<RootId> = match root {
+                    Some(r) => vec![r],
+                    None => self
+                        .catalog
+                        .read(cx)
+                        .collections
+                        .iter()
+                        .map(|c| c.root.id)
+                        .collect(),
+                };
+                self.catalog.update(cx, |c, cx| {
+                    for id in ids {
+                        c.rescan(id, cx);
+                    }
+                });
+            }
+            _ => self.library_changed(cx),
+        }
     }
     pub fn load(
         &mut self,
@@ -327,7 +623,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let same_folder = crate::places::same_path(&self.path, &path);
+        let same_folder = self.location.is_folder() && crate::places::same_path(&self.path, &path);
         if !same_folder {
             self.selected = None;
             self.table.update(cx, |t, cx| {
@@ -336,11 +632,12 @@ impl Browser {
             });
         }
         self.generation += 1;
-        cx.emit(ViewChanged);
         let revision = self.generation;
         let timing = std::env::var_os("DISQRO_TRACE_DISCOVERY").map(|_| std::time::Instant::now());
         self.task.take();
         let events = self.scanner.open(path.clone(), self.prefs.recursive);
+        self.location = Location::Folder(path.clone());
+        cx.emit(ViewChanged);
         self.path = path;
         self.busy = true;
         if !same_folder {
@@ -425,13 +722,10 @@ impl Browser {
             });
         }));
     }
-    fn reveal(&mut self, request: &Reveal, window: &mut Window, cx: &mut App) -> bool {
-        let item = self
-            .table
-            .read(cx)
-            .delegate()
-            .rows
-            .iter()
+    fn reveal(&mut self, request: &Reveal, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let table = self.table.read(cx).delegate();
+        let item = (0..table.len())
+            .filter_map(|i| table.track(i))
             .find(|t| match request {
                 Reveal::Track(wanted) => wanted.same_item(t),
                 Reveal::Select(path) | Reveal::Play(path) => {
@@ -453,7 +747,9 @@ impl Browser {
             }
         }
         self.table.update(cx, |t, cx| {
-            if let Some(i) = t.delegate().rows.iter().position(|t| t.same_item(&item)) {
+            let found = (0..t.delegate().len())
+                .find(|&i| t.delegate().track(i).is_some_and(|t| t.same_item(&item)));
+            if let Some(i) = found {
                 t.set_selected_row(i, cx);
                 t.scroll_to_row(i, cx);
                 if matches!(request, Reveal::Play(_)) {
@@ -462,6 +758,27 @@ impl Browser {
             }
         });
         true
+    }
+    /// Lists the current folder's neighbourhood without opening it, for a
+    /// library view restored at startup.
+    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let (dirs, siblings) = cx
+                .background_spawn(async move {
+                    (
+                        library::subfolders(&path),
+                        path.parent().map(library::subfolders),
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |b, cx| {
+                if b.paths.is_empty() {
+                    b.set_tree(&dirs, siblings.as_deref(), cx);
+                }
+            });
+        })
+        .detach();
     }
     /// The tree shows the parent folder with the current folder among its
     /// siblings, opened to show its own subfolders. Album discs and
@@ -521,5 +838,24 @@ impl Browser {
     }
     pub fn tree_path(&self, id: &str) -> Option<PathBuf> {
         self.paths.get(id.parse::<usize>().ok()?).cloned()
+    }
+    /// A short name for the current view.
+    pub fn title(&self, cx: &App) -> String {
+        let catalog = self.catalog.read(cx);
+        match &self.location {
+            Location::Folder(_) => self
+                .album
+                .clone()
+                .unwrap_or_else(|| library::display_name(&self.path)),
+            Location::Library(None) => "All Music".into(),
+            Location::Library(Some(r)) => catalog
+                .collection(*r)
+                .map_or_else(|| "Collection".into(), |c| c.root.name.clone()),
+            Location::Album { title, .. } => title.clone(),
+            Location::Liked => "Liked Tracks".into(),
+            Location::Playlist(p) => catalog
+                .playlist(*p)
+                .map_or_else(|| "Playlist".into(), |p| p.name.clone()),
+        }
     }
 }

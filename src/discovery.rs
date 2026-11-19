@@ -27,6 +27,11 @@ pub struct Batch {
     pub covers: Vec<(PathBuf, crate::artwork::CoverFile)>,
     pub equivalent_sheets: Vec<(PathBuf, PathBuf)>,
     pub notice: Option<String>,
+    /// Folders that could not be listed completely. Their contents are
+    /// unknown rather than absent, so the indexer never marks them missing.
+    pub incomplete: Vec<PathBuf>,
+    /// Sheets that exist but could not be interpreted on this visit.
+    pub failed_sheets: Vec<PathBuf>,
 }
 struct Request {
     path: PathBuf,
@@ -79,7 +84,7 @@ struct Segment {
 /// Deduplicate whole programs. A different source, sequence or authored
 /// program remains a separate edition, even if some chapters are identical.
 #[derive(Default)]
-struct Sources {
+pub(crate) struct Sources {
     programs: HashMap<Vec<Segment>, PathBuf>,
     covered: HashSet<Arc<Path>>,
     files: HashMap<Arc<Path>, usize>,
@@ -160,17 +165,28 @@ impl Sources {
     }
 }
 
-fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>) {
+/// Walks a folder, and its subfolders when `recursive`, publishing
+/// deduplicated tracks in bounded batches. Returns the state that header
+/// enrichment needs, or `None` once `publish` refuses a batch or `alive`
+/// turns false. The listening browser and the library indexer share it, so
+/// both agree on what counts as a track.
+pub(crate) fn walk(
+    root: &Path,
+    recursive: bool,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+) -> Option<Sources> {
     let mut todo = vec![root.to_owned()];
     let mut sources = Sources::default();
     let mut batch = Batch::default();
     let mut first = true;
     let mut published = Instant::now();
     while let Some(path) = todo.pop() {
-        if out.is_closed() {
-            return;
+        if !alive() {
+            return None;
         }
-        match library::browse_while(&path, cache, || !out.is_closed()) {
+        match library::browse_while(&path, cache, alive) {
             Ok(folder) => {
                 if path == root {
                     batch.root = Some(Root {
@@ -187,10 +203,15 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
                 if batch.notice.is_none() {
                     batch.notice = folder.notices.into_iter().next();
                 }
+                if !folder.complete {
+                    batch.incomplete.push(path.clone());
+                }
+                batch.failed_sheets.extend(folder.failed_sheets);
                 sources.folder(folder.tracks, &mut batch);
             }
             Err(error) => {
                 batch.notice.get_or_insert_with(|| format!("{error:#}"));
+                batch.incomplete.push(path.clone());
             }
         }
         if batch.root.is_some()
@@ -199,15 +220,26 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
             || published.elapsed() >= Duration::from_millis(100)
         {
             first &= batch.rows.is_empty();
-            if out.send_blocking(std::mem::take(&mut batch)).is_err() {
-                return;
+            if !publish(std::mem::take(&mut batch)) {
+                return None;
             }
             published = Instant::now();
         }
     }
-    if out.send_blocking(std::mem::take(&mut batch)).is_err() {
-        return;
+    if !publish(batch) {
+        return None;
     }
+    Some(sources)
+}
+
+fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>) {
+    let alive = || !out.is_closed();
+    let mut publish = |batch| out.send_blocking(batch).is_ok();
+    let Some(sources) = walk(root, recursive, cache, &alive, &mut publish) else {
+        return;
+    };
+    let mut batch = Batch::default();
+    let mut published = Instant::now();
     // Source headers are read after all cheap discovery. Sibling chapters
     // whose duration is known from INDEX 01 never need a probe.
     let remaining_files: HashSet<_> = sources.files.into_values().collect();

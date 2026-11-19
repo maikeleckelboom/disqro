@@ -142,9 +142,10 @@ fn six_figure_collection_projection() {
     let grouping = start.elapsed();
     assert_eq!(groups.len(), 1011);
     let start = Instant::now();
+    let terms = crate::store::Term::parse("format:wav album:777");
     let found = rows
         .iter()
-        .filter(|t| crate::collection::matches(t, "format:wav album:777"))
+        .filter(|t| crate::collection::matches(t, &terms, Default::default))
         .count();
     assert_eq!(found, 99);
     eprintln!(

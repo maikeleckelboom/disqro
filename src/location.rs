@@ -1,7 +1,7 @@
 //! The address bar: breadcrumbs for the current folder that turn into an
 //! editable path on click, Ctrl+L or Alt+D.
 use crate::{
-    browser::{Browser, Reveal},
+    browser::{Browser, Location, Reveal},
     theme::materials,
 };
 use gpui_kit::assets::IconName;
@@ -260,8 +260,85 @@ impl LocationBar {
         })
         .detach();
     }
+    /// A library view has no folder path; its crumbs name the view.
+    fn render_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let m = *materials(cx);
+        let b = self.browser.read(cx);
+        let (icon, section) = match b.location {
+            Location::Playlist(_) => (IconName::ListMusic, "Playlists"),
+            _ => (IconName::Library, "Library"),
+        };
+        let parent = if let Location::Album { root, .. } = b.location {
+            Some((
+                root,
+                root.and_then(|r| b.catalog.read(cx).collection(r))
+                    .map_or_else(|| "All Music".to_owned(), |r| r.root.name.clone()),
+            ))
+        } else {
+            None
+        };
+        let library = self.browser.clone();
+        let album_browser = self.browser.clone();
+        let name = match b.location {
+            Location::Library(None) => None,
+            _ => Some(b.title(cx)),
+        };
+        h_flex()
+            .h_full()
+            .min_w_0()
+            .items_center()
+            .gap(px(4.))
+            .px(px(7.))
+            .text_size(px(13.))
+            .child(Icon::new(icon).size(px(14.)).text_color(m.text_faint))
+            .child(
+                div()
+                    .id("library-crumb")
+                    .when(section == "Library" && name.is_some(), |d| {
+                        d.cursor_pointer().on_click(move |_, w, cx| {
+                            cx.stop_propagation();
+                            library.update(cx, |b, cx| b.show(Location::Library(None), w, cx));
+                        })
+                    })
+                    .text_color(if name.is_some() { m.text_muted } else { m.text })
+                    .child(section),
+            )
+            .when_some(parent, |d, (root, title)| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(m.text_faint),
+                )
+                .child(
+                    div()
+                        .id("album-parent")
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .child(title)
+                        .on_click(move |_, w, cx| {
+                            cx.stop_propagation();
+                            album_browser
+                                .update(cx, |b, cx| b.show(Location::Library(root), w, cx));
+                        }),
+                )
+            })
+            .when_some(name, |d, name| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(m.text_faint)
+                        .mx(px(2.)),
+                )
+                .child(div().min_w_0().truncate().text_color(m.text).child(name))
+            })
+            .into_any_element()
+    }
     fn render_crumbs(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
+        if !self.browser.read(cx).location.is_folder() {
+            return self.render_view(cx);
+        }
         let path = self.browser.read(cx).path.clone();
         let all = crumbs(&path);
         // Collapse leading folders into a menu when the path does not fit.
