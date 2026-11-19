@@ -24,6 +24,10 @@ Open a collection root to browse its albums, discs and individual CUE tracks as 
 
 The Windows workspace includes an editable address bar, Places, native tray and media controls, real artwork, and waveform seeking. It remembers the queue, folder, volume, collection view, columns and dock layout. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
 
+## Persistent library and personal collections
+
+Open a music folder and choose **Add Folder to Library** in the Recordings panel menu. Its indexed albums and tracks appear in the sidebar. Like a CUE chapter, give it up to five stars, or drag it to a playlist. A playlist can mix chapters and individual files from any folder. [Library controls, storage policy and Windows verification](docs/persistent-library.md)
+
 ## Product direction
 
 - **Native and fast** — Lightweight, responsive, and designed for large music collections.
@@ -58,4 +62,4 @@ responsive, and optional.
 
 ## Project Status
 
-Disqro is in early development, targeting Windows first. The listening workspace is available from source. Recursive browsing and a rebuildable SQLite cache are available. The global indexed library, playlists, favorites, ratings, zoomable waveforms and independent visualizer panels are future milestones.
+Disqro is in early development, targeting Windows first. The listening workspace is available from source. The workspace includes recursive browsing, a persistent indexed library, playlists, likes and ratings. Zoomable waveforms and independent visualizer panels are future milestones.
