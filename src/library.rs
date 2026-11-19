@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use lofty::{config::ParseOptions, prelude::*, probe::Probe};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
@@ -7,17 +8,24 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub source: PathBuf,
     pub title: String,
+    #[serde(default)]
     pub artist: String,
+    #[serde(default)]
     pub album: String,
+    #[serde(default)]
     pub duration: Option<f64>,
+    /// The tagged track number of a file. A CUE chapter uses its sheet number.
+    #[serde(default)]
+    pub number: Option<u32>,
+    #[serde(default)]
     pub disc: Option<DiscTrack>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscTrack {
     pub sheet: PathBuf,
     pub number: u8,
@@ -33,7 +41,15 @@ impl Track {
             artist: String::new(),
             album: String::new(),
             duration: None,
+            number: None,
             disc: None,
+        }
+    }
+    /// The number shown in a track list: the CUE track, or the tagged number.
+    pub fn display_number(&self) -> Option<u32> {
+        match &self.disc {
+            Some(d) => (d.number > 0).then_some(u32::from(d.number)),
+            None => self.number,
         }
     }
     pub fn format(&self) -> String {
@@ -63,6 +79,7 @@ impl Track {
             }
             self.artist = tag.artist().unwrap_or_default().into_owned();
             self.album = tag.album().unwrap_or_default().into_owned();
+            self.number = tag.track();
         }
     }
 }
@@ -106,7 +123,9 @@ pub fn browse(path: &Path) -> Result<Folder> {
         };
         let p = entry.path();
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            folder.dirs.push(p);
+            if !hidden(&entry) {
+                folder.dirs.push(p);
+            }
         } else if is_audio(&p) {
             files.push(p);
         } else if p.extension().is_some_and(|s| s.eq_ignore_ascii_case("cue")) {
@@ -175,6 +194,45 @@ pub fn browse(path: &Path) -> Result<Folder> {
     );
     folder.tracks = tracks.into();
     Ok(folder)
+}
+
+/// Hidden and system folders, such as `$RECYCLE.BIN`, stay out of the way.
+fn hidden(entry: &fs::DirEntry) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const HIDDEN: u32 = 0x2;
+        const SYSTEM: u32 = 0x4;
+        entry
+            .metadata()
+            .is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0)
+    }
+    #[cfg(not(windows))]
+    entry.file_name().to_string_lossy().starts_with('.')
+}
+/// The visible subfolders of a folder, sorted by name.
+pub fn subfolders(path: &Path) -> Vec<PathBuf> {
+    let Ok(dir) = fs::read_dir(path) else {
+        return vec![];
+    };
+    let mut dirs: Vec<PathBuf> = dir
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !hidden(e))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort_by_cached_key(|p| folder_name(p).to_lowercase());
+    dirs
+}
+
+/// A short name for a folder; a drive root keeps its letter.
+pub fn display_name(path: &Path) -> String {
+    match path.file_name() {
+        Some(n) => n.to_string_lossy().into_owned(),
+        None => path
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_owned(),
+    }
 }
 
 pub fn clock(seconds: f64) -> String {

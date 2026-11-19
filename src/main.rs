@@ -6,19 +6,22 @@ mod audio;
 mod browser;
 mod cue;
 mod library;
+mod location;
 mod movie;
 mod overview;
+mod places;
 mod player;
 mod profile;
+mod queue;
+mod queue_view;
 mod recording;
+mod sidebar;
+mod system;
 mod table;
+mod theme;
 mod workspace;
 
-use gpui_kit::{
-    component::{Theme, ThemeMode, TitleBar},
-    prelude::*,
-    *,
-};
+use gpui_kit::{component::TitleBar, prelude::*, *};
 use workspace::*;
 fn main() {
     let arg = std::env::args_os()
@@ -29,36 +32,17 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
-            Theme::update(cx, |t| {
-                t.font_family = "Segoe UI".into();
-                t.font_size = px(15.);
-                t.colors.primary = rgb(0x77d7cb).into();
-                t.colors.primary_foreground = rgb(0x112b2b).into();
-                t.colors.ring = t.colors.primary;
-                t.colors.background = rgb(0x171c20).into();
-                t.colors.table = t.colors.background;
-                t.colors.table_head_foreground = rgb(0xabbbb9).into();
-                t.colors.sidebar = rgb(0x151a1e).into();
-                t.colors.tab_bar = rgb(0x1c2227).into();
-                t.colors.title_bar = rgb(0x151a1e).into();
-                t.colors.border = rgb(0x323a40).into();
-            });
-            cx.bind_keys([
-                KeyBinding::new("ctrl-o", OpenFolder, Some("Disqro")),
-                KeyBinding::new("ctrl-f", FindTrack, Some("Disqro")),
-                KeyBinding::new("space", PlayPause, Some("Disqro && !Input")),
-                KeyBinding::new("enter", PlaySelected, Some("DataTable")),
-                KeyBinding::new("enter", OpenDirectory, Some("Tree")),
-                KeyBinding::new("alt-left", GoBack, Some("Disqro")),
-            ]);
+            theme::install(theme::Appearance::Dark, cx);
+            workspace::bind_keys(cx);
+            location::bind_keys(cx);
+            queue_view::bind_keys(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,
-                    size(px(1130.), px(715.)),
+                    size(px(1240.), px(780.)),
                     cx,
                 ))),
-                window_min_size: Some(size(px(640.), px(440.))),
+                window_min_size: Some(size(px(720.), px(460.))),
                 app_id: Some("Disqro.Player".into()),
                 ..TitleBar::window_options()
             };

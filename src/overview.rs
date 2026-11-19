@@ -1,5 +1,6 @@
 //! A compact overview for seeking in a recording or a CUE track. Each bin
-//! retains both polarities across both channels, so antiphase audio stays visible.
+//! retains both polarities across both channels, so antiphase audio stays
+//! visible, and the RMS level, which shows structure inside loud masters.
 use crate::{audio::Recording, library::Track};
 use gpui_kit::{prelude::*, *};
 use kira::{Frame, sound::streaming::Decoder as _};
@@ -42,22 +43,24 @@ impl SourceKey {
         })
     }
 }
+/// Minimum, maximum and RMS level of one slice of the recording.
+pub type Bin = [f32; 3];
 #[derive(Serialize, Deserialize)]
 struct Cached {
     key: SourceKey,
-    bins: Vec<[f32; 2]>,
+    bins: Vec<Bin>,
 }
 fn slot(dir: &Path, key: &SourceKey) -> PathBuf {
     let mut hash = DefaultHasher::new();
     key.hash(&mut hash);
-    dir.join(format!("overview-v1-{:02}.json", hash.finish() % 32))
+    dir.join(format!("overview-v2-{:02}.json", hash.finish() % 32))
 }
-fn read(path: &Path, key: &SourceKey) -> Option<Vec<[f32; 2]>> {
+fn read(path: &Path, key: &SourceKey) -> Option<Vec<Bin>> {
     let file = fs::File::open(path).ok()?;
-    let data: Cached = serde_json::from_reader(file.take(128 * 1024)).ok()?;
+    let data: Cached = serde_json::from_reader(file.take(192 * 1024)).ok()?;
     (data.key == *key && !data.bins.is_empty() && data.bins.len() <= BINS).then_some(data.bins)
 }
-fn save(dir: &Path, key: SourceKey, bins: &[[f32; 2]]) -> anyhow::Result<()> {
+fn save(dir: &Path, key: SourceKey, bins: &[Bin]) -> anyhow::Result<()> {
     fs::create_dir_all(dir)?;
     let path = slot(dir, &key);
     let mut file = tempfile::NamedTempFile::new_in(dir)?;
@@ -72,12 +75,30 @@ fn save(dir: &Path, key: SourceKey, bins: &[[f32; 2]]) -> anyhow::Result<()> {
     file.persist(path)?;
     Ok(())
 }
-fn accumulate(bins: &mut [[f32; 2]], total: usize, offset: usize, frames: &[Frame]) {
+fn accumulate(
+    bins: &mut [Bin],
+    energy: &mut [(f64, u32)],
+    total: usize,
+    offset: usize,
+    frames: &[Frame],
+) {
     for (i, f) in frames.iter().enumerate() {
-        let bin = (offset + i) as u128 * bins.len() as u128 / total as u128;
-        let p = &mut bins[bin as usize];
+        let bin = ((offset + i) as u128 * bins.len() as u128 / total as u128) as usize;
+        let p = &mut bins[bin];
         p[0] = p[0].min(f.left.min(f.right));
         p[1] = p[1].max(f.left.max(f.right));
+        let e = &mut energy[bin];
+        e.0 += f64::from(f.left * f.left + f.right * f.right) / 2.;
+        e.1 += 1;
+    }
+}
+fn finish(bins: &mut [Bin], energy: &[(f64, u32)]) {
+    for (b, (sum, n)) in bins.iter_mut().zip(energy) {
+        b[2] = if *n > 0 {
+            (sum / f64::from(*n)).sqrt() as f32
+        } else {
+            0.
+        };
     }
 }
 pub fn load(
@@ -85,7 +106,7 @@ pub fn load(
     cache: Option<PathBuf>,
     generation: &AtomicU64,
     revision: u64,
-) -> Option<Arc<[[f32; 2]]>> {
+) -> Option<Arc<[Bin]>> {
     let key = SourceKey::new(track)?;
     if let Some(dir) = &cache
         && let Some(bins) = read(&slot(dir, &key), &key)
@@ -95,7 +116,8 @@ pub fn load(
     let mut source = Recording::open(track, key.end).ok()?;
     source.seek(0).ok()?;
     let count = source.num_frames();
-    let mut bins = vec![[0., 0.]; BINS.min(count)];
+    let mut bins = vec![[0., 0., 0.]; BINS.min(count)];
+    let mut energy = vec![(0., 0); bins.len()];
     let mut offset = 0;
     while offset < count {
         if generation.load(Ordering::Relaxed) != revision {
@@ -105,9 +127,10 @@ pub fn load(
         if frames.is_empty() {
             return None;
         }
-        accumulate(&mut bins, count, offset, &frames);
+        accumulate(&mut bins, &mut energy, count, offset, &frames);
         offset += frames.len();
     }
+    finish(&mut bins, &energy);
     if SourceKey::new(track).as_ref() != Some(&key) {
         return None;
     }
@@ -116,38 +139,54 @@ pub fn load(
     }
     Some(bins.into())
 }
-pub fn paint(bins: Arc<[[f32; 2]]>, position: f32) -> impl IntoElement {
+/// Draws the overview with the played part in the waveform's own colors.
+pub fn paint(bins: Arc<[Bin]>, position: f32, wave: crate::theme::Wave) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
             let width = f32::from(bounds.size.width).floor() as usize;
             let height = f32::from(bounds.size.height);
             let columns = width.min(bins.len());
-            let center = height / 2.;
+            if columns == 0 {
+                return;
+            }
+            let center = (height / 2.).floor();
+            let played = position * columns as f32;
             for x in 0..columns {
                 let section = &bins[x * bins.len() / columns..(x + 1) * bins.len() / columns];
-                let [lo, hi] = section
-                    .iter()
-                    .fold([0f32; 2], |[lo, hi], v| [lo.min(v[0]), hi.max(v[1])]);
+                let [lo, hi, rms] = section.iter().fold([0f32; 3], |[lo, hi, rms], v| {
+                    [lo.min(v[0]), hi.max(v[1]), rms.max(v[2])]
+                });
                 let top = center * (1. - hi.clamp(0., 1.));
-                let bottom = center * (1. - lo.clamp(-1., 0.));
-                if bottom <= top {
-                    continue;
-                }
+                let bottom = center + center * (-lo).clamp(0., 1.);
                 let x0 = (x * width / columns) as f32;
                 let x1 = ((x + 1) * width / columns) as f32;
-                let color = if (x as f32) < position * columns as f32 {
-                    0x85d9cf
+                let is_played = (x as f32) < played;
+                let (peak, body) = if is_played {
+                    (wave.played_peak, wave.played_body)
                 } else {
-                    0x477a78
+                    (wave.ahead_peak, wave.ahead_body)
                 };
-                window.paint_quad(fill(
+                // Keep silence visible as a hairline so the track stays legible.
+                let (top, bottom) = if bottom - top < 1. {
+                    (center - 0.5, center + 0.5)
+                } else {
+                    (top, bottom)
+                };
+                let column = |a: f32, b: f32| {
                     Bounds::new(
-                        bounds.origin + point(px(x0), px(top)),
-                        size(px(x1 - x0), px(bottom - top)),
-                    ),
-                    rgb(color),
-                ));
+                        bounds.origin + point(px(x0), px(a)),
+                        size(px(x1 - x0), px(b - a)),
+                    )
+                };
+                window.paint_quad(fill(column(top, bottom), peak));
+                let r = rms.clamp(0., 1.) * center;
+                if r >= 0.5 {
+                    window.paint_quad(fill(
+                        column((center - r).max(top), (center + r).min(bottom)),
+                        body,
+                    ));
+                }
             }
         },
     )
@@ -155,12 +194,14 @@ pub fn paint(bins: Arc<[[f32; 2]]>, position: f32) -> impl IntoElement {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Frame, accumulate};
+    use super::{Frame, accumulate, finish};
     #[test]
     fn retains_antiphase_impulses_and_silence() {
-        let mut b = [[0.; 2]; 3];
+        let mut b = [[0.; 3]; 3];
+        let mut e = [(0., 0); 3];
         accumulate(
             &mut b,
+            &mut e,
             6,
             0,
             &[
@@ -172,6 +213,10 @@ mod tests {
                 Frame::ZERO,
             ],
         );
-        assert_eq!(b, [[-0.8, 0.8], [0., 0.], [0., 1.]]);
+        finish(&mut b, &e);
+        assert_eq!(b[1], [0., 0., 0.]);
+        assert_eq!([b[0][0], b[0][1], b[2][0], b[2][1]], [-0.8, 0.8, 0., 1.]);
+        assert!((b[0][2] - 0.32f32.sqrt()).abs() < 1e-6);
+        assert!((b[2][2] - 0.5).abs() < 1e-6);
     }
 }

@@ -1396,15 +1396,18 @@ dependencies = [
  "async-channel",
  "embed-resource",
  "encoding_rs",
+ "fastrand",
  "gpui-kit",
  "image",
  "kira",
  "lofty",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "symphonia",
  "symphonia-adapter-libopus",
  "tempfile",
+ "windows 0.62.2",
 ]
 
 [[package]]

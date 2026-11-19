@@ -1,27 +1,30 @@
 use crate::{
-    assets::FileIcon,
     audio::Command,
-    browser::{Browser, music_home},
-    library::folder_name,
-    player::Player,
-    profile::{self, Profile},
+    browser::{Browser, Reveal, music_home},
+    library::{clock, display_name},
+    location::LocationBar,
+    player::{Player, PlayerEvent},
+    profile::{self, Profile, SavedQueue, WindowPrefs},
+    queue_view::QueueView,
+    sidebar::{Sidebar, SidebarEvent},
+    system::{System, SystemEvent},
+    table::ROW_HEIGHT,
+    theme::materials,
 };
+use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
         button::*,
         dock::*,
         input::Input,
-        list::ListItem,
-        menu::{DropdownMenu, PopupMenuItem},
-        status_bar::StatusBar,
+        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         table::DataTable,
-        tree::tree,
         *,
     },
     prelude::*,
     *,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 gpui_kit::actions!(
     disqro,
@@ -31,24 +34,59 @@ gpui_kit::actions!(
         PlayPause,
         PlaySelected,
         OpenDirectory,
-        GoBack
+        GoBack,
+        GoForward,
+        GoUp,
+        FocusLocation,
+        Refresh,
+        NextTrack,
+        PreviousTrack,
+        ShowQueue,
+        HideToTray,
+        Quit
     ]
 );
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-o", OpenFolder, Some("Disqro")),
+        KeyBinding::new("ctrl-f", FindTrack, Some("Disqro")),
+        KeyBinding::new("ctrl-l", FocusLocation, Some("Disqro")),
+        KeyBinding::new("alt-d", FocusLocation, Some("Disqro")),
+        KeyBinding::new("f4", FocusLocation, Some("Disqro")),
+        KeyBinding::new("space", PlayPause, Some("Disqro && !Input")),
+        KeyBinding::new("enter", PlaySelected, Some("DataTable")),
+        KeyBinding::new("enter", OpenDirectory, Some("Tree")),
+        KeyBinding::new("alt-left", GoBack, Some("Disqro")),
+        KeyBinding::new("backspace", GoBack, Some("Disqro && !Input")),
+        KeyBinding::new("alt-right", GoForward, Some("Disqro")),
+        KeyBinding::new("alt-up", GoUp, Some("Disqro && !Queue")),
+        KeyBinding::new("f5", Refresh, Some("Disqro")),
+        KeyBinding::new("ctrl-right", NextTrack, Some("Disqro && !Input")),
+        KeyBinding::new("ctrl-left", PreviousTrack, Some("Disqro && !Input")),
+        KeyBinding::new("ctrl-q", Quit, Some("Disqro")),
+    ]);
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Kind {
     Folders,
     Tracks,
     Player,
+    Queue,
 }
 impl Kind {
-    const ALL: [Self; 3] = [Self::Folders, Self::Tracks, Self::Player];
+    const ALL: [Self; 4] = [Self::Folders, Self::Tracks, Self::Queue, Self::Player];
     fn name(self) -> &'static str {
         match self {
             Self::Folders => "Folders",
             Self::Tracks => "Recordings",
-            Self::Player => "Now playing",
+            Self::Player => "Now Playing",
+            Self::Queue => "Queue",
         }
+    }
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|k| *k == self).unwrap()
     }
 }
 
@@ -56,12 +94,17 @@ struct Pane {
     kind: Kind,
     browser: Entity<Browser>,
     player: Entity<Player>,
+    sidebar: Entity<Sidebar>,
+    queue: Entity<QueueView>,
     focus: FocusHandle,
 }
 impl EventEmitter<PanelEvent> for Pane {}
 impl Focusable for Pane {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self.kind {
+            Kind::Queue => self.queue.read(cx).focus_handle().clone(),
+            _ => self.focus.clone(),
+        }
     }
 }
 impl BasePanel for Pane {
@@ -70,190 +113,169 @@ impl BasePanel for Pane {
     }
 }
 impl Panel for Pane {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.kind.name()
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let m = *materials(cx);
+        let (title, detail): (String, String) = match self.kind {
+            Kind::Tracks => {
+                let b = self.browser.read(cx);
+                let count = b.tracks().len();
+                let total = b.total_duration();
+                let detail = if b.busy {
+                    "Opening…".to_owned()
+                } else if count == 0 {
+                    String::new()
+                } else if total > 0. {
+                    format!(
+                        "{count} {} · {}",
+                        if count == 1 { "track" } else { "tracks" },
+                        clock(total)
+                    )
+                } else {
+                    format!("{count} {}", if count == 1 { "track" } else { "tracks" })
+                };
+                (
+                    b.album.clone().unwrap_or_else(|| display_name(&b.path)),
+                    detail,
+                )
+            }
+            Kind::Queue => ("Queue".into(), self.queue.read(cx).summary(cx)),
+            k => (k.name().into(), String::new()),
+        };
+        h_flex()
+            .min_w_0()
+            .gap(px(10.))
+            .items_baseline()
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(m.text)
+                    .child(title),
+            )
+            .when(!detail.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .text_color(m.text_faint)
+                        .child(detail),
+                )
+            })
     }
     fn tab_name(&self, _: &App) -> Option<SharedString> {
         Some(self.kind.name().into())
     }
+    fn title_style(&self, cx: &App) -> Option<TitleStyle> {
+        let m = materials(cx);
+        (self.kind == Kind::Queue).then_some(TitleStyle {
+            background: m.chrome,
+            foreground: m.text,
+        })
+    }
     fn inner_padding(&self, _: &App) -> bool {
         false
     }
+    /// The sidebar and the player draw their own compact chrome.
+    fn title_bar(&self, _: &App) -> bool {
+        matches!(self.kind, Kind::Tracks | Kind::Queue)
+    }
+    fn dropdown_menu(
+        &mut self,
+        menu: PopupMenu,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PopupMenu {
+        match self.kind {
+            Kind::Queue => self.queue.read(cx).panel_menu(menu, cx),
+            Kind::Tracks => {
+                let tracks: std::sync::Arc<[crate::library::Track]> =
+                    self.browser.read(cx).table.read(cx).delegate().rows.clone();
+                let empty = tracks.is_empty();
+                let send = {
+                    let player = self.player.clone();
+                    move |c: Command, cx: &mut App| player.update(cx, |p, cx| p.command(c, cx))
+                };
+                let (s1, s2, s3) = (send.clone(), send.clone(), send);
+                let (t1, t2, t3) = (tracks.clone(), tracks.clone(), tracks);
+                let browser = self.browser.clone();
+                menu.item(
+                    PopupMenuItem::new("Play All")
+                        .icon(IconName::Play)
+                        .disabled(empty)
+                        .on_click(move |_, _, cx| {
+                            s1(Command::Shuffle(false), cx);
+                            s1(Command::Play(t1.clone(), 0), cx)
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Shuffle All")
+                        .icon(IconName::Shuffle)
+                        .disabled(empty)
+                        .on_click(move |_, _, cx| {
+                            let start = fastrand::usize(..t2.len());
+                            s2(Command::Shuffle(true), cx);
+                            s2(Command::Play(t2.clone(), start), cx)
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Add All to Queue")
+                        .icon(IconName::ListEnd)
+                        .disabled(empty)
+                        .on_click(move |_, _, cx| s3(Command::Enqueue(t3.to_vec()), cx)),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Refresh")
+                        .icon(IconName::RefreshCw)
+                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.reload(w, cx))),
+                )
+            }
+            _ => menu,
+        }
+    }
 }
 impl Pane {
-    fn folders(&self, cx: &App) -> impl IntoElement {
-        let b = self.browser.read(cx);
-        let browser = self.browser.clone();
-        let tree_view = tree(&b.tree, move |ix, entry, _, _, cx| {
-            let root = entry.depth() == 0;
-            let id = entry.item().id.clone();
-            let browser = browser.clone();
-            ListItem::new(("folder", ix))
-                .px_2()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .min_w_0()
-                        .pl(px(entry.depth() as f32 * 12.))
-                        .when(root && entry.is_folder(), |row| {
-                            row.child(
-                                Icon::new(if entry.is_expanded() {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .xsmall(),
-                            )
-                        })
-                        .child(
-                            FileIcon::Folder
-                                .icon()
-                                .small()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                        .child(div().truncate().child(entry.item().label.clone())),
-                )
-                .on_click(move |_, window, cx| {
-                    if !root && let Some(path) = browser.read(cx).tree_path(&id) {
-                        browser.update(cx, |b, cx| b.open(path, window, cx));
-                    }
-                })
-        });
-        let mut places = v_flex().gap_1();
-        let home = music_home();
-        let root = self
-            .browser
-            .read(cx)
-            .path
-            .ancestors()
-            .last()
-            .map(|p| p.to_owned());
-        let mut shortcuts = vec![("Music".to_owned(), home, FileIcon::Music)];
-        if let Some(home) = std::env::var_os("USERPROFILE") {
-            shortcuts.push((
-                "Downloads".to_owned(),
-                PathBuf::from(home).join("Downloads"),
-                FileIcon::Folder,
-            ));
-        }
-        if let Some(root) = root {
-            shortcuts.push((format!("Drive {}", root.display()), root, FileIcon::Drive));
-        }
-        for (i, (label, path, icon)) in shortcuts.into_iter().enumerate() {
-            let browser = self.browser.clone();
-            places = places.child(
-                ListItem::new(("place", i))
-                    .px_2()
-                    .child(h_flex().gap_2().child(icon.icon().small()).child(label))
-                    .on_click(move |_, window, cx| {
-                        browser.update(cx, |b, cx| b.open(path.clone(), window, cx))
-                    }),
-            );
-        }
-        v_flex()
-            .size_full()
-            .bg(cx.theme().sidebar)
-            .child(
-                v_flex()
-                    .px_2()
-                    .py_3()
-                    .gap_1()
-                    .child(
-                        div()
-                            .px_2()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Places"),
-                    )
-                    .child(places),
-            )
-            .child(div().border_t_1().border_color(cx.theme().border).mx_3())
-            .child(
-                div()
-                    .px_4()
-                    .pt_3()
-                    .pb_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Current folder"),
-            )
-            .child(div().flex_1().min_h_0().px_1().child(tree_view))
-    }
     fn recordings(&self, cx: &App) -> impl IntoElement {
+        let m = *materials(cx);
         let b = self.browser.read(cx);
-        let table = b.table.read(cx).delegate();
-        let empty = table.rows.is_empty();
-        let mut view = v_flex().size_full().child(
-            h_flex()
-                .px_4()
-                .py_3()
-                .gap_3()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_xl()
-                        .child(b.album.clone().unwrap_or_else(|| folder_name(&b.path))),
-                )
-                .child(
-                    div().w(px(185.)).child(
-                        Input::new(&b.search)
-                            .small()
-                            .prefix(Icon::new(IconName::Search).small())
-                            .cleanable(true),
-                    ),
-                ),
-        );
+        let mut view = v_flex().size_full().bg(m.canvas);
         if let Some(notice) = &b.notice {
             view = view.child(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_sm()
-                    .text_color(cx.theme().warning)
-                    .child(notice.clone()),
+                h_flex()
+                    .mx(px(10.))
+                    .mb(px(4.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .gap(px(8.))
+                    .rounded(px(5.))
+                    .bg(m.warning.opacity(0.08))
+                    .text_size(px(12.))
+                    .text_color(m.warning)
+                    .child(Icon::new(IconName::TriangleAlert).size(px(13.)))
+                    .child(div().truncate().child(notice.clone())),
             );
         }
-        if empty {
-            let label = if b.busy {
-                "Opening folder…"
-            } else if !b.search.read(cx).value().is_empty() {
-                "No matching recordings"
-            } else if b.folder_count > 0 {
-                "Choose a subfolder to browse its recordings"
-            } else {
-                "No supported recordings in this folder"
-            };
-            view.child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(Icon::new(IconName::FolderOpen).size(px(30.)))
-                    .child(label),
-            )
-        } else {
-            view.child(
-                div().flex_1().min_h_0().child(
-                    DataTable::new(&b.table)
-                        .accessibility_label("Recordings")
-                        .bordered(false)
-                        .small(),
-                ),
-            )
-        }
+        view.child(
+            div().flex_1().min_h_0().text_size(px(13.)).child(
+                DataTable::new(&b.table)
+                    .accessibility_label("Recordings")
+                    .bordered(false)
+                    .stripe(false)
+                    .header_row_height(px(30.))
+                    .with_size(gpui_kit::component::Size::Size(px(ROW_HEIGHT))),
+            ),
+        )
     }
 }
 impl Render for Pane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.kind {
-            Kind::Folders => self.folders(cx).into_any_element(),
+            Kind::Folders => self.sidebar.clone().into_any_element(),
             Kind::Tracks => self.recordings(cx).into_any_element(),
             Kind::Player => self.player.clone().into_any_element(),
+            Kind::Queue => self.queue.clone().into_any_element(),
         };
         div()
             .track_focus(&self.focus)
@@ -266,11 +288,30 @@ impl Render for Pane {
 pub struct Workspace {
     browser: Entity<Browser>,
     player: Entity<Player>,
+    sidebar: Entity<Sidebar>,
+    location: Entity<LocationBar>,
     dock: Entity<DockArea>,
     panels: Vec<Entity<Pane>>,
     profile: Option<PathBuf>,
-    profile_notice: Option<String>,
+    prefs: WindowPrefs,
+    system: Option<System>,
+    hwnd: isize,
+    hidden_to_tray: bool,
+    save_pending: bool,
+    focus: FocusHandle,
+    _subscriptions: Vec<Subscription>,
 }
+
+const LAYOUT_VERSION: usize = 2;
+
+fn native_handle(window: &Window) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+        _ => 0,
+    }
+}
+
 impl Workspace {
     pub fn new(arg: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut location = profile::location();
@@ -280,7 +321,7 @@ impl Workspace {
             .and_then(|p| match profile::read(p) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    profile_notice = Some(format!("Could not restore workspace · {e}"));
+                    profile_notice = Some(format!("Could not restore the workspace: {e}"));
                     None
                 }
             })
@@ -291,17 +332,30 @@ impl Workspace {
         let volume = saved.volume.clamp(0., 1.);
         let player = cx.new(|cx| Player::new(volume, window, cx));
         let browser = cx.new(|cx| Browser::new(player.clone(), saved.columns, window, cx));
+        let sidebar = cx.new(|cx| Sidebar::new(browser.clone(), saved.places.take(), cx));
+        let queue = cx.new(|cx| QueueView::new(player.clone(), browser.clone(), cx));
+        let location_bar = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         let panels = Kind::ALL
             .into_iter()
             .map(|kind| {
                 let pane = cx.new(|cx| {
-                    if kind != Kind::Player {
-                        cx.observe(&browser, |_, _, cx| cx.notify()).detach();
+                    match kind {
+                        Kind::Tracks => cx.observe(&browser, |_, _, cx| cx.notify()).detach(),
+                        Kind::Queue => cx
+                            .subscribe(&player, |_, _, e, cx| {
+                                if matches!(e, PlayerEvent::QueueChanged) {
+                                    cx.notify()
+                                }
+                            })
+                            .detach(),
+                        _ => {}
                     }
                     Pane {
                         kind,
                         browser: browser.clone(),
                         player: player.clone(),
+                        sidebar: sidebar.clone(),
+                        queue: queue.clone(),
                         focus: cx.focus_handle(),
                     }
                 });
@@ -312,23 +366,63 @@ impl Workspace {
                 pane
             })
             .collect::<Vec<_>>();
-        let (dock, _) = DockSkin::dock_area("listening", Some(1), window, cx);
+        let (dock, _) = DockSkin::dock_area("listening", Some(LAYOUT_VERSION), window, cx);
+        let (events_tx, events_rx) = async_channel::unbounded();
+        let system = System::new(events_tx, player.read(cx).sender());
+        let mut subscriptions = vec![
+            cx.subscribe(&sidebar, |s: &mut Self, _, e, cx| match e {
+                SidebarEvent::Changed => s.schedule_save(cx),
+            }),
+            cx.subscribe_in(&player, window, |s: &mut Self, _, e, _, cx| match e {
+                PlayerEvent::QueueChanged | PlayerEvent::TrackChanged => {
+                    s.update_system(cx);
+                    s.schedule_save(cx);
+                }
+                PlayerEvent::StateChanged => s.update_system(cx),
+                PlayerEvent::PlaySelection => {}
+            }),
+            cx.observe_window_visibility(window, |s: &mut Self, visibility, window, cx| {
+                let visible = visibility == WindowVisibility::Visible;
+                s.player.update(cx, |p, cx| p.set_visible(visible, cx));
+                if visible {
+                    s.hidden_to_tray = false;
+                } else if s.prefs.minimize_to_tray && !s.hidden_to_tray && is_minimized(window) {
+                    s.hide_to_tray(window, cx);
+                }
+            }),
+        ];
+        subscriptions.push(cx.observe(&browser, |_, _, cx| cx.notify()));
         let mut app = Self {
             browser,
             player,
+            sidebar,
+            location: location_bar,
             dock,
             panels,
             profile: location,
-            profile_notice,
+            prefs: saved.window,
+            system,
+            hwnd: native_handle(window),
+            hidden_to_tray: false,
+            save_pending: false,
+            focus: cx.focus_handle(),
+            _subscriptions: subscriptions,
         };
         if !saved.layout.take().is_some_and(|layout| {
-            layout.version == Some(1)
+            layout.version == Some(LAYOUT_VERSION)
                 && app
                     .dock
                     .update(cx, |d, cx| d.load(layout, window, cx))
                     .is_ok()
         }) {
             app.reset(window, cx);
+        }
+        if let Some(saved) = saved.queue.take()
+            && !saved.queue.entries.is_empty()
+        {
+            app.player.update(cx, |p, cx| {
+                p.command(Command::Restore(Box::new(saved.queue), saved.position), cx)
+            });
         }
         let target = arg.or(saved.folder).unwrap_or_else(music_home);
         let is_file = crate::library::is_audio(&target)
@@ -344,42 +438,149 @@ impl Workspace {
             target.clone()
         };
         app.browser.update(cx, |b, cx| {
-            b.load(folder, is_file.then_some(target), window, cx)
+            b.load(folder, is_file.then_some(Reveal::Play(target)), window, cx)
         });
-        cx.observe(&app.browser, |_, _, cx| cx.notify()).detach();
+        let table = app.browser.read(cx).table.clone();
+        table.read(cx).focus_handle(cx).focus(window, cx);
+        if let Some(notice) = profile_notice {
+            window.push_notification(notice, cx);
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = events_rx.recv().await {
+                if this
+                    .update_in(cx, |s, w, cx| s.system_event(event, w, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let this = cx.weak_entity();
-        window.on_window_should_close(cx, move |_, cx| {
-            let _ = this.update(cx, |s, cx| s.save(cx));
-            true
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |s, cx| {
+                if s.prefs.close_to_tray && s.system.is_some() {
+                    s.hide_to_tray(window, cx);
+                    false
+                } else {
+                    s.save(cx);
+                    true
+                }
+            })
+            .unwrap_or(true)
         });
         app
     }
-    fn save(&self, cx: &App) {
-        let Some(path) = &self.profile else { return };
+
+    fn snapshot(&self, cx: &App) -> Profile {
         let b = self.browser.read(cx);
-        let s = Profile {
+        let p = self.player.read(cx);
+        let queue = p.queue();
+        Profile {
             folder: Some(b.path.clone()),
-            volume: self.player.read(cx).volume,
+            volume: p.saved_volume(),
             columns: b.table.read(cx).delegate().columns.clone(),
             layout: Some(self.dock.read(cx).dump(cx)),
-        };
-        if let Err(e) = profile::save(path, &s) {
+            places: Some(self.sidebar.read(cx).places.state()),
+            queue: (!queue.entries.is_empty()).then(|| SavedQueue {
+                queue: (**queue).clone(),
+                position: p.status.position,
+            }),
+            window: self.prefs,
+        }
+    }
+    fn save(&self, cx: &App) {
+        let Some(path) = &self.profile else { return };
+        if let Err(e) = profile::save(path, &self.snapshot(cx)) {
             eprintln!("Workspace save failed: {e}");
         }
     }
+    /// Saves shortly after a change, so a crash or power loss keeps the queue
+    /// and Places, without writing on every keystroke.
+    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_pending || self.profile.is_none() {
+            return;
+        }
+        self.save_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let Ok(Some((path, snapshot))) = this.update(cx, |s, cx| {
+                s.save_pending = false;
+                s.profile.clone().map(|p| (p, s.snapshot(cx)))
+            }) else {
+                return;
+            };
+            cx.background_spawn(async move {
+                if let Err(e) = profile::save(&path, &snapshot) {
+                    eprintln!("Workspace save failed: {e}");
+                }
+            })
+            .await;
+        })
+        .detach();
+    }
+    fn update_system(&mut self, cx: &mut Context<Self>) {
+        let Some(system) = &mut self.system else {
+            return;
+        };
+        let p = self.player.read(cx);
+        system.update(p.now_playing().as_ref(), &p.status);
+    }
+    fn system_event(&mut self, e: SystemEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let send = |s: &Self, c: Command, cx: &mut Context<Self>| {
+            s.player.update(cx, |p, cx| p.command(c, cx))
+        };
+        match e {
+            SystemEvent::ShowWindow => self.show_window(window, cx),
+            SystemEvent::PlayPause => self.play_pause(cx),
+            SystemEvent::Previous => send(self, Command::Step(-1), cx),
+            SystemEvent::Next => send(self, Command::Step(1), cx),
+            SystemEvent::ShowQueue => {
+                self.show_window(window, cx);
+                self.show(Kind::Queue, window, cx);
+            }
+            SystemEvent::Quit => self.quit(cx),
+        }
+    }
+    fn show_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::system::show_window(self.hwnd);
+        window.activate_window();
+        self.hidden_to_tray = false;
+        cx.notify();
+    }
+    fn hide_to_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.system.is_none() {
+            window.minimize_window();
+            return;
+        }
+        self.hidden_to_tray = true;
+        crate::system::hide_window(self.hwnd);
+        self.player.update(cx, |p, cx| p.set_visible(false, cx));
+        self.schedule_save(cx);
+    }
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        self.save(cx);
+        self.system = None;
+        cx.quit();
+    }
     fn reset(&mut self, w: &mut Window, cx: &mut App) {
-        let tab =
-            |i: usize| DockLayout::tabs().panel_view(panel_handle(self.panels[i].clone()), cx);
-        let right = DockLayout::v_split()
-            .child(tab(1), None)
-            .child(tab(2), Some(px(158.)));
-        let layout = DockLayout::h_split()
-            .child(tab(0), Some(px(215.)))
-            .child(right, None);
+        let tab = |k: Kind| {
+            DockLayout::tabs().panel_view(panel_handle(self.panels[k.index()].clone()), cx)
+        };
+        let middle = DockLayout::h_split()
+            .child(tab(Kind::Folders), Some(px(232.)))
+            .child(tab(Kind::Tracks), None)
+            .child(tab(Kind::Queue), Some(px(300.)));
+        let layout = DockLayout::v_split()
+            .child(middle, None)
+            .child(tab(Kind::Player), Some(px(104.)));
         self.dock.update(cx, |d, cx| d.set_center(layout, w, cx));
     }
-    fn show(&self, index: usize, w: &mut Window, cx: &mut App) {
-        let panel = panel_handle(self.panels[index].clone());
+    fn show(&self, kind: Kind, w: &mut Window, cx: &mut App) {
+        let pane = &self.panels[kind.index()];
+        let panel = panel_handle(pane.clone());
         self.dock.update(cx, |d, cx| {
             let id = panel.panel_id(cx);
             if d.panel(id).is_some() {
@@ -388,6 +589,7 @@ impl Workspace {
                 d.add_panel_view(panel, DockPlacement::Center, None, w, cx);
             }
         });
+        pane.read(cx).focus_handle(cx).focus(w, cx);
     }
     fn play_selected(&self, cx: &mut App) {
         let t = self.browser.read(cx).table.read(cx);
@@ -402,48 +604,198 @@ impl Workspace {
                 .update(cx, |t, cx| t.delegate().play(ix, cx));
         }
     }
-}
-impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let b = self.browser.read(cx);
-        let mut status = format!("{} recordings", b.table.read(cx).delegate().rows.len());
-        if b.folder_count > 0 {
-            status = format!("{status}  ·  {} folders", b.folder_count);
+    fn play_pause(&self, cx: &mut App) {
+        let p = self.player.read(cx);
+        if p.status.track.is_none() && p.queue().entries.is_empty() {
+            self.play_selected(cx);
+        } else {
+            self.player
+                .update(cx, |p, cx| p.command(Command::Toggle, cx));
         }
-        let has_history = !b.history.is_empty();
-        let path = b.path.display().to_string();
-        let parent = b.path.parent().map(|p| p.to_owned());
+    }
+    fn workspace_menu(&self, cx: &Context<Self>) -> impl IntoElement {
         let shell = cx.weak_entity();
-        let menu = Button::new("workspace")
+        let prefs = self.prefs;
+        let tray = self.system.is_some();
+        Button::new("workspace")
             .ghost()
             .small()
-            .icon(Icon::new(gpui_kit::assets::IconName::PanelsTopLeft))
+            .icon(Icon::new(IconName::Ellipsis))
             .accessibility_label("Workspace")
             .tooltip("Workspace")
             .dropdown_menu(move |mut menu, _, _| {
-                for (i, kind) in Kind::ALL.iter().enumerate() {
+                menu = menu.menu("Open Folder…", Box::new(OpenFolder)).separator();
+                for kind in [Kind::Folders, Kind::Tracks, Kind::Queue, Kind::Player] {
                     let s = shell.clone();
                     menu = menu.item(
                         PopupMenuItem::new(format!("Show {}", kind.name())).on_click(
                             move |_, w, cx| {
-                                let _ = s.update(cx, |s, cx| s.show(i, w, cx));
+                                let _ = s.update(cx, |s, cx| s.show(kind, w, cx));
                             },
                         ),
                     );
                 }
-                let s = shell.clone();
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new("Restore default layout").on_click(move |_, w, cx| {
-                            let _ = s.update(cx, |s, cx| s.reset(w, cx));
+                let (s1, s2, s3, s4, s5) = (
+                    shell.clone(),
+                    shell.clone(),
+                    shell.clone(),
+                    shell.clone(),
+                    shell.clone(),
+                );
+                menu.item(
+                    PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
+                        let _ = s1.update(cx, |s, cx| s.reset(w, cx));
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Minimize to Tray")
+                        .checked(prefs.minimize_to_tray)
+                        .disabled(!tray)
+                        .on_click(move |_, _, cx| {
+                            let _ = s2.update(cx, |s, cx| {
+                                s.prefs.minimize_to_tray = !s.prefs.minimize_to_tray;
+                                s.schedule_save(cx);
+                                cx.notify();
+                            });
                         }),
-                    )
-            });
+                )
+                .item(
+                    PopupMenuItem::new("Close Button Keeps Playing in Tray")
+                        .checked(prefs.close_to_tray)
+                        .disabled(!tray)
+                        .on_click(move |_, _, cx| {
+                            let _ = s3.update(cx, |s, cx| {
+                                s.prefs.close_to_tray = !s.prefs.close_to_tray;
+                                s.schedule_save(cx);
+                                cx.notify();
+                            });
+                        }),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Hide to Tray").disabled(!tray).on_click(
+                    move |_, w, cx| {
+                        let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
+                    },
+                ))
+                .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, _, cx| {
+                    let _ = s5.update(cx, |s, cx| s.quit(cx));
+                }))
+            })
+    }
+    fn nav_button(
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> Button {
+        let m = materials(cx);
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
+            .accessibility_label(label)
+            .tooltip(label)
+            .disabled(!enabled)
+    }
+}
+
+#[cfg(windows)]
+fn is_minimized(window: &Window) -> bool {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
+    let h = native_handle(window);
+    h != 0 && unsafe { IsIconic(HWND(h as _)).as_bool() }
+}
+#[cfg(not(windows))]
+fn is_minimized(_: &Window) -> bool {
+    false
+}
+
+impl Render for Workspace {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let m = *materials(cx);
+        let b = self.browser.read(cx);
+        let (can_back, can_forward) = (b.can_go_back(), b.can_go_forward());
+        let has_parent = b.path.parent().is_some();
+        let search = b.search.clone();
+        let nav = h_flex()
+            .occlude()
+            .flex_shrink_0()
+            .gap(px(2.))
+            .child(
+                Self::nav_button("back", IconName::ArrowLeft, "Back · Alt+Left", can_back, cx)
+                    .on_click(
+                        cx.listener(|s, _, w, cx| s.browser.update(cx, |b, cx| b.back(w, cx))),
+                    ),
+            )
+            .child(
+                Self::nav_button(
+                    "forward",
+                    IconName::ArrowRight,
+                    "Forward · Alt+Right",
+                    can_forward,
+                    cx,
+                )
+                .on_click(
+                    cx.listener(|s, _, w, cx| s.browser.update(cx, |b, cx| b.forward(w, cx))),
+                ),
+            )
+            .child(
+                Self::nav_button(
+                    "up",
+                    IconName::ArrowUp,
+                    "Parent folder · Alt+Up",
+                    has_parent,
+                    cx,
+                )
+                .on_click(cx.listener(|s, _, w, cx| s.browser.update(cx, |b, cx| b.up(w, cx)))),
+            );
+        let bar = h_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .gap(px(8.))
+            .pr(px(6.))
+            .items_center()
+            .child(
+                img("brand/compact.png")
+                    .size(px(18.))
+                    .flex_shrink_0()
+                    .mr(px(4.)),
+            )
+            .child(nav)
+            .child(
+                div()
+                    .occlude()
+                    .flex_basis(relative(1.))
+                    .min_w(px(160.))
+                    .max_w(px(900.))
+                    .child(self.location.clone()),
+            )
+            // The space between is the caption: drag to move the window.
+            .child(div().flex_1().min_w(px(24.)).h_full())
+            .child(
+                div().occlude().flex_shrink_0().w(px(220.)).child(
+                    Input::new(&search)
+                        .small()
+                        .prefix(
+                            Icon::new(IconName::Search)
+                                .size(px(14.))
+                                .text_color(m.text_faint),
+                        )
+                        .cleanable(true)
+                        .aria_label("Find in folder"),
+                ),
+            )
+            .child(div().occlude().child(self.workspace_menu(cx)));
+
         v_flex()
             .key_context("Disqro")
+            .track_focus(&self.focus)
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(m.canvas)
+            .text_color(m.text)
             .on_action(
                 cx.listener(|s, _: &OpenFolder, w, cx| {
                     s.browser.update(cx, |b, cx| b.choose(w, cx))
@@ -452,22 +804,36 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|s, _: &GoBack, w, cx| s.browser.update(cx, |b, cx| b.back(w, cx))),
             )
+            .on_action(
+                cx.listener(|s, _: &GoForward, w, cx| {
+                    s.browser.update(cx, |b, cx| b.forward(w, cx))
+                }),
+            )
+            .on_action(cx.listener(|s, _: &GoUp, w, cx| s.browser.update(cx, |b, cx| b.up(w, cx))))
+            .on_action(
+                cx.listener(|s, _: &Refresh, w, cx| s.browser.update(cx, |b, cx| b.reload(w, cx))),
+            )
+            .on_action(cx.listener(|s, _: &FocusLocation, w, cx| {
+                s.location.update(cx, |l, cx| l.edit(w, cx))
+            }))
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
-                s.show(1, w, cx);
-                s.browser
-                    .read(cx)
-                    .search
-                    .read(cx)
-                    .focus_handle(cx)
-                    .focus(w, cx);
+                let search = s.browser.read(cx).search.clone();
+                search.update(cx, |i, cx| {
+                    i.focus(w, cx);
+                    i.select_all(w, cx);
+                });
             }))
-            .on_action(cx.listener(|s, _: &PlayPause, _, cx| {
-                if s.player.read(cx).status.track.is_none() {
-                    s.play_selected(cx);
-                } else {
-                    s.player.update(cx, |p, cx| p.command(Command::Toggle, cx));
-                }
+            .on_action(cx.listener(|s, _: &PlayPause, _, cx| s.play_pause(cx)))
+            .on_action(cx.listener(|s, _: &NextTrack, _, cx| {
+                s.player.update(cx, |p, cx| p.command(Command::Step(1), cx))
             }))
+            .on_action(cx.listener(|s, _: &PreviousTrack, _, cx| {
+                s.player
+                    .update(cx, |p, cx| p.command(Command::Step(-1), cx))
+            }))
+            .on_action(cx.listener(|s, _: &ShowQueue, w, cx| s.show(Kind::Queue, w, cx)))
+            .on_action(cx.listener(|s, _: &HideToTray, w, cx| s.hide_to_tray(w, cx)))
+            .on_action(cx.listener(|s, _: &Quit, _, cx| s.quit(cx)))
             .on_action(cx.listener(|s, _: &PlaySelected, _, cx| s.play_selected(cx)))
             .on_action(cx.listener(|s, _: &OpenDirectory, w, cx| {
                 let b = s.browser.read(cx);
@@ -481,75 +847,15 @@ impl Render for Workspace {
                     s.browser.update(cx, |b, cx| b.open(path, w, cx));
                 }
             }))
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .gap_2()
-                        .px_2()
-                        .child(img("brand/compact.png").size(px(22.)))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_sm()
-                                .child("Disqro"),
-                        ),
-                ),
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|s, _, w, cx| s.browser.update(cx, |b, cx| b.back(w, cx))),
             )
-            .child(
-                h_flex()
-                    .px_3()
-                    .py_1()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("back")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowLeft)
-                            .accessibility_label("Back")
-                            .tooltip("Back · Alt+Left")
-                            .disabled(!has_history)
-                            .on_click(cx.listener(|s, _, w, cx| {
-                                s.browser.update(cx, |b, cx| b.back(w, cx))
-                            })),
-                    )
-                    .child(
-                        Button::new("up")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ArrowUp)
-                            .accessibility_label("Parent folder")
-                            .tooltip("Parent folder")
-                            .disabled(parent.is_none())
-                            .on_click(cx.listener(move |s, _, w, cx| {
-                                if let Some(p) = &parent {
-                                    s.browser.update(cx, |b, cx| b.open(p.clone(), w, cx));
-                                }
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .truncate()
-                            .px_2()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(path),
-                    )
-                    .child(
-                        Button::new("open")
-                            .small()
-                            .icon(IconName::FolderOpen)
-                            .label("Open folder")
-                            .tooltip("Open folder · Ctrl+O")
-                            .on_click(cx.listener(|s, _, w, cx| {
-                                s.browser.update(cx, |b, cx| b.choose(w, cx))
-                            })),
-                    )
-                    .child(menu),
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|s, _, w, cx| s.browser.update(cx, |b, cx| b.forward(w, cx))),
             )
+            .child(TitleBar::new().h(px(40.)).pl(px(12.)).child(bar))
             .child(div().flex_1().min_h_0().child(self.dock.clone()))
-            .child(StatusBar::new().left(self.profile_notice.clone().unwrap_or(status)))
     }
 }

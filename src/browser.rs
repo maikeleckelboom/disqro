@@ -20,6 +20,15 @@ use std::{
     },
 };
 
+const HISTORY: usize = 100;
+
+/// What to do with a file once its folder is open.
+#[derive(Clone)]
+pub enum Reveal {
+    Play(PathBuf),
+    Select(PathBuf),
+}
+
 pub struct Browser {
     pub path: PathBuf,
     pub album: Option<String>,
@@ -29,16 +38,17 @@ pub struct Browser {
     pub tree: Entity<TreeState>,
     pub table: Entity<TableState<MusicTable>>,
     pub search: Entity<InputState>,
-    pub history: Vec<PathBuf>,
+    back: Vec<PathBuf>,
+    forward: Vec<PathBuf>,
     raw: Arc<[Track]>,
     paths: Vec<PathBuf>,
     generation: Arc<AtomicU64>,
     query: String,
 }
 pub fn music_home() -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_else(|| ".".into()));
-    let music = home.join("Music");
-    if music.is_dir() { music } else { home }
+    crate::places::known_path(crate::places::Known::Music)
+        .or_else(|| crate::places::known_path(crate::places::Known::Home))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 impl Browser {
     pub fn new(
@@ -51,12 +61,14 @@ impl Browser {
         let table = cx.new(|cx| {
             TableState::new(MusicTable::new(player.clone(), columns), window, cx)
                 .col_selectable(false)
+                .sortable(false)
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find in folder"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             b.table.update(cx, |t, cx| match ev {
                 PlayerEvent::TrackChanged => cx.notify(),
                 PlayerEvent::PlaySelection => t.delegate().play(t.selected_row().unwrap_or(0), cx),
+                PlayerEvent::QueueChanged | PlayerEvent::StateChanged => {}
             })
         })
         .detach();
@@ -86,11 +98,24 @@ impl Browser {
             paths: vec![],
             generation: Default::default(),
             query: String::new(),
-            history: vec![],
+            back: vec![],
+            forward: vec![],
             notice: None,
             busy: false,
             folder_count: 0,
         }
+    }
+    pub fn tracks(&self) -> &[Track] {
+        &self.raw
+    }
+    pub fn total_duration(&self) -> f64 {
+        self.raw.iter().filter_map(|t| t.duration).sum()
+    }
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
     }
     fn filter(&self, cx: &mut App) {
         let rows = if self.query.is_empty() {
@@ -118,6 +143,17 @@ impl Browser {
                     cx.notify();
                 }
             });
+            t.delegate_mut().empty = if self.busy {
+                "Opening folder…".into()
+            } else if !self.query.is_empty() {
+                "No matching tracks".into()
+            } else if self.notice.is_some() && self.raw.is_empty() && self.folder_count == 0 {
+                SharedString::default()
+            } else if self.folder_count > 0 {
+                "This folder holds folders. Choose one in the sidebar.".into()
+            } else {
+                "No supported recordings in this folder".into()
+            };
             t.delegate_mut().set_rows(rows);
             if let Some(ix) =
                 selected.and_then(|item| t.delegate().rows.iter().position(|r| r.same_item(&item)))
@@ -129,15 +165,44 @@ impl Browser {
             cx.notify();
         });
     }
+    /// Opens a folder and records the current one in the Back history.
     pub fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.path != path && !self.path.as_os_str().is_empty() {
-            self.history.push(self.path.clone());
+        self.open_revealing(path, None, window, cx);
+    }
+    pub fn open_revealing(
+        &mut self,
+        path: PathBuf,
+        reveal: Option<Reveal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::places::same_path(&self.path, &path) && !self.path.as_os_str().is_empty() {
+            self.back.push(std::mem::take(&mut self.path));
+            if self.back.len() > HISTORY {
+                self.back.remove(0);
+            }
+            self.forward.clear();
         }
-        self.load(path, None, window, cx);
+        self.load(path, reveal, window, cx);
     }
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(p) = self.history.pop() {
+        if let Some(p) = self.back.pop() {
+            self.forward.push(std::mem::take(&mut self.path));
             self.load(p, None, window, cx);
+        }
+    }
+    pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = self.forward.pop() {
+            self.back.push(std::mem::take(&mut self.path));
+            self.load(p, None, window, cx);
+        }
+    }
+    pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(parent) = self.path.parent().map(Path::to_owned) {
+            let child = self.path.clone();
+            self.open(parent, window, cx);
+            // Explorer keeps the folder you came from in view.
+            let _ = child;
         }
     }
     pub fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -156,10 +221,14 @@ impl Browser {
         })
         .detach();
     }
+    pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = self.path.clone();
+        self.load(path, None, window, cx);
+    }
     pub fn load(
         &mut self,
         path: PathBuf,
-        autoplay: Option<PathBuf>,
+        reveal: Option<Reveal>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -174,22 +243,25 @@ impl Browser {
         self.search.update(cx, |s, cx| s.set_value("", window, cx));
         self.query.clear();
         self.filter(cx);
-        self.set_tree(&[], cx);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let dir = path.clone();
             let result = cx
-                .background_spawn(async move { library::browse(&dir) })
+                .background_spawn(async move {
+                    let siblings = dir.parent().map(library::subfolders);
+                    library::browse(&dir).map(|f| (f, siblings))
+                })
                 .await;
             if generation.load(Ordering::Relaxed) != revision {
                 return;
             }
-            let folder = match result {
+            let (folder, siblings) = match result {
                 Ok(f) => f,
                 Err(e) => {
                     let _ = this.update(cx, |b, cx| {
                         b.busy = false;
                         b.notice = Some(format!("{e:#}"));
+                        b.set_tree(&[], None, cx);
                         cx.notify();
                     });
                     return;
@@ -202,14 +274,23 @@ impl Browser {
                 b.busy = false;
                 b.folder_count = folder.dirs.len();
                 b.notice = folder.notices.into_iter().next();
-                b.set_tree(&folder.dirs, cx);
+                b.set_tree(&folder.dirs, siblings.as_deref(), cx);
                 b.filter(cx);
-                if let Some(path) = &autoplay {
+                if let Some(reveal) = &reveal {
+                    let path = match reveal {
+                        Reveal::Play(p) | Reveal::Select(p) => p,
+                    };
                     let t = b.table.read(cx).delegate();
                     if let Some(i) = t.rows.iter().position(|t| {
                         &t.source == path || t.disc.as_ref().is_some_and(|d| &d.sheet == path)
                     }) {
-                        b.table.update(cx, |t, cx| t.delegate().play(i, cx));
+                        b.table.update(cx, |t, cx| {
+                            t.set_selected_row(i, cx);
+                            t.scroll_to_row(i, cx);
+                            if matches!(reveal, Reveal::Play(_)) {
+                                t.delegate().play(i, cx);
+                            }
+                        });
                     } else {
                         b.notice = Some("This file could not be opened as a recording.".into());
                     }
@@ -258,25 +339,61 @@ impl Browser {
             .filter(|t| !t.album.is_empty() && rows.iter().all(|r| r.album == t.album))
             .map(|t| t.album.clone());
     }
-    fn set_tree(&mut self, dirs: &[PathBuf], cx: &mut App) {
+    /// The tree shows the parent folder with the current folder among its
+    /// siblings, opened to show its own subfolders. Album discs and
+    /// neighbouring albums are one click away.
+    fn set_tree(&mut self, dirs: &[PathBuf], siblings: Option<&[PathBuf]>, cx: &mut App) {
         self.paths.clear();
-        fn item(paths: &mut Vec<PathBuf>, p: &Path, label: String) -> TreeItem {
+        fn item(paths: &mut Vec<PathBuf>, p: &Path) -> TreeItem {
             let id = paths.len();
             paths.push(p.to_owned());
-            TreeItem::new(id.to_string(), label)
+            TreeItem::new(id.to_string(), library::display_name(p))
         }
-        let children = dirs
-            .iter()
-            .map(|p| item(&mut self.paths, p, library::folder_name(p)))
-            .collect::<Vec<_>>();
-        let current = item(
-            &mut self.paths,
-            &self.path,
-            library::folder_name(&self.path),
-        )
-        .children(children)
-        .expanded(true);
-        self.tree.update(cx, |t, cx| t.set_items(vec![current], cx));
+        let children =
+            |paths: &mut Vec<PathBuf>| dirs.iter().map(|p| item(paths, p)).collect::<Vec<_>>();
+        let current_id;
+        let root = match (self.path.parent(), siblings) {
+            (Some(parent), Some(siblings)) => {
+                let mut root = item(&mut self.paths, parent).expanded(true);
+                let mut found = None;
+                let mut items = vec![];
+                for s in siblings {
+                    let mut it = item(&mut self.paths, s);
+                    if crate::places::same_path(s, &self.path) {
+                        found = Some(it.id.clone());
+                        let kids = children(&mut self.paths);
+                        it = it.children(kids).expanded(true);
+                    }
+                    items.push(it);
+                }
+                if found.is_none() {
+                    let mut it = item(&mut self.paths, &self.path.clone());
+                    found = Some(it.id.clone());
+                    let kids = children(&mut self.paths);
+                    it = it.children(kids).expanded(true);
+                    items.push(it);
+                }
+                current_id = found;
+                root = root.children(items);
+                root
+            }
+            _ => {
+                let mut it = item(&mut self.paths, &self.path.clone());
+                current_id = Some(it.id.clone());
+                let kids = children(&mut self.paths);
+                it = it.children(kids).expanded(true);
+                it
+            }
+        };
+        self.tree.update(cx, |t, cx| {
+            t.set_items(vec![root], cx);
+            if let Some(id) = &current_id
+                && let Some(ix) = t.index_of(id)
+            {
+                t.set_selected_index(Some(ix), cx);
+                t.scroll_to_item(ix, ScrollStrategy::Center);
+            }
+        });
     }
     pub fn tree_path(&self, id: &str) -> Option<PathBuf> {
         self.paths.get(id.parse::<usize>().ok()?).cloned()

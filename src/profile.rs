@@ -1,4 +1,4 @@
-use crate::table::LayoutColumn;
+use crate::{places::PlacesState, queue::Queue, table::LayoutColumn};
 use gpui_kit::component::dock::DockAreaState;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -6,6 +6,22 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+
+/// How the window behaves around the notification area. Both default to off,
+/// so closing Disqro quits it unless the listener asks otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowPrefs {
+    pub minimize_to_tray: bool,
+    pub close_to_tray: bool,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct SavedQueue {
+    pub queue: Queue,
+    pub position: f64,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
@@ -13,6 +29,9 @@ pub struct Profile {
     pub volume: f32,
     pub layout: Option<DockAreaState>,
     pub columns: Vec<LayoutColumn>,
+    pub places: Option<PlacesState>,
+    pub queue: Option<SavedQueue>,
+    pub window: WindowPrefs,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -21,6 +40,9 @@ impl Default for Profile {
             volume: 0.65,
             layout: None,
             columns: vec![],
+            places: None,
+            queue: None,
+            window: WindowPrefs::default(),
         }
     }
 }

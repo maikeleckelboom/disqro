@@ -14,7 +14,23 @@ gpui_kit::assets::icon_assets!(
         Disc3,
         Music2,
         ChevronRight,
-        ChevronDown
+        ChevronDown,
+        Shuffle,
+        Repeat,
+        Repeat1,
+        ListMusic,
+        ListStart,
+        ListEnd,
+        AudioLines,
+        Volume1,
+        VolumeX,
+        Download,
+        FolderPlus,
+        Pin,
+        X,
+        Pencil,
+        RefreshCw,
+        TriangleAlert
     ]
 );
 pub struct Assets;
@@ -25,8 +41,6 @@ impl AssetSource for Assets {
         }
         let custom = embedded!(
             "brand/compact.png",
-            "files/16/file-audio.svg",
-            "files/16/cue-track.svg",
             "files/16/folder.svg",
             "files/20/folder-music.svg",
             "files/20/drive.svg"
@@ -49,8 +63,6 @@ pub enum FileIcon {
     Folder,
     Music,
     Drive,
-    Recording,
-    Chapter,
 }
 impl FileIcon {
     pub fn icon(self) -> Icon {
@@ -58,8 +70,6 @@ impl FileIcon {
             Self::Folder => "files/16/folder.svg",
             Self::Music => "files/20/folder-music.svg",
             Self::Drive => "files/20/drive.svg",
-            Self::Recording => "files/16/file-audio.svg",
-            Self::Chapter => "files/16/cue-track.svg",
         })
     }
 }
