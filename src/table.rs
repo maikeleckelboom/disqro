@@ -28,6 +28,9 @@ pub enum Field {
     Album,
     Length,
     Format,
+    Disc,
+    Year,
+    Path,
 }
 impl Field {
     /// Shown until the listener chooses otherwise.
@@ -38,13 +41,16 @@ impl Field {
         Self::Album,
         Self::Length,
     ];
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::Number,
         Self::Title,
         Self::Artist,
         Self::Album,
         Self::Length,
         Self::Format,
+        Self::Disc,
+        Self::Year,
+        Self::Path,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -54,6 +60,9 @@ impl Field {
             Self::Album => "Album",
             Self::Length => "Time",
             Self::Format => "Format",
+            Self::Disc => "Disc",
+            Self::Year => "Year",
+            Self::Path => "File Path",
         }
     }
     fn menu_label(self) -> &'static str {
@@ -70,7 +79,8 @@ impl Field {
             Self::Artist => 160.,
             Self::Album => 200.,
             Self::Length => 60.,
-            Self::Format => 64.,
+            Self::Format | Self::Year | Self::Disc => 64.,
+            Self::Path => 330.,
         }
     }
     fn min_width(self) -> f32 {
@@ -94,6 +104,9 @@ impl Field {
             Self::Album => t.album.clone(),
             Self::Length => t.duration.map(clock).unwrap_or_default(),
             Self::Format => t.format(),
+            Self::Disc => t.disc_number.map(|n| n.to_string()).unwrap_or_default(),
+            Self::Year => t.year.map(|n| n.to_string()).unwrap_or_default(),
+            Self::Path => t.source.display().to_string(),
         }
     }
 }
@@ -102,23 +115,77 @@ pub struct LayoutColumn {
     field: Field,
     width: f32,
 }
+/// A physical file, or an authored segment of one. Tags and row positions
+/// are deliberately absent so a refresh or sort keeps the same selection.
+type TrackKey = (std::path::PathBuf, Option<crate::library::DiscTrack>);
+fn key(t: &Track) -> TrackKey {
+    (t.source.clone(), t.disc.clone())
+}
+#[derive(Default)]
+struct Selection {
+    marked: std::collections::HashSet<TrackKey>,
+    anchor: Option<TrackKey>,
+}
+impl Selection {
+    fn modify(
+        &mut self,
+        rows: &[Arc<Track>],
+        primary: Option<usize>,
+        at: usize,
+        range: bool,
+        additive: bool,
+    ) {
+        if self.marked.is_empty()
+            && let Some(t) = primary.and_then(|i| rows.get(i))
+        {
+            self.marked.insert(key(t));
+            self.anchor = Some(key(t));
+        }
+        let clicked = key(&rows[at]);
+        if range {
+            let from = self
+                .anchor
+                .as_ref()
+                .and_then(|id| rows.iter().position(|t| t.source == id.0 && t.disc == id.1))
+                .unwrap_or(at);
+            if !additive {
+                self.marked.clear();
+            }
+            self.marked
+                .extend(rows[from.min(at)..=from.max(at)].iter().map(|t| key(t)));
+            self.anchor.get_or_insert(clicked);
+        } else {
+            if !self.marked.remove(&clicked) {
+                self.marked.insert(clicked.clone());
+            }
+            self.anchor = Some(clicked);
+        }
+    }
+}
 pub struct MusicTable {
-    pub rows: Arc<[Track]>,
-    original: Arc<[Track]>,
+    pub rows: crate::library::TrackList,
+    original: crate::library::TrackList,
     pub columns: Vec<LayoutColumn>,
     sort: Option<(Field, ColumnSort)>,
+    selection: Selection,
     pub player: Entity<Player>,
+    browser: WeakEntity<crate::browser::Browser>,
     /// What an empty table says: loading, no match, or only subfolders.
     pub empty: SharedString,
 }
 impl MusicTable {
-    pub fn new(player: Entity<Player>, saved: Vec<LayoutColumn>) -> Self {
+    pub fn new(
+        player: Entity<Player>,
+        saved: Vec<LayoutColumn>,
+        browser: WeakEntity<crate::browser::Browser>,
+    ) -> Self {
         let valid = saved.iter().any(|c| c.field == Field::Title)
             && saved.iter().enumerate().all(|(i, c)| {
                 (24. ..=1200.).contains(&c.width) && saved[..i].iter().all(|d| d.field != c.field)
             });
         Self {
             player,
+            browser,
             rows: Arc::default(),
             original: Arc::default(),
             columns: if valid {
@@ -127,6 +194,7 @@ impl MusicTable {
                 Self::default_columns()
             },
             sort: None,
+            selection: Default::default(),
             empty: SharedString::default(),
         }
     }
@@ -165,7 +233,7 @@ impl MusicTable {
             },
         );
     }
-    pub fn set_rows(&mut self, rows: Arc<[Track]>) {
+    pub fn set_rows(&mut self, rows: crate::library::TrackList) {
         self.original = rows;
         self.apply_sort();
     }
@@ -179,6 +247,8 @@ impl MusicTable {
                         .partial_cmp(&b.duration)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 }),
+                Field::Disc => rows.sort_by_key(|t| t.disc_number),
+                Field::Year => rows.sort_by_key(|t| t.year),
                 Field::Number => rows.sort_by_key(|t| t.display_number()),
                 _ => rows.sort_by_cached_key(|t| f.value(t).to_lowercase()),
             }
@@ -207,6 +277,23 @@ impl MusicTable {
         for (c, w) in self.columns.iter_mut().zip(widths) {
             c.width = f32::from(*w);
         }
+    }
+    pub fn has_marks(&self) -> bool {
+        !self.selection.marked.is_empty()
+    }
+    pub fn clear_marks(&mut self) {
+        self.selection = Default::default();
+    }
+    fn chosen(&self, ix: usize) -> crate::library::TrackList {
+        if self.selection.marked.is_empty() || !self.selection.marked.contains(&key(&self.rows[ix]))
+        {
+            return vec![self.rows[ix].clone()].into();
+        }
+        self.rows
+            .iter()
+            .filter(|t| self.selection.marked.contains(&key(t)))
+            .cloned()
+            .collect()
     }
     fn is_playing(&self, t: &Track, cx: &App) -> bool {
         self.player
@@ -285,7 +372,16 @@ impl TableDelegate for MusicTable {
                 )
             })
             .on_click(cx.listener(move |t, _, _, cx| {
+                let selected = t
+                    .selected_row()
+                    .and_then(|i| t.delegate().rows.get(i))
+                    .cloned();
                 t.delegate_mut().cycle_sort(field);
+                if let Some(ix) = selected
+                    .and_then(|item| t.delegate().rows.iter().position(|r| r.same_item(&item)))
+                {
+                    t.set_selected_row(ix, cx);
+                }
                 t.refresh(cx);
                 cx.notify();
             }))
@@ -293,11 +389,15 @@ impl TableDelegate for MusicTable {
                 let table = cx.entity().downgrade();
                 let shown: Vec<Field> = self.columns.iter().map(|c| c.field).collect();
                 move |mut menu, _, _| {
-                    let edit = |f: fn(&mut MusicTable)| {
+                    let edit = |field: Option<Field>| {
                         let table = table.clone();
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
                             let _ = table.update(cx, |t, cx| {
-                                f(t.delegate_mut());
+                                if let Some(field) = field {
+                                    t.delegate_mut().toggle_field(field);
+                                } else {
+                                    t.delegate_mut().columns = MusicTable::default_columns();
+                                }
                                 t.refresh(cx);
                                 cx.notify();
                             });
@@ -305,25 +405,15 @@ impl TableDelegate for MusicTable {
                     };
                     menu = menu.label("Columns");
                     for f in Field::ALL {
-                        let toggle: fn(&mut MusicTable) = match f {
-                            Field::Number => |t| t.toggle_field(Field::Number),
-                            Field::Title => |t| t.toggle_field(Field::Title),
-                            Field::Artist => |t| t.toggle_field(Field::Artist),
-                            Field::Album => |t| t.toggle_field(Field::Album),
-                            Field::Length => |t| t.toggle_field(Field::Length),
-                            Field::Format => |t| t.toggle_field(Field::Format),
-                        };
                         menu = menu.item(
                             PopupMenuItem::new(f.menu_label())
                                 .checked(shown.contains(&f))
                                 .disabled(f == Field::Title)
-                                .on_click(edit(toggle)),
+                                .on_click(edit(Some(f))),
                         );
                     }
-                    menu.separator().item(
-                        PopupMenuItem::new("Reset Columns")
-                            .on_click(edit(|t| t.columns = MusicTable::default_columns())),
-                    )
+                    menu.separator()
+                        .item(PopupMenuItem::new("Reset Columns").on_click(edit(None)))
                 }
             })
     }
@@ -367,6 +457,39 @@ impl TableDelegate for MusicTable {
                 .into_any_element(),
         }
     }
+    fn render_tr(
+        &mut self,
+        row: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let marked = !self.selection.marked.is_empty()
+            && self.selection.marked.contains(&key(&self.rows[row]));
+        div()
+            .id(("track-row", row))
+            .when(marked, |d| d.bg(materials(cx).selected))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |table, event: &MouseDownEvent, _, cx| {
+                    let additive = event.modifiers.secondary(cx);
+                    if additive || event.modifiers.shift {
+                        let primary = table.selected_row();
+                        let delegate = table.delegate_mut();
+                        delegate.selection.modify(
+                            &delegate.rows,
+                            primary,
+                            row,
+                            event.modifiers.shift,
+                            additive,
+                        );
+                        table.clear_selection(cx);
+                    } else {
+                        table.delegate_mut().clear_marks();
+                    }
+                    cx.notify();
+                }),
+            )
+    }
     fn render_empty(
         &mut self,
         _: &mut Window,
@@ -399,21 +522,72 @@ impl TableDelegate for MusicTable {
         let player = self.player.clone();
         let send = move |cmd: Command, cx: &mut App| player.update(cx, |p, cx| p.command(cmd, cx));
         let (s1, s2, s3) = (send.clone(), send.clone(), send);
-        let (t1, t2) = (track.clone(), track);
+        let chosen = self.chosen(ix);
+        let next_label = if chosen.len() > 1 {
+            format!("Play {} Tracks Next", chosen.len())
+        } else {
+            "Play Next".into()
+        };
+        let add_label = if chosen.len() > 1 {
+            format!("Add {} Tracks to Queue", chosen.len())
+        } else {
+            "Add to Queue".into()
+        };
+        let upcoming = chosen.clone();
+        let browser = self.browser.clone();
         menu.item(
             PopupMenuItem::new("Play")
                 .icon(IconName::Play)
                 .on_click(move |_, _, cx| s1(Command::Play(rows.clone(), ix), cx)),
         )
         .item(
-            PopupMenuItem::new("Play Next")
+            PopupMenuItem::new(next_label)
                 .icon(IconName::ListStart)
-                .on_click(move |_, _, cx| s2(Command::PlayNext(vec![t1.clone()]), cx)),
+                .on_click(move |_, _, cx| s2(Command::PlayNext(upcoming.clone()), cx)),
         )
         .item(
-            PopupMenuItem::new("Add to Queue")
+            PopupMenuItem::new(add_label)
                 .icon(IconName::ListEnd)
-                .on_click(move |_, _, cx| s3(Command::Enqueue(vec![t2.clone()]), cx)),
+                .on_click(move |_, _, cx| s3(Command::Enqueue(chosen.clone()), cx)),
         )
+        .separator()
+        .item(
+            PopupMenuItem::new("Open Containing Folder")
+                .icon(IconName::FolderOpen)
+                .on_click(move |_, window, cx| {
+                    let original = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
+                    if let Some(folder) = original.parent() {
+                        let _ = browser.update(cx, |b, cx| {
+                            b.open_revealing(
+                                folder.to_owned(),
+                                Some(crate::browser::Reveal::Track(track.clone())),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
+                }),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, Selection, Track, key};
+    #[test]
+    fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {
+        let mut rows: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|p| Arc::new(Track::file((*p).into())))
+            .collect();
+        let mut selection = Selection::default();
+        selection.modify(&rows, Some(0), 2, false, true);
+        assert_eq!(selection.marked.len(), 2);
+        rows.reverse();
+        selection.modify(&rows, None, 3, true, false);
+        assert_eq!(selection.marked.len(), 3);
+        assert!(!selection.marked.contains(&key(&rows[0])));
+        selection.modify(&rows, None, 1, false, true);
+        assert_eq!(selection.marked.len(), 2);
     }
 }

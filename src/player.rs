@@ -25,7 +25,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc,
     },
 };
 
@@ -122,8 +121,9 @@ impl Player {
             && self.queue.entries.is_empty()
         {
             cx.emit(PlayerEvent::PlaySelection);
-        } else {
-            self.transport.send(c);
+        } else if let Err(e) = self.transport.send(c, self.status.entry) {
+            self.status.error = Some(e.to_string());
+            cx.notify();
         }
     }
     /// The volume to remember: muting is temporary.
@@ -134,7 +134,7 @@ impl Player {
         &self.queue
     }
     /// A sender for control paths outside the window, such as media keys.
-    pub fn sender(&self) -> mpsc::Sender<Command> {
+    pub fn sender(&self) -> crate::audio::Commands {
         self.transport.sender()
     }
     /// While hidden, the player stops drawing and analysing; playback and
@@ -145,6 +145,10 @@ impl Player {
         }
         self.visible = visible;
         self.transport.set_quiet(!visible);
+        if !visible && self.peaks.is_none() {
+            self.analysis.fetch_add(1, Ordering::Relaxed);
+            self.analysed = None;
+        }
         if visible {
             self.sync(cx);
             self.analyse(cx);
@@ -168,12 +172,12 @@ impl Player {
         })
     }
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let status = self.transport.status();
+        let (status, queue) = self.transport.state();
         if status == self.status {
             return;
         }
         if status.queue_revision != self.status.queue_revision {
-            self.queue = self.transport.queue();
+            self.queue = queue;
             cx.emit(PlayerEvent::QueueChanged);
         }
         let path = status.track.as_ref().map(|t| &t.source);
@@ -217,6 +221,7 @@ impl Player {
         };
         self.status = status;
         if track_changed {
+            self.analysis.fetch_add(1, Ordering::Relaxed);
             self.peaks = None;
             self.analysed = None;
             self.analyse(cx);
@@ -272,21 +277,28 @@ impl Player {
         .detach();
     }
     fn set_volume(&mut self, v: f32, cx: &mut Context<Self>) {
-        self.volume = v.clamp(0., 1.);
-        self.muted_from = None;
-        self.transport.send(Command::Volume(self.volume));
-        cx.notify();
+        self.apply_volume(v.clamp(0., 1.), None, cx);
     }
     fn toggle_mute(&mut self, cx: &mut Context<Self>) {
-        match self.muted_from.take() {
-            Some(v) => self.set_volume(v, cx),
-            None if self.volume > 0. => {
-                let before = self.volume;
-                self.set_volume(0., cx);
-                self.muted_from = Some(before);
-            }
-            None => self.set_volume(0.65, cx),
+        if self.volume > 0. {
+            self.apply_volume(0., Some(self.volume), cx);
+        } else {
+            self.apply_volume(self.muted_from.unwrap_or(0.65), None, cx);
         }
+    }
+    fn apply_volume(&mut self, volume: f32, muted_from: Option<f32>, cx: &mut Context<Self>) {
+        match self
+            .transport
+            .send(Command::Volume(volume), self.status.entry)
+        {
+            Ok(()) => {
+                self.volume = volume;
+                self.muted_from = muted_from;
+                cx.emit(PlayerEvent::StateChanged);
+            }
+            Err(e) => self.status.error = Some(e.to_string()),
+        }
+        cx.notify();
     }
     fn fraction_at(&self, x: Pixels, bounds: Bounds<Pixels>) -> f32 {
         let w = f32::from(bounds.size.width).max(1.);

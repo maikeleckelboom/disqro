@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use kira::{
-    AudioManager, DefaultBackend, Tween,
+    AudioManager, Decibels, DefaultBackend, Tween,
     sound::{
         PlaybackState,
         streaming::{Decoder as StreamDecoder, StreamingSoundData, StreamingSoundHandle},
@@ -42,7 +42,7 @@ pub struct Status {
 /// the one transport, so they can never disagree about what is playing.
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
-    Play(Arc<[Track]>, usize),
+    Play(crate::library::TrackList, usize),
     Toggle,
     SetPlaying(bool),
     Stop,
@@ -53,8 +53,8 @@ pub enum Command {
     Step(i8),
     Volume(f32),
     Jump(u64),
-    PlayNext(Vec<Track>),
-    Enqueue(Vec<Track>),
+    PlayNext(crate::library::TrackList),
+    Enqueue(crate::library::TrackList),
     Remove(Vec<u64>),
     Move(u64, usize),
     ClearUpcoming,
@@ -63,6 +63,7 @@ pub enum Command {
     Repeat(Repeat),
     /// Bring back a saved queue, paused at the saved position.
     Restore(Box<Queue>, f64),
+    Snapshot(mpsc::SyncSender<Option<crate::profile::SavedQueue>>),
 }
 
 struct Shared {
@@ -70,19 +71,105 @@ struct Shared {
     queue: Arc<Queue>,
 }
 
+/// Only adjacent seeks (or adjacent volume changes) may replace each other.
+/// A transport or queue action seals the preceding slot, preserving FIFO order.
+type Slot = Arc<Mutex<Option<Pending>>>;
+
+struct Pending {
+    command: Command,
+    entry: Option<u64>,
+}
+impl Pending {
+    fn replaces(&self, old: &Self) -> bool {
+        matches!(
+            (&self.command, &old.command),
+            (Command::Volume(_), Command::Volume(_))
+                | (
+                    Command::Seek(_) | Command::SeekTo(_),
+                    Command::Seek(_) | Command::SeekTo(_)
+                )
+        ) && self.entry == old.entry
+    }
+    fn applies_to(&self, entry: Option<u64>) -> bool {
+        !matches!(self.command, Command::Seek(_) | Command::SeekTo(_)) || self.entry == entry
+    }
+}
+
+#[derive(Clone)]
+pub struct Commands {
+    tx: mpsc::SyncSender<Slot>,
+    tail: Arc<Mutex<std::sync::Weak<Mutex<Option<Pending>>>>>,
+    shared: Arc<Mutex<Shared>>,
+}
+impl Commands {
+    fn channel(shared: Arc<Mutex<Shared>>, capacity: usize) -> (Self, mpsc::Receiver<Slot>) {
+        let (tx, rx) = mpsc::sync_channel(capacity);
+        (
+            Self {
+                tx,
+                shared,
+                tail: Default::default(),
+            },
+            rx,
+        )
+    }
+    // Called on the shutdown worker. FIFO puts the receipt after all commands
+    // accepted before Quit, even if the UI has not received their notifications.
+    pub fn snapshot(&self) -> Result<Option<crate::profile::SavedQueue>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let slot = Arc::new(Mutex::new(Some(Pending {
+            command: Command::Snapshot(tx),
+            entry: None,
+        })));
+        {
+            let mut tail = self.tail.lock().unwrap();
+            self.tx
+                .send(slot)
+                .map_err(|_| anyhow::anyhow!("The playback queue could not be saved."))?;
+            *tail = Default::default();
+        }
+        Ok(rx.recv()?)
+    }
+    pub fn send(&self, command: Command) -> Result<()> {
+        let entry = self.shared.lock().unwrap().status.entry;
+        self.send_for(command, entry)
+    }
+    fn send_for(&self, command: Command, entry: Option<u64>) -> Result<()> {
+        let pending = Pending { command, entry };
+        let mut tail = self.tail.lock().unwrap();
+        if let Some(slot) = tail.upgrade() {
+            let mut last = slot.lock().unwrap();
+            if last.as_ref().is_some_and(|old| pending.replaces(old)) {
+                *last = Some(pending);
+                return Ok(());
+            }
+        }
+        let slot = Arc::new(Mutex::new(Some(pending)));
+        self.tx.try_send(slot.clone()).map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => {
+                anyhow::anyhow!("Playback controls are busy. Try the action again.")
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                anyhow::anyhow!("Playback controls are unavailable.")
+            }
+        })?;
+        *tail = Arc::downgrade(&slot);
+        Ok(())
+    }
+}
 pub struct Transport {
-    tx: mpsc::Sender<Command>,
+    tx: Commands,
     latest: Arc<Mutex<Shared>>,
     quiet: Arc<AtomicBool>,
     pub changed: async_channel::Receiver<()>,
 }
 impl Transport {
     pub fn new(volume: f32) -> Self {
-        let (tx, rx) = mpsc::channel();
         let latest = Arc::new(Mutex::new(Shared {
             status: Status::default(),
             queue: Arc::default(),
         }));
+        let (tx, rx) = Commands::channel(latest.clone(), 64);
         let shared = latest.clone();
         let quiet = Arc::new(AtomicBool::new(false));
         let is_quiet = quiet.clone();
@@ -95,9 +182,16 @@ impl Transport {
                     ..Default::default()
                 };
                 let mut published = 0;
+                let interval = Duration::from_millis(40);
+                let mut next_tick = std::time::Instant::now() + interval;
                 loop {
-                    let command = if engine.status.playing {
-                        match rx.recv_timeout(Duration::from_millis(40)) {
+                    let command = if engine.status.playing && std::time::Instant::now() >= next_tick
+                    {
+                        None
+                    } else if engine.status.playing {
+                        match rx.recv_timeout(
+                            next_tick.saturating_duration_since(std::time::Instant::now()),
+                        ) {
                             Ok(c) => Some(c),
                             Err(mpsc::RecvTimeoutError::Timeout) => None,
                             Err(_) => break,
@@ -109,8 +203,19 @@ impl Transport {
                         }
                     };
                     let result = match command {
-                        Some(c) => engine.command(c),
-                        None => engine.tick(),
+                        Some(slot) => {
+                            let pending =
+                                slot.lock().unwrap().take().expect("one transport consumer");
+                            if pending.applies_to(engine.status.entry) {
+                                engine.command(pending.command)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        None => {
+                            next_tick = std::time::Instant::now() + interval;
+                            engine.tick()
+                        }
                     };
                     if let Err(error) = result {
                         engine.stop_voice();
@@ -145,17 +250,15 @@ impl Transport {
             changed,
         }
     }
-    pub fn send(&self, command: Command) {
-        let _ = self.tx.send(command);
+    pub fn send(&self, command: Command, entry: Option<u64>) -> Result<()> {
+        self.tx.send_for(command, entry)
     }
-    pub fn sender(&self) -> mpsc::Sender<Command> {
+    pub fn sender(&self) -> Commands {
         self.tx.clone()
     }
-    pub fn status(&self) -> Status {
-        self.latest.lock().unwrap().status.clone()
-    }
-    pub fn queue(&self) -> Arc<Queue> {
-        self.latest.lock().unwrap().queue.clone()
+    pub fn state(&self) -> (Status, Arc<Queue>) {
+        let shared = self.latest.lock().unwrap();
+        (shared.status.clone(), shared.queue.clone())
     }
     /// Stops position-only updates from waking the interface.
     pub fn set_quiet(&self, quiet: bool) {
@@ -185,11 +288,11 @@ struct Engine {
     volume: f32,
     status: Status,
 }
-fn db(volume: f32) -> f32 {
+fn db(volume: f32) -> Decibels {
     if volume <= 0. {
-        -60.
+        Decibels::SILENCE
     } else {
-        (20. * volume.log10()).max(-60.)
+        Decibels(20. * volume.log10())
     }
 }
 /// Whether `b` continues `a` in the same recording without a gap.
@@ -459,6 +562,14 @@ impl Engine {
                 self.queue.set_repeat(r);
                 self.revalidate();
             }
+            Command::Snapshot(reply) => {
+                let snapshot =
+                    (!self.queue.entries.is_empty()).then(|| crate::profile::SavedQueue {
+                        queue: self.queue.clone(),
+                        position: self.status.position,
+                    });
+                let _ = reply.send(snapshot);
+            }
             Command::Restore(queue, position) => {
                 self.stop_voice();
                 self.queue = *queue;
@@ -506,4 +617,4 @@ impl Engine {
 
 #[cfg(test)]
 #[path = "audioTests.rs"]
-mod tests;
+pub(crate) mod tests;

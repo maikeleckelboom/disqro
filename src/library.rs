@@ -5,8 +5,9 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
 };
+
+pub type TrackList = std::sync::Arc<[std::sync::Arc<Track>]>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -23,9 +24,13 @@ pub struct Track {
     pub number: Option<u32>,
     #[serde(default)]
     pub disc: Option<DiscTrack>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disc_number: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DiscTrack {
     pub sheet: PathBuf,
     pub number: u8,
@@ -43,6 +48,8 @@ impl Track {
             duration: None,
             number: None,
             disc: None,
+            year: None,
+            disc_number: None,
         }
     }
     /// The number shown in a track list: the CUE track, or the tagged number.
@@ -62,15 +69,15 @@ impl Track {
     pub fn same_item(&self, other: &Self) -> bool {
         self.source == other.source && self.disc == other.disc
     }
-    pub fn read_tags(&mut self) {
+    pub fn read_tags(&mut self) -> bool {
         let Ok(probe) = Probe::open(&self.source) else {
-            return;
+            return false;
         };
         let Ok(file) = probe
             .options(ParseOptions::new().read_cover_art(false))
             .read()
         else {
-            return;
+            return false;
         };
         self.duration = Some(file.properties().duration().as_secs_f64());
         if let Some(tag) = file.primary_tag().or_else(|| file.first_tag()) {
@@ -80,7 +87,10 @@ impl Track {
             self.artist = tag.artist().unwrap_or_default().into_owned();
             self.album = tag.album().unwrap_or_default().into_owned();
             self.number = tag.track();
+            self.disc_number = tag.disk();
+            self.year = tag.date().map(|d| u32::from(d.year));
         }
+        true
     }
 }
 
@@ -106,14 +116,24 @@ pub fn is_audio(path: &Path) -> bool {
 #[derive(Default)]
 pub struct Folder {
     pub dirs: Vec<PathBuf>,
-    pub tracks: Arc<[Track]>,
+    pub tracks: Vec<Track>,
+    pub cover: Option<PathBuf>,
     pub notices: Vec<String>,
 }
+#[cfg(test)]
 pub fn browse(path: &Path) -> Result<Folder> {
+    browse_while(path, None, || true)
+}
+pub fn browse_while(
+    path: &Path,
+    cache: Option<&crate::cache::Cache>,
+    current: impl Fn() -> bool,
+) -> Result<Folder> {
     let mut folder = Folder::default();
     let mut files = Vec::new();
     let mut discs = Vec::new();
     for entry in fs::read_dir(path).with_context(|| format!("Cannot open {}", path.display()))? {
+        anyhow::ensure!(current(), "Folder changed");
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -122,14 +142,34 @@ pub fn browse(path: &Path) -> Result<Folder> {
             }
         };
         let p = entry.path();
-        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) => {
+                folder.notices.push(e.to_string());
+                continue;
+            }
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
             if !hidden(&entry) {
                 folder.dirs.push(p);
             }
+        } else if !kind.is_file() {
+            continue;
         } else if is_audio(&p) {
             files.push(p);
         } else if p.extension().is_some_and(|s| s.eq_ignore_ascii_case("cue")) {
             discs.push(p);
+        } else if let Some(rank) = cover_rank(&p)
+            && folder
+                .cover
+                .as_ref()
+                .and_then(|c| cover_rank(c))
+                .is_none_or(|r| rank < r)
+        {
+            folder.cover = Some(p);
         }
     }
     folder
@@ -137,10 +177,11 @@ pub fn browse(path: &Path) -> Result<Folder> {
         .sort_by_cached_key(|p| folder_name(p).to_lowercase());
     discs.sort();
     let mut covered = HashSet::new();
-    let mut tracks = Vec::new();
+    let mut tracks: Vec<Track> = Vec::new();
     let mut absent = Vec::new();
     for sheet in discs {
-        match crate::cue::read(&sheet) {
+        anyhow::ensure!(current(), "Folder changed");
+        match cache.map_or_else(|| crate::cue::read(&sheet), |c| c.program(&sheet)) {
             Ok(program) => {
                 let sources = program
                     .iter()
@@ -148,14 +189,24 @@ pub fn browse(path: &Path) -> Result<Folder> {
                     .collect::<HashSet<_>>();
                 let present = sources
                     .iter()
-                    .filter_map(|path| path.canonicalize().ok())
-                    .collect::<Vec<_>>();
+                    .filter_map(|&path| Some((path.to_owned(), path.canonicalize().ok()?)))
+                    .collect::<std::collections::HashMap<_, _>>();
                 if present.is_empty() {
                     absent.push((sheet, program));
                     continue;
                 }
-                covered.extend(present);
-                tracks.extend(program);
+                if present.len() < sources.len() {
+                    folder.notices.push(format!(
+                        "{} · some source recordings are unavailable",
+                        folder_name(&sheet)
+                    ));
+                }
+                covered.extend(present.values().cloned());
+                tracks.extend(
+                    program
+                        .into_iter()
+                        .filter(|t| present.contains_key(&t.source)),
+                );
             }
             Err(error) => folder
                 .notices
@@ -192,8 +243,22 @@ pub fn browse(path: &Path) -> Result<Folder> {
             })
             .map(Track::file),
     );
-    folder.tracks = tracks.into();
+    folder.tracks = tracks;
     Ok(folder)
+}
+
+fn cover_rank(path: &Path) -> Option<usize> {
+    let name = path.file_name()?.to_str()?;
+    [
+        "cover.jpg",
+        "folder.jpg",
+        "front.jpg",
+        "cover.png",
+        "folder.png",
+        "front.png",
+    ]
+    .iter()
+    .position(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 /// Hidden and system folders, such as `$RECYCLE.BIN`, stay out of the way.
@@ -203,9 +268,10 @@ fn hidden(entry: &fs::DirEntry) -> bool {
         use std::os::windows::fs::MetadataExt;
         const HIDDEN: u32 = 0x2;
         const SYSTEM: u32 = 0x4;
+        const REPARSE_POINT: u32 = 0x400;
         entry
             .metadata()
-            .is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM) != 0)
+            .is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM | REPARSE_POINT) != 0)
     }
     #[cfg(not(windows))]
     entry.file_name().to_string_lossy().starts_with('.')

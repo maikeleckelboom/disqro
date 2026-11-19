@@ -10,7 +10,7 @@ fn samples(i: usize) -> [i16; 2] {
         ((i * 101 % 26339) as i16) - 13169,
     ]
 }
-fn fixture(path: &Path, rate: u32, n: usize) {
+pub(crate) fn fixture(path: &Path, rate: u32, n: usize) {
     let len = (n * 4) as u32;
     let mut wav = Vec::new();
     wav.extend(b"RIFF");
@@ -243,4 +243,46 @@ fn encoded_formats_open_decode_and_seek() {
             assert_eq!(error, 0., "{name}");
         }
     }
+}
+
+#[test]
+fn zero_volume_is_digital_silence() {
+    assert_eq!(super::db(0.).as_amplitude(), 0.);
+    assert!((super::db(0.5).as_amplitude() - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn seek_bursts_coalesce_without_crossing_transport_actions() {
+    use super::{Command, Commands, Shared};
+    use std::sync::{Arc, Mutex};
+    let shared = Arc::new(Mutex::new(Shared {
+        status: Default::default(),
+        queue: Default::default(),
+    }));
+    shared.lock().unwrap().status.entry = Some(7);
+    let (tx, rx) = Commands::channel(shared, 3);
+    for n in 0..1000 {
+        tx.send(Command::SeekTo(f64::from(n))).unwrap();
+    }
+    tx.send(Command::Stop).unwrap();
+    tx.send(Command::Seek(0.5)).unwrap();
+    assert!(tx.send(Command::Step(1)).is_err());
+    let take = || rx.try_recv().unwrap().lock().unwrap().take().unwrap();
+    let seek = take();
+    assert!(matches!(seek.command, Command::SeekTo(999.)));
+    assert!(seek.applies_to(Some(7)));
+    assert!(!seek.applies_to(Some(8)));
+    assert!(matches!(take().command, Command::Stop));
+    assert!(matches!(take().command, Command::Seek(0.5)));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn shutdown_receipt_includes_pending_queue_edits() {
+    let transport = Transport::new(0.);
+    let tracks = vec![Arc::new(Track::file("first.wav".into()))].into();
+    transport.send(Command::Enqueue(tracks), None).unwrap();
+    let saved = transport.sender().snapshot().unwrap().unwrap();
+    assert_eq!(saved.queue.entries.len(), 1);
+    assert_eq!(saved.queue.entries[0].track.title, "first");
 }

@@ -33,6 +33,7 @@ pub struct LocationBar {
     input: Entity<InputState>,
     editing: bool,
     pending: bool,
+    request: u64,
     error: Option<SharedString>,
     width: Rc<Cell<Pixels>>,
 }
@@ -89,16 +90,18 @@ pub fn parse(raw: &str) -> Result<PathBuf, &'static str> {
         return Err("Enter a folder path");
     }
     // Expand %VARIABLES% the way Explorer does.
-    while let Some(start) = s.find('%') {
+    let mut offset = 0;
+    while let Some(start) = s[offset..].find('%').map(|i| i + offset) {
         let Some(len) = s[start + 1..].find('%') else {
             break;
         };
-        let name = &s[start + 1..start + 1 + len];
-        match std::env::var(name) {
-            Ok(value) if !name.is_empty() => {
-                s.replace_range(start..start + len + 2, &value);
+        let end = start + len + 2;
+        match std::env::var(&s[start + 1..end - 1]) {
+            Ok(value) if len > 0 => {
+                s.replace_range(start..end, &value);
+                offset = start + value.len();
             }
-            _ => break,
+            _ => offset = end,
         }
     }
     let s = s.replace('/', "\\");
@@ -142,17 +145,34 @@ impl LocationBar {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a folder path"));
         cx.subscribe_in(&input, window, |bar, _, e, window, cx| match e {
             InputEvent::PressEnter { .. } => bar.submit(window, cx),
-            InputEvent::Change if bar.error.take().is_some() => cx.notify(),
+            InputEvent::Change => {
+                bar.request += 1;
+                bar.pending = false;
+                bar.error = None;
+                cx.notify();
+            }
             InputEvent::Blur if bar.editing && !bar.pending => bar.cancel(window, cx),
             _ => {}
         })
         .detach();
-        cx.observe(&browser, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &browser,
+            window,
+            |bar, _, _: &crate::browser::ViewChanged, _, cx| {
+                bar.request += 1;
+                bar.pending = false;
+                bar.editing = false;
+                bar.error = None;
+                cx.notify();
+            },
+        )
+        .detach();
         Self {
             browser,
             input,
             editing: false,
             pending: false,
+            request: 0,
             error: None,
             width: Rc::new(Cell::new(px(0.))),
         }
@@ -160,6 +180,7 @@ impl LocationBar {
     /// Shows the path as text with everything selected, ready to replace.
     pub fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.browser.read(cx).path.display().to_string();
+        self.request += 1;
         self.editing = true;
         self.error = None;
         self.input.update(cx, |s, cx| {
@@ -170,6 +191,7 @@ impl LocationBar {
         cx.notify();
     }
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request += 1;
         let was_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         self.editing = false;
         self.pending = false;
@@ -186,6 +208,9 @@ impl LocationBar {
         table.read(cx).focus_handle(cx).focus(window, cx);
     }
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request += 1;
+        let request = self.request;
+        let navigation = self.browser.read(cx).revision();
         let raw = self.input.read(cx).value().to_string();
         let path = match parse(&raw) {
             Ok(p) => p,
@@ -202,6 +227,13 @@ impl LocationBar {
             let probe = path.clone();
             let target = cx.background_spawn(async move { classify(&probe) }).await;
             let _ = this.update_in(cx, |bar, window, cx| {
+                if bar.request != request {
+                    return;
+                }
+                if bar.browser.read(cx).revision() != navigation {
+                    bar.cancel(window, cx);
+                    return;
+                }
                 bar.pending = false;
                 match target {
                     Target::Folder => {

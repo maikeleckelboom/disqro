@@ -47,11 +47,37 @@ pub struct Queue {
 }
 
 impl Queue {
-    fn entry(&mut self, track: Track) -> Entry {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.current.is_none_or(|i| i < self.entries.len()),
+            "Queue cursor is outside its entries"
+        );
+        let mut ids = std::collections::HashSet::new();
+        anyhow::ensure!(
+            self.next_id < u64::MAX
+                && self
+                    .entries
+                    .iter()
+                    .all(|e| e.id > 0 && e.id <= self.next_id && ids.insert(e.id)),
+            "Invalid queue entry identities"
+        );
+        anyhow::ensure!(
+            self.entries.iter().all(
+                |e| e.track.duration.is_none_or(|s| s.is_finite() && s >= 0.)
+                    && e.track
+                        .disc
+                        .as_ref()
+                        .is_none_or(|d| d.end.is_none_or(|v| v > d.start))
+            ),
+            "Invalid saved track boundaries"
+        );
+        Ok(())
+    }
+    fn entry(&mut self, track: impl Into<Arc<Track>>) -> Entry {
         self.next_id += 1;
         Entry {
             id: self.next_id,
-            track: Arc::new(track),
+            track: track.into(),
         }
     }
     fn touch(&mut self) {
@@ -76,7 +102,7 @@ impl Queue {
 
     /// Starts a new queue from a table, beginning at `start`. The tracks before
     /// it become history, so Previous moves back through the album.
-    pub fn replace(&mut self, tracks: &[Track], start: usize) {
+    pub fn replace(&mut self, tracks: &[impl Clone + Into<Arc<Track>>], start: usize) {
         self.entries = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         self.current = (start < self.entries.len()).then_some(start);
         self.unshuffled.clear();
@@ -86,7 +112,7 @@ impl Queue {
         self.touch();
     }
     /// Inserts tracks right after the current entry, in the order given.
-    pub fn play_next(&mut self, tracks: &[Track]) -> Vec<u64> {
+    pub fn play_next(&mut self, tracks: &[impl Clone + Into<Arc<Track>>]) -> Vec<u64> {
         let at = self.upcoming_start().min(self.entries.len());
         let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
@@ -97,7 +123,7 @@ impl Queue {
         self.touch();
         ids
     }
-    pub fn add(&mut self, tracks: &[Track]) -> Vec<u64> {
+    pub fn add(&mut self, tracks: &[impl Clone + Into<Arc<Track>>]) -> Vec<u64> {
         let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
         self.entries.extend(new);

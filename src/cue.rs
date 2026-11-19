@@ -50,6 +50,21 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
     let mut source: Option<PathBuf> = None;
     let (mut album, mut artist) = (String::new(), String::new());
     let mut tracks: Vec<Track> = Vec::new();
+    let folder_disc = sheet
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|s| s.to_str())
+        .and_then(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower
+                .strip_prefix("disc")
+                .or_else(|| lower.strip_prefix("cd"))?
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+        });
+    let mut year = None;
     let mut in_track = false;
     for line in text.trim_start_matches('\u{feff}').lines() {
         let (key, args) = line
@@ -58,6 +73,13 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
             .unwrap_or((line.trim(), ""));
         let args = args.trim();
         match key.to_ascii_uppercase().as_str() {
+            "REM" if !in_track => {
+                if let Some((k, v)) = args.split_once(char::is_whitespace)
+                    && k.eq_ignore_ascii_case("DATE")
+                {
+                    year = v.trim().trim_matches('"').parse().ok();
+                }
+            }
             "FILE" => {
                 let (file, _) = value(args)?;
                 let p = sheet.parent().unwrap_or(Path::new("")).join(file);
@@ -82,6 +104,8 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
                 );
                 let mut t = Track::file(source.clone().context("TRACK before FILE")?);
                 t.title = format!("Track {n:02}");
+                t.year = year;
+                t.disc_number = folder_disc;
                 t.album = album.clone();
                 t.artist = artist.clone();
                 t.disc = Some(DiscTrack {

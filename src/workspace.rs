@@ -1,14 +1,13 @@
 use crate::{
     audio::Command,
     browser::{Browser, Reveal, music_home},
-    library::{clock, display_name},
     location::LocationBar,
+    pane::{Kind, Pane},
     player::{Player, PlayerEvent},
     profile::{self, Profile, SavedQueue, WindowPrefs},
     queue_view::QueueView,
     sidebar::{Sidebar, SidebarEvent},
     system::{System, SystemEvent},
-    table::ROW_HEIGHT,
     theme::materials,
 };
 use gpui_kit::assets::IconName;
@@ -17,8 +16,7 @@ use gpui_kit::{
         button::*,
         dock::*,
         input::Input,
-        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
-        table::DataTable,
+        menu::{DropdownMenu, PopupMenuItem},
         *,
     },
     prelude::*,
@@ -68,223 +66,6 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum Kind {
-    Folders,
-    Tracks,
-    Player,
-    Queue,
-}
-impl Kind {
-    const ALL: [Self; 4] = [Self::Folders, Self::Tracks, Self::Queue, Self::Player];
-    fn name(self) -> &'static str {
-        match self {
-            Self::Folders => "Folders",
-            Self::Tracks => "Recordings",
-            Self::Player => "Now Playing",
-            Self::Queue => "Queue",
-        }
-    }
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|k| *k == self).unwrap()
-    }
-}
-
-struct Pane {
-    kind: Kind,
-    browser: Entity<Browser>,
-    player: Entity<Player>,
-    sidebar: Entity<Sidebar>,
-    queue: Entity<QueueView>,
-    focus: FocusHandle,
-}
-impl EventEmitter<PanelEvent> for Pane {}
-impl Focusable for Pane {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        match self.kind {
-            Kind::Queue => self.queue.read(cx).focus_handle().clone(),
-            _ => self.focus.clone(),
-        }
-    }
-}
-impl BasePanel for Pane {
-    fn panel_name(&self) -> &'static str {
-        self.kind.name()
-    }
-}
-impl Panel for Pane {
-    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let m = *materials(cx);
-        let (title, detail): (String, String) = match self.kind {
-            Kind::Tracks => {
-                let b = self.browser.read(cx);
-                let count = b.tracks().len();
-                let total = b.total_duration();
-                let detail = if b.busy {
-                    "Opening…".to_owned()
-                } else if count == 0 {
-                    String::new()
-                } else if total > 0. {
-                    format!(
-                        "{count} {} · {}",
-                        if count == 1 { "track" } else { "tracks" },
-                        clock(total)
-                    )
-                } else {
-                    format!("{count} {}", if count == 1 { "track" } else { "tracks" })
-                };
-                (
-                    b.album.clone().unwrap_or_else(|| display_name(&b.path)),
-                    detail,
-                )
-            }
-            Kind::Queue => ("Queue".into(), self.queue.read(cx).summary(cx)),
-            k => (k.name().into(), String::new()),
-        };
-        h_flex()
-            .min_w_0()
-            .gap(px(10.))
-            .items_baseline()
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(m.text)
-                    .child(title),
-            )
-            .when(!detail.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(12.))
-                        .text_color(m.text_faint)
-                        .child(detail),
-                )
-            })
-    }
-    fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.kind.name().into())
-    }
-    fn title_style(&self, cx: &App) -> Option<TitleStyle> {
-        let m = materials(cx);
-        (self.kind == Kind::Queue).then_some(TitleStyle {
-            background: m.chrome,
-            foreground: m.text,
-        })
-    }
-    fn inner_padding(&self, _: &App) -> bool {
-        false
-    }
-    /// The sidebar and the player draw their own compact chrome.
-    fn title_bar(&self, _: &App) -> bool {
-        matches!(self.kind, Kind::Tracks | Kind::Queue)
-    }
-    fn dropdown_menu(
-        &mut self,
-        menu: PopupMenu,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> PopupMenu {
-        match self.kind {
-            Kind::Queue => self.queue.read(cx).panel_menu(menu, cx),
-            Kind::Tracks => {
-                let tracks: std::sync::Arc<[crate::library::Track]> =
-                    self.browser.read(cx).table.read(cx).delegate().rows.clone();
-                let empty = tracks.is_empty();
-                let send = {
-                    let player = self.player.clone();
-                    move |c: Command, cx: &mut App| player.update(cx, |p, cx| p.command(c, cx))
-                };
-                let (s1, s2, s3) = (send.clone(), send.clone(), send);
-                let (t1, t2, t3) = (tracks.clone(), tracks.clone(), tracks);
-                let browser = self.browser.clone();
-                menu.item(
-                    PopupMenuItem::new("Play All")
-                        .icon(IconName::Play)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| {
-                            s1(Command::Shuffle(false), cx);
-                            s1(Command::Play(t1.clone(), 0), cx)
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Shuffle All")
-                        .icon(IconName::Shuffle)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| {
-                            let start = fastrand::usize(..t2.len());
-                            s2(Command::Shuffle(true), cx);
-                            s2(Command::Play(t2.clone(), start), cx)
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Add All to Queue")
-                        .icon(IconName::ListEnd)
-                        .disabled(empty)
-                        .on_click(move |_, _, cx| s3(Command::Enqueue(t3.to_vec()), cx)),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new("Refresh")
-                        .icon(IconName::RefreshCw)
-                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.reload(w, cx))),
-                )
-            }
-            _ => menu,
-        }
-    }
-}
-impl Pane {
-    fn recordings(&self, cx: &App) -> impl IntoElement {
-        let m = *materials(cx);
-        let b = self.browser.read(cx);
-        let mut view = v_flex().size_full().bg(m.canvas);
-        if let Some(notice) = &b.notice {
-            view = view.child(
-                h_flex()
-                    .mx(px(10.))
-                    .mb(px(4.))
-                    .px(px(10.))
-                    .py(px(5.))
-                    .gap(px(8.))
-                    .rounded(px(5.))
-                    .bg(m.warning.opacity(0.08))
-                    .text_size(px(12.))
-                    .text_color(m.warning)
-                    .child(Icon::new(IconName::TriangleAlert).size(px(13.)))
-                    .child(div().truncate().child(notice.clone())),
-            );
-        }
-        view.child(
-            div().flex_1().min_h_0().text_size(px(13.)).child(
-                DataTable::new(&b.table)
-                    .accessibility_label("Recordings")
-                    .bordered(false)
-                    .stripe(false)
-                    .header_row_height(px(30.))
-                    .with_size(gpui_kit::component::Size::Size(px(ROW_HEIGHT))),
-            ),
-        )
-    }
-}
-impl Render for Pane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = match self.kind {
-            Kind::Folders => self.sidebar.clone().into_any_element(),
-            Kind::Tracks => self.recordings(cx).into_any_element(),
-            Kind::Player => self.player.clone().into_any_element(),
-            Kind::Queue => self.queue.clone().into_any_element(),
-        };
-        div()
-            .track_focus(&self.focus)
-            .size_full()
-            .overflow_hidden()
-            .child(content)
-    }
-}
-
 pub struct Workspace {
     browser: Entity<Browser>,
     player: Entity<Player>,
@@ -292,7 +73,11 @@ pub struct Workspace {
     location: Entity<LocationBar>,
     dock: Entity<DockArea>,
     panels: Vec<Entity<Pane>>,
-    profile: Option<PathBuf>,
+    profile: Option<std::sync::Arc<profile::ProfileFile>>,
+    save_revision: u64,
+    quitting: bool,
+    save_dirty: bool,
+    window: AnyWindowHandle,
     prefs: WindowPrefs,
     system: Option<System>,
     hwnd: isize,
@@ -314,24 +99,21 @@ fn native_handle(window: &Window) -> isize {
 
 impl Workspace {
     pub fn new(arg: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut location = profile::location();
-        let mut profile_notice = None;
-        let mut saved = location
-            .as_deref()
-            .and_then(|p| match profile::read(p) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    profile_notice = Some(format!("Could not restore the workspace: {e}"));
-                    None
-                }
-            })
-            .unwrap_or_default();
-        if profile_notice.is_some() {
-            location = None;
-        }
+        let (file, mut saved, profile_notice) = match profile::location() {
+            Some(path) => {
+                let (file, saved, notice) = profile::ProfileFile::open(path);
+                (Some(std::sync::Arc::new(file)), saved, notice)
+            }
+            None => (
+                None,
+                Profile::default(),
+                Some("Workspace storage is unavailable.".into()),
+            ),
+        };
         let volume = saved.volume.clamp(0., 1.);
         let player = cx.new(|cx| Player::new(volume, window, cx));
-        let browser = cx.new(|cx| Browser::new(player.clone(), saved.columns, window, cx));
+        let browser =
+            cx.new(|cx| Browser::new(player.clone(), saved.columns, saved.collection, window, cx));
         let sidebar = cx.new(|cx| Sidebar::new(browser.clone(), saved.places.take(), cx));
         let queue = cx.new(|cx| QueueView::new(player.clone(), browser.clone(), cx));
         let location_bar = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
@@ -370,6 +152,10 @@ impl Workspace {
         let (events_tx, events_rx) = async_channel::unbounded();
         let system = System::new(events_tx, player.read(cx).sender());
         let mut subscriptions = vec![
+            cx.subscribe(
+                &browser,
+                |s: &mut Self, _, _: &crate::browser::ViewChanged, cx| s.schedule_save(cx),
+            ),
             cx.subscribe(&sidebar, |s: &mut Self, _, e, cx| match e {
                 SidebarEvent::Changed => s.schedule_save(cx),
             }),
@@ -378,7 +164,10 @@ impl Workspace {
                     s.update_system(cx);
                     s.schedule_save(cx);
                 }
-                PlayerEvent::StateChanged => s.update_system(cx),
+                PlayerEvent::StateChanged => {
+                    s.update_system(cx);
+                    s.schedule_save(cx);
+                }
                 PlayerEvent::PlaySelection => {}
             }),
             cx.observe_window_visibility(window, |s: &mut Self, visibility, window, cx| {
@@ -386,7 +175,11 @@ impl Workspace {
                 s.player.update(cx, |p, cx| p.set_visible(visible, cx));
                 if visible {
                     s.hidden_to_tray = false;
-                } else if s.prefs.minimize_to_tray && !s.hidden_to_tray && is_minimized(window) {
+                } else if s.prefs.minimize_to_tray
+                    && s.tray_available()
+                    && !s.hidden_to_tray
+                    && is_minimized(window)
+                {
                     s.hide_to_tray(window, cx);
                 }
             }),
@@ -399,7 +192,11 @@ impl Workspace {
             location: location_bar,
             dock,
             panels,
-            profile: location,
+            profile: file,
+            save_revision: 0,
+            quitting: false,
+            save_dirty: false,
+            window: window.window_handle(),
             prefs: saved.window,
             system,
             hwnd: native_handle(window),
@@ -459,12 +256,12 @@ impl Workspace {
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |s, cx| {
-                if s.prefs.close_to_tray && s.system.is_some() {
+                if s.prefs.close_to_tray && s.tray_available() {
                     s.hide_to_tray(window, cx);
                     false
                 } else {
-                    s.save(cx);
-                    true
+                    s.quit(window, cx);
+                    false
                 }
             })
             .unwrap_or(true)
@@ -487,37 +284,53 @@ impl Workspace {
                 position: p.status.position,
             }),
             window: self.prefs,
+            collection: b.prefs,
         }
     }
-    fn save(&self, cx: &App) {
-        let Some(path) = &self.profile else { return };
-        if let Err(e) = profile::save(path, &self.snapshot(cx)) {
-            eprintln!("Workspace save failed: {e}");
-        }
-    }
-    /// Saves shortly after a change, so a crash or power loss keeps the queue
-    /// and Places, without writing on every keystroke.
+    /// Keep at most one debounced write in flight. A change during the write
+    /// asks for another snapshot after it completes.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        if self.save_pending || self.profile.is_none() {
+        if self.profile.is_none() || self.quitting {
+            return;
+        }
+        self.save_dirty = true;
+        if self.save_pending {
             return;
         }
         self.save_pending = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(1500))
-                .await;
-            let Ok(Some((path, snapshot))) = this.update(cx, |s, cx| {
-                s.save_pending = false;
-                s.profile.clone().map(|p| (p, s.snapshot(cx)))
-            }) else {
-                return;
-            };
-            cx.background_spawn(async move {
-                if let Err(e) = profile::save(&path, &snapshot) {
-                    eprintln!("Workspace save failed: {e}");
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1500))
+                    .await;
+                let Ok(Some((file, revision, snapshot))) = this.update(cx, |s, cx| {
+                    if s.quitting {
+                        return None;
+                    }
+                    s.save_dirty = false;
+                    s.save_revision += 1;
+                    s.profile
+                        .clone()
+                        .map(|file| (file, s.save_revision, s.snapshot(cx)))
+                }) else {
+                    return;
+                };
+                let result = cx
+                    .background_spawn(async move { file.commit(revision, &snapshot) })
+                    .await;
+                let again = this.update(cx, |s, cx| {
+                    if let Err(e) = result {
+                        let _ = s.window.update(cx, |_, w, cx| {
+                            w.push_notification(format!("Workspace save failed: {e}"), cx)
+                        });
+                    }
+                    s.save_pending = s.save_dirty && !s.quitting;
+                    s.save_pending
+                });
+                if !again.unwrap_or(false) {
+                    return;
                 }
-            })
-            .await;
+            }
         })
         .detach();
     }
@@ -533,6 +346,12 @@ impl Workspace {
             s.player.update(cx, |p, cx| p.command(c, cx))
         };
         match e {
+            SystemEvent::TrayUnavailable => {
+                if self.hidden_to_tray {
+                    self.show_window(window, cx);
+                }
+                cx.notify();
+            }
             SystemEvent::ShowWindow => self.show_window(window, cx),
             SystemEvent::PlayPause => self.play_pause(cx),
             SystemEvent::Previous => send(self, Command::Step(-1), cx),
@@ -541,7 +360,7 @@ impl Workspace {
                 self.show_window(window, cx);
                 self.show(Kind::Queue, window, cx);
             }
-            SystemEvent::Quit => self.quit(cx),
+            SystemEvent::Quit => self.quit(window, cx),
         }
     }
     fn show_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -550,8 +369,11 @@ impl Workspace {
         self.hidden_to_tray = false;
         cx.notify();
     }
+    fn tray_available(&self) -> bool {
+        self.system.as_ref().is_some_and(System::tray_available)
+    }
     fn hide_to_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.system.is_none() {
+        if !self.system.as_ref().is_some_and(System::confirm_tray) {
             window.minimize_window();
             return;
         }
@@ -560,10 +382,52 @@ impl Workspace {
         self.player.update(cx, |p, cx| p.set_visible(false, cx));
         self.schedule_save(cx);
     }
-    fn quit(&mut self, cx: &mut Context<Self>) {
-        self.save(cx);
-        self.system = None;
-        cx.quit();
+    fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quitting {
+            return;
+        }
+        let Some(file) = self.profile.clone() else {
+            cx.quit();
+            return;
+        };
+        self.quitting = true;
+        self.save_revision += 1;
+        let revision = self.save_revision;
+        let mut snapshot = self.snapshot(cx);
+        let commands = self.player.read(cx).sender();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    snapshot.queue = commands.snapshot()?;
+                    file.commit(revision, &snapshot)
+                })
+                .await;
+            if let Err(error) = result {
+                let Ok(answer) = this.update_in(cx, |s, w, cx| {
+                    if s.hidden_to_tray {
+                        s.show_window(w, cx);
+                    }
+                    w.prompt(
+                        PromptLevel::Warning,
+                        "The workspace could not be saved.",
+                        Some(&error.to_string()),
+                        &["Keep open", "Quit without saving"],
+                        cx,
+                    )
+                }) else {
+                    return;
+                };
+                if answer.await != Ok(1) {
+                    let _ = this.update(cx, |s, _| s.quitting = false);
+                    return;
+                }
+            }
+            let _ = this.update(cx, |s, cx| {
+                s.system = None;
+                cx.quit();
+            });
+        })
+        .detach();
     }
     fn reset(&mut self, w: &mut Window, cx: &mut App) {
         let tab = |k: Kind| {
@@ -616,7 +480,7 @@ impl Workspace {
     fn workspace_menu(&self, cx: &Context<Self>) -> impl IntoElement {
         let shell = cx.weak_entity();
         let prefs = self.prefs;
-        let tray = self.system.is_some();
+        let tray = self.tray_available();
         Button::new("workspace")
             .ghost()
             .small()
@@ -678,8 +542,8 @@ impl Workspace {
                         let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
                     },
                 ))
-                .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, _, cx| {
-                    let _ = s5.update(cx, |s, cx| s.quit(cx));
+                .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, w, cx| {
+                    let _ = s5.update(cx, |s, cx| s.quit(w, cx));
                 }))
             })
     }
@@ -785,7 +649,7 @@ impl Render for Workspace {
                                 .text_color(m.text_faint),
                         )
                         .cleanable(true)
-                        .aria_label("Find in folder"),
+                        .aria_label("Find tracks"),
                 ),
             )
             .child(div().occlude().child(self.workspace_menu(cx)));
@@ -833,8 +697,17 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|s, _: &ShowQueue, w, cx| s.show(Kind::Queue, w, cx)))
             .on_action(cx.listener(|s, _: &HideToTray, w, cx| s.hide_to_tray(w, cx)))
-            .on_action(cx.listener(|s, _: &Quit, _, cx| s.quit(cx)))
-            .on_action(cx.listener(|s, _: &PlaySelected, _, cx| s.play_selected(cx)))
+            .on_action(cx.listener(|s, _: &Quit, w, cx| s.quit(w, cx)))
+            .on_action(cx.listener(|s, _: &PlaySelected, w, cx| {
+                if s.browser.read(cx).listing_discs() {
+                    s.browser.update(cx, |b, cx| {
+                        let ix = b.discs.read(cx).selected_row().unwrap_or(0);
+                        b.show_disc(ix, w, cx);
+                    });
+                } else {
+                    s.play_selected(cx);
+                }
+            }))
             .on_action(cx.listener(|s, _: &OpenDirectory, w, cx| {
                 let b = s.browser.read(cx);
                 if let Some(path) = b

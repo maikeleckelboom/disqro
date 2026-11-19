@@ -9,6 +9,7 @@ use crate::{audio::Status, player::NowPlaying};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemEvent {
     ShowWindow,
+    TrayUnavailable,
     PlayPause,
     Previous,
     Next,
@@ -16,7 +17,6 @@ pub enum SystemEvent {
     Quit,
 }
 
-#[cfg(windows)]
 pub use imp::*;
 
 #[cfg(not(windows))]
@@ -26,9 +26,15 @@ mod imp {
     impl System {
         pub fn new(
             _: async_channel::Sender<SystemEvent>,
-            _: std::sync::mpsc::Sender<crate::audio::Command>,
+            _: crate::audio::Commands,
         ) -> Option<Self> {
             None
+        }
+        pub fn tray_available(&self) -> bool {
+            false
+        }
+        pub fn confirm_tray(&self) -> bool {
+            false
         }
         pub fn update(&mut self, _: Option<&NowPlaying>, _: &Status) {}
     }
@@ -40,7 +46,7 @@ mod imp {
 mod imp {
     use super::*;
     use crate::audio::Command;
-    use std::{cell::RefCell, sync::mpsc};
+    use std::cell::RefCell;
     use windows::{
         Foundation::{TimeSpan, TypedEventHandler},
         Media::{
@@ -86,6 +92,7 @@ mod imp {
         tip: String,
         playing: bool,
         has_track: bool,
+        registered: bool,
     }
     thread_local! {
         static TRAY: RefCell<Option<TrayState>> = const { RefCell::new(None) };
@@ -106,15 +113,35 @@ mod imp {
         }
         data
     }
-    unsafe fn add_icon(hwnd: HWND, icon: HICON, tip: &str) {
+    fn add_icon(hwnd: HWND, icon: HICON, tip: &str) -> bool {
+        if icon.is_invalid() {
+            return false;
+        }
+        // The hidden window and icon belong to System for this call.
         let mut data = notify_data(hwnd, icon, tip);
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_ADD, &data);
+            if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+                return false;
+            }
             data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-            let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
+            if !Shell_NotifyIconW(NIM_SETVERSION, &data).as_bool() {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+                return false;
+            }
+            true
         }
     }
 
+    fn set_registered(registered: bool) {
+        TRAY.with(|tray| {
+            if let Some(tray) = tray.borrow_mut().as_mut() {
+                tray.registered = registered;
+                if !registered {
+                    let _ = tray.events.try_send(SystemEvent::TrayUnavailable);
+                }
+            }
+        });
+    }
     fn send(event: SystemEvent) {
         TRAY.with(|t| {
             if let Some(t) = t.borrow().as_ref() {
@@ -202,7 +229,8 @@ mod imp {
         });
         if let Some((icon, tip)) = restart {
             // Explorer restarted; the notification area forgot the icon.
-            unsafe { add_icon(hwnd, icon, &tip) };
+            let registered = add_icon(hwnd, icon, &tip);
+            set_registered(registered);
             return LRESULT(0);
         }
         unsafe { DefWindowProcW(hwnd, msg, w, l) }
@@ -210,6 +238,8 @@ mod imp {
 
     struct Media {
         smtc: SystemMediaTransportControls,
+        buttons: Option<i64>,
+        positions: Option<i64>,
         shown: Option<NowPlaying>,
         status: Option<MediaPlaybackStatus>,
         timeline: (u64, u64),
@@ -220,12 +250,21 @@ mod imp {
         }
     }
     impl Media {
-        fn new(hwnd: HWND, tx: mpsc::Sender<Command>) -> windows::core::Result<Self> {
+        fn new(hwnd: HWND, tx: crate::audio::Commands) -> windows::core::Result<Self> {
             let interop = windows::core::factory::<
                 SystemMediaTransportControls,
                 ISystemMediaTransportControlsInterop,
             >()?;
             let smtc: SystemMediaTransportControls = unsafe { interop.GetForWindow(hwnd)? };
+            let mut media = Self {
+                smtc,
+                buttons: None,
+                positions: None,
+                shown: None,
+                status: None,
+                timeline: (u64::MAX, u64::MAX),
+            };
+            let smtc = &media.smtc;
             smtc.SetIsEnabled(true)?;
             smtc.SetIsPlayEnabled(true)?;
             smtc.SetIsPauseEnabled(true)?;
@@ -233,7 +272,7 @@ mod imp {
             smtc.SetIsPreviousEnabled(true)?;
             smtc.SetIsStopEnabled(true)?;
             let buttons = tx.clone();
-            smtc.ButtonPressed(&TypedEventHandler::<
+            media.buttons = Some(smtc.ButtonPressed(&TypedEventHandler::<
                 SystemMediaTransportControls,
                 SystemMediaTransportControlsButtonPressedEventArgs,
             >::new(move |_, args| {
@@ -245,24 +284,23 @@ mod imp {
                     SystemMediaTransportControlsButton::Stop => Command::Stop,
                     _ => return Ok(()),
                 };
-                let _ = buttons.send(command);
-                Ok(())
-            }))?;
-            smtc.PlaybackPositionChangeRequested(&TypedEventHandler::<
+                buttons.send(command).map_err(|e| {
+                    windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
+                })
+            }))?);
+            media.positions = Some(smtc.PlaybackPositionChangeRequested(&TypedEventHandler::<
                 SystemMediaTransportControls,
                 PlaybackPositionChangeRequestedEventArgs,
-            >::new(move |_, args| {
-                let at = args.ok()?.RequestedPlaybackPosition()?.Duration as f64 / 10_000_000.;
-                let _ = tx.send(Command::SeekTo(at));
-                Ok(())
-            }))?;
+            >::new(
+                move |_, args| {
+                    let at = args.ok()?.RequestedPlaybackPosition()?.Duration as f64 / 10_000_000.;
+                    tx.send(Command::SeekTo(at)).map_err(|e| {
+                        windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
+                    })
+                },
+            ))?);
             smtc.SetPlaybackStatus(MediaPlaybackStatus::Closed)?;
-            Ok(Self {
-                smtc,
-                shown: None,
-                status: None,
-                timeline: (u64::MAX, u64::MAX),
-            })
+            Ok(media)
         }
         fn update(&mut self, now: Option<&NowPlaying>, s: &Status) -> windows::core::Result<()> {
             let status = match (&s.track, s.playing) {
@@ -320,6 +358,18 @@ mod imp {
         }
     }
 
+    impl Drop for Media {
+        fn drop(&mut self) {
+            if let Some(token) = self.buttons.take() {
+                let _ = self.smtc.RemoveButtonPressed(token);
+            }
+            if let Some(token) = self.positions.take() {
+                let _ = self.smtc.RemovePlaybackPositionChangeRequested(token);
+            }
+            let _ = self.smtc.SetIsEnabled(false);
+        }
+    }
+
     pub struct System {
         hwnd: HWND,
         icon: HICON,
@@ -330,7 +380,7 @@ mod imp {
     impl System {
         pub fn new(
             events: async_channel::Sender<SystemEvent>,
-            transport: mpsc::Sender<Command>,
+            transport: crate::audio::Commands,
         ) -> Option<Self> {
             unsafe {
                 let instance = GetModuleHandleW(None).ok()?;
@@ -341,7 +391,13 @@ mod imp {
                     lpszClassName: w!("DisqroTray"),
                     ..Default::default()
                 };
-                RegisterClassExW(&class);
+                // The class can already exist if the workspace was reopened in this process.
+                if RegisterClassExW(&class) == 0
+                    && windows::Win32::Foundation::GetLastError()
+                        != windows::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS
+                {
+                    return None;
+                }
                 let hwnd = CreateWindowExW(
                     WS_EX_TOOLWINDOW,
                     w!("DisqroTray"),
@@ -361,17 +417,19 @@ mod imp {
                 let icon = LoadIconMetric(Some(instance.into()), PCWSTR(1 as _), LIM_SMALL)
                     .unwrap_or_default();
                 let tip = "Disqro".to_owned();
+                let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
+                let registered = taskbar_created != 0 && add_icon(hwnd, icon, &tip);
                 TRAY.with(|t| {
                     *t.borrow_mut() = Some(TrayState {
                         events,
-                        taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
+                        taskbar_created,
+                        registered,
                         icon,
                         tip: tip.clone(),
                         playing: false,
                         has_track: false,
                     })
                 });
-                add_icon(hwnd, icon, &tip);
                 let media = match Media::new(hwnd, transport) {
                     Ok(m) => Some(m),
                     Err(e) => {
@@ -386,6 +444,22 @@ mod imp {
                     tip,
                 })
             }
+        }
+        pub fn tray_available(&self) -> bool {
+            TRAY.with(|t| t.borrow().as_ref().is_some_and(|t| t.registered))
+        }
+        pub fn confirm_tray(&self) -> bool {
+            if !self.tray_available() {
+                return false;
+            }
+            let data = notify_data(self.hwnd, self.icon, &self.tip);
+            // hwnd and icon remain owned until Drop. Ask Explorer immediately
+            // before hiding, including the gap before a TaskbarCreated broadcast.
+            let registered = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() };
+            if !registered {
+                set_registered(false);
+            }
+            registered
         }
         pub fn update(&mut self, now: Option<&NowPlaying>, status: &Status) {
             TRAY.with(|t| {
@@ -406,10 +480,7 @@ mod imp {
                         t.tip = tip.clone();
                     }
                 });
-                let data = notify_data(self.hwnd, self.icon, &tip);
-                unsafe {
-                    let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-                }
+                self.confirm_tray();
             }
             if let Some(media) = &mut self.media
                 && let Err(e) = media.update(now, status)
@@ -420,6 +491,8 @@ mod imp {
     }
     impl Drop for System {
         fn drop(&mut self) {
+            self.media.take();
+            // Remove the shell registration before freeing either native handle.
             unsafe {
                 let data = notify_data(self.hwnd, self.icon, "");
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -453,6 +526,29 @@ mod imp {
                 },
             );
             let _ = SetForegroundWindow(h);
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn missing_icon_cannot_enable_hiding_and_lost_registration_wakes_workspace() {
+            assert!(!add_icon(HWND::default(), HICON::default(), "Disqro"));
+            let (events, rx) = async_channel::bounded(1);
+            TRAY.with(|slot| {
+                *slot.borrow_mut() = Some(TrayState {
+                    events,
+                    taskbar_created: 1,
+                    icon: HICON::default(),
+                    tip: String::new(),
+                    playing: false,
+                    has_track: false,
+                    registered: true,
+                })
+            });
+            set_registered(false);
+            assert_eq!(rx.try_recv().unwrap(), SystemEvent::TrayUnavailable);
+            TRAY.with(|slot| assert!(!slot.borrow_mut().take().unwrap().registered));
         }
     }
 }

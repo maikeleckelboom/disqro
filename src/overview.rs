@@ -1,80 +1,21 @@
 //! A compact overview for seeking in a recording or a CUE track. Each bin
 //! retains both polarities across both channels, so antiphase audio stays
 //! visible, and the RMS level, which shows structure inside loud masters.
+use crate::cache::{Cache, Stamp};
 use crate::{audio::Recording, library::Track};
 use gpui_kit::{prelude::*, *};
 use kira::{Frame, sound::streaming::Decoder as _};
-use serde::{Deserialize, Serialize};
 use std::{
-    fs,
-    hash::{DefaultHasher, Hash, Hasher},
-    io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::UNIX_EPOCH,
 };
 
 const BINS: usize = 1536;
-#[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
-struct SourceKey {
-    path: PathBuf,
-    length: u64,
-    modified_ns: u128,
-    start: u64,
-    end: Option<u64>,
-}
-impl SourceKey {
-    fn new(t: &Track) -> Option<Self> {
-        let meta = fs::metadata(&t.source).ok()?;
-        Some(Self {
-            path: t.source.clone(),
-            length: meta.len(),
-            modified_ns: meta
-                .modified()
-                .ok()?
-                .duration_since(UNIX_EPOCH)
-                .ok()?
-                .as_nanos(),
-            start: t.disc.as_ref().map_or(0, |d| d.start),
-            end: t.disc.as_ref().and_then(|d| d.end),
-        })
-    }
-}
 /// Minimum, maximum and RMS level of one slice of the recording.
 pub type Bin = [f32; 3];
-#[derive(Serialize, Deserialize)]
-struct Cached {
-    key: SourceKey,
-    bins: Vec<Bin>,
-}
-fn slot(dir: &Path, key: &SourceKey) -> PathBuf {
-    let mut hash = DefaultHasher::new();
-    key.hash(&mut hash);
-    dir.join(format!("overview-v2-{:02}.json", hash.finish() % 32))
-}
-fn read(path: &Path, key: &SourceKey) -> Option<Vec<Bin>> {
-    let file = fs::File::open(path).ok()?;
-    let data: Cached = serde_json::from_reader(file.take(192 * 1024)).ok()?;
-    (data.key == *key && !data.bins.is_empty() && data.bins.len() <= BINS).then_some(data.bins)
-}
-fn save(dir: &Path, key: SourceKey, bins: &[Bin]) -> anyhow::Result<()> {
-    fs::create_dir_all(dir)?;
-    let path = slot(dir, &key);
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    serde_json::to_writer(
-        &mut file,
-        &Cached {
-            key,
-            bins: bins.to_vec(),
-        },
-    )?;
-    file.flush()?;
-    file.persist(path)?;
-    Ok(())
-}
 fn accumulate(
     bins: &mut [Bin],
     energy: &mut [(f64, u32)],
@@ -107,13 +48,30 @@ pub fn load(
     generation: &AtomicU64,
     revision: u64,
 ) -> Option<Arc<[Bin]>> {
-    let key = SourceKey::new(track)?;
-    if let Some(dir) = &cache
-        && let Some(bins) = read(&slot(dir, &key), &key)
+    let stamp = Stamp::read(&track.source)?;
+    let start = track.disc.as_ref().map_or(0, |d| d.start);
+    let end = track.disc.as_ref().and_then(|d| d.end);
+    let cache = cache.and_then(|dir| Cache::open(&dir).ok());
+    if let Some(data) = cache
+        .as_ref()
+        .and_then(|c| c.peaks(&track.source, start, end, &stamp))
+        && !data.is_empty()
+        && data.len() <= BINS * 12
+        && data.len() % 12 == 0
     {
-        return Some(bins.into());
+        let bins = data
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|b| {
+                std::array::from_fn(|i| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()))
+            })
+            .collect::<Vec<Bin>>();
+        if bins.iter().flatten().all(|v| v.is_finite()) {
+            return Some(bins.into());
+        }
     }
-    let mut source = Recording::open(track, key.end).ok()?;
+    let mut source = Recording::open(track, end).ok()?;
     source.seek(0).ok()?;
     let count = source.num_frames();
     let mut bins = vec![[0., 0., 0.]; BINS.min(count)];
@@ -131,11 +89,16 @@ pub fn load(
         offset += frames.len();
     }
     finish(&mut bins, &energy);
-    if SourceKey::new(track).as_ref() != Some(&key) {
+    if Stamp::read(&track.source).as_ref() != Some(&stamp) {
         return None;
     }
-    if let Some(dir) = cache {
-        let _ = save(&dir, key, &bins);
+    if let Some(cache) = cache {
+        let bytes = bins
+            .iter()
+            .flatten()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<_>>();
+        let _ = cache.store_peaks(&track.source, start, end, &stamp, &bytes);
     }
     Some(bins.into())
 }
