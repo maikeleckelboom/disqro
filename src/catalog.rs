@@ -161,7 +161,7 @@ impl Catalog {
             })
             .collect();
     }
-    fn set_marks(&mut self, marks: Vec<(TrackId, Locator, Mark)>) {
+    fn set_marks(&mut self, marks: Vec<store::TrackMark>) {
         self.marks.clear();
         self.located.clear();
         self.apply_marks(marks);
@@ -170,10 +170,14 @@ impl Catalog {
         for (id, locator, mark) in marks {
             if mark == Mark::default() {
                 self.marks.remove(&id);
-                self.located.remove(&locator);
+                if let Some(locator) = locator {
+                    self.located.remove(&locator);
+                }
             } else {
                 self.marks.insert(id, mark);
-                self.located.insert(locator, id);
+                if let Some(locator) = locator {
+                    self.located.insert(locator, id);
+                }
             }
         }
     }
@@ -211,16 +215,22 @@ impl Catalog {
             return;
         };
         let pending = store.call(move |s| {
+            let browsing = matches!(&targets, Targets::Tracks(tracks) if !tracks.is_empty());
             let ids = match targets {
-                Targets::Tracks(tracks) => s.resolve(&tracks, None)?,
+                Targets::Tracks(tracks) => s.resolve(&tracks)?,
                 Targets::Keys(scope, keys) => s.track_ids(scope, &keys)?,
             };
-            f(s, ids)
+            let value = f(s, ids)?;
+            let marks = browsing.then(|| s.marks()).transpose()?;
+            Ok((value, marks))
         });
         cx.spawn(async move |this, cx| {
             let result = pending.await;
             let _ = this.update(cx, |c, cx| match result {
-                Ok(value) => {
+                Ok((value, marks)) => {
+                    if let Some(marks) = marks {
+                        c.set_marks(marks);
+                    }
                     done(c, value, cx);
                     cx.emit(CatalogEvent::Content);
                     cx.notify();
@@ -403,24 +413,14 @@ impl Catalog {
                 .await?;
             background
                 .spawn(async move {
-                    let mut files = HashMap::new();
-                    let mut exists = |path: &PathBuf| {
-                        *files.entry(path.clone()).or_insert_with(|| path.is_file())
-                    };
+                    let mut files = store::DetachedFiles::default();
                     for row in &mut rows {
                         if !ticket.is_current(generation) {
                             return Err(store::Cancelled.into());
                         }
                         row.available &= !row.root.is_some_and(|id| offline.contains(&id))
                             && !row.source_root.is_some_and(|id| offline.contains(&id));
-                        if row.source_root.is_none() {
-                            row.available &= exists(&row.track.source);
-                        }
-                        if row.root.is_none()
-                            && let Some(disc) = &row.track.disc
-                        {
-                            row.available &= exists(&disc.sheet);
-                        }
+                        row.available = row.available && files.available(row);
                     }
                     Ok(rows)
                 })

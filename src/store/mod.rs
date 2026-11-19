@@ -5,7 +5,7 @@
 //! - **Identities.** Physical files (audio sources and CUE sheets) and the
 //!   logical tracks anchored on them. A whole file is one track; a CUE sheet
 //!   anchors one track per authored chapter and per recorded lead-in. A track
-//!   is identified by `(anchor, part)`, never by a title, row position or
+//!   is identified by its anchor, part and source-frame slice, independently of title or
 //!   sort order, and keeps its identity when its file is missing.
 //! - **Index metadata.** Titles, albums, durations, search keys and
 //!   availability, refreshed by every scan.
@@ -16,7 +16,7 @@
 //! Rebuildable analysis (parsed sheets, tags, waveform peaks) stays in
 //! [`crate::cache`]. Deleting that cache never touches this database.
 use crate::library::Track;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::{
     path::{Component, Path, PathBuf},
@@ -24,6 +24,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod identity;
 mod index;
 mod playlists;
 pub mod query;
@@ -76,6 +77,8 @@ pub struct Locator {
     anchor: String,
     source: String,
     chapter: u8,
+    start: Option<i64>,
+    end: Option<i64>,
 }
 impl Locator {
     pub fn of(t: &Track) -> Self {
@@ -84,6 +87,8 @@ impl Locator {
                 anchor: path_key(&d.sheet),
                 source: path_key(&t.source),
                 chapter: d.number,
+                start: Some(d.start as i64),
+                end: d.end.map(|tick| tick as i64),
             },
             None => {
                 let key = path_key(&t.source);
@@ -91,6 +96,8 @@ impl Locator {
                     anchor: key.clone(),
                     source: key,
                     chapter: 0,
+                    start: None,
+                    end: None,
                 }
             }
         }
@@ -115,6 +122,50 @@ pub struct Row {
     pub available: bool,
     pub root: Option<RootId>,
     pub source_root: Option<RootId>,
+    revision: identity::Revision,
+}
+
+/// Per-page observations for sources outside the registered scanner.
+#[derive(Default)]
+pub struct DetachedFiles {
+    audio: std::collections::HashMap<PathBuf, Option<(crate::cache::Stamp, identity::Evidence)>>,
+    sheets: std::collections::HashMap<PathBuf, std::collections::HashSet<Locator>>,
+}
+impl DetachedFiles {
+    pub fn available(&mut self, row: &Row) -> bool {
+        if row.source_root.is_none() {
+            let observation = self
+                .audio
+                .entry(row.track.source.clone())
+                .or_insert_with(|| {
+                    let stamp = crate::cache::Stamp::read(&row.track.source)?;
+                    let evidence = identity::Evidence::read(&row.track.source, false, &stamp)?;
+                    Some((stamp, evidence))
+                });
+            if !observation
+                .as_ref()
+                .is_some_and(|(stamp, e)| row.revision.matches(stamp.bytes, stamp.modified, e))
+            {
+                return false;
+            }
+        }
+        if row.root.is_none()
+            && let Some(d) = &row.track.disc
+        {
+            return self
+                .sheets
+                .entry(d.sheet.clone())
+                .or_insert_with(|| {
+                    crate::cue::read(&d.sheet)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(Locator::of)
+                        .collect()
+                })
+                .contains(&Locator::of(&row.track));
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -326,24 +377,20 @@ impl Store {
     /// The identities of tracks met while browsing. A track outside every
     /// registered collection gets an identity of its own, so liking it or
     /// adding it to a playlist never requires importing its folder.
-    pub fn resolve(
-        &mut self,
-        tracks: &[Arc<Track>],
-        cache: Option<&crate::cache::Cache>,
-    ) -> Result<Vec<TrackId>> {
+    pub fn resolve(&mut self, tracks: &[Arc<Track>]) -> Result<Vec<TrackId>> {
+        let mut checked = std::collections::HashSet::new();
         let mut ids = Vec::with_capacity(tracks.len());
         for t in tracks {
             let locator = Locator::of(t);
-            let id = match self.find(&locator)? {
-                Some(id) => id,
-                None => {
-                    index::adopt(&mut self.db, t, cache)?;
-                    self.find(&locator)?.ok_or_else(|| {
-                        anyhow::anyhow!("{} could not be added to the library", t.title)
-                    })?
-                }
-            };
-            ids.push(id);
+            if checked.insert(locator.anchor.clone()) {
+                index::adopt(&mut self.db, t)?;
+            }
+            ids.push(self.find(&locator)?.with_context(|| {
+                format!(
+                    "{} changed or is unavailable. Refresh the folder and try again.",
+                    t.title
+                )
+            })?);
         }
         Ok(ids)
     }
@@ -353,17 +400,19 @@ impl Store {
             .prepare_cached(
                 "SELECT t.id FROM tracks t JOIN files a ON a.id = t.anchor JOIN files s ON s.id = t.source
                  WHERE a.path_key = ?1 AND s.path_key = ?2
-                   AND (CASE WHEN ?3 > 0 THEN t.part = ?3 ELSE t.part <= 0 END)
+                   AND t.present AND a.present AND s.present AND t.first_tick IS ?4 AND t.last_tick IS ?5
+                   AND max(t.part, 0) = ?3
                  ORDER BY t.part DESC LIMIT 1",
             )?
-            .query_row(params![l.anchor, l.source, l.chapter], |r| r.get(0))
+            .query_row(params![l.anchor, l.source, l.chapter, l.start, l.end], |r| r.get(0))
             .optional()?)
     }
 }
 
-pub type TrackMark = (TrackId, Locator, Mark);
+pub type TrackMark = (TrackId, Option<Locator>, Mark);
 const MARK_SQL: &str =
-    "SELECT t.id, a.path_key, s.path_key, t.part, l.track_id IS NOT NULL, coalesce(r.stars, 0)
+    "SELECT t.id, a.path, s.path, t.part, l.track_id IS NOT NULL, coalesce(r.stars, 0),
+        t.present AND a.present AND s.present, t.first_tick, t.last_tick
     FROM tracks t JOIN files a ON a.id = t.anchor JOIN files s ON s.id = t.source
     LEFT JOIN likes l ON l.track_id = t.id LEFT JOIN ratings r ON r.track_id = t.id";
 
@@ -371,10 +420,16 @@ fn read_mark(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackMark> {
     let part: i64 = r.get(3)?;
     Ok((
         r.get(0)?,
-        Locator {
-            anchor: r.get(1)?,
-            source: r.get(2)?,
-            chapter: part.max(0) as u8,
+        if r.get(6)? {
+            Some(Locator {
+                anchor: path_key(Path::new(&r.get::<_, String>(1)?)),
+                source: path_key(Path::new(&r.get::<_, String>(2)?)),
+                chapter: part.max(0) as u8,
+                start: r.get(7)?,
+                end: r.get(8)?,
+            })
+        } else {
+            None
         },
         Mark {
             liked: r.get(4)?,

@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Migrations in order. The database's `user_version` counts those applied.
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, include_str!("recording-identity.sql")];
 
 const V1: &str = "
 -- Registered music collections. Removing one never touches files on disk.
@@ -163,22 +163,34 @@ pub fn migrate(db: &mut Connection, path: Option<&Path>, migrations: &[&str]) ->
             Err(e) => return Err(e.into()),
         }
     }
-    for (i, sql) in migrations.iter().enumerate().skip(current) {
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let version = version(&tx)?;
-        ensure!(
-            version <= migrations.len(),
-            "This library requires a newer Disqro"
-        );
-        if version > i {
-            continue;
+    // SQLite requires foreign key enforcement to be disabled on this
+    // connection while replacing parent tables. Check every relationship
+    // before committing and restore enforcement even after a rollback.
+    db.pragma_update(None, "foreign_keys", false)?;
+    let result = (|| -> Result<()> {
+        for (i, sql) in migrations.iter().enumerate().skip(current) {
+            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let version = version(&tx)?;
+            ensure!(
+                version <= migrations.len(),
+                "This library requires a newer Disqro"
+            );
+            if version > i {
+                continue;
+            }
+            tx.execute_batch(sql)
+                .with_context(|| format!("Library migration {} failed", i + 1))?;
+            ensure!(
+                !tx.prepare("PRAGMA foreign_key_check")?.exists([])?,
+                "Library migration would break a personal or library reference"
+            );
+            tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+            tx.commit()?;
         }
-        tx.execute_batch(sql)
-            .with_context(|| format!("Library migration {} failed", i + 1))?;
-        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
-        tx.commit()?;
-    }
-    Ok(())
+        Ok(())
+    })();
+    db.pragma_update(None, "foreign_keys", true)?;
+    result
 }
 
 #[cfg(test)]
@@ -196,7 +208,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("library.sqlite3");
         let mut db = open(&path);
-        migrate(&mut db, Some(&path), MIGRATIONS).unwrap();
+        migrate(&mut db, Some(&path), &[V1]).unwrap();
         db.execute_batch(
             "INSERT INTO playlists VALUES(1, 'Keep', 0, 0);
              INSERT INTO files(id, path, path_key, name, kind, size, modified) VALUES(1, 'a', 'a', 'a', 0, 1, 1);
@@ -230,7 +242,51 @@ mod tests {
         // A newer library is refused instead of being rewritten.
         drop(db);
         let mut db = open(&path);
-        assert!(migrate(&mut db, Some(&path), MIGRATIONS).is_err());
+        assert!(migrate(&mut db, Some(&path), &[V1]).is_err());
+    }
+
+    #[test]
+    fn recording_identity_upgrade_preserves_ids_and_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.sqlite3");
+        let mut db = open(&path);
+        migrate(&mut db, Some(&path), &[V1]).unwrap();
+        db.execute_batch(
+            "INSERT INTO files(id,path,path_key,name,kind,size,modified) VALUES(3,'a','a','a',0,1,1);
+             INSERT INTO tracks(id,anchor,part,source,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+                 VALUES(8,3,0,3,'t','','','FLAC','t','','','t',0);
+             INSERT INTO likes VALUES(8,17);
+             INSERT INTO ratings VALUES(8,4,17);
+             INSERT INTO playlists VALUES(2,'Saved',0,0);
+             INSERT INTO playlist_entries VALUES(9,2,8,0,0),(11,2,8,1,0);
+             UPDATE sqlite_sequence SET seq=20 WHERE name='tracks';"
+        ).unwrap();
+        migrate(&mut db, Some(&path), MIGRATIONS).unwrap();
+        assert_eq!(version(&db).unwrap(), 2);
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM playlist_entries e JOIN ratings r USING(track_id)
+             JOIN likes l USING(track_id) JOIN tracks t ON t.id=e.track_id
+             WHERE e.id IN (9,11) AND t.id=8 AND t.source=3 AND e.playlist_id=2 AND r.stars=4",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            db.query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name='tracks'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            20
+        );
+        assert!(db.execute("DELETE FROM tracks WHERE id=8", []).is_err());
+        assert_eq!(
+            version(&open(&dir.path().join("library-schema1-backup.sqlite3"))).unwrap(),
+            1
+        );
     }
 
     #[test]

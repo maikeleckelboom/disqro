@@ -126,7 +126,7 @@ fn identities_survive_rescans_sheet_edits_and_verified_moves() {
             rating: 4
         }
     );
-    assert_eq!(marks[0].1, Locator::of(&two_row.track));
+    assert_eq!(marks[0].1, Some(Locator::of(&two_row.track)));
 
     // Untagged titles follow the filename even when the playlist identity survives.
     fs::rename(root.join("Singles/x.mp3"), root.join("Singles/Renamed.mp3")).unwrap();
@@ -251,10 +251,10 @@ fn browsed_tracks_get_identities_that_a_later_collection_adopts() {
     let browsed: Vec<Arc<Track>> = folder.tracks.into_iter().map(Arc::new).collect();
     assert_eq!(browsed.len(), 4);
     let mut s = Store::memory();
-    let ids = s.resolve(&browsed[2..3], None).unwrap();
+    let ids = s.resolve(&browsed[2..3]).unwrap();
     s.set_liked(&ids, true).unwrap();
-    assert_eq!(s.resolve(&browsed[2..3], None).unwrap(), ids);
-    assert_eq!(s.marks().unwrap()[0].1, Locator::of(&browsed[2]));
+    assert_eq!(s.resolve(&browsed[2..3]).unwrap(), ids);
+    assert_eq!(s.marks().unwrap()[0].1, Some(Locator::of(&browsed[2])));
 
     let r = s.add_root(&root).unwrap();
     let summary = index(&mut s, r);
@@ -394,7 +394,7 @@ fn stale_playlist_keys_cannot_target_another_occurrence() {
     let mut s = Store::memory();
     let file = dir.path().join("single.wav");
     fs::write(&file, b"sample").unwrap();
-    let ids = s.resolve(&[Arc::new(Track::file(file))], None).unwrap();
+    let ids = s.resolve(&[Arc::new(Track::file(file))]).unwrap();
     let p = s.create_playlist("First", &ids).unwrap();
     let old = s.entries(p).unwrap()[0].0;
     let q = s.create_playlist("Second", &ids).unwrap();
@@ -434,4 +434,130 @@ fn replacing_pending_queries_keeps_the_new_read_after_an_intervening_edit() {
     });
     release.send(()).unwrap();
     assert_eq!(observed.recv_timeout(timeout).unwrap()[0].name, "Saved");
+}
+
+fn tagged_wave(title: &[u8; 8], value: i16) -> Vec<u8> {
+    let mut wave = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0".to_vec();
+    wave.extend(44100u32.to_le_bytes());
+    wave.extend(88200u32.to_le_bytes());
+    wave.extend(b"\x02\0\x10\0LIST\x18\0\0\0INFOINAM\x0c\0\0\0");
+    wave.extend(title);
+    wave.extend([0; 4]);
+    wave.extend(b"data");
+    wave.extend(96000u32.to_le_bytes());
+    for _ in 0..48000 {
+        wave.extend(value.to_le_bytes());
+    }
+    let size = wave.len() as u32 - 8;
+    wave[4..8].copy_from_slice(&size.to_le_bytes());
+    wave
+}
+
+#[test]
+fn tag_corrections_moves_and_same_path_replacement_keep_personal_ownership() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    let path = dir.path().join("first.wav");
+    fs::write(&path, tagged_wave(b"Misspelt", 500)).unwrap();
+    index(&mut s, root);
+    let old = all(&s, Scope::Library(Some(root)))[0].id;
+    s.set_liked(&[old], true).unwrap();
+    s.set_rating(&[old], 4).unwrap();
+    let mix = s.create_playlist("Mix", &[old, old]).unwrap();
+    let positions = s.entries(mix).unwrap();
+
+    fs::write(&path, tagged_wave(b"Repaired", 500)).unwrap();
+    index(&mut s, root);
+    assert_eq!(all(&s, Scope::Library(Some(root)))[0].id, old);
+    let moved = dir.path().join("renamed.wav");
+    fs::rename(path, &moved).unwrap();
+    assert_eq!(index(&mut s, root).relocated, 1);
+    assert_eq!(all(&s, Scope::Library(Some(root)))[0].id, old);
+
+    // Keep the same object, size, tag, prefix and modification timestamp.
+    // A change in the sampled tail still separates the two recordings.
+    let time = fs::metadata(&moved).unwrap().modified().unwrap();
+    let mut other = tagged_wave(b"Repaired", 500);
+    other[90000..].fill(0x55);
+    fs::write(&moved, other).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&moved)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+    index(&mut s, root);
+    let current = all(&s, Scope::Library(Some(root)));
+    assert_eq!(current.len(), 1);
+    assert_ne!(current[0].id, old);
+    assert_eq!(s.entries(mix).unwrap(), positions);
+    assert!(all(&s, Scope::Playlist(mix)).iter().all(|r| !r.available));
+    assert_eq!(
+        s.marks().unwrap(),
+        [(
+            old,
+            None,
+            Mark {
+                liked: true,
+                rating: 4
+            }
+        )]
+    );
+    assert_eq!(
+        s.resolve(&[Arc::new(Track::file(moved))]).unwrap(),
+        [current[0].id]
+    );
+}
+
+#[test]
+fn reauthored_program_keeps_only_matching_source_and_frame_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    collection(dir.path());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    index(&mut s, root);
+    let rows = all(&s, Scope::Library(Some(root)));
+    let two = chapter(&rows, "a.cue", 2);
+    let three = chapter(&rows, "a.cue", 3);
+    s.set_liked(&[two.id, three.id], true).unwrap();
+    let mix = s.create_playlist("Archive", &[two.id, three.id]).unwrap();
+    let sheet = dir.path().join("Album A/a.cue");
+    fs::write(&sheet, ALBUM_A.replace("01:00:00", "01:20:00")).unwrap();
+    index(&mut s, root);
+    let shifted = all(&s, Scope::Library(Some(root)));
+    assert_ne!(chapter(&shifted, "a.cue", 2).id, two.id);
+    assert_eq!(chapter(&shifted, "a.cue", 3).id, three.id);
+    assert!(!all(&s, Scope::Playlist(mix))[0].available);
+    assert!(s.resolve(std::slice::from_ref(&two.track)).is_err());
+
+    fs::write(sheet.with_file_name("other.flac"), b"different music").unwrap();
+    fs::write(&sheet, ALBUM_A.replace("a.flac", "other.flac")).unwrap();
+    index(&mut s, root);
+    let switched = all(&s, Scope::Library(Some(root)));
+    assert_ne!(chapter(&switched, "a.cue", 3).id, three.id);
+    assert!(all(&s, Scope::Playlist(mix)).iter().all(|r| !r.available));
+
+    // Putting the exact original program back rejoins its original entries.
+    fs::write(sheet, ALBUM_A).unwrap();
+    index(&mut s, root);
+    assert!(all(&s, Scope::Playlist(mix)).iter().all(|r| r.available));
+    assert_eq!(all(&s, Scope::Playlist(mix))[0].id, two.id);
+}
+
+#[test]
+fn detached_tracks_are_checked_before_playback_and_personal_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("single.wav");
+    fs::write(&path, b"first").unwrap();
+    let mut s = Store::memory();
+    let track = [Arc::new(Track::file(path.clone()))];
+    let old = s.resolve(&track).unwrap();
+    let mix = s.create_playlist("Keep", &old).unwrap();
+    let row = all(&s, Scope::Playlist(mix)).remove(0);
+    assert!(DetachedFiles::default().available(&row));
+    fs::write(path, b"other").unwrap();
+    assert!(!DetachedFiles::default().available(&row));
+    assert_ne!(s.resolve(&track).unwrap(), old);
+    assert!(!all(&s, Scope::Playlist(mix))[0].available);
 }

@@ -2,13 +2,13 @@
 //!
 //! 1. **Walk.** The walker that browses folders finds every playable track,
 //!    with the same CUE program deduplication. Nothing is written yet.
-//! 2. **Reconcile.** Known paths keep their identities. Files the walk did
+//! 2. **Reconcile.** Match recordings and authored slices. Files the walk did
 //!    not find become missing, unless their folder or sheet could not be
 //!    read. A new path takes over a missing file's identity only with
 //!    verified evidence and a one-to-one match. Anything ambiguous becomes a
 //!    new identity, and the missing one stays missing together with its
 //!    likes, ratings and playlist entries.
-//! 3. **Enrich.** Tags, durations and identity evidence are read for new or
+//! 3. **Enrich.** Tags and durations are read for new or
 //!    changed files in small batches, after the collection is browsable.
 //!
 //! Nothing here writes to music files or sheets.
@@ -21,11 +21,11 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use super::identity::{Evidence, Revision};
 
 const AUDIO: i64 = 0;
 const SHEET: i64 = 1;
@@ -56,14 +56,6 @@ pub enum Progress {
     },
 }
 
-/// Evidence that a file at a new path is a file the library already knows.
-#[derive(Clone, Debug, PartialEq)]
-struct Evidence {
-    volume: Option<i64>,
-    index: Option<i64>,
-    digest: i64,
-}
-
 struct FileInfo {
     path: PathBuf,
     key: String,
@@ -71,6 +63,7 @@ struct FileInfo {
     kind: i64,
     size: i64,
     modified: i64,
+    evidence: Evidence,
     /// The collection whose folder contains the file.
     owner: Option<RootId>,
 }
@@ -81,6 +74,7 @@ impl FileInfo {
         let key = path_key(path);
         let owner = root.and_then(|(prefix, id)| inside(prefix, &key).then_some(id));
         Some(Self {
+            evidence: Evidence::read(path, kind == SHEET, &stamp)?,
             name: library::folder_name(path),
             path: path.to_owned(),
             key,
@@ -140,56 +134,6 @@ fn parts(group: &Group) -> Vec<i64> {
         .collect()
 }
 
-fn digest(bytes: &[u8], size: u64) -> i64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in size.to_le_bytes().iter().chain(bytes) {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash as i64
-}
-
-/// Reads the file's identity on its volume and a digest of its first 64 KiB
-/// (all of a sheet). A file that changed since `expected` was taken gives none.
-fn evidence(path: &Path, kind: i64, expected: (i64, i64)) -> Option<Evidence> {
-    let file = fs::File::open(path).ok()?;
-    let (volume, index) = file_identity(&file);
-    let limit = if kind == SHEET { 1 << 20 } else { 64 << 10 };
-    let mut head = Vec::with_capacity(limit as usize);
-    file.take(limit).read_to_end(&mut head).ok()?;
-    let stamp = Stamp::read(path)?;
-    ((stamp.bytes, stamp.modified) == expected).then(|| Evidence {
-        volume,
-        index,
-        digest: digest(&head, expected.0 as u64),
-    })
-}
-
-#[cfg(windows)]
-fn file_identity(file: &fs::File) -> (Option<i64>, Option<i64>) {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle},
-    };
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: the handle belongs to `file`, which outlives the call.
-    match unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) } {
-        Ok(()) => (
-            Some(i64::from(info.dwVolumeSerialNumber)),
-            Some(((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)) as i64),
-        ),
-        Err(_) => (None, None),
-    }
-}
-#[cfg(unix)]
-fn file_identity(file: &fs::File) -> (Option<i64>, Option<i64>) {
-    use std::os::unix::fs::MetadataExt;
-    file.metadata().map_or((None, None), |m| {
-        (Some(m.dev() as i64), Some(m.ino() as i64))
-    })
-}
-
 /// A file the library knows that this scan did not find.
 struct Missing {
     id: i64,
@@ -201,6 +145,7 @@ struct Missing {
     volume: Option<i64>,
     index: Option<i64>,
     digest: Option<i64>,
+    sample: Option<i64>,
 }
 impl Missing {
     // A content sample identifies possible copies, never a relocation on its own.
@@ -215,6 +160,7 @@ impl Missing {
         e.volume.is_some()
             && e.index.is_some_and(|id| id != 0)
             && (self.volume, self.index) == (e.volume, e.index)
+            && self.sample.is_none_or(|s| s == e.sample)
             && self.modified == new.modified
             && self.plausible(new, e)
     }
@@ -263,7 +209,7 @@ pub fn index_root(
         |r| r.get(0),
     )?;
     progress(Progress::Walking);
-    let found = walk(&path, cache, alive).ok_or(super::worker::Cancelled)?;
+    let found = walk(&path, alive).ok_or(super::worker::Cancelled)?;
     let mut uncertain = found.failed_sheets;
     // Every file the walk found, with its size and time.
     let groups = groups(found.tracks);
@@ -275,6 +221,9 @@ pub fn index_root(
         let paths = std::iter::once((&g.anchor, anchor_kind))
             .chain(g.tracks.iter().map(|t| (&t.source, AUDIO)));
         for (p, kind) in paths {
+            if !alive() {
+                return Err(super::worker::Cancelled.into());
+            }
             if by_path.contains_key(p) {
                 continue;
             }
@@ -304,7 +253,7 @@ pub fn index_root(
     let mut missing: HashMap<(i64, i64), Vec<Missing>> = HashMap::new();
     {
         let mut stmt = db.prepare(
-            "SELECT id, kind, size, modified, name, volume, file_index, digest, path_key, path
+            "SELECT id, kind, size, modified, name, volume, file_index, digest, path_key, path, sample
              FROM files WHERE root_id = ?1 AND present = 1",
         )?;
         let rows = stmt.query_map([root], |r| {
@@ -318,6 +267,7 @@ pub fn index_root(
                     volume: r.get(5)?,
                     index: r.get(6)?,
                     digest: r.get(7)?,
+                    sample: r.get(10)?,
                     path: PathBuf::from(r.get::<_, String>(9)?),
                 },
                 r.get::<_, String>(8)?,
@@ -337,8 +287,8 @@ pub fn index_root(
     let mut ambiguous = 0;
     {
         let mut elsewhere = db.prepare_cached(
-            "SELECT id, kind, size, modified, name, volume, file_index, digest, path
-             FROM files WHERE present = 0 AND kind = ?1 AND size = ?2",
+            "SELECT id, kind, size, modified, name, volume, file_index, digest, path, sample
+             FROM files WHERE present = 0 AND path_key IS NOT NULL AND kind = ?1 AND size = ?2",
         )?;
         let mut matches = Vec::new();
         let mut claims: HashMap<i64, usize> = HashMap::new();
@@ -354,6 +304,7 @@ pub fn index_root(
                         volume: r.get(5)?,
                         index: r.get(6)?,
                         digest: r.get(7)?,
+                        sample: r.get(9)?,
                         path: PathBuf::from(r.get::<_, String>(8)?),
                     })
                 })?
@@ -363,13 +314,11 @@ pub fn index_root(
             if candidates.is_empty() {
                 continue;
             }
-            let Some(e) = evidence(&info.path, info.kind, (info.size, info.modified)) else {
-                continue;
-            };
+            let e = &info.evidence;
             let hits: Vec<_> = candidates
                 .iter()
                 .copied()
-                .filter(|c| c.plausible(info, &e) && matches!(c.path.try_exists(), Ok(false)))
+                .filter(|c| c.plausible(info, e) && matches!(c.path.try_exists(), Ok(false)))
                 .collect();
             for hit in &hits {
                 *claims.entry(hit.id).or_default() += 1;
@@ -377,8 +326,8 @@ pub fn index_root(
             match hits.as_slice() {
                 [] => {}
                 [old] => {
-                    let verified = old.verified(info, &e);
-                    matches.push((key.clone(), old.id, e, verified));
+                    let verified = old.verified(info, e);
+                    matches.push((key.clone(), old.id, e.clone(), verified));
                 }
                 _ => ambiguous += 1,
             }
@@ -441,14 +390,7 @@ pub fn index_root(
             let tracks = g
                 .tracks
                 .iter()
-                .map(|t| {
-                    enriched(
-                        db,
-                        t,
-                        cache,
-                        by_path.get(&t.source).and_then(|k| files.get(k)),
-                    )
-                })
+                .map(|t| enriched(db, t, by_path.get(&t.source).and_then(|k| files.get(k))))
                 .collect::<Result<Vec<_>>>()?;
             count += g.tracks.len();
             prepared.push((g, tracks, anchor, cover));
@@ -526,7 +468,7 @@ struct Found {
     incomplete: Vec<String>,
     failed_sheets: HashSet<String>,
 }
-fn walk(root: &Path, cache: Option<&Cache>, alive: &dyn Fn() -> bool) -> Option<Found> {
+fn walk(root: &Path, alive: &dyn Fn() -> bool) -> Option<Found> {
     let mut slots: Vec<Option<Arc<Track>>> = vec![];
     let mut found = Found {
         tracks: vec![],
@@ -534,7 +476,7 @@ fn walk(root: &Path, cache: Option<&Cache>, alive: &dyn Fn() -> bool) -> Option<
         incomplete: vec![],
         failed_sheets: HashSet::new(),
     };
-    crate::discovery::walk(root, true, cache, alive, &mut |batch| {
+    crate::discovery::walk(root, true, None, alive, &mut |batch| {
         for (i, t) in batch.rows {
             if i == slots.len() {
                 slots.push(t);
@@ -559,41 +501,20 @@ fn walk(root: &Path, cache: Option<&Cache>, alive: &dyn Fn() -> bool) -> Option<
 
 /// The best metadata available without reading the file: cached tags for
 /// its current revision, or what the library recorded for an unchanged file.
-fn enriched(
-    db: &Connection,
-    t: &Arc<Track>,
-    cache: Option<&Cache>,
-    source: Option<&FileInfo>,
-) -> Result<Arc<Track>> {
+fn enriched(db: &Connection, t: &Arc<Track>, source: Option<&FileInfo>) -> Result<Arc<Track>> {
     let Some(source) = source else {
         return Ok(t.clone());
     };
-    let stamp = Stamp {
-        bytes: source.size,
-        modified: source.modified,
-    };
-    if let Some(d) = &t.disc {
-        if d.end.is_some() || t.duration.is_some() {
-            return Ok(t.clone());
-        }
-        let mut t = (**t).clone();
-        t.duration = cache
-            .and_then(|c| c.tags(&source.path, &stamp))
-            .and_then(|tags| tags.duration)
-            .map(|s| (s - d.start as f64 / 75.).max(0.));
-        return Ok(Arc::new(t));
-    }
-    if let Some(mut tags) = cache.and_then(|c| c.tags(&source.path, &stamp)) {
-        tags.source = t.source.clone();
-        return Ok(Arc::new(tags));
+    if t.disc.is_some() {
+        return Ok(t.clone());
     }
     let recorded = db
         .prepare_cached(
             "SELECT t.title, t.artist, t.album, t.number, t.disc_number, t.year, t.duration
              FROM tracks t JOIN files f ON f.id = t.anchor
-             WHERE f.path_key = ?1 AND t.part = 0 AND f.tagged = ?2 AND f.size = ?3",
+             WHERE f.path_key = ?1 AND t.part = 0 AND f.tagged = ?2 AND f.size = ?3 AND f.sample = ?4 AND f.digest = ?5",
         )?
-        .query_row(params![source.key, source.modified, source.size], |r| {
+        .query_row(params![source.key, source.modified, source.size, source.evidence.sample, source.evidence.digest], |r| {
             let mut t = (**t).clone();
             t.title = r.get(0)?;
             t.artist = r.get(1)?;
@@ -608,8 +529,7 @@ fn enriched(
     Ok(recorded.map_or_else(|| t.clone(), Arc::new))
 }
 
-/// Writes one anchor and its tracks. Identities come from `(anchor, part)`;
-/// everything else is refreshed.
+/// Writes the current source and authored slices in one transaction.
 fn write_group<'a>(
     tx: &Transaction,
     group: &Group,
@@ -647,48 +567,30 @@ fn write_group<'a>(
 }
 
 fn upsert_file(tx: &Transaction, f: &FileInfo, generation: i64) -> Result<i64> {
-    let existing: Option<i64> = tx
-        .prepare_cached("SELECT id FROM files WHERE path_key = ?1")?
-        .query_row([&f.key], |r| r.get(0))
-        .optional()?;
-    if let Some(id) = existing {
-        // A changed file keeps its identity; its evidence is read again.
-        tx.prepare_cached(
-            "UPDATE files SET path = ?2, name = ?3, kind = ?4, root_id = coalesce(?5, root_id),
-                volume = CASE WHEN size = ?6 AND modified = ?7 THEN volume END,
-                file_index = CASE WHEN size = ?6 AND modified = ?7 THEN file_index END,
-                digest = CASE WHEN size = ?6 AND modified = ?7 THEN digest END,
-                tagged = CASE WHEN size = ?6 AND modified = ?7 THEN tagged END,
-                size = ?6, modified = ?7, present = 1, seen = CASE WHEN ?5 IS NULL THEN seen ELSE ?8 END
-             WHERE id = ?1",
-        )?
-        .execute(params![
-            id,
-            f.path.to_str(),
-            f.name,
-            f.kind,
-            f.owner,
-            f.size,
-            f.modified,
-            generation
-        ])?;
-        return Ok(id);
+    let e = &f.evidence;
+    let existing = tx.prepare_cached(
+        "SELECT id, size, modified, volume, file_index, digest, sample FROM files WHERE path_key = ?1"
+    )?.query_row([&f.key], |r| Ok((r.get::<_, i64>(0)?, Revision::columns(r, 1)?))).optional()?;
+    if let Some((id, old)) = existing
+        && f.kind == AUDIO
+        && !old.matches(f.size, f.modified, e)
+    {
+        tx.prepare_cached("UPDATE files SET present = 0, path_key = NULL WHERE id = ?1")?
+            .execute([id])?;
+        tx.prepare_cached("UPDATE tracks SET present = 0 WHERE anchor = ?1 OR source = ?1")?
+            .execute([id])?;
     }
-    tx.prepare_cached(
-        "INSERT INTO files(path, path_key, name, kind, root_id, size, modified, present, seen)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
-    )?
-    .execute(params![
-        f.path.to_str(),
-        f.key,
-        f.name,
-        f.kind,
-        f.owner,
-        f.size,
-        f.modified,
-        generation
-    ])?;
-    Ok(tx.last_insert_rowid())
+    Ok(tx.prepare_cached(
+        "INSERT INTO files(path, path_key, name, kind, root_id, size, modified, volume, file_index, digest, sample, present, seen)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1, ?12)
+         ON CONFLICT(path_key) DO UPDATE SET path = excluded.path, name = excluded.name,
+            root_id = coalesce(excluded.root_id, root_id), size = excluded.size, modified = excluded.modified,
+            volume = excluded.volume, file_index = excluded.file_index, digest = excluded.digest, sample = excluded.sample,
+            tagged = CASE WHEN size = excluded.size AND modified = excluded.modified AND digest = excluded.digest THEN tagged END,
+            present = 1, seen = CASE WHEN excluded.root_id IS NULL THEN seen ELSE excluded.seen END
+         RETURNING id",
+    )?.query_row(params![f.path.to_str(), f.key, f.name, f.kind, f.owner, f.size, f.modified,
+        e.volume, e.index, e.digest, e.sample, generation], |r| r.get(0))?)
 }
 
 /// A CUE program is its own disc. Tagged files group by folder, album and
@@ -766,14 +668,20 @@ fn upsert_track(
     let (first, last) = t.disc.as_ref().map_or((None, None), |d| {
         (Some(d.start as i64), d.end.map(|e| e as i64))
     });
+    if t.disc.is_some() {
+        tx.prepare_cached(
+            "UPDATE tracks SET present = 0 WHERE anchor = ?1 AND part = ?2 AND present = 1
+             AND (source != ?3 OR first_tick IS NOT ?4 OR last_tick IS NOT ?5)",
+        )?
+        .execute(params![anchor, part, source, first, last])?;
+    }
     tx.prepare_cached(
         "INSERT INTO tracks(anchor, part, source, first_tick, last_tick, root_id, album_id, ordinal,
             title, artist, album, number, disc_number, year, duration, format,
             title_key, artist_key, album_key, search, present, seen, added_at)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
             ?17, ?18, ?19, ?20, 1, ?21, ?22)
-         ON CONFLICT(anchor, part) DO UPDATE SET source = excluded.source,
-            first_tick = excluded.first_tick, last_tick = excluded.last_tick,
+         ON CONFLICT(anchor, part, source, ifnull(first_tick,-1), ifnull(last_tick,-1)) DO UPDATE SET
             root_id = coalesce(excluded.root_id, root_id), album_id = excluded.album_id,
             ordinal = excluded.ordinal, title = excluded.title, artist = excluded.artist,
             album = excluded.album, number = excluded.number, disc_number = excluded.disc_number,
@@ -813,7 +721,7 @@ fn search_text(t: &Track) -> String {
     format!("{}\u{1}{}\u{1}{}", t.title, t.artist, t.album).to_lowercase()
 }
 
-/// Reads tags, durations and identity evidence for the files of this scan
+/// Reads tags and durations for the files of this scan
 /// that need them.
 fn enrich(
     db: &mut Connection,
@@ -827,29 +735,22 @@ fn enrich(
     struct Todo {
         id: i64,
         path: PathBuf,
-        kind: i64,
         size: i64,
         modified: i64,
-        tags: bool,
-        evidence: bool,
     }
     let todo: Vec<Todo> = db
         .prepare(
-            "SELECT id, path, kind, size, modified,
-                kind = 0 AND (tagged IS NULL OR tagged != modified), digest IS NULL
+            "SELECT id, path, size, modified
              FROM files WHERE root_id = ?1 AND present = 1 AND seen = ?2
-               AND ((kind = 0 AND (tagged IS NULL OR tagged != modified)) OR digest IS NULL)
+               AND kind = 0 AND (tagged IS NULL OR tagged != modified)
              ORDER BY path_key",
         )?
         .query_map(params![root, generation], |r| {
             Ok(Todo {
                 id: r.get(0)?,
                 path: PathBuf::from(r.get::<_, String>(1)?),
-                kind: r.get(2)?,
-                size: r.get(3)?,
-                modified: r.get(4)?,
-                tags: r.get(5)?,
-                evidence: r.get(6)?,
+                size: r.get(2)?,
+                modified: r.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -865,42 +766,26 @@ fn enrich(
                     bytes: f.size,
                     modified: f.modified,
                 };
-                let e = f
-                    .evidence
-                    .then(|| evidence(&f.path, f.kind, (f.size, f.modified)))
-                    .flatten();
-                let tags = f.tags.then(|| {
-                    cache.and_then(|c| c.tags(&f.path, &stamp)).or_else(|| {
-                        let mut t = Track::file(f.path.clone());
-                        if !t.read_tags() {
-                            return None;
-                        }
-                        if Stamp::read(&f.path).as_ref() != Some(&stamp) {
-                            return None;
-                        }
-                        if let Some(c) = cache {
-                            let _ = c.store_tags(&t, &stamp);
-                        }
-                        Some(t)
-                    })
-                });
-                (e, tags)
+                let mut t = Track::file(f.path.clone());
+                if !t.read_tags() {
+                    return None;
+                }
+                if Stamp::read(&f.path).as_ref() != Some(&stamp) {
+                    return None;
+                }
+                if let Some(c) = cache {
+                    let _ = c.store_tags(&t, &stamp);
+                }
+                Some(t)
             })
             .collect();
         let tx = scan_transaction(db, root, generation, alive)?;
-        for (f, (e, tags)) in chunk.iter().zip(read) {
-            if let Some(e) = e {
-                tx.prepare_cached(
-                    "UPDATE files SET volume = ?2, file_index = ?3, digest = ?4
-                     WHERE id = ?1 AND size = ?5 AND modified = ?6",
-                )?
-                .execute(params![
-                    f.id, e.volume, e.index, e.digest, f.size, f.modified
-                ])?;
+        for (f, tags) in chunk.iter().zip(read) {
+            let updated = tx.prepare_cached("UPDATE files SET tagged = ?2 WHERE id = ?1 AND modified = ?2 AND present = 1 AND size = ?3")?
+                .execute(params![f.id, f.modified, f.size])?;
+            if updated == 0 {
+                continue;
             }
-            let Some(tags) = tags else { continue };
-            tx.prepare_cached("UPDATE files SET tagged = ?2 WHERE id = ?1 AND modified = ?2")?
-                .execute(params![f.id, f.modified])?;
             let Some(mut t) = tags else { continue };
             t.source = f.path.clone();
             if let Some(seconds) = t.duration {
@@ -968,14 +853,11 @@ fn enrich(
 
 /// Gives a track met while browsing an identity outside any collection. A
 /// CUE chapter brings its whole program, so every chapter has its own part.
-pub(super) fn adopt(db: &mut Connection, t: &Track, cache: Option<&Cache>) -> Result<()> {
+pub(super) fn adopt(db: &mut Connection, t: &Track) -> Result<()> {
     let program: Vec<Arc<Track>> = match &t.disc {
         None => vec![Arc::new(t.clone())],
         Some(d) => {
-            let program = match cache {
-                Some(c) => c.program(&d.sheet)?,
-                None => crate::cue::read(&d.sheet)?,
-            };
+            let program = crate::cue::read(&d.sheet)?;
             program
                 .into_iter()
                 .filter(|c| c.source.is_file())
@@ -991,24 +873,32 @@ pub(super) fn adopt(db: &mut Connection, t: &Track, cache: Option<&Cache>) -> Re
         .with_context(|| format!("{} is not available", group.anchor.display()))?;
     let mut sources: HashMap<PathBuf, FileInfo> = HashMap::new();
     for track in &group.tracks {
-        if !sources.contains_key(&track.source)
+        if track.source != anchor.path
+            && !sources.contains_key(&track.source)
             && let Some(info) = FileInfo::read(&track.source, AUDIO, None)
         {
             sources.insert(track.source.clone(), info);
         }
     }
+    let source = |path: &Path| {
+        if path == anchor.path {
+            Some(&anchor)
+        } else {
+            sources.get(path)
+        }
+    };
     let cover = group.anchor.parent().and_then(library::find_cover);
-    let tx = db.transaction()?;
-    let tracks = group.tracks.clone();
-    write_group(
-        &tx,
-        &group,
-        &tracks,
-        &anchor,
-        &|p| sources.get(p),
-        cover.as_deref(),
-        0,
-    )?;
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tracks = group
+        .tracks
+        .iter()
+        .map(|track| enriched(&tx, track, source(&track.source)))
+        .collect::<Result<Vec<_>>>()?;
+    if group.sheet {
+        // Folder edits also reconcile chapters removed from the program.
+        tx.execute("UPDATE tracks SET present = 0 WHERE anchor = (SELECT id FROM files WHERE path_key = ?1)", [&anchor.key])?;
+    }
+    write_group(&tx, &group, &tracks, &anchor, &source, cover.as_deref(), 0)?;
     tx.commit()?;
     Ok(())
 }

@@ -264,7 +264,8 @@ impl Store {
             let sql = format!(
                 "SELECT {key}, t.id, s.path, a.path, a.kind, t.part, t.first_tick, t.last_tick,
                     t.title, t.artist, t.album, t.number, t.disc_number, t.year, t.duration,
-                    t.present AND s.present AND (a.present OR a.id = s.id), t.root_id, s.root_id
+                    t.present AND s.present AND (a.present OR a.id = s.id), t.root_id, s.root_id,
+                    s.size, s.modified, s.volume, s.file_index, s.digest, s.sample
                  FROM {from} JOIN files s ON s.id = t.source JOIN files a ON a.id = t.anchor
                  WHERE {key} IN ({marks}) {scope_filter}"
             );
@@ -296,6 +297,7 @@ impl Store {
                     available: r.get(15)?,
                     root: r.get(16)?,
                     source_root: r.get(17)?,
+                    revision: super::identity::Revision::columns(r, 18)?,
                 })
             })?;
             for row in rows {
