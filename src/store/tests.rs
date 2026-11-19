@@ -127,6 +127,13 @@ fn identities_survive_rescans_sheet_edits_and_verified_moves() {
         }
     );
     assert_eq!(marks[0].1, Locator::of(&two_row.track));
+
+    // Untagged titles follow the filename even when the playlist identity survives.
+    fs::rename(root.join("Singles/x.mp3"), root.join("Singles/Renamed.mp3")).unwrap();
+    assert_eq!(index(&mut s, r).relocated, 1);
+    let entries = all(&s, Scope::Playlist(mix));
+    assert_eq!(entries[1].id, x);
+    assert_eq!(entries[1].track.title, "Renamed");
 }
 
 #[test]

@@ -401,6 +401,7 @@ pub fn index_root(
             tx.execute(
                 "UPDATE files SET path = ?2, path_key = ?3, name = ?4, root_id = coalesce(?5, root_id),
                     size = ?6, modified = ?7, volume = ?8, file_index = ?9, digest = ?10,
+                    tagged = NULL,
                     present = 1, seen = ?11 WHERE id = ?1",
                 params![
                     old,

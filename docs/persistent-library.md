@@ -35,4 +35,6 @@ Opening *The Original Dreamteam (CD1)* displayed 13 tracks. Searching for `artis
 
 ![Mixed playlist during muted CUE playback](evidence/persistent-playlist.png)
 
+In the same playlist, moving the temporary WAV outside its registered collection retained its entry at position one. Disqro marked the entry unavailable and explained why it could not play. Returning the same file under a new name restored availability and refreshed its filename-derived title. Read-only checks confirmed that its file, track and playlist-entry IDs stayed the same. Two-row keyboard selection and reordering preserved the selected order, and the disc breadcrumb, Back and Forward restored the expected indexed views.
+
 Temporary filesystem tests cover verified same-volume relocation, ambiguous copies, missing and restored sources, root removal during a scan, competing scans and migration rollback. This qualification did not measure audible output, removable-drive latency or six-figure indexed-library performance.
