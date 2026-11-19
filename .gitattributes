@@ -1,0 +1,2 @@
+# Preserve the supplied brand masters byte for byte across platforms.
+assets/brand/*.svg -text -whitespace

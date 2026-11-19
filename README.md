@@ -9,7 +9,20 @@ customizable desktop application.
 The goal is simple: **excellent music playback and library management, with new ways to explore and experience your
 music.**
 
-## Features
+## Run the Windows player
+
+Build on Windows x64 with Rustup, Visual Studio C++ Build Tools, the Windows SDK, and CMake. The repository pins Rust and the dependency graph.
+
+```powershell
+.\build.ps1 -Release
+.\target\release\disqro.exe
+```
+
+Choose **Open folder** or press **Ctrl+O**. Double-click a track to start listening. A folder, an audio file, or a CUE sheet can also be passed as the first argument. Opening a file or sheet starts playback.
+
+The first build browses folders, reads tags and cover art, plays individual CUE tracks, and lets you seek on a waveform built from the recording. It remembers your workspace, table columns, folder, and volume. See the [listening workspace notes](docs/listening-workspace.md) for format coverage, shortcuts, and verification.
+
+## Product direction
 
 - **Native and fast** — Lightweight, responsive, and designed for large music collections.
 - **Advanced music library** — Virtualized tables with customizable columns, artwork thumbnails, cached waveform
@@ -25,7 +38,7 @@ music.**
 - **Clean interface** — Minimal visual clutter, contextual menus, and powerful keyboard interactions.
 - **Local-first** — Your music and library data remain under your control.
 
-## Technology
+## Technology direction
 
 - **Rust** — Native application and audio processing.
 - **GPUI + GPUI Kit** — Interface, components, icons, and docking system.
@@ -43,5 +56,4 @@ responsive, and optional.
 
 ## Project Status
 
-Disqro is in early development, targeting Windows first. The features described above are planned goals, not yet
-released functionality.
+Disqro is in early development, targeting Windows first. The listening workspace is available from source. The indexed library, playlists, favorites, ratings, zoomable waveforms, and independent visualizer panels are future milestones.

@@ -1,0 +1,134 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="130 105 995 995" width="1024" height="1024" role="img" aria-labelledby="title description">
+  <title id="title">Disqro — chrome aqua mark, transparent background (compact)</title>
+  <desc id="description">Pure vector Disqro mark with reflective silver and aqua gradients, dark inner core and signal arcs, no surrounding tile or background.</desc>
+<defs>
+    <linearGradient id="shellMetal" x1="296" y1="229" x2="1064" y2="794" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7F7FC"/>
+      <stop offset=".16" stop-color="#DADEEA"/>
+      <stop offset=".29" stop-color="#FFFFFF"/>
+      <stop offset=".42" stop-color="#BFC8D7"/>
+      <stop offset=".60" stop-color="#63778F"/>
+      <stop offset=".78" stop-color="#365D78"/>
+      <stop offset=".94" stop-color="#10A8B9"/>
+      <stop offset="1" stop-color="#83EDF0"/>
+    </linearGradient>
+    <linearGradient id="shellVertical" x1="370" y1="204" x2="385" y2="948" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".23"/>
+      <stop offset=".44" stop-color="#FFFFFF" stop-opacity=".07"/>
+      <stop offset=".62" stop-color="#0B1A35" stop-opacity=".10"/>
+      <stop offset="1" stop-color="#06152E" stop-opacity=".55"/>
+    </linearGradient>
+    <linearGradient id="satin" x1="193" y1="432" x2="871" y2="768" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".0"/>
+      <stop offset=".25" stop-color="#FFFFFF" stop-opacity=".36"/>
+      <stop offset=".42" stop-color="#FFFFFF" stop-opacity=".02"/>
+      <stop offset=".76" stop-color="#DAF4FF" stop-opacity=".26"/>
+      <stop offset="1" stop-color="#E9FFFF" stop-opacity=".0"/>
+    </linearGradient>
+    <linearGradient id="diagReflection" x1="128" y1="696" x2="796" y2="223" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".02"/>
+      <stop offset=".38" stop-color="#FFFFFF" stop-opacity=".19"/>
+      <stop offset=".54" stop-color="#FFFFFF" stop-opacity=".38"/>
+      <stop offset=".72" stop-color="#EAF6FF" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="sweepGlass" x1="260" y1="1011" x2="1056" y2="618" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#047996"/>
+      <stop offset=".16" stop-color="#0B91B4"/>
+      <stop offset=".34" stop-color="#047D9A"/>
+      <stop offset=".53" stop-color="#058DA5"/>
+      <stop offset=".74" stop-color="#0AC9D4"/>
+      <stop offset=".93" stop-color="#35E1EC"/>
+      <stop offset="1" stop-color="#85F8F7"/>
+    </linearGradient>
+    <linearGradient id="sweepVertical" x1="522" y1="747" x2="681" y2="1057" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#99FFFF" stop-opacity=".23"/>
+      <stop offset=".31" stop-color="#C5FFFF" stop-opacity=".08"/>
+      <stop offset=".74" stop-color="#004659" stop-opacity=".06"/>
+      <stop offset="1" stop-color="#00192E" stop-opacity=".40"/>
+    </linearGradient>
+    <linearGradient id="glassFacet" x1="460" y1="798" x2="640" y2="1026" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B5FFFF" stop-opacity=".52"/>
+      <stop offset=".37" stop-color="#D7FFFF" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#A0FCFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="sweepTopRim" x1="178" y1="963" x2="1042" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#CFFFFF"/>
+      <stop offset=".18" stop-color="#4BE4FF"/>
+      <stop offset=".48" stop-color="#FFECE3"/>
+      <stop offset=".62" stop-color="#F0F8FC"/>
+      <stop offset=".90" stop-color="#48E5EC"/>
+      <stop offset="1" stop-color="#B7FEF9"/>
+    </linearGradient>
+    <linearGradient id="metalEdge" x1="150" y1="302" x2="1112" y2="656" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".98"/>
+      <stop offset=".45" stop-color="#FFFFFF" stop-opacity=".54"/>
+      <stop offset=".77" stop-color="#C2E4FA" stop-opacity=".72"/>
+      <stop offset="1" stop-color="#74F3F1" stop-opacity=".90"/>
+    </linearGradient>
+    <linearGradient id="coreDark" x1="409" y1="423" x2="949" y2="830" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#132D41"/>
+      <stop offset=".27" stop-color="#091826"/>
+      <stop offset=".7" stop-color="#05121D"/>
+      <stop offset="1" stop-color="#020B14"/>
+    </linearGradient>
+    <linearGradient id="coreUpperGlow" x1="550" y1="363" x2="701" y2="813" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D4F8FF" stop-opacity=".18"/>
+      <stop offset=".30" stop-color="#BDEFF9" stop-opacity=".04"/>
+      <stop offset="1" stop-color="#000B12" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="signalChrome" x1="600" y1="430" x2="902" y2="718" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset=".31" stop-color="#ECF1FA"/>
+      <stop offset=".58" stop-color="#FFFFFF"/>
+      <stop offset=".84" stop-color="#C6E4F0"/>
+      <stop offset="1" stop-color="#8DAABB"/>
+    </linearGradient>
+    <linearGradient id="arcSheen" x1="710" y1="477" x2="885" y2="649" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".65"/>
+      <stop offset=".6" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="1" stop-color="#D6F9FF" stop-opacity=".5"/>
+    </linearGradient>
+    <radialGradient id="hubChrome" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(622 616) rotate(46) scale(133)">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset=".40" stop-color="#FAFCFF"/>
+      <stop offset=".73" stop-color="#CBD7E4"/>
+      <stop offset=".94" stop-color="#8DA1B3"/>
+      <stop offset="1" stop-color="#F1F7FF"/>
+    </radialGradient>
+<radialGradient id="edgeGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1043 700) rotate(45) scale(133)">
+      <stop offset="0" stop-color="#8AF9F4" stop-opacity=".6"/>
+      <stop offset="1" stop-color="#8AF9F4" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="shellClip"><path d="M141 929 L332 266 C342 225 359 205 408 205 H718 C921 205 1087 362 1087 559 C1087 627 1069 675 1026 704 C1007 718 976 728 943 740 C959 685 966 624 948 561 C910 435 798 341 655 341 C477 341 347 472 334 639 C328 720 351 794 403 837 L150 936 C143 938 139 935 141 929 Z"/></clipPath>
+    <clipPath id="sweepClip"><path d="M168 972 L935 737 C966 727 986 708 995 679 C1043 660 1077 620 1087 565 C1118 793 955 985 743 995 H202 C170 995 151 990 168 972 Z"/></clipPath>
+    <clipPath id="coreClip"><path d="M403 838 C355 793 333 723 334 640 C339 473 473 341 649 341 C811 341 935 453 957 597 C968 662 956 709 943 740 Z"/></clipPath>
+  
+    <linearGradient id="outerArcChrome" x1="684" y1="375" x2="947" y2="648" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#D7E4F2"/>
+      <stop offset=".35" stop-color="#FFFFFF"/>
+      <stop offset=".8" stop-color="#D3E9F7"/>
+      <stop offset="1" stop-color="#6DA5C0"/>
+    </linearGradient>
+    <linearGradient id="glassFlash" x1="270" y1="951" x2="1030" y2="705" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8AFBFF" stop-opacity=".50"/>
+      <stop offset=".30" stop-color="#44E8F5" stop-opacity=".10"/>
+      <stop offset=".68" stop-color="#B1FFFF" stop-opacity=".04"/>
+      <stop offset="1" stop-color="#E7FFFF" stop-opacity=".32"/>
+    </linearGradient>
+
+  </defs>
+  <g id="disqro-symbol-compact" transform="translate(75 30) scale(.90 .95)">
+
+
+  <path d="M403 838 C355 793 333 723 334 640 C339 473 473 341 649 341 C811 341 935 453 957 597 C968 662 956 709 943 740 Z" fill="url(#coreDark)"/>
+  <path d="M141 929 L332 266 C342 225 359 205 408 205 H718 C921 205 1087 362 1087 559 C1087 627 1069 675 1026 704 C1007 718 976 728 943 740 C959 685 966 624 948 561 C910 435 798 341 655 341 C477 341 347 472 334 639 C328 720 351 794 403 837 L150 936 C143 938 139 935 141 929 Z" fill="url(#shellMetal)"/>
+  <path d="M620 429 C789 426 915 548 902 675 C898 695 891 714 878 732 C894 586 799 480 620 429 Z" fill="url(#signalChrome)"/>
+  <path d="M601 500 C735 494 832 584 841 676 C842 698 837 716 823 728 C825 636 742 545 601 500 Z" fill="url(#signalChrome)"/>
+  <circle cx="647" cy="646" r="83" fill="url(#hubChrome)"/>
+  <path d="M168 972 L935 737 C966 727 986 708 995 679 C1043 660 1077 620 1087 565 C1118 793 955 985 743 995 H202 C170 995 151 990 168 972 Z" fill="url(#sweepGlass)"/>
+  <path d="M168 973 L935 738" stroke="url(#sweepTopRim)" stroke-width="7" stroke-linecap="round"/>
+
+  </g>
+</svg>
