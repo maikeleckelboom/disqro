@@ -1,6 +1,6 @@
 # Listening workspace
 
-Disqro opens a folder or a CUE album directly. Browsing never changes what is playing: the queue holds its own copies of the tracks, so you can open other folders, sort tables or rearrange panels while an album continues.
+Disqro opens a folder or a CUE album directly. Browsing never changes what is playing: the queue retains the tracks independently of the browser, so you can open other folders, sort tables or rearrange panels while an album continues.
 
 ![Disqro Dark with an album playing](evidence/disqro-dark.png)
 
@@ -11,7 +11,7 @@ Disqro opens a folder or a CUE album directly. Browsing never changes what is pl
 | Edit the folder path | Ctrl+L, Alt+D or F4, or click the address bar |
 | Open a folder | Ctrl+O, a Place, the folder tree, or a breadcrumb |
 | Back, Forward, Parent folder | Alt+Left (or Backspace), Alt+Right, Alt+Up, or the mouse's back and forward buttons |
-| Find a title, artist or album in this folder | Ctrl+F |
+| Find tracks in the current collection | Ctrl+F |
 | Play from a track | Double-click, Enter, or **Play** in its context menu |
 | Queue a track | **Play Next** or **Add to Queue** in its context menu; **Add All to Queue** in the panel menu |
 | Play or pause | Space outside a text field, the media keys, or the tray menu |
@@ -67,7 +67,7 @@ The transport streams local mono and stereo recordings through Kira and the defa
 
 CUE times use 75 ticks per second. The next track's INDEX 01 ends the current track in the same source. Recorded pregaps remain playable and a recorded lead-in before the first track is accessible. When the queue changes while a disc is playing, the running decoder keeps only the chapters that still follow in the queue and stops where the next queued entry differs. Synthesized gaps, mixed-mode discs, complex MP4 edit lists, and surround playback are outside this build.
 
-The player reads embedded artwork or a neighbouring cover image. The waveform keeps the minimum and maximum of both channels per bin, so antiphase audio stays visible, and the RMS level inside that envelope, which shows the structure of heavily limited masters. A cancellable background job writes up to 1,536 bins per overview. The 32 cache slots live in the profile (`overview-v2-*.json`) and check source path, size, modification time, and CUE range before reuse.
+The player reads embedded artwork or a neighbouring cover image. The waveform keeps the minimum and maximum of both channels per bin, so antiphase audio stays visible, and the RMS level inside that envelope, which shows the structure of heavily limited masters. A cancellable background job writes up to 1,536 bins per overview. The versioned SQLite cache checks source path, size, modification time and CUE range before reusing an overview. [Collection storage and verification](recursive-collections.md)
 
 On a normal close, and shortly after any change to the queue or Places, Disqro saves the folder, volume, queue, Places, window preferences, dock layout and column layout in `%LOCALAPPDATA%\Disqro\workspace-v1.json`. Set `DISQRO_PROFILE_DIR` to use an isolated profile. The dock layout format moved to version 2 for the Queue panel, so a layout saved by the first build is replaced once by the new default.
 
@@ -80,7 +80,7 @@ On a normal close, and shortly after any change to the queue or Places, Disqro s
 - The tray icon lives on a hidden window owned by the interface thread, created with the Win32 API from the `windows` crate that GPUI already depends on. No second UI toolkit is involved. The media session uses `ISystemMediaTransportControlsInterop` on the same window.
 - The read-only Dekzer review covered its playback crate, native player integration, CUE handling, player qualification, and waveform research. Disqro adopted source-frame addressing, decoder preroll, a buffered boundary between decoding and output, and sample-oracle checks. It has its own implementation and no Dekzer source or runtime dependency.
 
-## Windows verification
+## Earlier listening-workspace verification
 
 Measured on a Ryzen 7 8845HS running Windows 11 at 150% display scaling with the optimized build, using isolated profiles with the application volume at zero. CPU is the share of one logical core averaged over 12 seconds; GPU is the sum of the process's GPU engine counters.
 
@@ -109,4 +109,4 @@ For repeatable audio checks, run `cargo test --release --locked` with CMake avai
 
 ## Not in this build
 
-Output device selection, ReplayGain-style loudness normalization, a persistent listening history beyond the session queue, a sleep timer, path autocompletion, Places in new tabs, multi-row selection in the track table, the Light and Glass appearances, and the library features on the roadmap (indexed collection, playlists, favorites, ratings, artwork and waveform cells, zoomable waveforms and visualizer panels).
+Output device selection, ReplayGain-style loudness normalization, a persistent listening history beyond the session queue, a sleep timer, path autocompletion, Places in new tabs, the Light and Glass appearances, and the library features on the roadmap (paged global library, playlists, favorites, ratings, artwork and waveform cells, zoomable waveforms and visualizer panels).
