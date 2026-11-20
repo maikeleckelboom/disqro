@@ -42,6 +42,19 @@ pub struct DiscTrack {
     pub end: Option<u64>,
 }
 
+/// Only a deliberately selected CD can supply the context missing from a recording.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiscContext {
+    #[default]
+    Inferred,
+    Selected,
+}
+impl DiscContext {
+    pub fn allows(self, track: &Track) -> bool {
+        self == Self::Selected || track.has_disc_context()
+    }
+}
+
 impl Track {
     pub fn file(path: PathBuf) -> Self {
         Self {
@@ -66,8 +79,8 @@ impl Track {
     }
     pub fn has_disc_context(&self) -> bool {
         self.disc.is_some()
-            || !self.album.is_empty()
-            || self.disc_number.is_some()
+            || !self.album.trim().is_empty()
+            || self.disc_number.is_some_and(|n| n > 0)
             || folder_disc_number(&self.source).is_some()
     }
     pub fn format(&self) -> String {

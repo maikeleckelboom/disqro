@@ -1,5 +1,6 @@
 //! Resolve listening intent independently of display order and filtering.
 use super::*;
+use crate::library::DiscContext;
 
 impl MusicTable {
     pub fn play(&self, row: usize, cx: &mut App) {
@@ -9,7 +10,12 @@ impl MusicTable {
         match &self.rows.data {
             Contents::Folder { sorted, .. } => {
                 let Some(track) = sorted.get(ix) else { return };
-                if !self.folder_cd && !track.has_disc_context() {
+                let context = if self.folder_cd {
+                    DiscContext::Selected
+                } else {
+                    DiscContext::Inferred
+                };
+                if !context.allows(track) {
                     let single = Arc::from([track.clone()]);
                     self.player
                         .update(cx, |p, cx| p.command(Command::Play(single, 0), cx));
@@ -19,8 +25,9 @@ impl MusicTable {
                     && let Some(i) = disc.tracks.iter().position(|t| t.same_item(track))
                 {
                     let tracks = disc.tracks.clone().into();
-                    self.player
-                        .update(cx, |p, cx| p.command(Command::PlayDisc(tracks, i), cx));
+                    self.player.update(cx, |p, cx| {
+                        p.command(Command::PlayDisc(tracks, i, context), cx)
+                    });
                 }
             }
             Contents::Library(p) => {
@@ -68,15 +75,21 @@ impl MusicTable {
                             .filter(|r| r.available)
                             .ok_or_else(|| anyhow::anyhow!("The selected track is unavailable."))?
                             .track;
-                        if !matches!(scope, Scope::Album(_)) && !target.has_disc_context() {
+                        let context = if matches!(scope, Scope::Album(_)) {
+                            DiscContext::Selected
+                        } else {
+                            DiscContext::Inferred
+                        };
+                        if !context.allows(&target) {
                             return Ok(Command::Play(Arc::from([target]), 0));
                         }
-                        let tracks = Catalog::program(catalog.clone(), target.clone(), cx).await?;
+                        let tracks =
+                            Catalog::program(catalog.clone(), target.clone(), context, cx).await?;
                         let i = tracks
                             .iter()
                             .position(|t| target.same_item(t))
                             .ok_or_else(|| anyhow::anyhow!("The selected track is unavailable."))?;
-                        Ok(Command::PlayDisc(tracks, i))
+                        Ok(Command::PlayDisc(tracks, i, context))
                     }
                     .await;
                     if request.is_current(generation) {
@@ -105,9 +118,9 @@ impl MusicTable {
                     return;
                 }
                 match tracks {
-                    Ok(tracks) if !tracks.is_empty() => {
-                        player.update(cx, |p, cx| p.command(Command::PlayDisc(tracks, 0), cx))
-                    }
+                    Ok(tracks) if !tracks.is_empty() => player.update(cx, |p, cx| {
+                        p.command(Command::PlayDisc(tracks, 0, DiscContext::Selected), cx)
+                    }),
                     other => catalog.update(cx, |_, cx| {
                         cx.emit(crate::catalog::CatalogEvent::Notice(
                             other.err().map_or_else(
@@ -121,7 +134,10 @@ impl MusicTable {
             .detach();
         } else if let Some(disc) = self.programs.iter().find(|d| &d.id == id) {
             self.player.update(cx, |p, cx| {
-                p.command(Command::PlayDisc(disc.tracks.clone().into(), 0), cx)
+                p.command(
+                    Command::PlayDisc(disc.tracks.clone().into(), 0, DiscContext::Selected),
+                    cx,
+                )
             });
         }
     }

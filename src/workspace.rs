@@ -233,9 +233,9 @@ impl Workspace {
                     s.browser
                         .update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
                 }
-                PlayerEvent::ContinueCd(entry, track) => s
+                PlayerEvent::ContinueCd(entry) => s
                     .browser
-                    .update(cx, |b, cx| b.continue_cd(*entry, track.clone(), cx)),
+                    .update(cx, |b, cx| b.continue_cd(entry.clone(), cx)),
                 PlayerEvent::QueueChanged | PlayerEvent::TrackChanged => {
                     s.update_system(cx);
                     s.schedule_save(cx);

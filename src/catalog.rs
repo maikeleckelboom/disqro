@@ -7,7 +7,7 @@
 //! library worker; this entity keeps what the interface draws.
 use crate::{
     cache::Cache,
-    library::{Track, TrackList},
+    library::{DiscContext, Track, TrackList},
     store::{
         self, Handle, Locator, Mark, PlaylistId, Progress, RootId, Row, Scope, Store, TrackId,
     },
@@ -457,13 +457,24 @@ impl Catalog {
     pub async fn program(
         catalog: Entity<Self>,
         track: Arc<Track>,
+        context: DiscContext,
         cx: &AsyncApp,
     ) -> anyhow::Result<TrackList> {
+        if !context.allows(&track) {
+            return Ok(Arc::default());
+        }
         let store = catalog.read_with(cx, |c, _| c.handle());
         if let Some(store) = store {
             let target = track.clone();
             if let Some(disc) = store.call(move |s| s.registered_disc(&target)).await? {
-                return Self::album_tracks(catalog, disc.album, cx).await;
+                let tracks = Self::album_tracks(catalog, disc.album, cx).await?;
+                if tracks
+                    .iter()
+                    .any(|t| t.same_item(&track) && context.allows(t))
+                {
+                    return Ok(tracks);
+                }
+                return Ok(Arc::default());
             }
         }
         let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
@@ -471,8 +482,12 @@ impl Catalog {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("The CD folder is unavailable."))?
             .to_owned();
-        cx.background_spawn(async move { crate::discovery::local_program(&folder, &track) })
-            .await
+        let cache_dir = catalog.read_with(cx, |c, _| c.cache_dir.clone());
+        cx.background_spawn(async move {
+            let cache = cache_dir.and_then(|dir| Cache::open(&dir).ok());
+            crate::discovery::local_program(&folder, &track, context, cache.as_ref())
+        })
+        .await
     }
     pub async fn album_tracks(
         catalog: Entity<Self>,

@@ -13,7 +13,7 @@
 | Choose **Play CD** from a section menu or CD page menu | Start the whole CD at the beginning, including a recorded lead-in. Disc playback uses authored order and clears shuffle and repeat-one. |
 | Choose **Play All** or **Add All to Queue** from a collection | Play or append the whole displayed track sequence. A search limits these actions to the results. |
 | Double-click a playlist occurrence | Play from that occurrence in the displayed playlist sequence. Repeated occurrences retain independent queue entries. |
-| Click the player artwork | Open the playing CD and select the exact chapter. The artwork menu also offers **Show in Collection**. |
+| Click the player artwork | Open the playing CD and select the exact chapter. A loose recording opens in its collection or folder and its artwork menu offers only **Show in Collection**. |
 | Choose **Show Track on CD** from a queue entry | Reveal that entry’s chapter. The playback indicator stays on the active recording. |
 | Choose **Continue This CD** from the artwork menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
 
@@ -44,3 +44,5 @@ The optimized Windows application ran with isolated profiles and application vol
 - In one release run with an empty application cache, discovery published its first 19 tracks at 12.6 ms and completed in 302 ms. Applying six batches took 8.8 ms total on the interface thread, with a 4.8 ms maximum. These are application timers with Windows filesystem caching enabled.
 
 Formatting, warnings-denied Clippy and all 60 default tests passed locally. Tests cover alternate sheets, missing and replaced sources, verified moves, recorded lead-ins, multi-file CUE ordering, playlist duplicates and decoder-range restoration. An in-memory renderer also compared stereo samples across a CUE boundary. The two opt-in codec and scale campaigns were outside this run. Physical output, audible transitions and gapless playback between different files remain unqualified.
+
+The final correction added two regression tests covering loose WAV files, explicitly selected untagged CDs and tagged album/disc order. All 62 default tests passed. In a separate muted Windows session, a loose WAV played alone and its artwork menu showed only **Show in Collection**. Clearing the last chapter of a three-chapter CUE and continuing from the artwork restored that chapter. The middle chapter kept its queue entry as its position advanced from 11.91 to 21.30 seconds.

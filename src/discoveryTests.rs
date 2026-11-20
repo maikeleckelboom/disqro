@@ -236,3 +236,77 @@ fn loose_files_and_untagged_numbered_disc_directories_have_distinct_playback_con
     assert!(cd.has_disc_context());
     assert!(!Track::file(root.join("CD samples").join("one.wav")).has_disc_context());
 }
+
+#[test]
+fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
+    use library::DiscContext::{Inferred, Selected};
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a.wav", "b.wav", "c.wav"] {
+        crate::audio::tests::fixture(&dir.path().join(name), 44100, 441);
+    }
+    let tracks = collect(dir.path(), false, None).0;
+    assert_eq!(tracks.len(), 3);
+    let first = &tracks[0];
+    assert!(!Inferred.allows(first));
+    assert!(
+        local_program(dir.path(), first, Inferred, None)
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut queue = crate::queue::Queue::default();
+    queue.replace(std::slice::from_ref(first), 0);
+    let id = queue.current_entry().unwrap().id;
+    let revision = queue.revision;
+    assert!(!queue.continue_disc(id, &tracks, Inferred));
+    assert!(queue.upcoming().is_empty());
+    assert_eq!(queue.revision, revision);
+
+    let explicit = local_program(dir.path(), first, Selected, None).unwrap();
+    assert_eq!(&*explicit, tracks);
+    let duplicates = queue.add(&[tracks[1].clone(), tracks[1].clone()]);
+    assert!(queue.continue_disc(id, &explicit, Selected));
+    assert_eq!(queue.current_entry().unwrap().id, id);
+    assert_eq!(queue.upcoming()[0].id, duplicates[0]);
+    assert_eq!(queue.upcoming()[1].track, tracks[2]);
+    assert_eq!(queue.upcoming()[2].id, duplicates[1]);
+    assert_eq!(queue.upcoming()[0].disc_context, Selected);
+    assert_eq!(queue.upcoming()[2].disc_context, Inferred);
+    assert!(!queue.continue_disc(id, &explicit, Selected));
+}
+
+#[test]
+fn tagged_wavs_continue_in_track_order_within_the_same_album_and_disc() {
+    use library::DiscContext::Inferred;
+    use lofty::{
+        config::WriteOptions,
+        prelude::*,
+        tag::{Tag, TagType},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    for (file, album, disc, number) in [
+        ("a.wav", "Album", 1, 2),
+        ("b.wav", "Album", 1, 1),
+        ("c.wav", "Album", 2, 3),
+        ("d.wav", "Other", 1, 4),
+    ] {
+        let path = dir.path().join(file);
+        crate::audio::tests::fixture(&path, 44100, 441);
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_album(album.into());
+        tag.set_disk(disc);
+        tag.set_track(number);
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+    let first = collect(dir.path(), false, None).0.remove(1);
+    assert!(Inferred.allows(&first));
+    let program = local_program(dir.path(), &first, Inferred, None).unwrap();
+    assert_eq!(
+        program.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    let mut queue = crate::queue::Queue::default();
+    queue.replace(&program[..1], 0);
+    assert!(queue.continue_disc(queue.current_entry().unwrap().id, &program, Inferred));
+    assert_eq!(queue.upcoming()[0].track.title, "a");
+}

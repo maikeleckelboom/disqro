@@ -1,5 +1,5 @@
 use crate::{
-    library::Track,
+    library::{DiscContext, Track},
     queue::{Queue, Repeat},
 };
 use anyhow::{Context, Result, ensure};
@@ -43,7 +43,7 @@ pub struct Status {
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
     Play(crate::library::TrackList, usize),
-    PlayDisc(crate::library::TrackList, usize),
+    PlayDisc(crate::library::TrackList, usize, DiscContext),
     Toggle,
     SetPlaying(bool),
     Stop,
@@ -58,7 +58,7 @@ pub enum Command {
     Enqueue(crate::library::TrackList),
     Remove(Vec<u64>),
     Move(u64, usize),
-    ContinueDisc(u64, crate::library::TrackList),
+    ContinueDisc(u64, crate::library::TrackList, DiscContext),
     ClearUpcoming,
     ClearHistory,
     Shuffle(bool),
@@ -503,12 +503,15 @@ impl Engine {
     }
     fn command(&mut self, c: Command) -> Result<()> {
         match c {
-            Command::PlayDisc(tracks, i) => {
+            Command::PlayDisc(tracks, i, context) => {
                 self.queue.shuffle = false;
                 if self.queue.repeat == Repeat::One {
                     self.queue.set_repeat(Repeat::Off);
                 }
                 self.queue.replace(&tracks, i);
+                for entry in &mut self.queue.entries {
+                    entry.disc_context = context;
+                }
                 self.play(i, 0.)?;
             }
             Command::Play(tracks, i) => {
@@ -579,8 +582,8 @@ impl Engine {
                     self.revalidate();
                 }
             }
-            Command::ContinueDisc(entry, program) => {
-                if self.queue.continue_disc(entry, &program) {
+            Command::ContinueDisc(entry, program, context) => {
+                if self.queue.continue_disc(entry, &program, context) {
                     self.revalidate();
                 }
             }

@@ -208,6 +208,11 @@ impl QueueView {
                 }
             }
         };
+        let (destination, label) = if entry.disc_context.allows(&entry.track) {
+            (Destination::Disc, "Show Track on CD")
+        } else {
+            (Destination::Collection, "Show in Collection")
+        };
         let play = act(Command::Jump(id));
         let next = act(Command::Move(id, next_slot));
         let remove = act(Command::Remove(vec![id]));
@@ -230,12 +235,12 @@ impl QueueView {
         )
         .separator()
         .item(
-            PopupMenuItem::new("Show Track on CD")
+            PopupMenuItem::new(label)
                 .icon(IconName::FolderOpen)
                 .on_click(move |_, _, cx| {
                     let _ = this.update(cx, |s, cx| {
                         s.player.update(cx, |_, cx| {
-                            cx.emit(PlayerEvent::Locate(entry.track.clone(), Destination::Disc))
+                            cx.emit(PlayerEvent::Locate(entry.track.clone(), destination))
                         })
                     });
                 }),

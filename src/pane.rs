@@ -262,20 +262,20 @@ impl Panel for Pane {
                 let playing = self
                     .player
                     .read(cx)
-                    .status
-                    .entry
-                    .zip(self.player.read(cx).status.track.clone())
-                    .filter(|(_, t)| cd.as_ref().is_some_and(|id| table.page_contains(id, t)));
+                    .playing_entry()
+                    .filter(|e| {
+                        cd.as_ref()
+                            .is_some_and(|id| table.page_contains(id, &e.track))
+                    })
+                    .cloned();
                 let cd_table = b.table.clone();
-                let menu = menu.when_some(playing, |menu, (entry, track)| {
+                let menu = menu.when_some(playing, |menu, mut entry| {
+                    entry.disc_context = crate::library::DiscContext::Selected;
                     let player = self.player.clone();
                     menu.item(
                         PopupMenuItem::new("Continue This CD").on_click(move |_, _, cx| {
                             player.update(cx, |_, cx| {
-                                cx.emit(crate::player::PlayerEvent::ContinueCd(
-                                    entry,
-                                    track.clone(),
-                                ))
+                                cx.emit(crate::player::PlayerEvent::ContinueCd(entry.clone()))
                             })
                         }),
                     )

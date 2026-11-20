@@ -315,20 +315,33 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
     e.status.playing = true;
     e.command(Command::ClearUpcoming).unwrap();
     assert_eq!((e.group.len(), e.limit), (1, 1.));
-    e.command(Command::ContinueDisc(current, program.clone()))
-        .unwrap();
+    e.command(Command::ContinueDisc(
+        current,
+        program.clone(),
+        DiscContext::Inferred,
+    ))
+    .unwrap();
     assert_eq!((e.group.len(), e.limit), (3, 3.));
     assert_eq!(
         (e.status.entry, e.status.position, e.status.playing),
         (Some(current), 0.42, true)
     );
     let revision = e.queue.revision;
-    e.command(Command::ContinueDisc(current, program.clone()))
-        .unwrap();
+    e.command(Command::ContinueDisc(
+        current,
+        program.clone(),
+        DiscContext::Inferred,
+    ))
+    .unwrap();
     assert_eq!(e.queue.revision, revision);
     e.update_position(1.125);
     assert_eq!(e.queue.current, Some(2));
     assert_eq!(e.status.position, 0.125);
-    e.command(Command::ContinueDisc(current, program)).unwrap();
+    e.command(Command::ContinueDisc(
+        current,
+        program,
+        DiscContext::Inferred,
+    ))
+    .unwrap();
     assert_eq!(e.queue.current, Some(2));
 }

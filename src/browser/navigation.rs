@@ -350,7 +350,15 @@ impl Browser {
         }
     }
 
-    pub fn continue_cd(&self, entry: u64, track: Arc<Track>, cx: &mut Context<Self>) {
+    pub fn continue_cd(&self, request: crate::queue::Entry, cx: &mut Context<Self>) {
+        let crate::queue::Entry {
+            id: entry,
+            track,
+            disc_context: context,
+        } = request;
+        if !context.allows(&track) {
+            return;
+        }
         let player = self.table.read(cx).delegate().player.clone();
         if track.library_id.is_none()
             && self.location.is_folder()
@@ -359,17 +367,23 @@ impl Browser {
         {
             let program = disc.tracks.clone().into();
             player.update(cx, |p, cx| {
-                p.command(crate::audio::Command::ContinueDisc(entry, program), cx)
+                p.command(
+                    crate::audio::Command::ContinueDisc(entry, program, context),
+                    cx,
+                )
             });
             return;
         }
         let catalog = self.catalog.clone();
         cx.spawn(async move |_, cx| {
-            let result = Catalog::program(catalog.clone(), track.clone(), cx).await;
+            let result = Catalog::program(catalog.clone(), track.clone(), context, cx).await;
             match result {
                 Ok(tracks) if tracks.iter().any(|t| t.same_item(&track)) => {
                     player.update(cx, |p, cx| {
-                        p.command(crate::audio::Command::ContinueDisc(entry, tracks), cx)
+                        p.command(
+                            crate::audio::Command::ContinueDisc(entry, tracks, context),
+                            cx,
+                        )
                     });
                 }
                 other => catalog.update(cx, |_, cx| {

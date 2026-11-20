@@ -31,7 +31,7 @@ use std::{
 
 pub enum PlayerEvent {
     Locate(Arc<crate::library::Track>, crate::browser::Destination),
-    ContinueCd(u64, Arc<crate::library::Track>),
+    ContinueCd(crate::queue::Entry),
     TrackChanged,
     PlaySelection,
     QueueChanged,
@@ -147,6 +147,11 @@ impl Player {
     }
     pub fn queue(&self) -> &Arc<Queue> {
         &self.queue
+    }
+    pub fn playing_entry(&self) -> Option<&crate::queue::Entry> {
+        self.queue
+            .current_entry()
+            .filter(|e| Some(e.id) == self.status.entry)
     }
     /// A sender for control paths outside the window, such as media keys.
     pub fn sender(&self) -> crate::audio::Commands {
@@ -402,12 +407,20 @@ impl Render for Player {
             use crate::browser::Destination;
             let player = cx.entity();
             let click = track.clone();
-            let entry = s.entry;
+            let entry = self
+                .playing_entry()
+                .filter(|e| e.disc_context.allows(&e.track))
+                .cloned();
+            let (destination, hint) = if entry.is_some() {
+                (Destination::Disc, "Open playing CD")
+            } else {
+                (Destination::Collection, "Show in Collection")
+            };
             art.id("open-playing-cd")
                 .cursor_pointer()
-                .tooltip(|w, cx| Tooltip::new("Open playing CD").build(w, cx))
+                .tooltip(move |w, cx| Tooltip::new(hint).build(w, cx))
                 .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(PlayerEvent::Locate(click.clone(), Destination::Disc))
+                    cx.emit(PlayerEvent::Locate(click.clone(), destination))
                 }))
                 .context_menu(move |menu, _, _| {
                     let (p, t) = (player.clone(), track.clone());
@@ -418,12 +431,12 @@ impl Render for Player {
                             })
                         }),
                     )
-                    .when_some(entry, |menu, entry| {
-                        let (p, t) = (player.clone(), track.clone());
+                    .when_some(entry.clone(), |menu, entry| {
+                        let p = player.clone();
                         menu.item(PopupMenuItem::new("Continue This CD").on_click(
                             move |_, _, cx| {
                                 p.update(cx, |_, cx| {
-                                    cx.emit(PlayerEvent::ContinueCd(entry, t.clone()))
+                                    cx.emit(PlayerEvent::ContinueCd(entry.clone()))
                                 })
                             },
                         ))

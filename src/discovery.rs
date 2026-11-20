@@ -307,11 +307,14 @@ fn scan_into(
 
 /// Resolve an unindexed CD away from the UI thread. Only its own directory
 /// is read. The discovery worker applies the same CUE and tag rules as browsing.
-pub fn local_program(folder: &Path, target: &Track) -> anyhow::Result<crate::library::TrackList> {
-    let cache =
-        crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
+pub fn local_program(
+    folder: &Path,
+    target: &Track,
+    context: library::DiscContext,
+    cache: Option<&Cache>,
+) -> anyhow::Result<crate::library::TrackList> {
     let mut rows = Vec::new();
-    scan_into(folder, false, cache.as_ref(), &|| true, &mut |batch| {
+    scan_into(folder, false, cache, &|| true, &mut |batch| {
         for (index, track) in batch.rows {
             if index == rows.len() {
                 rows.push(track);
@@ -321,7 +324,11 @@ pub fn local_program(folder: &Path, target: &Track) -> anyhow::Result<crate::lib
         }
         true
     });
-    let Some(actual) = rows.iter().flatten().find(|t| target.same_item(t)) else {
+    let Some(actual) = rows
+        .iter()
+        .flatten()
+        .find(|t| target.same_item(t) && context.allows(t))
+    else {
         return Ok(Arc::default());
     };
     let disc = crate::collection::DiscId::of(actual);
