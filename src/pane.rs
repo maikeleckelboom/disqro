@@ -87,12 +87,17 @@ impl Panel for Pane {
                     _ => None,
                 };
                 let tracks = |n: usize| format!("{n} {}", if n == 1 { "track" } else { "tracks" });
-                let detail = if b.busy {
+                let detail = if b.busy && b.slow {
                     format!("Scanning · {}", tracks(count))
+                } else if b.busy && count == 0 {
+                    String::new()
+                } else if b.busy {
+                    tracks(count)
                 } else if count == 0 {
                     String::new()
                 } else if b.listing_discs() {
-                    format!("{discs} discs · {}", tracks(count))
+                    let plural = if discs == 1 { "disc" } else { "discs" };
+                    format!("{discs} {plural} · {}", tracks(count))
                 } else if total > 0. {
                     format!("{} · {}", tracks(count), clock(total))
                 } else {
@@ -103,7 +108,7 @@ impl Panel for Pane {
                     Some(status) => format!("{detail} · {status}"),
                     None => detail,
                 };
-                let subfolders = b.location.is_folder() && b.prefs.recursive;
+                let subfolders = b.location.is_folder() && b.subfolders;
                 (
                     b.title(cx),
                     if subfolders {
@@ -230,18 +235,15 @@ impl Panel for Pane {
                 let (t1, t2, t3) = (all.clone(), all.clone(), all);
                 let browser = self.browser.clone();
                 let scope = browser.clone();
-                let recursive = b.prefs.recursive;
+                let subfolders = b.subfolders;
                 let folder = b.path.clone();
                 let menu = match &location {
                     Location::Folder(_) => menu
                         .item(
                             PopupMenuItem::new("Include Subfolders")
-                                .checked(recursive)
+                                .checked(subfolders)
                                 .on_click(move |_, w, cx| {
-                                    scope.update(cx, |b, cx| {
-                                        b.prefs.recursive = !b.prefs.recursive;
-                                        b.reload(w, cx);
-                                    });
+                                    scope.update(cx, |b, cx| b.set_subfolders(!subfolders, w, cx));
                                 }),
                         )
                         .separator(),

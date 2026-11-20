@@ -156,3 +156,71 @@ fn six_figure_collection_projection() {
         start.elapsed()
     );
 }
+
+#[test]
+fn dot_folders_are_skipped_but_open_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for folder in ["Album", ".git", r".local\fixtures"] {
+        fs::create_dir_all(root.join(folder)).unwrap();
+    }
+    crate::audio::tests::fixture(&root.join("Album").join("song.wav"), 44100, 441);
+    crate::audio::tests::fixture(&root.join(r".local\fixtures\probe.wav"), 44100, 441);
+    let names = |dirs: Vec<PathBuf>| {
+        dirs.iter()
+            .map(|p| library::folder_name(p))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(library::subfolders(root)), ["Album"]);
+    assert_eq!(names(library::browse(root).unwrap().dirs), ["Album"]);
+    let (found, _) = collect(root, true, None);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].source.ends_with("song.wav"));
+    // Navigating straight into a dot-folder still lists it.
+    assert_eq!(
+        collect(&root.join(r".local\fixtures"), false, None).0.len(),
+        1
+    );
+}
+
+#[test]
+fn folders_and_files_sort_like_explorer() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["CD 10", "cd 2", "CD 1"] {
+        fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    for name in ["10.wav", "2.wav", "1.wav"] {
+        fs::write(dir.path().join(name), []).unwrap();
+    }
+    let folder = library::browse(dir.path()).unwrap();
+    let dirs: Vec<_> = folder
+        .dirs
+        .iter()
+        .map(|p| library::folder_name(p))
+        .collect();
+    assert_eq!(dirs, ["CD 1", "cd 2", "CD 10"]);
+    let files: Vec<_> = folder.tracks.iter().map(|t| t.title.clone()).collect();
+    assert_eq!(files, ["1", "2", "10"]);
+}
+
+#[test]
+fn unreadable_audio_is_told_apart_from_untagged_audio() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::audio::tests::fixture(&dir.path().join("untagged.wav"), 44100, 4410);
+    fs::write(dir.path().join("empty.wav"), []).unwrap();
+    let (tx, rx) = async_channel::unbounded();
+    scan(dir.path(), false, None, &tx);
+    drop(tx);
+    let mut unreadable = vec![];
+    let mut durations = std::collections::HashMap::new();
+    while let Ok(batch) = rx.try_recv() {
+        unreadable.extend(batch.unreadable);
+        for t in batch.rows.into_iter().filter_map(|(_, t)| t) {
+            durations.insert(library::name(&t.source), t.duration);
+        }
+    }
+    assert_eq!(unreadable.len(), 1);
+    assert!(unreadable[0].ends_with("empty.wav"));
+    assert!(durations["untagged"].is_some_and(|d| d > 0.));
+    assert_eq!(durations["empty"], None);
+}

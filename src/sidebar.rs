@@ -152,6 +152,7 @@ impl Sidebar {
             available: Arc::from([]),
         };
         this.check_availability(cx);
+        this.share_places(cx);
         this
     }
     fn show(&self, location: Location, window: &mut Window, cx: &mut App) {
@@ -240,6 +241,7 @@ impl Sidebar {
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.check_availability(cx);
+        self.share_places(cx);
         cx.emit(SidebarEvent::Changed);
         cx.notify();
     }
@@ -269,8 +271,22 @@ impl Sidebar {
     fn open(&self, ix: usize, window: &mut Window, cx: &mut App) {
         if let Some(p) = self.places.items.get(ix) {
             let path = p.path.clone();
-            self.browser.update(cx, |b, cx| b.open(path, window, cx));
+            self.browser
+                .update(cx, |b, cx| b.open_place(path, window, cx));
         }
+    }
+    /// Places other than drives anchor the folder tree; a drive is where
+    /// the tree falls back to anyway.
+    fn share_places(&self, cx: &mut App) {
+        let places = self
+            .places
+            .items
+            .iter()
+            .filter(|p| p.origin != Origin::Drive)
+            .map(|p| p.path.clone())
+            .collect();
+        let folders = self.browser.read(cx).folders.clone();
+        folders.update(cx, |f, _| f.set_places(places));
     }
     fn choose_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let result = cx.prompt_for_paths(PathPromptOptions {
@@ -489,55 +505,85 @@ impl Sidebar {
             })
             .into_any_element()
     }
+    /// The folder tree. The expander only opens or closes a branch; the
+    /// name opens the folder. Both resolve their entry by path, so a click
+    /// that lands while the tree updates still means the folder it showed.
     fn render_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         let b = self.browser.read(cx);
+        let state = b.folders.read(cx).state.clone();
+        let folders = b.folders.clone();
         let browser = self.browser.clone();
+        let menu_folders = b.folders.clone();
         let menu_browser = self.browser.clone();
         let sidebar = cx.weak_entity();
         let catalog = self.catalog.clone();
-        tree(&b.tree, move |ix, entry, selected, _, _| {
+        tree(&state, move |ix, entry, selected, _, _| {
             let depth = entry.depth();
             let id = entry.item().id.clone();
-            let browser = browser.clone();
+            let toggle_id = id.clone();
+            let (browser, folders, toggle) = (browser.clone(), folders.clone(), folders.clone());
             let expandable = entry.is_folder();
             ListItem::new(("folder", ix))
                 .h(px(26.))
-                .px(px(10.))
+                .pl(px(4.))
+                .pr(px(10.))
                 .py_0()
                 .mx(px(6.))
                 .rounded(px(5.))
                 .child(
                     h_flex()
-                        .gap(px(6.))
+                        .gap(px(4.))
                         .min_w_0()
                         .items_center()
                         .text_size(px(13.))
                         .text_color(if selected { m.text } else { m.text_muted })
                         .pl(px(depth as f32 * 14.))
-                        .child(div().w(px(12.)).flex_shrink_0().when(expandable, |d| {
-                            d.child(
-                                Icon::new(if entry.is_expanded() {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size(px(12.))
-                                .text_color(m.text_faint),
-                            )
-                        }))
+                        .child(
+                            div()
+                                .id(("folder-expander", ix))
+                                .size(px(20.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .when(expandable, |d| {
+                                    d.hover(|d| d.bg(m.hover))
+                                        .child(
+                                            Icon::new(if entry.is_expanded() {
+                                                IconName::ChevronDown
+                                            } else {
+                                                IconName::ChevronRight
+                                            })
+                                            .size(px(12.))
+                                            .text_color(m.text_faint),
+                                        )
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx));
+                                        })
+                                }),
+                        )
                         .child(
                             FileIcon::Folder
                                 .icon()
                                 .size(px(15.))
                                 .flex_shrink_0()
+                                .mr(px(2.))
                                 .text_color(if selected { m.accent } else { m.text_faint }),
                         )
                         .child(div().truncate().child(entry.item().label.clone())),
                 )
                 .on_click(move |_, window, cx| {
+                    // The tree's own click handling would select by row
+                    // position and expand; navigation does both by path.
+                    cx.stop_propagation();
                     let b = browser.read(cx);
-                    if let Some(path) = b.tree_path(&id)
+                    if let Some(path) = folders.read(cx).path(&id)
                         && (!same_path(&path, &b.path) || !b.location.is_folder())
                     {
                         browser.update(cx, |b, cx| b.open(path, window, cx));
@@ -545,7 +591,7 @@ impl Sidebar {
                 })
         })
         .context_menu(move |_, entry, menu, _, cx| {
-            let Some(path) = menu_browser.read(cx).tree_path(&entry.item().id) else {
+            let Some(path) = menu_folders.read(cx).path(&entry.item().id) else {
                 return menu;
             };
             let pinned = sidebar
@@ -659,7 +705,7 @@ impl Sidebar {
                     PopupMenuItem::new("Browse Folder")
                         .icon(IconName::FolderOpen)
                         .on_click(move |_, w, cx| {
-                            c.update(cx, |b, cx| b.open(path.clone(), w, cx))
+                            c.update(cx, |b, cx| b.open_place(path.clone(), w, cx))
                         }),
                 )
                 .item({
