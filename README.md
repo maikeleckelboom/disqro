@@ -22,6 +22,8 @@ Open a folder from Places, the folder tree, the address bar (**Ctrl+L**), or **C
 
 A folder shows the recordings it holds, and the folder tree shows where it sits within its Place. To browse an archive such as a CD collection as a whole, choose **Include Subfolders**: the folder offers it when it holds only subfolders, and the Recordings panel menu always has it. Disqro remembers the choice for that folder and the folders inside it. A collection shows its albums, discs and individual CUE tracks as they appear. Switch between **Albums / CDs** and **All Tracks**, or search nested music with Ctrl+F. Ctrl-click or Shift-click to queue a selection. The player keeps its queue while you browse.
 
+**All Tracks** groups recursive collections by CD. Double-click a chapter to play within that CD, or use **Play All** for the collection. Click the player artwork to return to the playing chapter. Its menu includes **Show in Collection** and **Continue This CD**. [CD navigation, queue behavior and Windows screenshots](docs/cd-navigation.md)
+
 The Windows workspace includes an editable address bar, Places, native tray and media controls, real artwork, and waveform seeking. It remembers the queue, folder, volume, collection view, columns and dock layout. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
 
 ## Persistent library and personal collections
