@@ -9,7 +9,22 @@ customizable desktop application.
 The goal is simple: **excellent music playback and library management, with new ways to explore and experience your
 music.**
 
-## Features
+## Run the Windows player
+
+Build on Windows x64 with Rustup, Visual Studio C++ Build Tools, the Windows SDK, and CMake. The repository pins Rust and the dependency graph.
+
+```powershell
+.\build.ps1 -Release
+.\target\release\disqro.exe
+```
+
+Open a folder from Places, the folder tree, the address bar (**Ctrl+L**), or **Ctrl+O**. Double-click a track to start listening, or right-click it to play it next or add it to the queue. A folder, an audio file, or a CUE sheet can also be passed as the first argument. Opening a file or sheet starts playback.
+
+Open a collection root to browse its albums, discs and individual CUE tracks as they appear. Switch between **Albums / CDs** and **All Tracks**, search nested music with Ctrl+F, or turn off **Include Subfolders** in the Recordings panel menu. Ctrl-click or Shift-click to queue a selection. The player keeps its queue while you browse.
+
+The Windows workspace includes an editable address bar, Places, native tray and media controls, real artwork, and waveform seeking. It remembers the queue, folder, volume, collection view, columns and dock layout. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
+
+## Product direction
 
 - **Native and fast** — Lightweight, responsive, and designed for large music collections.
 - **Advanced music library** — Virtualized tables with customizable columns, artwork thumbnails, cached waveform
@@ -25,7 +40,7 @@ music.**
 - **Clean interface** — Minimal visual clutter, contextual menus, and powerful keyboard interactions.
 - **Local-first** — Your music and library data remain under your control.
 
-## Technology
+## Technology direction
 
 - **Rust** — Native application and audio processing.
 - **GPUI + GPUI Kit** — Interface, components, icons, and docking system.
@@ -43,5 +58,4 @@ responsive, and optional.
 
 ## Project Status
 
-Disqro is in early development, targeting Windows first. The features described above are planned goals, not yet
-released functionality.
+Disqro is in early development, targeting Windows first. The listening workspace is available from source. Recursive browsing and a rebuildable SQLite cache are available. The global indexed library, playlists, favorites, ratings, zoomable waveforms and independent visualizer panels are future milestones.
