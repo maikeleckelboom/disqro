@@ -1,12 +1,14 @@
 use crate::{
     audio::Command,
     browser::{Browser, Reveal, music_home},
+    catalog::{Catalog, CatalogEvent, Targets},
     location::LocationBar,
     pane::{Kind, Pane},
     player::{Player, PlayerEvent},
     profile::{self, Profile, SavedQueue, WindowPrefs},
     queue_view::QueueView,
     sidebar::{Sidebar, SidebarEvent},
+    store::Scope,
     system::{System, SystemEvent},
     theme::materials,
 };
@@ -41,7 +43,21 @@ gpui_kit::actions!(
         PreviousTrack,
         ShowQueue,
         HideToTray,
-        Quit
+        Quit,
+        ToggleLike,
+        RateOne,
+        RateTwo,
+        RateThree,
+        RateFour,
+        RateFive,
+        ClearRating,
+        ExtendUp,
+        ExtendDown,
+        MovePlaylistUp,
+        MovePlaylistDown,
+        RemoveFromPlaylist,
+        NewPlaylist,
+        AddMusicFolder
     ]
 );
 
@@ -63,11 +79,37 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-right", NextTrack, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-left", PreviousTrack, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-q", Quit, Some("Disqro")),
+        KeyBinding::new("alt-l", ToggleLike, Some("Disqro && !Input")),
+        KeyBinding::new("alt-1", RateOne, Some("Disqro && !Input")),
+        KeyBinding::new("alt-2", RateTwo, Some("Disqro && !Input")),
+        KeyBinding::new("alt-3", RateThree, Some("Disqro && !Input")),
+        KeyBinding::new("alt-4", RateFour, Some("Disqro && !Input")),
+        KeyBinding::new("alt-5", RateFive, Some("Disqro && !Input")),
+        KeyBinding::new("alt-0", ClearRating, Some("Disqro && !Input")),
+        KeyBinding::new(
+            "delete",
+            RemoveFromPlaylist,
+            Some("MusicTracks > DataTable"),
+        ),
+        KeyBinding::new("shift-up", ExtendUp, Some("MusicTracks > DataTable")),
+        KeyBinding::new("shift-down", ExtendDown, Some("MusicTracks > DataTable")),
+        KeyBinding::new(
+            "ctrl-shift-up",
+            MovePlaylistUp,
+            Some("MusicTracks > DataTable"),
+        ),
+        KeyBinding::new(
+            "ctrl-shift-down",
+            MovePlaylistDown,
+            Some("MusicTracks > DataTable"),
+        ),
+        KeyBinding::new("ctrl-n", NewPlaylist, Some("Disqro")),
     ]);
 }
 
 pub struct Workspace {
     browser: Entity<Browser>,
+    catalog: Entity<Catalog>,
     player: Entity<Player>,
     sidebar: Entity<Sidebar>,
     location: Entity<LocationBar>,
@@ -112,9 +154,30 @@ impl Workspace {
         };
         let volume = saved.volume.clamp(0., 1.);
         let player = cx.new(|cx| Player::new(volume, window, cx));
-        let browser =
-            cx.new(|cx| Browser::new(player.clone(), saved.columns, saved.collection, window, cx));
-        let sidebar = cx.new(|cx| Sidebar::new(browser.clone(), saved.places.take(), cx));
+        let catalog = cx.new(Catalog::new);
+        if saved.columns_version < profile::COLUMNS_VERSION {
+            crate::table::add_personal_columns(&mut saved.columns);
+        }
+        let columns = std::mem::take(&mut saved.columns);
+        let browser = cx.new(|cx| {
+            Browser::new(
+                player.clone(),
+                catalog.clone(),
+                columns,
+                saved.collection,
+                window,
+                cx,
+            )
+        });
+        let sidebar = cx.new(|cx| {
+            Sidebar::new(
+                browser.clone(),
+                catalog.clone(),
+                saved.places.take(),
+                window,
+                cx,
+            )
+        });
         let queue = cx.new(|cx| QueueView::new(player.clone(), browser.clone(), cx));
         let location_bar = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         let panels = Kind::ALL
@@ -159,6 +222,11 @@ impl Workspace {
             cx.subscribe(&sidebar, |s: &mut Self, _, e, cx| match e {
                 SidebarEvent::Changed => s.schedule_save(cx),
             }),
+            cx.subscribe_in(&catalog, window, |_, _, e, window, cx| {
+                if let CatalogEvent::Notice(text) = e {
+                    window.push_notification(text.clone(), cx);
+                }
+            }),
             cx.subscribe_in(&player, window, |s: &mut Self, _, e, _, cx| match e {
                 PlayerEvent::QueueChanged | PlayerEvent::TrackChanged => {
                     s.update_system(cx);
@@ -187,6 +255,7 @@ impl Workspace {
         subscriptions.push(cx.observe(&browser, |_, _, cx| cx.notify()));
         let mut app = Self {
             browser,
+            catalog,
             player,
             sidebar,
             location: location_bar,
@@ -221,6 +290,7 @@ impl Workspace {
                 p.command(Command::Restore(Box::new(saved.queue), saved.position), cx)
             });
         }
+        let opened_file = arg.is_some();
         let target = arg.or(saved.folder).unwrap_or_else(music_home);
         let is_file = crate::library::is_audio(&target)
             || target
@@ -234,8 +304,16 @@ impl Workspace {
         } else {
             target.clone()
         };
-        app.browser.update(cx, |b, cx| {
-            b.load(folder, is_file.then_some(Reveal::Play(target)), window, cx)
+        let restored = saved
+            .location
+            .take()
+            .filter(|l| !l.is_folder() && !opened_file);
+        app.browser.update(cx, |b, cx| match restored {
+            Some(location) => {
+                b.path = folder;
+                b.show(location, window, cx);
+            }
+            None => b.load(folder, is_file.then_some(Reveal::Play(target)), window, cx),
         });
         app.browser.read(cx).list_focus(cx).focus(window, cx);
         if let Some(notice) = profile_notice {
@@ -284,7 +362,58 @@ impl Workspace {
             }),
             window: self.prefs,
             collection: b.prefs,
+            location: Some(b.location.clone()),
+            columns_version: profile::COLUMNS_VERSION,
         }
+    }
+    /// What a library action applies to: the table's selection, or the
+    /// playing track when nothing is selected.
+    fn targets(&self, cx: &App) -> Targets {
+        let t = self.browser.read(cx).table.read(cx);
+        let targets = t.delegate().targets(None, t.selected_row());
+        if !targets.is_empty() {
+            return targets;
+        }
+        match &self.player.read(cx).status.track {
+            Some(track) => Targets::Tracks(vec![track.clone()]),
+            None => targets,
+        }
+    }
+    fn extend_selection(&self, direction: isize, cx: &mut App) {
+        self.browser.read(cx).table.clone().update(cx, |t, cx| {
+            let primary = t.selected_row();
+            if let Some(row) = t.delegate_mut().extend_selection(primary, direction) {
+                t.clear_selection(cx);
+                t.scroll_to_row(row, cx);
+            }
+        });
+    }
+    fn move_selection(&self, down: bool, cx: &mut App) {
+        self.browser.read(cx).table.clone().update(cx, |t, cx| {
+            t.delegate().move_selection(t.selected_row(), down, cx)
+        });
+    }
+
+    fn rate(&mut self, stars: u8, cx: &mut Context<Self>) {
+        let targets = self.targets(cx);
+        self.catalog.update(cx, |c, cx| c.rate(targets, stars, cx));
+    }
+    fn add_music_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let result = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Add to Library".into()),
+        });
+        let catalog = self.catalog.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            if let Ok(Ok(Some(paths))) = result.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                catalog.update(cx, |c, cx| c.add_root(path, cx));
+            }
+        })
+        .detach();
     }
     /// Keep at most one debounced write in flight. A change during the write
     /// asks for another snapshot after it completes.
@@ -394,9 +523,14 @@ impl Workspace {
         let revision = self.save_revision;
         let mut snapshot = self.snapshot(cx);
         let commands = self.player.read(cx).sender();
+        // All personal edits issued before Quit must reach SQLite before process exit.
+        let flushed = self.catalog.read(cx).handle().map(|s| s.drain());
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    if let Some(flushed) = flushed {
+                        flushed.await?;
+                    }
                     snapshot.queue = commands.snapshot()?;
                     file.commit(revision, &snapshot)
                 })
@@ -458,7 +592,7 @@ impl Workspace {
         let t = self.browser.read(cx).table.read(cx);
         if let Some(ix) = t
             .selected_row()
-            .or_else(|| (!t.delegate().rows.is_empty()).then_some(0))
+            .or_else(|| (!t.delegate().is_empty()).then_some(0))
         {
             self.browser
                 .read(cx)
@@ -487,7 +621,11 @@ impl Workspace {
             .accessibility_label("Workspace")
             .tooltip("Workspace")
             .dropdown_menu(move |mut menu, _, _| {
-                menu = menu.menu("Open Folder…", Box::new(OpenFolder)).separator();
+                menu = menu
+                    .menu("Open Folder…", Box::new(OpenFolder))
+                    .menu("Add Music Folder to Library…", Box::new(AddMusicFolder))
+                    .menu("New Playlist", Box::new(NewPlaylist))
+                    .separator();
                 for kind in [Kind::Folders, Kind::Tracks, Kind::Queue, Kind::Player] {
                     let s = shell.clone();
                     menu = menu.item(
@@ -580,7 +718,7 @@ impl Render for Workspace {
         let m = *materials(cx);
         let b = self.browser.read(cx);
         let (can_back, can_forward) = (b.can_go_back(), b.can_go_forward());
-        let has_parent = b.path.parent().is_some();
+        let has_parent = b.can_go_up();
         let search = b.search.clone();
         let nav = h_flex()
             .occlude()
@@ -695,6 +833,35 @@ impl Render for Workspace {
                     .update(cx, |p, cx| p.command(Command::Step(-1), cx))
             }))
             .on_action(cx.listener(|s, _: &ShowQueue, w, cx| s.show(Kind::Queue, w, cx)))
+            .on_action(cx.listener(|s, _: &ToggleLike, _, cx| {
+                let targets = s.targets(cx);
+                s.catalog.update(cx, |c, cx| c.toggle_like(targets, cx));
+            }))
+            .on_action(cx.listener(|s, _: &RateOne, _, cx| s.rate(1, cx)))
+            .on_action(cx.listener(|s, _: &RateTwo, _, cx| s.rate(2, cx)))
+            .on_action(cx.listener(|s, _: &RateThree, _, cx| s.rate(3, cx)))
+            .on_action(cx.listener(|s, _: &RateFour, _, cx| s.rate(4, cx)))
+            .on_action(cx.listener(|s, _: &RateFive, _, cx| s.rate(5, cx)))
+            .on_action(cx.listener(|s, _: &ClearRating, _, cx| s.rate(0, cx)))
+            .on_action(cx.listener(|s, _: &ExtendUp, _, cx| s.extend_selection(-1, cx)))
+            .on_action(cx.listener(|s, _: &ExtendDown, _, cx| s.extend_selection(1, cx)))
+            .on_action(cx.listener(|s, _: &MovePlaylistUp, _, cx| s.move_selection(false, cx)))
+            .on_action(cx.listener(|s, _: &MovePlaylistDown, _, cx| s.move_selection(true, cx)))
+            .on_action(cx.listener(|s, _: &RemoveFromPlaylist, _, cx| {
+                let t = s.browser.read(cx).table.read(cx);
+                if let Targets::Keys(Scope::Playlist(p), entries) =
+                    t.delegate().targets(None, t.selected_row())
+                    && !entries.is_empty()
+                {
+                    s.catalog
+                        .update(cx, |c, cx| c.remove_entries(p, entries, cx));
+                }
+            }))
+            .on_action(cx.listener(|s, _: &NewPlaylist, _, cx| {
+                s.catalog
+                    .update(cx, |c, cx| c.new_playlist(Targets::Tracks(vec![]), cx));
+            }))
+            .on_action(cx.listener(|s, _: &AddMusicFolder, w, cx| s.add_music_folder(w, cx)))
             .on_action(cx.listener(|s, _: &HideToTray, w, cx| s.hide_to_tray(w, cx)))
             .on_action(cx.listener(|s, _: &Quit, w, cx| s.quit(w, cx)))
             .on_action(cx.listener(|s, _: &PlaySelected, w, cx| {
@@ -714,7 +881,7 @@ impl Render for Workspace {
                     .read(cx)
                     .selected_item()
                     .and_then(|i| b.tree_path(&i.id))
-                    && path != b.path
+                    && (path != b.path || !b.location.is_folder())
                 {
                     s.browser.update(cx, |b, cx| b.open(path, w, cx));
                 }

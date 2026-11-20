@@ -47,6 +47,9 @@ impl CoverFile {
         let stamp = crate::cache::Stamp::read(&path)?;
         Some(Self { path, stamp })
     }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 pub struct CoverThumbnail;
 impl gpui_kit::Asset for CoverThumbnail {

@@ -2,6 +2,7 @@
 //! Two identically titled rips in different folders remain distinct.
 use crate::{
     library::{self, Track},
+    store::{AlbumId, AlbumRow, Mark, Term},
     theme::materials,
 };
 use gpui_kit::{
@@ -37,6 +38,8 @@ impl Default for ViewPrefs {
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
+    /// A disc of a registered collection.
+    Library(AlbumId),
 }
 impl DiscId {
     pub fn of(t: &Track) -> Self {
@@ -56,6 +59,12 @@ impl DiscId {
                 t.source.parent() == Some(p) && album == &t.album && *n == t.disc_number
             }
             _ => false,
+        }
+    }
+    pub fn album(&self) -> Option<AlbumId> {
+        match self {
+            Self::Library(id) => Some(*id),
+            _ => None,
         }
     }
 }
@@ -137,6 +146,24 @@ impl Discs {
     }
 }
 impl Disc {
+    /// A disc of a collection view. Reads the cover's file stamp, so it is
+    /// built off the interface thread.
+    pub fn from_album(a: AlbumRow) -> Self {
+        Self {
+            id: DiscId::Library(a.id),
+            title: a.title,
+            folder: a.folder,
+            cover: a.cover.and_then(crate::artwork::CoverFile::new),
+            year: a.year,
+            format: a.format,
+            count: a.count,
+            duration: a.duration,
+            complete: a.complete,
+        }
+    }
+    pub fn duration(&self) -> f64 {
+        self.duration
+    }
     fn label(&self, col: usize) -> String {
         match col {
             0 => self.title.clone(),
@@ -206,22 +233,8 @@ impl TableDelegate for Discs {
     }
 }
 
-pub fn matches(t: &Track, query: &str) -> bool {
-    query.split_whitespace().all(|term| {
-        let contains = |s: &str, v: &str| s.to_lowercase().contains(v);
-        match term.split_once(':') {
-            Some(("artist", v)) => contains(&t.artist, v),
-            Some(("album", v)) => contains(&t.album, v),
-            Some(("format", v)) => t
-                .source
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case(v)),
-            _ => {
-                [&t.title, &t.artist, &t.album]
-                    .iter()
-                    .any(|s| contains(s, term))
-                    || contains(&t.source.to_string_lossy(), term)
-            }
-        }
-    })
+/// Whether a folder track matches every search term. The same terms filter
+/// library views in SQL; `mark` is only consulted for `rating:` and `liked:`.
+pub fn matches(t: &Track, terms: &[Term], mark: impl Fn() -> Mark) -> bool {
+    terms.iter().all(|term| term.matches(t, &mark))
 }

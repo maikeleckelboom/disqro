@@ -8,8 +8,8 @@ pub struct Cache(Connection);
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Stamp {
-    bytes: i64,
-    modified: i64,
+    pub(crate) bytes: i64,
+    pub(crate) modified: i64,
 }
 impl Stamp {
     pub fn read(path: &Path) -> Option<Self> {

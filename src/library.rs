@@ -113,12 +113,27 @@ pub fn is_audio(path: &Path) -> bool {
             .any(|ext| s.eq_ignore_ascii_case(ext))
     })
 }
-#[derive(Default)]
 pub struct Folder {
     pub dirs: Vec<PathBuf>,
     pub tracks: Vec<Track>,
     pub cover: Option<PathBuf>,
     pub notices: Vec<String>,
+    /// False when an entry of the folder could not be read.
+    pub complete: bool,
+    /// Sheets that exist but could not be interpreted.
+    pub failed_sheets: Vec<PathBuf>,
+}
+impl Default for Folder {
+    fn default() -> Self {
+        Self {
+            dirs: vec![],
+            tracks: vec![],
+            cover: None,
+            notices: vec![],
+            complete: true,
+            failed_sheets: vec![],
+        }
+    }
 }
 #[cfg(test)]
 pub fn browse(path: &Path) -> Result<Folder> {
@@ -138,6 +153,7 @@ pub fn browse_while(
             Ok(e) => e,
             Err(e) => {
                 folder.notices.push(e.to_string());
+                folder.complete = false;
                 continue;
             }
         };
@@ -146,6 +162,7 @@ pub fn browse_while(
             Ok(kind) => kind,
             Err(e) => {
                 folder.notices.push(e.to_string());
+                folder.complete = false;
                 continue;
             }
         };
@@ -189,7 +206,15 @@ pub fn browse_while(
                     .collect::<HashSet<_>>();
                 let present = sources
                     .iter()
-                    .filter_map(|&path| Some((path.to_owned(), path.canonicalize().ok()?)))
+                    .filter_map(|&path| match path.canonicalize() {
+                        Ok(canonical) => Some((path.to_owned(), canonical)),
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                folder.failed_sheets.push(sheet.clone());
+                            }
+                            None
+                        }
+                    })
                     .collect::<std::collections::HashMap<_, _>>();
                 if present.is_empty() {
                     absent.push((sheet, program));
@@ -208,9 +233,12 @@ pub fn browse_while(
                         .filter(|t| present.contains_key(&t.source)),
                 );
             }
-            Err(error) => folder
-                .notices
-                .push(format!("{} · {error}", folder_name(&sheet))),
+            Err(error) => {
+                folder
+                    .notices
+                    .push(format!("{} · {error}", folder_name(&sheet)));
+                folder.failed_sheets.push(sheet);
+            }
         }
     }
     for (sheet, program) in absent {
@@ -247,18 +275,25 @@ pub fn browse_while(
     Ok(folder)
 }
 
+/// The folder's cover image, by the same preference as a folder listing.
+pub fn find_cover(dir: &Path) -> Option<PathBuf> {
+    COVERS.iter().map(|n| dir.join(n)).find(|p| p.is_file())
+}
+
+const COVERS: [&str; 6] = [
+    "cover.jpg",
+    "folder.jpg",
+    "front.jpg",
+    "cover.png",
+    "folder.png",
+    "front.png",
+];
+
 fn cover_rank(path: &Path) -> Option<usize> {
     let name = path.file_name()?.to_str()?;
-    [
-        "cover.jpg",
-        "folder.jpg",
-        "front.jpg",
-        "cover.png",
-        "folder.png",
-        "front.png",
-    ]
-    .iter()
-    .position(|candidate| name.eq_ignore_ascii_case(candidate))
+    COVERS
+        .iter()
+        .position(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 /// Hidden and system folders, such as `$RECYCLE.BIN`, stay out of the way.
