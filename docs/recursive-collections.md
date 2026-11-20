@@ -1,6 +1,6 @@
 # Browsing a music collection
 
-Open the collection root from Places, the address bar or the folder picker. Disqro starts showing tracks as it finds them. The Recordings panel menu remembers **Include Subfolders**. Turn it off to browse just the selected directory.
+Open the collection root from Places, the folder tree, the address bar or the folder picker, then choose **Include Subfolders**. A folder that holds only subfolders offers it in the list; the Recordings panel menu always has it. Disqro remembers the choice for that folder and every folder inside it, and starts showing discs and tracks as it finds them. Its parent and neighbouring folders keep showing only their own recordings. Choosing it again inside a collection turns it off for that branch alone.
 
 - **Albums / CDs** shows the artwork, title, year, track count, duration, format and relative folder for each disc. Double-click a disc or press Enter to see its tracks. The button above the table returns to the discs.
 - **All Tracks** uses the existing customizable table. Click a heading to sort across the collection. Ctrl+F searches titles, artists, albums and paths. Combine terms such as `artist:gizmo format:flac` or `album:thunderdome`.
@@ -52,6 +52,34 @@ To repeat the desktop timings, set `DISQRO_TRACE_DISCOVERY=1`, choose a fresh `D
 cargo test --release --locked six_figure_collection_projection -- --ignored --nocapture
 cargo test --release --locked encoded_formats_open_decode_and_seek -- --ignored --nocapture
 ```
+
+## Folder browsing, 20 November 2026
+
+The same machine ran optimized x64 builds of the previous and the current browser with isolated profiles and muted playback. The listener's Music folder holds 10 recordings of its own, the Thunderdome archive, other albums, a DJ application's sample packs and another program's test recordings: 4,302 playable entries in all.
+
+Opening Music used to walk every subfolder, because including subfolders was one switch for all folders and on by default. The list grew to 4,302 entries, sample packs and test recordings included. The tree showed Music among the home folder's other folders. Now Music lists its 10 recordings, and the tree starts at Music. An earlier profile keeps its Albums / CDs choice; the old global switch is not carried over.
+
+| Observation | Previous browser | Current browser |
+| --- | --- | --- |
+| Music opened with an empty cache | 4,302 entries, complete in 1.05 s | 10 entries, complete in 74 ms |
+| A row selected, then the list scrolled while Music with subfolders was discovered | The next batch scrolled back to the selected row | The list stayed where it was scrolled; only cell text filled in |
+| Thunderdome as Albums / CDs, empty cache | Discs found later were sorted in above earlier ones for about 550 ms | Discs were added below in folder order; only times filled in |
+| A folder opened from the tree | The tree was rebuilt around its parent; the row under the pointer changed | The tree stayed; the clicked row kept its place |
+| Longest interface work per batch, Thunderdome as Albums / CDs | 2.0 ms | 1.1–1.3 ms |
+| Longest interface work per batch, Music with subfolders as Albums / CDs | 3.5–4.0 ms | 2.4–3.4 ms |
+
+Each figure comes from two or three runs, with Windows file caching enabled. `DISQRO_TRACE_DISCOVERY=1` now also reports the number of batches and the interface time spent applying them. Rebuilding the list for each batch takes well under a frame at these sizes, so the list is still projected in full rather than patched row by row.
+
+Interaction checks, driven through window messages:
+
+- **Tree:** the arrow expanded *Music Collection* without leaving Music. The name opened *VA – Thunderdome – CD Collection* in the same row, and a second click there changed nothing. Back, Forward and Parent moved between `# 1-22`, the archive and Music with the expanded branches kept. Parent from Music anchored the tree at `C:`, and choosing the Music Place anchored it at Music again. Four tree clicks within 80 ms ended on the last folder clicked, with breadcrumbs, highlight and list in agreement.
+- **Typed paths:** a path inside a dot-folder opened its three recordings, and the tree showed the way to it.
+- **Scope:** the archive offered **Include Subfolders** in its empty list and then showed 108 discs and 2,123 entries in natural folder order. `# 1-22` inherited the choice with 44 discs, and Music kept its own 10 recordings. In a fixture, an album with `CD1` and `CD2` showed two discs; its artist folder still offered the choice, and `CD1` listed its tracks.
+- **Content:** a fixture with text files, a playlist file, `.git`, `.cache` and a folder with the hidden attribute listed only recordings and visible folders. A zero-byte WAV and a text file named `.mp3` were dimmed with a warning; an untagged WAV was not.
+- **During discovery:** a search narrowed the list as it grew and restored all 4,302 entries when cleared. With Title sorted and the list scrolled, the top row stayed in place while about 3,000 more entries were sorted in around it. Albums / CDs and All Tracks switched while discovery continued. Choosing the `C:` Place cancelled the scan. Refresh, and Include Subfolders on Music, left the tree unchanged in 20 and 43 sampled frames.
+- **Library:** the archive added to the library showed 108 discs and 2,123 entries in its collection. A like and a three-star rating on two CUE chapters, a new playlist and playback from the album all worked. Reveal in Folder opened the chapter's `CD1` folder with the chapter selected and both marks shown, while playback continued.
+
+[Folder without recordings](evidence/folder-without-recordings.png) · [Folder as a collection](evidence/folder-as-collection.png) · [Reveal in Folder](evidence/reveal-in-folder.png) · [Unreadable recordings](evidence/unreadable-recordings.png)
 
 ## Release boundary
 

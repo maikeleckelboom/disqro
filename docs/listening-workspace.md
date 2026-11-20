@@ -29,7 +29,7 @@ The current folder appears as breadcrumbs. Click a crumb to open that folder. Cl
 
 ### Places
 
-Places are shortcuts; the folder tree below them shows the current folder among its neighbours. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine.
+Places are shortcuts; the folder tree below them shows the current folder within the Place it belongs to. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine.
 
 - Right-click a Place: **Open**, **Rename Shortcut**, **Remove from Places**.
 - Right-click the Places heading or the space around the list: **Add Folder to Places…**, **Restore Missing Default Places**, **Reset Places to Defaults…**.
@@ -37,6 +37,14 @@ Places are shortcuts; the folder tree below them shows the current folder among 
 - Drag a Place to reorder it.
 
 Removing a shortcut never touches its folder. Restoring adds back only the defaults you removed, at the end, and leaves your own shortcuts, names and order alone. Reset replaces the whole list after a confirmation. A drive that is not attached disappears until it returns; a custom Place whose folder is missing stays, dimmed. Opening a Place in a new tab is not available yet: the workspace has one folder view.
+
+### Folder tree
+
+- The tree is rooted at the outermost Place or library collection that holds the current folder. Opening Music shows Music and its folders, not the rest of the home folder. A folder outside every Place is shown from its drive. Choosing a Place roots the tree at it.
+- The arrow opens or closes a branch without leaving the current folder. The name opens the folder, which expands it; the rest of the tree, its scroll position and the row under the pointer stay where they were.
+- Back, Forward, Parent, breadcrumbs and typed paths keep the highlighted folder, the breadcrumbs and the list in agreement. While a library view is shown, the tree keeps the last folder in view without highlighting it.
+- Folders whose names start with a dot, such as `.git` or `.cache`, and hidden or system folders are left out of the tree and of subfolder discovery. Typing the path of one in the address bar still opens it, and the tree shows the way to it.
+- Folders and files are ordered as Explorer orders them, so `CD 2` comes before `CD 10`.
 
 ### Queue
 
