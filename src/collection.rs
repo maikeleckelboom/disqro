@@ -67,7 +67,7 @@ impl ViewPrefs {
         self.subfolders.drain(..excess);
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
@@ -103,11 +103,13 @@ impl DiscId {
 }
 
 pub struct Disc {
+    pub tracks: Vec<Arc<Track>>,
     pub id: DiscId,
     pub title: String,
-    folder: PathBuf,
+    pub folder: PathBuf,
     pub cover: Option<crate::artwork::CoverFile>,
     year: Option<u32>,
+    number: Option<u32>,
     format: String,
     pub count: usize,
     duration: f64,
@@ -115,14 +117,14 @@ pub struct Disc {
 }
 #[derive(Default)]
 pub struct Discs {
-    pub items: Vec<Disc>,
+    pub items: Vec<Arc<Disc>>,
 }
 impl Discs {
-    pub fn group(
-        rows: &[Arc<Track>],
+    pub fn group<'a>(
+        rows: impl IntoIterator<Item = &'a Arc<Track>>,
         covers: &HashMap<PathBuf, crate::artwork::CoverFile>,
         root: &Path,
-    ) -> Vec<Disc> {
+    ) -> Vec<Arc<Disc>> {
         let mut positions = HashMap::new();
         let mut items: Vec<Disc> = Vec::new();
         let mut last: Option<usize> = None;
@@ -150,11 +152,13 @@ impl Discs {
                 };
                 let i = items.len();
                 items.push(Disc {
+                    tracks: Vec::new(),
                     id,
                     title,
                     folder: folder.strip_prefix(root).unwrap_or(folder).into(),
                     cover: covers.get(folder).cloned(),
                     year: t.year,
+                    number: t.disc_number,
                     format: t.format(),
                     count: 0,
                     duration: 0.,
@@ -169,10 +173,19 @@ impl Discs {
         // folder order. Discs found later are added below the ones on screen
         // rather than among them, and arriving tags never reorder the list.
         items
+            .into_iter()
+            .map(|mut disc| {
+                if matches!(disc.id, DiscId::Album(..)) {
+                    disc.tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
+                }
+                Arc::new(disc)
+            })
+            .collect()
     }
 }
 impl Disc {
-    fn add(&mut self, t: &Track) {
+    fn add(&mut self, t: &Arc<Track>) {
+        self.tracks.push(t.clone());
         self.count += 1;
         self.duration += t.duration.unwrap_or(0.);
         self.complete &= t.duration.is_some();
@@ -189,16 +202,76 @@ impl Disc {
     /// built off the interface thread.
     pub fn from_album(a: AlbumRow) -> Self {
         Self {
+            tracks: Vec::new(),
             id: DiscId::Library(a.id),
             title: a.title,
             folder: a.folder,
             cover: a.cover.and_then(crate::artwork::CoverFile::new),
             year: a.year,
+            number: a.disc_number,
             format: a.format,
             count: a.count,
             duration: a.duration,
             complete: a.complete,
         }
+    }
+    pub fn section(&self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let m = *materials(cx);
+        let cover = self.cover.as_ref().and_then(|file| {
+            window
+                .use_asset::<crate::artwork::CoverThumbnail>(file, cx)
+                .flatten()
+        });
+        let mut detail = Vec::new();
+        if let Some(year) = self.year {
+            detail.push(year.to_string());
+        }
+        detail.push(self.format.clone());
+        if let Some(number) = self.number {
+            let normalized = self.title.replace(' ', "").to_lowercase();
+            if !normalized.contains(&format!("cd{number}"))
+                && !normalized.contains(&format!("disc{number}"))
+            {
+                detail.insert(0, format!("CD {number}"));
+            }
+        }
+        h_flex()
+            .w_full()
+            .h_full()
+            .flex_shrink_0()
+            .min_w_0()
+            .gap(px(8.))
+            .px(px(9.))
+            .border_t_1()
+            .border_color(m.control_line)
+            .child(
+                div()
+                    .size(px(22.))
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .rounded(px(2.))
+                    .when_some(cover, |d, cover| {
+                        d.child(img(cover).size_full().object_fit(ObjectFit::Cover))
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(12.5))
+                    .text_color(m.text)
+                    .child(self.title.clone()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .flex_shrink_0()
+                    .text_size(px(11.))
+                    .text_color(m.text_faint)
+                    .child(detail.join("  ·  ")),
+            )
     }
     pub fn duration(&self) -> f64 {
         self.duration

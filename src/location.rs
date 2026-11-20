@@ -340,7 +340,15 @@ impl LocationBar {
             return self.render_view(cx);
         }
         let path = self.browser.read(cx).path.clone();
-        let all = crumbs(&path);
+        let browser = self.browser.read(cx);
+        let disc = browser.disc.is_some();
+        let mut all = crumbs(&path);
+        if disc {
+            all.push(Crumb {
+                label: browser.title(cx).into(),
+                path: path.clone(),
+            });
+        }
         // Collapse leading folders into a menu when the path does not fit.
         let font_size = px(13.);
         let font = window.text_style().font();
@@ -450,7 +458,11 @@ impl LocationBar {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, w, cx| {
                         cx.stop_propagation();
-                        browser.update(cx, |b, cx| b.open(target.clone(), w, cx))
+                        if disc && i + 1 == last {
+                            browser.update(cx, |b, cx| b.up(w, cx));
+                        } else if !disc || i != last {
+                            browser.update(cx, |b, cx| b.open(target.clone(), w, cx));
+                        }
                     }),
             );
         }

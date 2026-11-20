@@ -286,3 +286,49 @@ fn shutdown_receipt_includes_pending_queue_edits() {
     assert_eq!(saved.queue.entries.len(), 1);
     assert_eq!(saved.queue.entries[0].track.title, "first");
 }
+
+#[test]
+fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
+    let mut e = Engine::default();
+    let program: crate::library::TrackList = (0..4)
+        .map(|n| {
+            let mut t = Track::file("disc.flac".into());
+            t.disc = Some(DiscTrack {
+                sheet: "disc.cue".into(),
+                number: n + 1,
+                start: u64::from(n) * 75,
+                end: Some(u64::from(n + 1) * 75),
+            });
+            Arc::new(t)
+        })
+        .collect();
+    e.queue.replace(&program, 1);
+    let current = e.queue.current_entry().unwrap().id;
+    e.select(Some(1), 0.);
+    e.group = vec![Chapter {
+        id: current,
+        offset: 0.,
+    }];
+    e.length = 3.;
+    e.revalidate();
+    e.update_position(0.42);
+    e.status.playing = true;
+    e.command(Command::ClearUpcoming).unwrap();
+    assert_eq!((e.group.len(), e.limit), (1, 1.));
+    e.command(Command::ContinueDisc(current, program.clone()))
+        .unwrap();
+    assert_eq!((e.group.len(), e.limit), (3, 3.));
+    assert_eq!(
+        (e.status.entry, e.status.position, e.status.playing),
+        (Some(current), 0.42, true)
+    );
+    let revision = e.queue.revision;
+    e.command(Command::ContinueDisc(current, program.clone()))
+        .unwrap();
+    assert_eq!(e.queue.revision, revision);
+    e.update_position(1.125);
+    assert_eq!(e.queue.current, Some(2));
+    assert_eq!(e.status.position, 0.125);
+    e.command(Command::ContinueDisc(current, program)).unwrap();
+    assert_eq!(e.queue.current, Some(2));
+}

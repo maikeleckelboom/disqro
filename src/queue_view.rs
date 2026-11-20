@@ -1,7 +1,7 @@
 //! The Queue panel: Now Playing, Up Next, and what played before.
 use crate::{
     audio::Command,
-    browser::{Browser, Reveal},
+    browser::Destination,
     library::clock,
     player::{Player, PlayerEvent},
     queue::{Entry, Queue, Repeat},
@@ -17,7 +17,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 gpui_kit::actions!(
     queue,
@@ -76,7 +76,6 @@ enum Section {
 
 pub struct QueueView {
     player: Entity<Player>,
-    browser: Entity<Browser>,
     focus: FocusHandle,
     selected: Option<u64>,
     show_history: bool,
@@ -84,7 +83,7 @@ pub struct QueueView {
 }
 
 impl QueueView {
-    pub fn new(player: Entity<Player>, browser: Entity<Browser>, cx: &mut Context<Self>) -> Self {
+    pub fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
         cx.subscribe(&player, |_, _, e, cx| {
             if matches!(e, PlayerEvent::QueueChanged | PlayerEvent::TrackChanged) {
                 cx.notify();
@@ -93,7 +92,6 @@ impl QueueView {
         .detach();
         Self {
             player,
-            browser,
             focus: cx.focus_handle(),
             selected: None,
             show_history: false,
@@ -154,18 +152,6 @@ impl QueueView {
             (ix + 2).min(q.entries.len())
         };
         self.send(Command::Move(id, to), cx);
-    }
-    fn reveal(&self, entry: &Entry, window: &mut Window, cx: &mut App) {
-        let file = entry
-            .track
-            .disc
-            .as_ref()
-            .map_or(entry.track.source.clone(), |d| d.sheet.clone());
-        if let Some(folder) = file.parent().map(Path::to_owned) {
-            self.browser.update(cx, |b, cx| {
-                b.open_revealing(folder, Some(Reveal::Select(file)), window, cx)
-            });
-        }
     }
     pub fn panel_menu(&self, menu: PopupMenu, cx: &App) -> PopupMenu {
         let q = self.queue(cx);
@@ -244,10 +230,14 @@ impl QueueView {
         )
         .separator()
         .item(
-            PopupMenuItem::new("Show in Folder")
+            PopupMenuItem::new("Show Track on CD")
                 .icon(IconName::FolderOpen)
-                .on_click(move |_, w, cx| {
-                    let _ = this.update(cx, |s, cx| s.reveal(&entry, w, cx));
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |s, cx| {
+                        s.player.update(cx, |_, cx| {
+                            cx.emit(PlayerEvent::Locate(entry.track.clone(), Destination::Disc))
+                        })
+                    });
                 }),
         )
     }

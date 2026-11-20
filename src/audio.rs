@@ -43,6 +43,7 @@ pub struct Status {
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
     Play(crate::library::TrackList, usize),
+    PlayDisc(crate::library::TrackList, usize),
     Toggle,
     SetPlaying(bool),
     Stop,
@@ -57,6 +58,7 @@ pub enum Command {
     Enqueue(crate::library::TrackList),
     Remove(Vec<u64>),
     Move(u64, usize),
+    ContinueDisc(u64, crate::library::TrackList),
     ClearUpcoming,
     ClearHistory,
     Shuffle(bool),
@@ -285,6 +287,8 @@ struct Engine {
     /// queue changed after the group was opened.
     limit: f64,
     length: f64,
+    /// Last authored tick opened by this decoder, or EOF.
+    decoder_end: Option<u64>,
     volume: f32,
     status: Status,
 }
@@ -360,6 +364,7 @@ impl Engine {
             .and_then(|d| d.end);
         let recording = Recording::open(&entry.track, end)
             .with_context(|| format!("Cannot play {}", entry.track.title))?;
+        self.decoder_end = end;
         self.length = recording.num_frames() as f64 / f64::from(recording.sample_rate());
         ensure!(
             group.last().unwrap().offset < self.length,
@@ -400,29 +405,49 @@ impl Engine {
         self.status.duration = end - start;
         self.status.position = (p - start).clamp(0., self.status.duration);
     }
-    /// After the queue changed, keeps only the chapters that still follow the
-    /// current one in the queue. The voice then stops where the group now ends.
+    /// Remap the queued chapters inside the already open decoder range. An edit
+    /// can shorten its run or restore a previously removed continuation.
     fn revalidate(&mut self) {
         let Some(current) = self.group.get(self.chapter).copied() else {
             return;
         };
-        let Some(mut ix) = self.queue.index_of(current.id) else {
+        let Some(ix) = self
+            .queue
+            .current
+            .filter(|&i| self.queue.entries[i].id == current.id)
+        else {
             return;
         };
-        let mut valid = self.chapter + 1;
+        let active = &self.queue.entries[ix].track;
+        let Some(segment) = &active.disc else { return };
+        let offset = |tick: u64| current.offset + tick.saturating_sub(segment.start) as f64 / 75.;
+        self.group.truncate(self.chapter + 1);
+        let mut last = active;
         if self.queue.repeat != Repeat::One {
-            while let Some(c) = self.group.get(valid) {
-                if self.queue.entries.get(ix + 1).map(|e| e.id) != Some(c.id) {
+            for next in &self.queue.entries[ix + 1..] {
+                if !contiguous(last, &next.track) {
                     break;
                 }
-                ix += 1;
-                valid += 1;
+                let next_end = next.track.disc.as_ref().and_then(|d| d.end);
+                if self
+                    .decoder_end
+                    .is_some_and(|end| next_end.is_none_or(|next| next > end))
+                {
+                    break;
+                }
+                let start = offset(disc_start(&next.track));
+                self.group.push(Chapter {
+                    id: next.id,
+                    offset: start,
+                });
+                last = &next.track;
             }
         }
-        if let Some(cut) = self.group.get(valid) {
-            self.limit = cut.offset;
-            self.group.truncate(valid);
-        }
+        self.limit = last
+            .disc
+            .as_ref()
+            .and_then(|d| d.end)
+            .map_or(self.length, |end| offset(end).min(self.length));
     }
     fn refresh_flags(&mut self) {
         let s = &mut self.status;
@@ -478,6 +503,14 @@ impl Engine {
     }
     fn command(&mut self, c: Command) -> Result<()> {
         match c {
+            Command::PlayDisc(tracks, i) => {
+                self.queue.shuffle = false;
+                if self.queue.repeat == Repeat::One {
+                    self.queue.set_repeat(Repeat::Off);
+                }
+                self.queue.replace(&tracks, i);
+                self.play(i, 0.)?;
+            }
             Command::Play(tracks, i) => {
                 self.queue.replace(&tracks, i);
                 self.play(i, 0.)?;
@@ -543,6 +576,11 @@ impl Engine {
                         current => self.select(current, 0.),
                     }
                 } else {
+                    self.revalidate();
+                }
+            }
+            Command::ContinueDisc(entry, program) => {
+                if self.queue.continue_disc(entry, &program) {
                     self.revalidate();
                 }
             }

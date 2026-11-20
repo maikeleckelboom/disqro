@@ -331,6 +331,44 @@ fn playlists_order_duplicates_and_queries() {
 }
 
 #[test]
+fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Music");
+    collection(&root);
+    let mut s = Store::memory();
+    let r = s.add_root(&root).unwrap();
+    index(&mut s, r);
+    let query = Query {
+        scope: Scope::Library(Some(r)),
+        search: "title:b2".into(),
+        order: None,
+    };
+    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    assert_eq!(
+        (sections.len(), sections[0].count, listing.keys.len()),
+        (1, 1, 1)
+    );
+    let selected = s.rows(query.scope, &listing.keys).unwrap().pop().unwrap();
+    let disc = s.registered_disc(&selected.track).unwrap().unwrap();
+    assert_eq!(
+        (disc.root, disc.album, disc.track),
+        (r, sections[0].id, selected.id)
+    );
+    let cd = s.disc_keys(disc.album).unwrap();
+    assert_eq!(cd.len(), 2);
+    assert_eq!(cd[1], selected.id);
+    fs::rename(root.join("Album B"), root.join("Moved B")).unwrap();
+    index(&mut s, r);
+    let moved = s.rows(query.scope, &[selected.id]).unwrap().pop().unwrap();
+    assert_ne!(moved.track.source, selected.track.source);
+    assert!(selected.track.same_item(&moved.track));
+    assert_eq!(
+        s.registered_disc(&selected.track).unwrap().unwrap().track,
+        moved.id
+    );
+}
+
+#[test]
 fn same_prefix_and_filename_are_insufficient_relocation_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("Música 日本");

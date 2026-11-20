@@ -34,7 +34,7 @@ mod tests;
 mod worker;
 
 pub use index::{Progress, Summary, index_root};
-pub use query::{AlbumRow, Listing, Order, Query, Scope, Term};
+pub use query::{AlbumRow, Order, Query, Scope, Term};
 pub use worker::{Cancelled, Handle, Ticket, is_cancelled};
 
 pub type TrackId = i64;

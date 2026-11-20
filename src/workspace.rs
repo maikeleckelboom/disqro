@@ -178,7 +178,7 @@ impl Workspace {
                 cx,
             )
         });
-        let queue = cx.new(|cx| QueueView::new(player.clone(), browser.clone(), cx));
+        let queue = cx.new(|cx| QueueView::new(player.clone(), cx));
         let location_bar = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         let panels = Kind::ALL
             .into_iter()
@@ -227,7 +227,15 @@ impl Workspace {
                     window.push_notification(text.clone(), cx);
                 }
             }),
-            cx.subscribe_in(&player, window, |s: &mut Self, _, e, _, cx| match e {
+            cx.subscribe_in(&player, window, |s: &mut Self, _, e, w, cx| match e {
+                PlayerEvent::Locate(track, dest) => {
+                    s.show(Kind::Tracks, w, cx);
+                    s.browser
+                        .update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
+                }
+                PlayerEvent::ContinueCd(entry, track) => s
+                    .browser
+                    .update(cx, |b, cx| b.continue_cd(*entry, track.clone(), cx)),
                 PlayerEvent::QueueChanged | PlayerEvent::TrackChanged => {
                     s.update_system(cx);
                     s.schedule_save(cx);
@@ -371,7 +379,10 @@ impl Workspace {
     fn targets(&self, cx: &App) -> Targets {
         let t = self.browser.read(cx).table.read(cx);
         let targets = t.delegate().targets(None, t.selected_row());
-        if !targets.is_empty() {
+        if !targets.is_empty()
+            || t.selected_row()
+                .is_some_and(|i| t.delegate().header(i).is_some())
+        {
             return targets;
         }
         match &self.player.read(cx).status.track {
@@ -592,7 +603,8 @@ impl Workspace {
         let t = self.browser.read(cx).table.read(cx);
         if let Some(ix) = t
             .selected_row()
-            .or_else(|| (!t.delegate().is_empty()).then_some(0))
+            .filter(|&i| t.delegate().header(i).is_none())
+            .or_else(|| (!t.delegate().is_empty()).then(|| t.delegate().first_track()))
         {
             self.browser
                 .read(cx)
@@ -871,7 +883,15 @@ impl Render for Workspace {
                         b.show_disc(ix, w, cx);
                     });
                 } else {
-                    s.play_selected(cx);
+                    s.browser.update(cx, |b, cx| {
+                        let t = b.table.read(cx);
+                        b.activate(
+                            t.selected_row()
+                                .unwrap_or_else(|| t.delegate().first_track()),
+                            w,
+                            cx,
+                        );
+                    });
                 }
             }))
             .on_action(cx.listener(|s, _: &OpenDirectory, w, cx| {

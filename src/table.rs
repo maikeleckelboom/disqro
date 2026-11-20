@@ -1,9 +1,11 @@
 //! The track table shared by folder listings, collections, Liked Tracks and
 //! playlists. Columns, selection, menus and the like and rating cells are the
 //! same everywhere; only where rows come from differs.
+mod playback;
 use crate::{
     audio::Command,
     catalog::{Catalog, Targets},
+    collection::{Disc, DiscId},
     library::{DiscTrack, Track, TrackList, clock},
     player::Player,
     store::{self, Mark, PlaylistId, Row, Scope, Ticket},
@@ -33,9 +35,6 @@ use std::{
 
 pub const ROW_HEIGHT: f32 = 28.;
 const CELL_X: f32 = 10.;
-/// Playing from a library view queues at most this many tracks around the
-/// chosen one, so a six-figure collection never becomes a six-figure queue.
-const PLAY_LIMIT: usize = 5000;
 /// Library rows kept in memory beyond the visible range.
 const ROW_CACHE: usize = 4096;
 const PREFETCH: usize = 64;
@@ -197,7 +196,8 @@ pub fn add_personal_columns(columns: &mut Vec<LayoutColumn>) {
 /// folder, or a library view key. Tags and positions are deliberately
 /// absent, so a refresh or sort keeps the same selection.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum RowKey {
+pub(crate) enum RowKey {
+    Disc(DiscId),
     Track(PathBuf, Option<DiscTrack>),
     Key(i64),
 }
@@ -213,47 +213,114 @@ struct Paged {
     keys: Arc<[i64]>,
     cache: HashMap<i64, Row>,
     loaded: bool,
+    grouped: bool,
 }
 
-enum Rows {
+enum Contents {
     Folder {
         original: TrackList,
         sorted: TrackList,
     },
     Library(Paged),
 }
+/// Section offsets are in the displayed table; track keys and pages stay dense.
+#[derive(Clone, Default)]
+pub struct Sections(Arc<[(usize, Arc<Disc>)]>);
+impl Sections {
+    pub fn new(groups: impl IntoIterator<Item = (Arc<Disc>, usize)>) -> Self {
+        let mut row = 0;
+        Self(
+            groups
+                .into_iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(disc, count)| {
+                    let header = row;
+                    row += 1 + count;
+                    (header, disc)
+                })
+                .collect(),
+        )
+    }
+    fn header(&self, row: usize) -> Option<&Arc<Disc>> {
+        self.0
+            .binary_search_by_key(&row, |(ix, _)| *ix)
+            .ok()
+            .map(|i| &self.0[i].1)
+    }
+    fn preceding(&self, row: usize) -> usize {
+        self.0.partition_point(|(ix, _)| *ix < row)
+    }
+    fn data_index(&self, row: usize) -> Option<usize> {
+        let count = self.preceding(row);
+        self.0
+            .get(count)
+            .is_none_or(|(ix, _)| *ix != row)
+            .then(|| row - count)
+    }
+    fn display_index(&self, index: usize) -> usize {
+        let mut lo = 0;
+        let mut hi = self.0.len();
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.0[mid].0 - mid <= index {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        index + lo
+    }
+}
+struct Rows {
+    data: Contents,
+    sections: Sections,
+}
 impl Rows {
     fn len(&self) -> usize {
-        match self {
-            Self::Folder { sorted, .. } => sorted.len(),
-            Self::Library(p) => p.keys.len(),
-        }
+        self.sections.0.len()
+            + match &self.data {
+                Contents::Folder { sorted, .. } => sorted.len(),
+                Contents::Library(p) => p.keys.len(),
+            }
     }
-    fn key(&self, ix: usize) -> Option<RowKey> {
-        match self {
-            Self::Folder { sorted, .. } => sorted.get(ix).map(|t| key(t)),
-            Self::Library(p) => p.keys.get(ix).map(|k| RowKey::Key(*k)),
+    fn key(&self, row: usize) -> Option<RowKey> {
+        if let Some(disc) = self.sections.header(row) {
+            return Some(RowKey::Disc(disc.id.clone()));
+        }
+        let ix = self.sections.data_index(row)?;
+        match &self.data {
+            Contents::Folder { sorted, .. } => sorted.get(ix).map(|t| key(t)),
+            Contents::Library(p) => p.keys.get(ix).map(|k| RowKey::Key(*k)),
         }
     }
     fn position(&self, k: &RowKey) -> Option<usize> {
-        match (self, k) {
-            (Self::Folder { sorted, .. }, RowKey::Track(source, disc)) => sorted
+        if let RowKey::Disc(id) = k {
+            return self
+                .sections
+                .0
+                .iter()
+                .find(|(_, d)| d.id == *id)
+                .map(|(i, _)| *i);
+        }
+        let ix = match (&self.data, k) {
+            (Contents::Folder { sorted, .. }, RowKey::Track(source, disc)) => sorted
                 .iter()
                 .position(|t| &t.source == source && &t.disc == disc),
-            (Self::Library(p), RowKey::Key(k)) => p.keys.iter().position(|x| x == k),
+            (Contents::Library(p), RowKey::Key(k)) => p.keys.iter().position(|x| x == k),
             _ => None,
+        }?;
+        Some(self.sections.display_index(ix))
+    }
+    fn row(&self, row: usize) -> Option<&Row> {
+        match &self.data {
+            Contents::Library(p) => p.cache.get(p.keys.get(self.sections.data_index(row)?)?),
+            Contents::Folder { .. } => None,
         }
     }
-    fn row(&self, ix: usize) -> Option<&Row> {
-        match self {
-            Self::Library(p) => p.cache.get(p.keys.get(ix)?),
-            Self::Folder { .. } => None,
-        }
-    }
-    fn track(&self, ix: usize) -> Option<&Arc<Track>> {
-        match self {
-            Self::Folder { sorted, .. } => sorted.get(ix),
-            Self::Library(_) => self.row(ix).map(|r| &r.track),
+    fn track(&self, row: usize) -> Option<&Arc<Track>> {
+        match &self.data {
+            Contents::Folder { sorted, .. } => sorted.get(self.sections.data_index(row)?),
+            Contents::Library(_) => self.row(row).map(|r| &r.track),
         }
     }
 }
@@ -276,12 +343,16 @@ impl Selection {
     ) {
         self.ordered.take();
         if self.marked.is_empty()
-            && let Some(k) = primary.and_then(|i| rows.key(i))
+            && let Some(k) = primary
+                .and_then(|i| rows.key(i))
+                .filter(|k| !matches!(k, RowKey::Disc(_)))
         {
             self.marked.insert(k.clone());
             self.anchor = Some(k);
         }
-        let Some(clicked) = rows.key(at) else { return };
+        let Some(clicked) = rows.key(at).filter(|k| !matches!(k, RowKey::Disc(_))) else {
+            return;
+        };
         self.cursor = Some(clicked.clone());
         if range {
             let from = self
@@ -292,8 +363,11 @@ impl Selection {
             if !additive {
                 self.marked.clear();
             }
-            self.marked
-                .extend((from.min(at)..=from.max(at)).filter_map(|i| rows.key(i)));
+            self.marked.extend(
+                (from.min(at)..=from.max(at))
+                    .filter_map(|i| rows.key(i))
+                    .filter(|k| !matches!(k, RowKey::Disc(_))),
+            );
             self.anchor.get_or_insert(clicked);
         } else {
             if !self.marked.remove(&clicked) {
@@ -328,8 +402,11 @@ impl Render for DraggedTracks {
 
 pub struct MusicTable {
     rows: Rows,
+    folder_sections: Sections,
+    pub programs: Arc<[Arc<Disc>]>,
+    pub folder_cd: bool,
     pub columns: Vec<LayoutColumn>,
-    sort: Option<(Field, ColumnSort)>,
+    pub sort: Option<(Field, ColumnSort)>,
     selection: Selection,
     pub player: Entity<Player>,
     pub catalog: Entity<Catalog>,
@@ -374,15 +451,27 @@ pub fn reselect<D: TableDelegate>(
 pub fn set_rows_in_place(
     t: &mut TableState<MusicTable>,
     rows: TrackList,
+    sections: Sections,
     cx: &mut Context<TableState<MusicTable>>,
 ) {
+    let top = top_anchor(t);
+    t.delegate_mut().set_rows(rows, sections, cx);
+    restore_anchor(t, top);
+}
+type Anchor = (usize, Point<Pixels>, Option<RowKey>);
+fn top_anchor(t: &TableState<MusicTable>) -> Anchor {
     let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
+    let first = (-offset.y / px(ROW_HEIGHT)).max(0.) as usize;
+    (
+        first,
+        offset,
+        (offset.y < px(0.))
+            .then(|| t.delegate().rows.key(first))
+            .flatten(),
+    )
+}
+fn restore_anchor(t: &mut TableState<MusicTable>, (first, offset, anchor): Anchor) {
     let height = px(ROW_HEIGHT);
-    let first = (-offset.y / height).max(0.) as usize;
-    let anchor = (offset.y < px(0.))
-        .then(|| t.delegate().rows.key(first))
-        .flatten();
-    t.delegate_mut().set_rows(rows, cx);
     if let Some(now) = anchor.and_then(|k| t.delegate().rows.position(&k))
         && now != first
     {
@@ -443,10 +532,16 @@ impl MusicTable {
             player,
             catalog,
             browser,
-            rows: Rows::Folder {
-                original: Arc::default(),
-                sorted: Arc::default(),
+            rows: Rows {
+                sections: Sections::default(),
+                data: Contents::Folder {
+                    original: Arc::default(),
+                    sorted: Arc::default(),
+                },
             },
+            programs: Arc::default(),
+            folder_cd: false,
+            folder_sections: Sections::default(),
             columns: if valid {
                 saved
             } else {
@@ -479,9 +574,9 @@ impl MusicTable {
                 self.columns.remove(i);
                 if self.sort.is_some_and(|(f, _)| f == field) {
                     self.sort = None;
-                    match self.rows {
-                        Rows::Folder { .. } => self.apply_sort(cx),
-                        Rows::Library(_) => self.query(cx),
+                    match self.rows.data {
+                        Contents::Folder { .. } => self.apply_sort(cx),
+                        Contents::Library(_) => self.query(cx),
                     }
                 }
             }
@@ -512,12 +607,12 @@ impl MusicTable {
         self.rows.track(ix)
     }
     pub fn is_loading(&self) -> bool {
-        matches!(&self.rows, Rows::Library(p) if !p.loaded)
+        matches!(&self.rows.data, Contents::Library(p) if !p.loaded)
     }
     /// The playlist shown in its own order, which drag and drop may change.
     fn reorderable(&self) -> Option<PlaylistId> {
-        match &self.rows {
-            Rows::Library(Paged {
+        match &self.rows.data {
+            Contents::Library(Paged {
                 scope: Scope::Playlist(id),
                 search,
                 ..
@@ -527,26 +622,28 @@ impl MusicTable {
     }
     fn mark(&self, ix: usize, cx: &App) -> Mark {
         let catalog = self.catalog.read(cx);
-        match &self.rows {
-            Rows::Library(_) => self
+        match &self.rows.data {
+            Contents::Library(_) => self
                 .rows
                 .row(ix)
                 .map_or_else(Mark::default, |r| catalog.mark(r.id)),
-            Rows::Folder { sorted, .. } => sorted
-                .get(ix)
+            Contents::Folder { .. } => self
+                .rows
+                .track(ix)
                 .map_or_else(Mark::default, |t| catalog.mark_of(t)),
         }
     }
 
-    pub fn set_rows(&mut self, rows: TrackList, cx: &App) {
-        if !matches!(self.rows, Rows::Folder { .. }) {
+    pub fn set_rows(&mut self, rows: TrackList, sections: Sections, cx: &App) {
+        if !matches!(self.rows.data, Contents::Folder { .. }) {
             self.keys_ticket.next();
             self.page_ticket.next();
             self.view += 1;
             self.clear_marks();
         }
         self.selection.ordered.take();
-        self.rows = Rows::Folder {
+        self.folder_sections = sections;
+        self.rows.data = Contents::Folder {
             original: rows,
             sorted: Arc::default(),
         };
@@ -557,23 +654,27 @@ impl MusicTable {
         &mut self,
         scope: Scope,
         search: String,
+        grouped: bool,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let same = matches!(&self.rows, Rows::Library(p) if p.scope == scope);
+        let same = matches!(&self.rows.data, Contents::Library(p) if p.scope == scope);
         if same {
-            if let Rows::Library(p) = &mut self.rows {
+            if let Contents::Library(p) = &mut self.rows.data {
                 p.search = search;
+                p.grouped = grouped;
             }
         } else {
             self.view += 1;
             self.clear_marks();
             self.sort = None;
-            self.rows = Rows::Library(Paged {
+            self.rows.sections = Sections::default();
+            self.rows.data = Contents::Library(Paged {
                 scope,
                 search,
                 keys: Arc::default(),
                 cache: HashMap::new(),
                 loaded: false,
+                grouped,
             });
         }
         self.query(cx);
@@ -581,7 +682,9 @@ impl MusicTable {
     /// Queries the library view again, keeping the rows on screen until the
     /// new listing arrives.
     pub fn query(&mut self, cx: &mut Context<TableState<Self>>) {
-        let Rows::Library(p) = &self.rows else { return };
+        let Contents::Library(p) = &self.rows.data else {
+            return;
+        };
         let Some(store) = self.catalog.read(cx).handle() else {
             return;
         };
@@ -594,7 +697,15 @@ impl MusicTable {
         };
         let generation = self.keys_ticket.next();
         let view = self.view;
-        let listing = store.query(&self.keys_ticket, generation, move |s| s.listing(&q));
+        let grouped = p.grouped && self.sort.is_none();
+        let listing = store.query(&self.keys_ticket, generation, move |s| {
+            let (listing, albums) = s.table_listing(&q, grouped)?;
+            let sections = Sections::new(albums.into_iter().map(|a| {
+                let count = a.count;
+                (Arc::new(Disc::from_album(a)), count)
+            }));
+            Ok((listing, sections))
+        });
         let browser = self.browser.clone();
         cx.spawn(async move |this, cx| {
             let result = listing.await;
@@ -602,18 +713,20 @@ impl MusicTable {
                 if t.delegate().view != view || !t.delegate().keys_ticket.is_current(generation) {
                     return None;
                 }
-                let listing = match result {
+                let (listing, sections) = match result {
                     Ok(listing) => listing,
                     Err(e) if store::is_cancelled(&e) => return None,
                     Err(e) => {
                         t.delegate_mut().empty = format!("{e:#}").into();
-                        store::Listing::default()
+                        Default::default()
                     }
                 };
                 let selected = t.selected_row().and_then(|i| t.delegate().rows.key(i));
+                let anchor = top_anchor(t);
                 let count = listing.keys.len();
+                t.delegate_mut().rows.sections = sections;
                 t.delegate_mut().selection.ordered.take();
-                if let Rows::Library(p) = &mut t.delegate_mut().rows {
+                if let Contents::Library(p) = &mut t.delegate_mut().rows.data {
                     p.keys = listing.keys.into();
                     p.loaded = true;
                     p.cache.clear();
@@ -621,6 +734,7 @@ impl MusicTable {
                 let ix = selected.and_then(|k| t.delegate().rows.position(&k));
                 reselect(t, ix, cx);
                 t.delegate_mut().page_ticket.next();
+                restore_anchor(t, anchor);
                 t.delegate_mut().request_rows(true, cx);
                 cx.notify();
                 Some((count, listing.duration))
@@ -634,15 +748,16 @@ impl MusicTable {
     /// Fetches the rows around the visible range that are not in memory.
     /// `stale` refetches rows already shown, after the library changed.
     fn request_rows(&mut self, stale: bool, cx: &mut Context<TableState<Self>>) {
-        let Rows::Library(p) = &mut self.rows else {
+        let Contents::Library(p) = &mut self.rows.data else {
             return;
         };
-        let start = self
-            .visible
-            .start
+        let start = (self.visible.start - self.rows.sections.preceding(self.visible.start))
             .saturating_sub(PREFETCH)
             .min(p.keys.len());
-        let end = (self.visible.end.max(start + 48) + PREFETCH).min(p.keys.len());
+        let end = ((self.visible.end - self.rows.sections.preceding(self.visible.end))
+            .max(start + 48)
+            + PREFETCH)
+            .min(p.keys.len());
         let wanted: Vec<i64> = p.keys[start..end]
             .iter()
             .filter(|k| stale || !p.cache.contains_key(k))
@@ -664,8 +779,9 @@ impl MusicTable {
                 if d.view != view || !d.page_ticket.is_current(generation) {
                     return;
                 }
-                let visible = d.visible.clone();
-                if let Rows::Library(p) = &mut d.rows {
+                let visible = d.visible.start - d.rows.sections.preceding(d.visible.start)
+                    ..d.visible.end - d.rows.sections.preceding(d.visible.end);
+                if let Contents::Library(p) = &mut d.rows.data {
                     for r in rows {
                         p.cache.insert(r.key, r);
                     }
@@ -685,8 +801,13 @@ impl MusicTable {
     fn apply_sort(&mut self, cx: &App) {
         self.selection.ordered.take();
         let marks = |t: &Track| self.catalog.read(cx).mark_of(t);
-        let Rows::Folder { original, sorted } = &mut self.rows else {
+        let Contents::Folder { original, sorted } = &mut self.rows.data else {
             return;
+        };
+        self.rows.sections = if self.sort.is_none() {
+            self.folder_sections.clone()
+        } else {
+            Sections::default()
         };
         *sorted = original.clone();
         if let Some((f, order)) = self.sort {
@@ -716,70 +837,27 @@ impl MusicTable {
             Some((f, ColumnSort::Descending)) if f == field => None,
             _ => Some((field, ColumnSort::Ascending)),
         };
-        match self.rows {
-            Rows::Folder { .. } => self.apply_sort(cx),
-            Rows::Library(_) => self.query(cx),
+        match self.rows.data {
+            Contents::Folder { .. } => self.apply_sort(cx),
+            Contents::Library(_) => self.query(cx),
         }
     }
-    /// Plays the view from row `ix`. A library view queues the tracks
-    /// around it, skipping unavailable ones.
-    pub fn play(&self, ix: usize, cx: &mut App) {
-        match &self.rows {
-            Rows::Folder { sorted, .. } => {
-                if ix < sorted.len() {
-                    self.player
-                        .update(cx, |p, cx| p.command(Command::Play(sorted.clone(), ix), cx));
-                }
-            }
-            Rows::Library(p) => {
-                let Some(&chosen) = p.keys.get(ix) else {
-                    return;
-                };
-                let start = ix.saturating_sub(PLAY_LIMIT / 2);
-                let keys = p.keys[start..(start + PLAY_LIMIT).min(p.keys.len())].to_vec();
-                let rows = self
-                    .catalog
-                    .read(cx)
-                    .rows(p.scope, keys, &Ticket::default(), 0, cx);
-                let player = self.player.clone();
-                let catalog = self.catalog.clone();
-                cx.spawn(async move |cx| {
-                    let rows = match rows.await {
-                        Ok(rows) => rows,
-                        Err(e) => {
-                            catalog.update(cx, |_, cx| {
-                                cx.emit(crate::catalog::CatalogEvent::Notice(format!("{e:#}")))
-                            });
-                            return;
-                        }
-                    };
-                    let mut start = None;
-                    let mut tracks = Vec::with_capacity(rows.len());
-                    for r in rows.into_iter().filter(|r| r.available || r.key == chosen) {
-                        if r.key == chosen {
-                            if !r.available {
-                                catalog.update(cx, |_, cx| {
-                                    cx.emit(crate::catalog::CatalogEvent::Notice(format!(
-                                        "{} is unavailable.",
-                                        r.track.title
-                                    )))
-                                });
-                                return;
-                            }
-                            start = Some(tracks.len());
-                        }
-                        tracks.push(r.track);
-                    }
-                    if let Some(start) = start {
-                        player.update(cx, |p, cx| {
-                            p.command(Command::Play(tracks.into(), start), cx)
-                        });
-                    }
-                })
-                .detach();
-            }
-        }
+    pub fn section_count(&self) -> usize {
+        self.rows.sections.0.len()
     }
+    pub fn header(&self, ix: usize) -> Option<&Arc<Disc>> {
+        self.rows.sections.header(ix)
+    }
+    pub fn selected_key(&self, ix: usize) -> Option<RowKey> {
+        self.rows.key(ix)
+    }
+    pub fn position(&self, k: &RowKey) -> Option<usize> {
+        self.rows.position(k)
+    }
+    pub fn first_track(&self) -> usize {
+        self.rows.sections.display_index(0)
+    }
+
     pub fn resize(&mut self, widths: &[Pixels]) {
         for (c, w) in self.columns.iter_mut().zip(widths) {
             c.width = f32::from(*w);
@@ -806,7 +884,7 @@ impl MusicTable {
         let Some(playlist) = self.reorderable() else {
             return;
         };
-        let Rows::Library(page) = &self.rows else {
+        let Contents::Library(page) = &self.rows.data else {
             return;
         };
         let Targets::Keys(_, entries) = self.targets(None, selected) else {
@@ -853,14 +931,18 @@ impl MusicTable {
                 .filter(|&i| self.rows.key(i).is_some_and(|k| marked.contains(&k)))
                 .collect(),
         };
-        match &self.rows {
-            Rows::Folder { sorted, .. } => Targets::Tracks(
+        let indices: Vec<_> = indices
+            .into_iter()
+            .filter_map(|i| self.rows.sections.data_index(i))
+            .collect();
+        match &self.rows.data {
+            Contents::Folder { sorted, .. } => Targets::Tracks(
                 indices
                     .iter()
                     .filter_map(|&i| sorted.get(i).cloned())
                     .collect(),
             ),
-            Rows::Library(p) => Targets::Keys(
+            Contents::Library(p) => Targets::Keys(
                 p.scope,
                 indices
                     .iter()
@@ -870,20 +952,23 @@ impl MusicTable {
         }
     }
     fn single_target(&self, row: usize) -> Targets {
-        match &self.rows {
-            Rows::Folder { sorted, .. } => {
+        let Some(row) = self.rows.sections.data_index(row) else {
+            return Targets::Tracks(Vec::new());
+        };
+        match &self.rows.data {
+            Contents::Folder { sorted, .. } => {
                 Targets::Tracks(sorted.get(row).cloned().into_iter().collect())
             }
-            Rows::Library(p) => {
+            Contents::Library(p) => {
                 Targets::Keys(p.scope, p.keys.get(row).copied().into_iter().collect())
             }
         }
     }
     /// Every row of the view, in display order.
     pub fn all_targets(&self) -> Targets {
-        match &self.rows {
-            Rows::Folder { sorted, .. } => Targets::Tracks(sorted.to_vec()),
-            Rows::Library(p) => Targets::Keys(p.scope, p.keys.to_vec()),
+        match &self.rows.data {
+            Contents::Folder { sorted, .. } => Targets::Tracks(sorted.to_vec()),
+            Contents::Library(p) => Targets::Keys(p.scope, p.keys.to_vec()),
         }
     }
     fn is_playing(&self, t: &Track, cx: &App) -> bool {
@@ -1106,6 +1191,9 @@ impl TableDelegate for MusicTable {
             })
     }
     fn cell_label(&self, row: usize, col: usize, cx: &App) -> Option<SharedString> {
+        if let Some(d) = self.header(row) {
+            return (col == 0).then(|| d.title.clone().into());
+        }
         let t = self.rows.track(row)?;
         Some(self.columns[col].field.value(t, self.mark(row, cx)).into())
     }
@@ -1125,7 +1213,7 @@ impl TableDelegate for MusicTable {
         let Some(t) = self.rows.track(row).cloned() else {
             return cell.into_any_element();
         };
-        let unreadable = matches!(self.rows, Rows::Folder { .. })
+        let unreadable = matches!(self.rows.data, Contents::Folder { .. })
             && !self.unreadable.is_empty()
             && self.unreadable.contains(&t.source);
         let available = self.rows.row(row).is_none_or(|r| r.available) && !unreadable;
@@ -1133,6 +1221,7 @@ impl TableDelegate for MusicTable {
         let playing = self.is_playing(&t, cx);
         let cell = cell.when(!available, |d| d.opacity(0.45));
         match f {
+            Field::Album if !self.rows.sections.0.is_empty() => cell.into_any_element(),
             Field::Number if playing => cell
                 .child(
                     Icon::new(IconName::AudioLines)
@@ -1183,10 +1272,26 @@ impl TableDelegate for MusicTable {
     fn render_tr(
         &mut self,
         row: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let m = *materials(cx);
+        if let Some(d) = self.header(row) {
+            let disc = d.clone();
+            return div()
+                .id(("cd-section", row))
+                .bg(m.raised)
+                .cursor_pointer()
+                .child(d.section(window, cx))
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(format!(
+                        "{}  ·  {}",
+                        disc.title,
+                        disc.folder.display()
+                    ))
+                    .build(w, cx)
+                });
+        }
         let marked = !self.selection.marked.is_empty()
             && self
                 .rows
@@ -1298,6 +1403,18 @@ impl TableDelegate for MusicTable {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
+        if let Some(disc) = self.header(ix).cloned() {
+            let browser = self.browser.clone();
+            let table = cx.weak_entity();
+            let id = disc.id.clone();
+            return menu
+                .item(PopupMenuItem::new("Open CD").on_click(move |_, w, cx| {
+                    let _ = browser.update(cx, |b, cx| b.open_disc(&disc, w, cx));
+                }))
+                .item(PopupMenuItem::new("Play CD").on_click(move |_, _, cx| {
+                    let _ = table.update(cx, |t, cx| t.delegate().play_disc(&id, cx));
+                }));
+        }
         let Some(track) = self.rows.track(ix).cloned() else {
             return menu;
         };
@@ -1485,16 +1602,44 @@ impl TableDelegate for MusicTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Rows, Selection, Track, key};
+    use super::{Arc, Contents, Rows, Sections, Selection, Track, key};
+    #[test]
+    fn section_indices_map_only_tracks_into_actions() {
+        use crate::collection::Discs;
+        let mut files = Vec::new();
+        for (folder, number) in [("CD1", 2), ("CD2", 1), ("CD1", 1)] {
+            let mut t = Track::file(std::path::Path::new(folder).join(format!("{number}.wav")));
+            t.album = "Same title".into();
+            t.number = Some(number);
+            files.push(Arc::new(t));
+        }
+        let discs = Discs::group(&files, &Default::default(), std::path::Path::new(""));
+        assert_eq!(discs.len(), 2);
+        assert_eq!(discs[0].tracks[0], files[2]);
+        let sections = Sections::new(discs.iter().map(|d| (d.clone(), d.count)));
+        assert_eq!(
+            (0..5).map(|i| sections.data_index(i)).collect::<Vec<_>>(),
+            [None, Some(0), Some(1), None, Some(2)]
+        );
+        assert_eq!(
+            (0..3)
+                .map(|i| sections.display_index(i))
+                .collect::<Vec<_>>(),
+            [1, 2, 4]
+        );
+    }
     #[test]
     fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {
         let mut rows: Vec<_> = ["a", "b", "c", "d"]
             .iter()
             .map(|p| Arc::new(Track::file((*p).into())))
             .collect();
-        let folder = |rows: &Vec<Arc<Track>>| Rows::Folder {
-            original: Arc::default(),
-            sorted: rows.clone().into(),
+        let folder = |rows: &Vec<Arc<Track>>| Rows {
+            sections: Sections::default(),
+            data: Contents::Folder {
+                original: Arc::default(),
+                sorted: rows.clone().into(),
+            },
         };
         let mut selection = Selection::default();
         selection.modify(&folder(&rows), Some(0), 2, false, true);

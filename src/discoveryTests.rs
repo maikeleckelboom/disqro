@@ -224,3 +224,15 @@ fn unreadable_audio_is_told_apart_from_untagged_audio() {
     assert!(durations["untagged"].is_some_and(|d| d > 0.));
     assert_eq!(durations["empty"], None);
 }
+
+#[test]
+fn loose_files_and_untagged_numbered_disc_directories_have_distinct_playback_contexts() {
+    let root = Path::new("loose");
+    let mut file = Track::file(root.join("single.mp3"));
+    assert!(!file.has_disc_context());
+    file.album = "A tagged album".into();
+    assert!(file.has_disc_context());
+    let cd = Track::file(root.join("Disc 2").join("track.wav"));
+    assert!(cd.has_disc_context());
+    assert!(!Track::file(root.join("CD samples").join("one.wav")).has_disc_context());
+}

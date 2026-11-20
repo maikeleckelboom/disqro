@@ -8,7 +8,7 @@
 use super::{AlbumId, PlaylistId, RootId, Row, Store, TrackId};
 use crate::library::{DiscTrack, Track};
 use anyhow::Result;
-use rusqlite::{ToSql, params_from_iter};
+use rusqlite::{OptionalExtension, ToSql, params_from_iter};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -157,6 +157,7 @@ pub struct AlbumRow {
     pub id: AlbumId,
     pub title: String,
     pub year: Option<u32>,
+    pub disc_number: Option<u32>,
     /// The folder, relative to its collection.
     pub folder: PathBuf,
     pub cover: Option<PathBuf>,
@@ -164,6 +165,13 @@ pub struct AlbumRow {
     pub duration: f64,
     pub complete: bool,
     pub format: String,
+}
+
+pub struct RegisteredDisc {
+    pub root: RootId,
+    pub album: AlbumId,
+    pub title: String,
+    pub track: TrackId,
 }
 
 /// A materialized view: its ordered keys and their total duration.
@@ -192,7 +200,7 @@ impl Store {
                     }
                     None => "t.root_id IS NOT NULL AND t.present = 1".into(),
                 }],
-                "al.sort_key, t.ordinal, t.id",
+                "coalesce(al.year, 4294967295), al.sort_key, al.id, t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
             ),
             Scope::Album(album) => {
                 args.push(Box::new(album));
@@ -200,7 +208,7 @@ impl Store {
                     "t.id",
                     "tracks t",
                     vec![format!("t.album_id = ?{} AND t.present = 1", args.len())],
-                    "t.ordinal, t.id",
+                    "t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
                 )
             }
             Scope::Liked => (
@@ -246,6 +254,50 @@ impl Store {
         Ok(listing)
     }
 
+    /// Read keys and section counts from the same SQLite snapshot during indexing.
+    pub fn table_listing(&self, query: &Query, grouped: bool) -> Result<(Listing, Vec<AlbumRow>)> {
+        let snapshot = self.db.unchecked_transaction()?;
+        let listing = self.listing(query)?;
+        let sections = match query.scope {
+            Scope::Library(root) if grouped => self.albums(root, &query.search)?,
+            _ => vec![],
+        };
+        snapshot.commit()?;
+        Ok((listing, sections))
+    }
+
+    pub fn registered_disc(&self, track: &Track) -> Result<Option<RegisteredDisc>> {
+        let key = match track.library_id {
+            Some(key) => Some(key),
+            None => self.find(&super::Locator::of(track))?,
+        };
+        let Some(key) = key else { return Ok(None) };
+        let disc = self.db.prepare_cached(
+            "SELECT t.root_id, al.id, al.title FROM tracks t JOIN albums al ON al.id = t.album_id
+             WHERE t.id = ?1 AND t.present"
+        )?.query_row([key], |row| {
+            let root: Option<RootId> = row.get(0)?;
+            let album = row.get(1)?;
+            let title = row.get(2)?;
+            Ok(root.map(|root| RegisteredDisc { root, album, title, track: key }))
+        }).optional()?;
+        anyhow::ensure!(
+            track.library_id.is_none() || disc.is_some(),
+            "The selected recording is unavailable."
+        );
+        Ok(disc.flatten())
+    }
+
+    pub fn disc_keys(&self, album: AlbumId) -> Result<Vec<i64>> {
+        Ok(self
+            .listing(&Query {
+                scope: Scope::Album(album),
+                search: String::new(),
+                order: None,
+            })?
+            .keys)
+    }
+
     /// The rows for `keys`, in the same order. Keys that no longer exist are
     /// left out.
     pub fn rows(&self, scope: Scope, keys: &[i64]) -> Result<Vec<Row>> {
@@ -284,6 +336,7 @@ impl Store {
                 } else {
                     track.number = r.get(11)?;
                 }
+                track.library_id = Some(r.get(1)?);
                 track.title = r.get(8)?;
                 track.artist = r.get(9)?;
                 track.album = r.get(10)?;
@@ -336,7 +389,7 @@ impl Store {
             "SELECT al.id, al.title, al.year, al.folder, al.cover, count(t.id),
                 total(t.duration), count(t.duration) = count(t.id),
                 CASE WHEN min(t.format) = max(t.format) THEN min(t.format) ELSE 'Mixed' END,
-                ro.path
+                ro.path, min(t.disc_number)
              FROM tracks t JOIN albums al ON al.id = t.album_id
              JOIN files s ON s.id = t.source
              LEFT JOIN roots ro ON ro.id = t.root_id
@@ -358,6 +411,7 @@ impl Store {
                 title: r.get(1)?,
                 year: r.get(2)?,
                 folder,
+                disc_number: r.get(10)?,
                 cover: r.get::<_, Option<String>>(4)?.map(PathBuf::from),
                 count: r.get::<_, i64>(5)? as usize,
                 duration: r.get(6)?,

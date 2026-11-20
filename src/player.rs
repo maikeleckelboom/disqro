@@ -12,6 +12,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
+        menu::{ContextMenuExt, PopupMenuItem},
         tooltip::Tooltip,
         v_flex,
     },
@@ -29,6 +30,8 @@ use std::{
 };
 
 pub enum PlayerEvent {
+    Locate(Arc<crate::library::Track>, crate::browser::Destination),
+    ContinueCd(u64, Arc<crate::library::Track>),
     TrackChanged,
     PlaySelection,
     QueueChanged,
@@ -63,6 +66,7 @@ impl Render for LevelDrag {
 
 pub struct Player {
     pub can_start: bool,
+    pub play_request: crate::store::Ticket,
     transport: Transport,
     pub status: Status,
     queue: Arc<Queue>,
@@ -96,6 +100,7 @@ impl Player {
         .detach();
         Self {
             can_start: false,
+            play_request: Default::default(),
             transport,
             status: Status::default(),
             queue: Arc::default(),
@@ -116,6 +121,16 @@ impl Player {
         }
     }
     pub fn command(&mut self, c: Command, cx: &mut Context<Self>) {
+        if matches!(
+            c,
+            Command::Play(..)
+                | Command::PlayDisc(..)
+                | Command::Jump(_)
+                | Command::Stop
+                | Command::Step(_)
+        ) {
+            self.play_request.next();
+        }
         if matches!(c, Command::Toggle | Command::SetPlaying(true))
             && self.status.track.is_none()
             && self.queue.entries.is_empty()
@@ -383,6 +398,41 @@ impl Render for Player {
             )
         };
 
+        let art = if let Some(track) = s.track.clone() {
+            use crate::browser::Destination;
+            let player = cx.entity();
+            let click = track.clone();
+            let entry = s.entry;
+            art.id("open-playing-cd")
+                .cursor_pointer()
+                .tooltip(|w, cx| Tooltip::new("Open playing CD").build(w, cx))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(PlayerEvent::Locate(click.clone(), Destination::Disc))
+                }))
+                .context_menu(move |menu, _, _| {
+                    let (p, t) = (player.clone(), track.clone());
+                    menu.item(
+                        PopupMenuItem::new("Show in Collection").on_click(move |_, _, cx| {
+                            p.update(cx, |_, cx| {
+                                cx.emit(PlayerEvent::Locate(t.clone(), Destination::Collection))
+                            })
+                        }),
+                    )
+                    .when_some(entry, |menu, entry| {
+                        let (p, t) = (player.clone(), track.clone());
+                        menu.item(PopupMenuItem::new("Continue This CD").on_click(
+                            move |_, _, cx| {
+                                p.update(cx, |_, cx| {
+                                    cx.emit(PlayerEvent::ContinueCd(entry, t.clone()))
+                                })
+                            },
+                        ))
+                    })
+                })
+                .into_any_element()
+        } else {
+            art.into_any_element()
+        };
         let now = self.now_playing();
         let title = now
             .as_ref()

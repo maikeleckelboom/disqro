@@ -75,7 +75,7 @@ impl Panel for Pane {
                 let b = self.browser.read(cx);
                 let count = b.count;
                 let total = b.duration.unwrap_or_default();
-                let discs = b.discs.read(cx).delegate().items.len();
+                let discs = b.section_count(cx);
                 let catalog = b.catalog.read(cx);
                 let indexing = match &b.location {
                     Location::Library(Some(r)) => {
@@ -95,7 +95,7 @@ impl Panel for Pane {
                     tracks(count)
                 } else if count == 0 {
                     String::new()
-                } else if b.listing_discs() {
+                } else if discs > 0 {
                     let plural = if discs == 1 { "disc" } else { "discs" };
                     format!("{discs} {plural} · {}", tracks(count))
                 } else if total > 0. {
@@ -108,7 +108,7 @@ impl Panel for Pane {
                     Some(status) => format!("{detail} · {status}"),
                     None => detail,
                 };
-                let subfolders = b.location.is_folder() && b.subfolders;
+                let subfolders = b.location.is_folder() && b.subfolders && b.disc.is_none();
                 (
                     b.title(cx),
                     if subfolders {
@@ -171,7 +171,7 @@ impl Panel for Pane {
         }
         let b = self.browser.read(cx);
         let indexed_album = matches!(b.location, Location::Album { .. });
-        if !b.can_list_discs() && !indexed_album {
+        if !b.can_list_discs() && b.disc.is_none() && !indexed_album {
             return None;
         }
         let albums = b.prefs.albums;
@@ -182,14 +182,20 @@ impl Panel for Pane {
                 .ghost()
                 .xsmall()
                 .label(if back {
-                    "‹ Albums / CDs"
+                    "‹ Collection"
                 } else if albums {
                     "All Tracks"
                 } else {
                     "Albums / CDs"
                 })
                 .on_click(move |_, w, cx| {
-                    browser.update(cx, |b, cx| b.view(back || !albums, w, cx))
+                    browser.update(cx, |b, cx| {
+                        if back {
+                            b.up(w, cx)
+                        } else {
+                            b.view(!albums, w, cx)
+                        }
+                    })
                 }),
         ])
     }
@@ -249,12 +255,42 @@ impl Panel for Pane {
                         .separator(),
                     _ => menu,
                 };
+                let cd = match &b.location {
+                    Location::Album { id, .. } => Some(crate::collection::DiscId::Library(*id)),
+                    _ => b.disc.clone(),
+                };
+                let playing = self
+                    .player
+                    .read(cx)
+                    .status
+                    .entry
+                    .zip(self.player.read(cx).status.track.clone())
+                    .filter(|(_, t)| cd.as_ref().is_some_and(|id| table.page_contains(id, t)));
+                let cd_table = b.table.clone();
+                let menu = menu.when_some(playing, |menu, (entry, track)| {
+                    let player = self.player.clone();
+                    menu.item(
+                        PopupMenuItem::new("Continue This CD").on_click(move |_, _, cx| {
+                            player.update(cx, |_, cx| {
+                                cx.emit(crate::player::PlayerEvent::ContinueCd(
+                                    entry,
+                                    track.clone(),
+                                ))
+                            })
+                        }),
+                    )
+                });
                 let menu = menu
                     .item(
-                        PopupMenuItem::new("Play All")
+                        PopupMenuItem::new(if cd.is_some() { "Play CD" } else { "Play All" })
                             .icon(IconName::Play)
-                            .disabled(empty)
-                            .on_click(move |_, _, cx| s1(t1.clone(), Some(false), cx)),
+                            .disabled(empty && cd.is_none())
+                            .on_click(move |_, _, cx| match &cd {
+                                Some(id) => {
+                                    cd_table.update(cx, |t, cx| t.delegate().play_disc(id, cx))
+                                }
+                                None => s1(t1.clone(), Some(false), cx),
+                            }),
                     )
                     .item(
                         PopupMenuItem::new("Shuffle All")
