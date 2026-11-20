@@ -2,16 +2,16 @@ use crate::{
     catalog::{Catalog, CatalogEvent},
     collection::{Disc, DiscId, Discs, ViewPrefs},
     discovery::Scanner,
+    folders::Folders,
     library::{self, Track, TrackList},
     player::{Player, PlayerEvent},
     store::{PlaylistId, RootId, Scope, Term, Ticket},
-    table::{LayoutColumn, MusicTable},
+    table::{LayoutColumn, MusicTable, reselect, scroll_to_top, set_rows_in_place},
 };
 use gpui_kit::{
     component::{
         input::{InputEvent, InputState},
         table::{TableEvent, TableState},
-        tree::{TreeItem, TreeState},
     },
     prelude::*,
     *,
@@ -20,7 +20,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
+
+/// A folder that has not listed anything by then says it is opening, rather
+/// than flashing that message for every folder.
+const OPENING_NOTICE: Duration = Duration::from_millis(250);
 
 const HISTORY: usize = 100;
 
@@ -63,8 +68,13 @@ pub struct Browser {
     pub album: Option<String>,
     pub folder_count: usize,
     pub notice: Option<String>,
+    /// Discovery of the open folder is running.
     pub busy: bool,
-    pub tree: Entity<TreeState>,
+    /// It has run long enough to say so.
+    pub slow: bool,
+    /// The open folder is shown with its subfolders, as a collection.
+    pub subfolders: bool,
+    pub folders: Entity<Folders>,
     pub table: Entity<TableState<MusicTable>>,
     pub search: Entity<InputState>,
     pub catalog: Entity<Catalog>,
@@ -77,11 +87,11 @@ pub struct Browser {
     pub count: usize,
     pub duration: Option<f64>,
     covers: std::collections::HashMap<PathBuf, crate::artwork::CoverFile>,
+    unreadable: Arc<std::collections::HashSet<PathBuf>>,
     equivalent_sheets: std::collections::HashMap<PathBuf, PathBuf>,
     scanner: Scanner,
     task: Option<Task<()>>,
     selected: Option<Arc<Track>>,
-    paths: Vec<PathBuf>,
     generation: u64,
     query: String,
     albums: Ticket,
@@ -100,7 +110,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let tree = cx.new(|cx| TreeState::new(cx));
+        let folders = cx.new(Folders::new);
         let browser = cx.weak_entity();
         let table = cx.new(|cx| {
             TableState::new(
@@ -152,6 +162,17 @@ impl Browser {
         cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
             CatalogEvent::Content => b.library_changed(cx),
             CatalogEvent::Changed => {
+                let catalog = b.catalog.read(cx);
+                let roots: Option<Vec<PathBuf>> = catalog.loaded.then(|| {
+                    catalog
+                        .collections
+                        .iter()
+                        .map(|c| c.root.path.clone())
+                        .collect()
+                });
+                if let Some(roots) = roots {
+                    b.folders.update(cx, |f, cx| f.set_roots(roots, cx));
+                }
                 // A removed collection or playlist cannot stay open.
                 let gone = match &b.location {
                     Location::Library(Some(r)) | Location::Album { root: Some(r), .. } => {
@@ -175,7 +196,7 @@ impl Browser {
             path: PathBuf::new(),
             location: Location::Folder(PathBuf::new()),
             album: None,
-            tree,
+            folders,
             table,
             search,
             catalog,
@@ -186,17 +207,19 @@ impl Browser {
             count: 0,
             duration: None,
             covers: Default::default(),
+            unreadable: Default::default(),
             equivalent_sheets: Default::default(),
             scanner: Scanner::new(),
             task: None,
             selected: None,
-            paths: vec![],
             generation: Default::default(),
             query: String::new(),
             back: vec![],
             forward: vec![],
             notice: None,
             busy: false,
+            slow: false,
+            subfolders: false,
             folder_count: 0,
             albums: Ticket::default(),
         }
@@ -211,9 +234,17 @@ impl Browser {
             self.table.read(cx).focus_handle(cx)
         }
     }
-    /// Albums / CDs applies to folders and collections.
+    /// Albums / CDs applies to collections: a folder shown with its
+    /// subfolders, or a library collection. A folder on its own lists its
+    /// recordings.
     pub fn can_list_discs(&self) -> bool {
-        matches!(self.location, Location::Folder(_) | Location::Library(_))
+        match self.location {
+            // A folder without subfolders is one album or a loose set even
+            // inside a collection: its tracks are what it has to show.
+            Location::Folder(_) => self.subfolders && self.folder_count > 0,
+            Location::Library(_) => true,
+            _ => false,
+        }
     }
     pub fn listing_discs(&self) -> bool {
         self.prefs.albums && self.disc.is_none() && self.can_list_discs()
@@ -243,9 +274,19 @@ impl Browser {
                 return;
             }
             self.disc = Some(d.id.clone());
+            self.table.update(cx, |t, _| scroll_to_top(t));
             self.filter(cx);
             self.list_focus(cx).focus(window, cx);
             cx.notify();
+        }
+    }
+    /// Shows the open folder with or without its subfolders, and remembers
+    /// the choice for it and the folders inside it.
+    pub fn set_subfolders(&mut self, include: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Location::Folder(path) = &self.location {
+            self.prefs.set_subfolders(path, include);
+            cx.emit(ViewChanged);
+            self.reload(window, cx);
         }
     }
     pub fn view(&mut self, albums: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -271,10 +312,12 @@ impl Browser {
         if let Some(scope) = self.scope() {
             self.filter_library(scope, cx);
         } else {
-            self.filter_folder(cx);
+            self.filter_folder(false, cx);
         }
     }
-    fn filter_folder(&mut self, cx: &mut App) {
+    /// Projects the folder's tracks. `discovered` keeps the rows on screen
+    /// in place while discovery adds to them.
+    fn filter_folder(&mut self, discovered: bool, cx: &mut App) {
         let terms = Term::parse(&self.query);
         let catalog = self.catalog.read(cx);
         let rows: TrackList = self
@@ -297,6 +340,28 @@ impl Browser {
             let items = Discs::group(&rows, &self.covers, &self.path);
             self.set_discs(items, cx);
         }
+        let only_folders = !self.busy
+            && self.query.is_empty()
+            && !self.subfolders
+            && self.folder_count > 0
+            && self.raw.iter().flatten().next().is_none();
+        let empty: SharedString = if self.busy {
+            if self.slow {
+                "Opening folder…".into()
+            } else {
+                SharedString::default()
+            }
+        } else if !self.query.is_empty() {
+            "No matching tracks".into()
+        } else if self.notice.is_some() && self.raw.is_empty() && self.folder_count == 0 {
+            SharedString::default()
+        } else if only_folders {
+            "No recordings in this folder".into()
+        } else if self.subfolders {
+            "No supported recordings in this folder or its subfolders".into()
+        } else {
+            "No supported recordings in this folder".into()
+        };
         self.table.update(cx, |t, cx| {
             if let Some(selected) = t
                 .selected_row()
@@ -316,26 +381,19 @@ impl Browser {
                     cx.notify();
                 }
             });
-            t.delegate_mut().empty = if self.busy {
-                "Opening folder…".into()
-            } else if !self.query.is_empty() {
-                "No matching tracks".into()
-            } else if self.notice.is_some() && self.raw.is_empty() && self.folder_count == 0 {
-                SharedString::default()
-            } else if self.folder_count > 0 && !self.prefs.recursive {
-                "This folder holds folders. Choose one in the sidebar.".into()
+            t.delegate_mut().empty = empty;
+            t.delegate_mut().offer_subfolders = only_folders;
+            t.delegate_mut().unreadable = self.unreadable.clone();
+            if discovered {
+                set_rows_in_place(t, rows, cx);
             } else {
-                "No supported recordings in this folder".into()
-            };
-            t.delegate_mut().set_rows(rows, cx);
-            if let Some(ix) = selected.and_then(|item| {
+                t.delegate_mut().set_rows(rows, cx);
+            }
+            let ix = selected.and_then(|item| {
                 (0..t.delegate().len())
                     .find(|&i| t.delegate().track(i).is_some_and(|r| r.same_item(item)))
-            }) {
-                t.set_selected_row(ix, cx);
-            } else {
-                t.clear_selection(cx);
-            }
+            });
+            reselect(t, ix, cx);
             cx.notify();
         });
     }
@@ -346,13 +404,8 @@ impl Browser {
                 .and_then(|i| table.delegate().items.get(i))
                 .map(|d| d.id.clone());
             table.delegate_mut().items = items;
-            if let Some(ix) =
-                selected.and_then(|id| table.delegate().items.iter().position(|d| d.id == id))
-            {
-                table.set_selected_row(ix, cx);
-            } else {
-                table.clear_selection(cx);
-            }
+            let ix = selected.and_then(|id| table.delegate().items.iter().position(|d| d.id == id));
+            reselect(table, ix, cx);
             cx.notify();
         });
     }
@@ -377,6 +430,7 @@ impl Browser {
         };
         self.table.update(cx, |t, _| {
             t.delegate_mut().empty = empty;
+            t.delegate_mut().offer_subfolders = false;
         });
         let search = self.query.clone();
         if self.listing_discs() {
@@ -466,7 +520,7 @@ impl Browser {
                 .iter()
                 .any(|t| matches!(t, Term::Rating(_) | Term::Liked(_))) =>
             {
-                self.filter_folder(cx)
+                self.filter_folder(false, cx)
             }
             None => self.table.update(cx, |_, cx| cx.notify()),
         }
@@ -485,6 +539,11 @@ impl Browser {
     ) {
         self.remember(&Location::Folder(path.clone()));
         self.load(path, reveal, window, cx);
+    }
+    /// Opens a Place: the folder tree is rooted at it.
+    pub fn open_place(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember(&Location::Folder(path.clone()));
+        self.load_from(path, None, true, window, cx);
     }
     /// Shows a library view and records the current view in the history.
     pub fn show(&mut self, location: Location, window: &mut Window, cx: &mut Context<Self>) {
@@ -514,6 +573,8 @@ impl Browser {
                     self.disc = None;
                     self.search.update(cx, |s, cx| s.set_value("", window, cx));
                     self.query.clear();
+                    self.table.update(cx, |t, _| scroll_to_top(t));
+                    self.discs.update(cx, |t, _| scroll_to_top(t));
                 }
                 self.task.take();
                 self.generation += 1;
@@ -523,9 +584,15 @@ impl Browser {
                 self.location = location;
                 self.count = 0;
                 self.duration = None;
-                if self.paths.is_empty() && !self.path.as_os_str().is_empty() {
-                    self.refresh_tree(cx);
-                }
+                // The tree keeps the last folder in view without marking it
+                // as the current location.
+                let path = self.path.clone();
+                self.folders.update(cx, |f, cx| {
+                    if !path.as_os_str().is_empty() && f.is_empty() {
+                        f.show(&path, false, cx);
+                    }
+                    f.set_highlight(false, cx);
+                });
                 cx.emit(ViewChanged);
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
@@ -594,6 +661,7 @@ impl Browser {
         match self.location.clone() {
             Location::Folder(_) => {
                 let path = self.path.clone();
+                self.folders.update(cx, |f, cx| f.refresh(&path, cx));
                 self.load(path, None, window, cx);
             }
             Location::Library(root) | Location::Album { root, .. } => {
@@ -623,31 +691,50 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.load_from(path, reveal, false, window, cx);
+    }
+    /// Opens `path` and lists it. `place` roots the folder tree at it.
+    fn load_from(
+        &mut self,
+        path: PathBuf,
+        reveal: Option<Reveal>,
+        place: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let same_folder = self.location.is_folder() && crate::places::same_path(&self.path, &path);
         if !same_folder {
             self.selected = None;
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().clear_marks();
                 t.clear_selection(cx);
+                scroll_to_top(t);
+            });
+            self.discs.update(cx, |t, cx| {
+                t.clear_selection(cx);
+                scroll_to_top(t);
             });
         }
         self.generation += 1;
         let revision = self.generation;
         let timing = std::env::var_os("DISQRO_TRACE_DISCOVERY").map(|_| std::time::Instant::now());
         self.task.take();
-        let events = self.scanner.open(path.clone(), self.prefs.recursive);
+        self.subfolders = self.prefs.includes_subfolders(&path);
+        let events = self.scanner.open(path.clone(), self.subfolders);
         self.location = Location::Folder(path.clone());
         cx.emit(ViewChanged);
+        self.folders.update(cx, |f, cx| f.show(&path, place, cx));
         self.path = path;
         self.busy = true;
+        self.slow = false;
         if !same_folder {
             self.disc = None;
         }
         self.raw.clear();
         self.covers.clear();
+        self.unreadable = Default::default();
         self.equivalent_sheets.clear();
         self.notice = None;
-        self.set_tree(&[], None, cx);
         self.folder_count = 0;
         if !same_folder || reveal.is_some() {
             self.search.update(cx, |s, cx| s.set_value("", window, cx));
@@ -655,10 +742,23 @@ impl Browser {
         }
         self.filter(cx);
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(OPENING_NOTICE).await;
+            let _ = this.update(cx, |b, cx| {
+                if b.generation == revision && b.busy {
+                    b.slow = true;
+                    b.filter_folder(true, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let mut reveal = reveal;
             let mut first = true;
+            let mut handling = (0usize, std::time::Duration::ZERO, std::time::Duration::ZERO);
             while let Ok(batch) = events.recv().await {
+                let started = timing.map(|_| std::time::Instant::now());
                 if this
                     .update_in(cx, |b, window, cx| {
                         if b.generation != revision {
@@ -666,9 +766,14 @@ impl Browser {
                         }
                         if let Some(root) = batch.root {
                             b.folder_count = root.dirs.len();
-                            b.set_tree(&root.dirs, root.siblings.as_deref(), cx);
+                            let path = b.path.clone();
+                            b.folders
+                                .update(cx, |f, cx| f.listed(&path, &root.dirs, cx));
                         }
                         b.covers.extend(batch.covers);
+                        if !batch.unreadable.is_empty() {
+                            Arc::make_mut(&mut b.unreadable).extend(batch.unreadable);
+                        }
                         b.equivalent_sheets.extend(batch.equivalent_sheets);
                         if b.notice.is_none() {
                             b.notice = batch.notice;
@@ -680,7 +785,8 @@ impl Browser {
                                 b.raw[i] = track;
                             }
                         }
-                        b.filter(cx);
+                        b.albums.next();
+                        b.filter_folder(true, cx);
                         if first && b.count > 0 {
                             first = false;
                             if let Some(start) = timing {
@@ -702,15 +808,22 @@ impl Browser {
                 {
                     return;
                 }
+                if let Some(started) = started {
+                    let spent = started.elapsed();
+                    handling = (handling.0 + 1, handling.1 + spent, handling.2.max(spent));
+                }
             }
             let _ = this.update(cx, |b, cx| {
                 if b.generation == revision {
                     b.busy = false;
                     if let Some(start) = timing {
                         eprintln!(
-                            "Discovery {revision} finished {:?} ({} tracks)",
+                            "Discovery {revision} finished {:?} ({} tracks; {} batches, interface {:?}, longest {:?})",
                             start.elapsed(),
-                            b.raw.iter().flatten().count()
+                            b.raw.iter().flatten().count(),
+                            handling.0,
+                            handling.1,
+                            handling.2
                         );
                     }
                     if reveal.is_some() && b.notice.is_none() {
@@ -738,7 +851,7 @@ impl Browser {
             })
             .cloned();
         let Some(item) = item else { return false };
-        if self.prefs.albums {
+        if self.prefs.albums && self.can_list_discs() {
             let list_had_focus = self.list_focus(cx).is_focused(window);
             self.disc = Some(DiscId::of(&item));
             self.filter(cx);
@@ -758,86 +871,6 @@ impl Browser {
             }
         });
         true
-    }
-    /// Lists the current folder's neighbourhood without opening it, for a
-    /// library view restored at startup.
-    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let path = self.path.clone();
-        cx.spawn(async move |this, cx| {
-            let (dirs, siblings) = cx
-                .background_spawn(async move {
-                    (
-                        library::subfolders(&path),
-                        path.parent().map(library::subfolders),
-                    )
-                })
-                .await;
-            let _ = this.update(cx, |b, cx| {
-                if b.paths.is_empty() {
-                    b.set_tree(&dirs, siblings.as_deref(), cx);
-                }
-            });
-        })
-        .detach();
-    }
-    /// The tree shows the parent folder with the current folder among its
-    /// siblings, opened to show its own subfolders. Album discs and
-    /// neighbouring albums are one click away.
-    fn set_tree(&mut self, dirs: &[PathBuf], siblings: Option<&[PathBuf]>, cx: &mut App) {
-        self.paths.clear();
-        fn item(paths: &mut Vec<PathBuf>, p: &Path) -> TreeItem {
-            let id = paths.len();
-            paths.push(p.to_owned());
-            TreeItem::new(id.to_string(), library::display_name(p))
-        }
-        let children =
-            |paths: &mut Vec<PathBuf>| dirs.iter().map(|p| item(paths, p)).collect::<Vec<_>>();
-        let current_id;
-        let root = match (self.path.parent(), siblings) {
-            (Some(parent), Some(siblings)) => {
-                let mut root = item(&mut self.paths, parent).expanded(true);
-                let mut found = None;
-                let mut items = vec![];
-                for s in siblings {
-                    let mut it = item(&mut self.paths, s);
-                    if crate::places::same_path(s, &self.path) {
-                        found = Some(it.id.clone());
-                        let kids = children(&mut self.paths);
-                        it = it.children(kids).expanded(true);
-                    }
-                    items.push(it);
-                }
-                if found.is_none() {
-                    let mut it = item(&mut self.paths, &self.path.clone());
-                    found = Some(it.id.clone());
-                    let kids = children(&mut self.paths);
-                    it = it.children(kids).expanded(true);
-                    items.push(it);
-                }
-                current_id = found;
-                root = root.children(items);
-                root
-            }
-            _ => {
-                let mut it = item(&mut self.paths, &self.path.clone());
-                current_id = Some(it.id.clone());
-                let kids = children(&mut self.paths);
-                it = it.children(kids).expanded(true);
-                it
-            }
-        };
-        self.tree.update(cx, |t, cx| {
-            t.set_items(vec![root], cx);
-            if let Some(id) = &current_id
-                && let Some(ix) = t.index_of(id)
-            {
-                t.set_selected_index(Some(ix), cx);
-                t.scroll_to_item(ix, ScrollStrategy::Center);
-            }
-        });
-    }
-    pub fn tree_path(&self, id: &str) -> Option<PathBuf> {
-        self.paths.get(id.parse::<usize>().ok()?).cloned()
     }
     /// A short name for the current view.
     pub fn title(&self, cx: &App) -> String {

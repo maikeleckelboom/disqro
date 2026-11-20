@@ -16,9 +16,9 @@ use std::{
 #[path = "discoveryTests.rs"]
 mod tests;
 
+/// The opened folder's own subfolders, listed once per scan.
 pub struct Root {
     pub dirs: Vec<PathBuf>,
-    pub siblings: Option<Vec<PathBuf>>,
 }
 #[derive(Default)]
 pub struct Batch {
@@ -32,6 +32,9 @@ pub struct Batch {
     pub incomplete: Vec<PathBuf>,
     /// Sheets that exist but could not be interpreted on this visit.
     pub failed_sheets: Vec<PathBuf>,
+    /// Sources whose audio header could not be read: not recordings Disqro
+    /// can play, as opposed to recordings without tags.
+    pub unreadable: Vec<PathBuf>,
 }
 struct Request {
     path: PathBuf,
@@ -190,7 +193,6 @@ pub(crate) fn walk(
             Ok(folder) => {
                 if path == root {
                     batch.root = Some(Root {
-                        siblings: path.parent().map(library::subfolders),
                         dirs: folder.dirs.clone(),
                     });
                 }
@@ -243,6 +245,7 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
     // Source headers are read after all cheap discovery. Sibling chapters
     // whose duration is known from INDEX 01 never need a probe.
     let remaining_files: HashSet<_> = sources.files.into_values().collect();
+    let mut unreadable = HashSet::new();
     for (index, track) in sources.enrich {
         if out.is_closed() {
             return;
@@ -257,6 +260,9 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
             None => {
                 let mut source = Track::file(track.source.clone());
                 if !source.read_tags() {
+                    if unreadable.insert(track.source.clone()) {
+                        batch.unreadable.push(track.source.clone());
+                    }
                     continue;
                 }
                 if let (Some(c), Some(stamp)) = (cache, stamp.as_ref())
@@ -285,7 +291,7 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
             published = Instant::now();
         }
     }
-    if !batch.rows.is_empty() {
+    if !batch.rows.is_empty() || !batch.unreadable.is_empty() {
         let _ = out.send_blocking(batch);
     }
 }

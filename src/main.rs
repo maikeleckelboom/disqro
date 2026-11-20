@@ -9,6 +9,7 @@ mod catalog;
 mod collection;
 mod cue;
 mod discovery;
+mod folders;
 mod library;
 mod location;
 mod movie;

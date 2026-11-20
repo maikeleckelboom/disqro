@@ -361,7 +361,7 @@ impl Workspace {
                 position: p.status.position,
             }),
             window: self.prefs,
-            collection: b.prefs,
+            collection: b.prefs.clone(),
             location: Some(b.location.clone()),
             columns_version: profile::COLUMNS_VERSION,
         }
@@ -876,12 +876,13 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|s, _: &OpenDirectory, w, cx| {
                 let b = s.browser.read(cx);
-                if let Some(path) = b
-                    .tree
+                let folders = b.folders.read(cx);
+                if let Some(path) = folders
+                    .state
                     .read(cx)
                     .selected_item()
-                    .and_then(|i| b.tree_path(&i.id))
-                    && (path != b.path || !b.location.is_folder())
+                    .and_then(|i| folders.path(&i.id))
+                    && (!crate::places::same_path(&path, &b.path) || !b.location.is_folder())
                 {
                     s.browser.update(cx, |b, cx| b.open(path, w, cx));
                 }

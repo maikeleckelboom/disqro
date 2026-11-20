@@ -13,7 +13,9 @@ use crate::{
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
-        Icon, Sizable, h_flex,
+        Icon, Sizable,
+        button::Button,
+        h_flex,
         menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
         rating::Rating,
         table::{Column, ColumnSort, TableDelegate, TableState},
@@ -334,11 +336,69 @@ pub struct MusicTable {
     browser: WeakEntity<crate::browser::Browser>,
     /// What an empty table says: loading, no match, or only subfolders.
     pub empty: SharedString,
+    /// An empty folder with subfolders offers to include them.
+    pub offer_subfolders: bool,
+    /// Folder sources whose audio header could not be read.
+    pub unreadable: Arc<HashSet<PathBuf>>,
     keys_ticket: Ticket,
     page_ticket: Ticket,
     visible: Range<usize>,
     /// Bumps when the table switches views; late results are dropped.
     view: u64,
+}
+
+/// Restores the selection after the rows changed under it. The view stays
+/// where the listener left it: GPUI Kit scrolls to a newly selected row,
+/// which would pull the view back to the selection on every update.
+pub fn reselect<D: TableDelegate>(
+    t: &mut TableState<D>,
+    ix: Option<usize>,
+    cx: &mut Context<TableState<D>>,
+) {
+    match ix {
+        Some(ix) if t.selected_row() == Some(ix) => {}
+        Some(ix) => {
+            t.set_selected_row(ix, cx);
+            t.vertical_scroll_handle
+                .0
+                .borrow_mut()
+                .deferred_scroll_to_item = None;
+        }
+        None if t.selected_row().is_some() => t.clear_selection(cx),
+        None => {}
+    }
+}
+/// Replaces the rows of a folder view while it is being discovered. Once
+/// the listener has scrolled, the row at the top of the view stays there
+/// when rows are sorted in or removed above it.
+pub fn set_rows_in_place(
+    t: &mut TableState<MusicTable>,
+    rows: TrackList,
+    cx: &mut Context<TableState<MusicTable>>,
+) {
+    let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
+    let height = px(ROW_HEIGHT);
+    let first = (-offset.y / height).max(0.) as usize;
+    let anchor = (offset.y < px(0.))
+        .then(|| t.delegate().rows.key(first))
+        .flatten();
+    t.delegate_mut().set_rows(rows, cx);
+    if let Some(now) = anchor.and_then(|k| t.delegate().rows.position(&k))
+        && now != first
+    {
+        let y = offset.y - height * (now as f32 - first as f32);
+        t.vertical_scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(offset.x, y));
+    }
+}
+/// Starts a newly opened view at its first row.
+pub fn scroll_to_top<D: TableDelegate>(t: &mut TableState<D>) {
+    let mut scroll = t.vertical_scroll_handle.0.borrow_mut();
+    scroll.deferred_scroll_to_item = None;
+    scroll.base_handle.set_offset(point(px(0.), px(0.)));
 }
 
 /// Sends the playable tracks of `targets` to the player once they are known.
@@ -395,6 +455,8 @@ impl MusicTable {
             sort: None,
             selection: Default::default(),
             empty: SharedString::default(),
+            offer_subfolders: false,
+            unreadable: Arc::default(),
             keys_ticket: Ticket::default(),
             page_ticket: Ticket::default(),
             visible: 0..0,
@@ -556,10 +618,8 @@ impl MusicTable {
                     p.loaded = true;
                     p.cache.clear();
                 }
-                match selected.and_then(|k| t.delegate().rows.position(&k)) {
-                    Some(ix) => t.set_selected_row(ix, cx),
-                    None => t.clear_selection(cx),
-                }
+                let ix = selected.and_then(|k| t.delegate().rows.position(&k));
+                reselect(t, ix, cx);
                 t.delegate_mut().page_ticket.next();
                 t.delegate_mut().request_rows(true, cx);
                 cx.notify();
@@ -1065,7 +1125,10 @@ impl TableDelegate for MusicTable {
         let Some(t) = self.rows.track(row).cloned() else {
             return cell.into_any_element();
         };
-        let available = self.rows.row(row).is_none_or(|r| r.available);
+        let unreadable = matches!(self.rows, Rows::Folder { .. })
+            && !self.unreadable.is_empty()
+            && self.unreadable.contains(&t.source);
+        let available = self.rows.row(row).is_none_or(|r| r.available) && !unreadable;
         let mark = self.mark(row, cx);
         let playing = self.is_playing(&t, cx);
         let cell = cell.when(!available, |d| d.opacity(0.45));
@@ -1079,9 +1142,21 @@ impl TableDelegate for MusicTable {
                 .into_any_element(),
             Field::Number if !available => cell
                 .child(
-                    Icon::new(IconName::TriangleAlert)
-                        .size(px(13.))
-                        .text_color(m.warning),
+                    div()
+                        .id(("unavailable", self.cell_id(row)))
+                        .child(
+                            Icon::new(IconName::TriangleAlert)
+                                .size(px(13.))
+                                .text_color(m.warning),
+                        )
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(if unreadable {
+                                "This file could not be read as audio"
+                            } else {
+                                "This recording is unavailable"
+                            })
+                            .build(w, cx)
+                        }),
                 )
                 .into_any_element(),
             Field::Liked => cell
@@ -1192,6 +1267,7 @@ impl TableDelegate for MusicTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let m = materials(cx);
+        let browser = self.browser.clone();
         gpui_kit::component::v_flex()
             .size_full()
             .items_center()
@@ -1202,6 +1278,17 @@ impl TableDelegate for MusicTable {
             .when(!self.empty.is_empty() && !self.is_loading(), |d| {
                 d.child(Icon::new(IconName::FolderOpen).size(px(26.)))
                     .child(self.empty.clone())
+            })
+            .when(self.offer_subfolders, |d| {
+                d.child(
+                    Button::new("include-subfolders")
+                        .outline()
+                        .small()
+                        .label("Include Subfolders")
+                        .on_click(move |_, w, cx| {
+                            let _ = browser.update(cx, |b, cx| b.set_subfolders(true, w, cx));
+                        }),
+                )
             })
     }
     fn context_menu(

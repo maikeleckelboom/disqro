@@ -20,18 +20,51 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+/// How collections are presented, and which folders are browsed as
+/// collections.
+///
+/// A folder normally shows the recordings it holds. Including subfolders
+/// turns it into a collection view of everything beneath it. The choice is
+/// remembered for that folder and holds inside it, but never for its parent
+/// or its neighbours. The global `recursive` switch of earlier versions is
+/// ignored when read, since it was on for every folder by default.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewPrefs {
-    pub recursive: bool,
+    /// Collections show Albums / CDs rather than All Tracks.
     pub albums: bool,
+    pub subfolders: Vec<SubfolderRule>,
 }
-impl Default for ViewPrefs {
-    fn default() -> Self {
-        Self {
-            recursive: true,
-            albums: false,
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubfolderRule {
+    pub path: PathBuf,
+    pub include: bool,
+}
+/// Remembered folder choices beyond this many forget the oldest.
+const RULES: usize = 256;
+impl ViewPrefs {
+    /// Whether `folder` is browsed with its subfolders: the choice made for
+    /// it or its nearest ancestor, or not.
+    pub fn includes_subfolders(&self, folder: &Path) -> bool {
+        self.subfolders
+            .iter()
+            .filter(|r| library::within(folder, &r.path))
+            .max_by_key(|r| r.path.as_os_str().len())
+            .is_some_and(|r| r.include)
+    }
+    /// Records a choice for `folder` and everything beneath it, replacing
+    /// earlier choices made inside it.
+    pub fn set_subfolders(&mut self, folder: &Path, include: bool) {
+        self.subfolders
+            .retain(|r| !library::within(&r.path, folder));
+        if self.includes_subfolders(folder) != include {
+            self.subfolders.push(SubfolderRule {
+                path: folder.to_owned(),
+                include,
+            });
         }
+        let excess = self.subfolders.len().saturating_sub(RULES);
+        self.subfolders.drain(..excess);
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -91,8 +124,15 @@ impl Discs {
         root: &Path,
     ) -> Vec<Disc> {
         let mut positions = HashMap::new();
-        let mut items = Vec::new();
+        let mut items: Vec<Disc> = Vec::new();
+        let mut last: Option<usize> = None;
         for t in rows {
+            // A disc's tracks arrive together, so most rows belong to the
+            // disc before them and need no key of their own.
+            if let Some(i) = last.filter(|&i| items[i].id.contains(t)) {
+                items[i].add(t);
+                continue;
+            }
             let id = DiscId::of(t);
             let i = *positions.entry(id.clone()).or_insert_with(|| {
                 let folder = t
@@ -122,30 +162,29 @@ impl Discs {
                 });
                 i
             });
-            let disc = &mut items[i];
-            disc.count += 1;
-            disc.duration += t.duration.unwrap_or(0.);
-            disc.complete &= t.duration.is_some();
-            if disc.format != "Mixed"
-                && !t
-                    .source
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case(&disc.format))
-            {
-                disc.format = "Mixed".into();
-            }
+            items[i].add(t);
+            last = Some(i);
         }
-        items.sort_by(|a, b| {
-            a.year
-                .unwrap_or(u32::MAX)
-                .cmp(&b.year.unwrap_or(u32::MAX))
-                .then_with(|| a.folder.cmp(&b.folder))
-                .then_with(|| a.title.cmp(&b.title))
-        });
+        // Discs keep the order their first tracks were found in, which is
+        // folder order. Discs found later are added below the ones on screen
+        // rather than among them, and arriving tags never reorder the list.
         items
     }
 }
 impl Disc {
+    fn add(&mut self, t: &Track) {
+        self.count += 1;
+        self.duration += t.duration.unwrap_or(0.);
+        self.complete &= t.duration.is_some();
+        if self.format != "Mixed"
+            && !t
+                .source
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case(&self.format))
+        {
+            self.format = "Mixed".into();
+        }
+    }
     /// A disc of a collection view. Reads the cover's file stamp, so it is
     /// built off the interface thread.
     pub fn from_album(a: AlbumRow) -> Self {
@@ -237,4 +276,42 @@ impl TableDelegate for Discs {
 /// library views in SQL; `mark` is only consulted for `rating:` and `liked:`.
 pub fn matches(t: &Track, terms: &[Term], mark: impl Fn() -> Mark) -> bool {
     terms.iter().all(|term| term.matches(t, &mark))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ViewPrefs;
+    use std::path::Path;
+    #[test]
+    fn subfolder_choices_hold_inside_a_folder_only() {
+        let mut prefs = ViewPrefs::default();
+        let archive = Path::new(r"C:\Music\Archive");
+        let disc = Path::new(r"C:\Music\Archive\1995\CD1");
+        assert!(!prefs.includes_subfolders(archive));
+        prefs.set_subfolders(archive, true);
+        assert!(prefs.includes_subfolders(archive));
+        assert!(prefs.includes_subfolders(Path::new(r"c:\music\archive\\")));
+        assert!(prefs.includes_subfolders(disc));
+        assert!(!prefs.includes_subfolders(Path::new(r"C:\Music")));
+        assert!(!prefs.includes_subfolders(Path::new(r"C:\Music\Archive 2")));
+        // An exception inside the collection, then the collection again.
+        prefs.set_subfolders(disc, false);
+        assert!(!prefs.includes_subfolders(disc));
+        assert!(prefs.includes_subfolders(Path::new(r"C:\Music\Archive\1995")));
+        prefs.set_subfolders(archive, true);
+        assert!(prefs.includes_subfolders(disc));
+        assert_eq!(prefs.subfolders.len(), 1);
+        // Turning a folder back to itself leaves no rule behind.
+        prefs.set_subfolders(archive, false);
+        assert!(prefs.subfolders.is_empty());
+    }
+    #[test]
+    fn earlier_global_subfolder_switch_is_not_carried_over() {
+        let prefs: ViewPrefs = serde_json::from_str(r#"{"recursive":true,"albums":true}"#).unwrap();
+        assert!(prefs.albums);
+        assert!(!prefs.includes_subfolders(Path::new(r"C:\Users\Me\Music")));
+        let again: ViewPrefs =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert!(again.albums && again.subfolders.is_empty());
+    }
 }

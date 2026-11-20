@@ -189,9 +189,7 @@ pub fn browse_while(
             folder.cover = Some(p);
         }
     }
-    folder
-        .dirs
-        .sort_by_cached_key(|p| folder_name(p).to_lowercase());
+    sort_by_name(&mut folder.dirs, folder_name);
     discs.sort();
     let mut covered = HashSet::new();
     let mut tracks: Vec<Track> = Vec::new();
@@ -262,7 +260,7 @@ pub fn browse_while(
             ));
         }
     }
-    files.sort_by_cached_key(|p| name(p).to_lowercase());
+    sort_by_name(&mut files, name);
     tracks.extend(
         files
             .into_iter()
@@ -296,8 +294,14 @@ fn cover_rank(path: &Path) -> Option<usize> {
         .position(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
-/// Hidden and system folders, such as `$RECYCLE.BIN`, stay out of the way.
+/// Folders that browsing and recursive discovery pass over: hidden and system
+/// folders such as `$RECYCLE.BIN`, links, and dot-folders such as `.git` or
+/// `.cache`, which tools create without the hidden attribute on Windows. Any
+/// of them still opens when the listener navigates to it directly.
 fn hidden(entry: &fs::DirEntry) -> bool {
+    if entry.file_name().to_string_lossy().starts_with('.') {
+        return true;
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -309,7 +313,7 @@ fn hidden(entry: &fs::DirEntry) -> bool {
             .is_ok_and(|m| m.file_attributes() & (HIDDEN | SYSTEM | REPARSE_POINT) != 0)
     }
     #[cfg(not(windows))]
-    entry.file_name().to_string_lossy().starts_with('.')
+    false
 }
 /// The visible subfolders of a folder, sorted by name.
 pub fn subfolders(path: &Path) -> Vec<PathBuf> {
@@ -321,8 +325,49 @@ pub fn subfolders(path: &Path) -> Vec<PathBuf> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !hidden(e))
         .map(|e| e.path())
         .collect();
-    dirs.sort_by_cached_key(|p| folder_name(p).to_lowercase());
+    sort_by_name(&mut dirs, folder_name);
     dirs
+}
+
+/// Orders paths by name as Explorer does, so `CD 2` precedes `CD 10`.
+pub fn sort_by_name(paths: &mut [PathBuf], name: fn(&Path) -> String) {
+    #[cfg(windows)]
+    {
+        let mut keyed: Vec<(Vec<u16>, PathBuf)> = paths
+            .iter_mut()
+            .map(|p| {
+                let wide = name(p).encode_utf16().chain([0]).collect();
+                (wide, std::mem::take(p))
+            })
+            .collect();
+        keyed.sort_by(|(a, _), (b, _)| {
+            use windows::{Win32::UI::Shell::StrCmpLogicalW, core::PCWSTR};
+            // Both keys are NUL-terminated and outlive the call.
+            let order = unsafe { StrCmpLogicalW(PCWSTR(a.as_ptr()), PCWSTR(b.as_ptr())) };
+            order.cmp(&0)
+        });
+        for (slot, (_, path)) in paths.iter_mut().zip(keyed) {
+            *slot = path;
+        }
+    }
+    #[cfg(not(windows))]
+    paths.sort_by_cached_key(|p| name(p).to_lowercase());
+}
+
+/// Whether `path` is `root` or lies beneath it, ignoring case and trailing
+/// separators as Windows does.
+pub fn within(path: &Path, root: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let (path, root) = (norm(path), norm(root));
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 /// A short name for a folder; a drive root keeps its letter.
