@@ -317,6 +317,18 @@ impl Rows {
             Contents::Folder { .. } => None,
         }
     }
+    /// Range selection visits tracks; ordinary arrow navigation can still focus a CD header.
+    fn adjacent_track(&self, current: Option<usize>, direction: isize) -> Option<usize> {
+        let last = self.len().checked_sub(1)?;
+        let first = self.sections.display_index(0);
+        let step = |i: usize| i.saturating_add_signed(direction).clamp(first, last);
+        let next = current.map_or(first, step);
+        Some(if self.sections.header(next).is_some() {
+            step(next)
+        } else {
+            next
+        })
+    }
     fn track(&self, row: usize) -> Option<&Arc<Track>> {
         match &self.data {
             Contents::Folder { sorted, .. } => sorted.get(self.sections.data_index(row)?),
@@ -325,8 +337,8 @@ impl Rows {
     }
 }
 
-#[derive(Default)]
-struct Selection {
+#[derive(Clone, Default)]
+pub(crate) struct Selection {
     marked: HashSet<RowKey>,
     anchor: Option<RowKey>,
     cursor: Option<RowKey>,
@@ -867,14 +879,13 @@ impl MusicTable {
         !self.selection.marked.is_empty()
     }
     pub fn extend_selection(&mut self, primary: Option<usize>, direction: isize) -> Option<usize> {
-        let last = self.rows.len().checked_sub(1)?;
         let current = self
             .selection
             .cursor
             .as_ref()
             .and_then(|k| self.rows.position(k))
             .or(primary);
-        let next = current.map_or(0, |i| i.saturating_add_signed(direction).min(last));
+        let next = self.rows.adjacent_track(current, direction)?;
         self.selection
             .modify(&self.rows, primary, next, true, false);
         Some(next)
@@ -907,6 +918,13 @@ impl MusicTable {
             .copied();
         self.catalog
             .update(cx, |c, cx| c.move_entries(playlist, entries, before, cx));
+    }
+    pub fn marked_selection(&self) -> Option<Selection> {
+        self.has_marks().then(|| self.selection.clone())
+    }
+    pub fn restore_marks(&mut self, mut selection: Selection) {
+        selection.ordered.take();
+        self.selection = selection;
     }
     pub fn clear_marks(&mut self) {
         self.selection = Default::default();
@@ -1627,6 +1645,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2, 4]
         );
+        let rows = Rows {
+            sections,
+            data: Contents::Folder {
+                original: Arc::default(),
+                sorted: discs
+                    .iter()
+                    .flat_map(|d| d.tracks.iter().cloned())
+                    .collect(),
+            },
+        };
+        assert_eq!(rows.adjacent_track(None, 1), Some(1));
+        assert_eq!(rows.adjacent_track(Some(1), -1), Some(1));
+        assert_eq!(rows.adjacent_track(Some(2), 1), Some(4));
+        assert_eq!(rows.adjacent_track(Some(4), -1), Some(2));
     }
     #[test]
     fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {

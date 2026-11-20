@@ -13,6 +13,7 @@ pub(super) struct Visit {
 }
 pub(super) struct Bookmark {
     selected: Option<RowKey>,
+    marked: Option<crate::table::Selection>,
     offset: Point<Pixels>,
 }
 
@@ -22,6 +23,7 @@ impl Browser {
         let bookmark = if self.listing_discs() {
             let t = self.discs.read(cx);
             Bookmark {
+                marked: None,
                 selected: t
                     .selected_row()
                     .and_then(|i| t.delegate().items.get(i))
@@ -30,6 +32,7 @@ impl Browser {
             }
         } else {
             Bookmark {
+                marked: table.delegate().marked_selection(),
                 selected: table
                     .selected_row()
                     .and_then(|i| table.delegate().selected_key(i)),
@@ -94,6 +97,9 @@ impl Browser {
             self.table.update(cx, |t, cx| {
                 let ix = mark.selected.and_then(|k| t.delegate().position(&k));
                 reselect(t, ix, cx);
+                if let Some(marked) = mark.marked {
+                    t.delegate_mut().restore_marks(marked);
+                }
                 t.vertical_scroll_handle
                     .0
                     .borrow()
