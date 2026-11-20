@@ -4,7 +4,7 @@
 //! The queue holds its own copies of the tracks. Browsing, sorting a table or
 //! editing a folder never changes it, and changing the queue never changes an
 //! album or a playlist. A CUE chapter is an entry like any other file.
-use crate::library::Track;
+use crate::library::{DiscContext, Track};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -12,6 +12,8 @@ use std::sync::Arc;
 pub struct Entry {
     pub id: u64,
     pub track: Arc<Track>,
+    #[serde(default)]
+    pub disc_context: DiscContext,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +80,7 @@ impl Queue {
         Entry {
             id: self.next_id,
             track: track.into(),
+            disc_context: DiscContext::Inferred,
         }
     }
     fn touch(&mut self) {
@@ -132,6 +135,72 @@ impl Queue {
         }
         self.touch();
         ids
+    }
+    /// Promote one existing occurrence of each remaining CD track, creating only
+    /// missing occurrences. Other entries (including intentional repeats) keep
+    /// their relative order. A delayed action belongs to one exact occurrence.
+    pub fn continue_disc(
+        &mut self,
+        entry: u64,
+        program: &[Arc<Track>],
+        context: DiscContext,
+    ) -> bool {
+        let Some(start) = self.current else {
+            return false;
+        };
+        let current = &self.entries[start];
+        if current.id != entry || !context.allows(&current.track) {
+            return false;
+        }
+        let Some(chapter) = program.iter().position(|t| t.same_item(&current.track)) else {
+            return false;
+        };
+        let remaining = &program[chapter + 1..];
+        if remaining.is_empty() {
+            return false;
+        }
+        let ordered = self
+            .upcoming()
+            .iter()
+            .map(|e| &e.track)
+            .zip(remaining)
+            .all(|(a, b)| a.same_item(b))
+            && self.upcoming().len() >= remaining.len();
+        let select_disc = context == DiscContext::Selected
+            && ordered
+            && self.entries[start..=start + remaining.len()]
+                .iter()
+                .any(|e| !e.disc_context.allows(&e.track));
+        if !select_disc && !self.shuffle && self.repeat != Repeat::One && ordered {
+            return false;
+        }
+        // This explicit listening action establishes authored order. Keep the
+        // existing order of unrelated upcoming entries, even when shuffled.
+        self.shuffle = false;
+        self.unshuffled.clear();
+        if self.repeat == Repeat::One {
+            self.repeat = Repeat::Off;
+        }
+        if !ordered {
+            let upcoming = self.entries.split_off(self.upcoming_start());
+            let mut upcoming: Vec<_> = upcoming.into_iter().map(Some).collect();
+            for track in remaining {
+                let found = upcoming
+                    .iter_mut()
+                    .find(|slot| slot.as_ref().is_some_and(|e| e.track.same_item(track)))
+                    .and_then(Option::take);
+                let next = found.unwrap_or_else(|| self.entry(track.clone()));
+                self.entries.push(next);
+            }
+            self.entries.extend(upcoming.into_iter().flatten());
+        }
+        if context == DiscContext::Selected {
+            for entry in &mut self.entries[start..=start + remaining.len()] {
+                entry.disc_context = context;
+            }
+        }
+        self.touch();
+        true
     }
     /// Removes entries. Returns true when the current entry was among them;
     /// the entry that followed it then becomes current.
@@ -361,6 +430,40 @@ mod tests {
         let mut restored = before.clone();
         restored.push("late".into());
         assert_eq!(titles(&q), restored);
+    }
+
+    #[test]
+    fn continuing_promotes_one_occurrence_and_preserves_manual_repeats() {
+        let cd: Vec<_> = (1..=4).map(|n| Arc::new(chapter("A", n))).collect();
+        let extra = Arc::new(file("extra"));
+        let mut q = Queue::default();
+        q.replace(&cd[..2], 1);
+        let current = q.current_entry().unwrap().id;
+        let ids = q.add(&[extra.clone(), cd[3].clone(), extra, cd[3].clone()]);
+        let history = q.history().to_vec();
+        q.set_repeat(Repeat::One);
+        assert!(q.continue_disc(current, &cd, DiscContext::Inferred));
+        assert_eq!(
+            titles(&q),
+            ["A 1", "A 2", "A 3", "A 4", "extra", "extra", "A 4"]
+        );
+        assert_eq!(q.history(), history);
+        assert_eq!(q.current_entry().unwrap().id, current);
+        assert_eq!(
+            q.upcoming()[1..].iter().map(|e| e.id).collect::<Vec<_>>(),
+            [ids[1], ids[0], ids[2], ids[3]]
+        );
+        assert_eq!(q.repeat, Repeat::Off);
+        let revision = q.revision;
+        assert!(!q.continue_disc(current, &cd, DiscContext::Inferred));
+        assert!(!q.continue_disc(ids[0], &cd, DiscContext::Inferred));
+        assert_eq!(q.revision, revision);
+        q.set_shuffle(true);
+        assert!(q.continue_disc(current, &cd, DiscContext::Inferred));
+        assert!(!q.shuffle);
+        assert_eq!(q.upcoming()[0].track, cd[2]);
+        assert_eq!(q.upcoming()[1].track, cd[3]);
+        q.validate().unwrap();
     }
 
     #[test]

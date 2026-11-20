@@ -235,9 +235,18 @@ pub(crate) fn walk(
 }
 
 fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>) {
-    let alive = || !out.is_closed();
-    let mut publish = |batch| out.send_blocking(batch).is_ok();
-    let Some(sources) = walk(root, recursive, cache, &alive, &mut publish) else {
+    scan_into(root, recursive, cache, &|| !out.is_closed(), &mut |batch| {
+        out.send_blocking(batch).is_ok()
+    });
+}
+fn scan_into(
+    root: &Path,
+    recursive: bool,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+) {
+    let Some(sources) = walk(root, recursive, cache, alive, publish) else {
         return;
     };
     let mut batch = Batch::default();
@@ -247,7 +256,7 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
     let remaining_files: HashSet<_> = sources.files.into_values().collect();
     let mut unreadable = HashSet::new();
     for (index, track) in sources.enrich {
-        if out.is_closed() {
+        if !alive() {
             return;
         }
         if track.disc.is_none() && !remaining_files.contains(&index) {
@@ -285,13 +294,51 @@ fn scan(root: &Path, recursive: bool, cache: Option<&Cache>, out: &Sender<Batch>
         };
         batch.rows.push((index, Some(Arc::new(enriched))));
         if batch.rows.len() >= 2048 || published.elapsed() >= Duration::from_millis(100) {
-            if out.send_blocking(std::mem::take(&mut batch)).is_err() {
+            if !publish(std::mem::take(&mut batch)) {
                 return;
             }
             published = Instant::now();
         }
     }
     if !batch.rows.is_empty() || !batch.unreadable.is_empty() {
-        let _ = out.send_blocking(batch);
+        publish(batch);
     }
+}
+
+/// Resolve an unindexed CD away from the UI thread. Only its own directory
+/// is read. The discovery worker applies the same CUE and tag rules as browsing.
+pub fn local_program(
+    folder: &Path,
+    target: &Track,
+    context: library::DiscContext,
+    cache: Option<&Cache>,
+) -> anyhow::Result<crate::library::TrackList> {
+    let mut rows = Vec::new();
+    scan_into(folder, false, cache, &|| true, &mut |batch| {
+        for (index, track) in batch.rows {
+            if index == rows.len() {
+                rows.push(track);
+            } else {
+                rows[index] = track;
+            }
+        }
+        true
+    });
+    let Some(actual) = rows
+        .iter()
+        .flatten()
+        .find(|t| target.same_item(t) && context.allows(t))
+    else {
+        return Ok(Arc::default());
+    };
+    let disc = crate::collection::DiscId::of(actual);
+    let mut tracks: Vec<_> = rows
+        .into_iter()
+        .flatten()
+        .filter(|t| disc.contains(t))
+        .collect();
+    if matches!(disc, crate::collection::DiscId::Album(..)) {
+        tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
+    }
+    Ok(tracks.into())
 }

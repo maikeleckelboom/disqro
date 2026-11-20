@@ -7,7 +7,7 @@
 //! library worker; this entity keeps what the interface draws.
 use crate::{
     cache::Cache,
-    library::{Track, TrackList},
+    library::{DiscContext, Track, TrackList},
     store::{
         self, Handle, Locator, Mark, PlaylistId, Progress, RootId, Row, Scope, Store, TrackId,
     },
@@ -451,6 +451,58 @@ impl Catalog {
                     .collect()),
             }
         }
+    }
+    /// Resolve an authored sequence independently of the visible search, sort
+    /// and loaded page. Unregistered music is read from its own directory.
+    pub async fn program(
+        catalog: Entity<Self>,
+        track: Arc<Track>,
+        context: DiscContext,
+        cx: &AsyncApp,
+    ) -> anyhow::Result<TrackList> {
+        if !context.allows(&track) {
+            return Ok(Arc::default());
+        }
+        let store = catalog.read_with(cx, |c, _| c.handle());
+        if let Some(store) = store {
+            let target = track.clone();
+            if let Some(disc) = store.call(move |s| s.registered_disc(&target)).await? {
+                let tracks = Self::album_tracks(catalog, disc.album, cx).await?;
+                if tracks
+                    .iter()
+                    .any(|t| t.same_item(&track) && context.allows(t))
+                {
+                    return Ok(tracks);
+                }
+                return Ok(Arc::default());
+            }
+        }
+        let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
+        let folder = anchor
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("The CD folder is unavailable."))?
+            .to_owned();
+        let cache_dir = catalog.read_with(cx, |c, _| c.cache_dir.clone());
+        cx.background_spawn(async move {
+            let cache = cache_dir.and_then(|dir| Cache::open(&dir).ok());
+            crate::discovery::local_program(&folder, &track, context, cache.as_ref())
+        })
+        .await
+    }
+    pub async fn album_tracks(
+        catalog: Entity<Self>,
+        album: store::AlbumId,
+        cx: &AsyncApp,
+    ) -> anyhow::Result<TrackList> {
+        let store = catalog
+            .read_with(cx, |c, _| c.handle())
+            .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
+        let keys = store.call(move |s| s.disc_keys(album)).await?;
+        catalog
+            .read_with(cx, |c, cx| {
+                c.tracks(Targets::Keys(Scope::Album(album), keys), cx)
+            })
+            .await
     }
     pub fn handle(&self) -> Option<Handle> {
         self.store.clone()

@@ -50,20 +50,7 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
     let mut source: Option<PathBuf> = None;
     let (mut album, mut artist) = (String::new(), String::new());
     let mut tracks: Vec<Track> = Vec::new();
-    let folder_disc = sheet
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|s| s.to_str())
-        .and_then(|s| {
-            let lower = s.to_ascii_lowercase();
-            lower
-                .strip_prefix("disc")
-                .or_else(|| lower.strip_prefix("cd"))?
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|n| *n > 0)
-        });
+    let folder_disc = crate::library::folder_disc_number(sheet);
     let mut year = None;
     let mut in_track = false;
     for line in text.trim_start_matches('\u{feff}').lines() {

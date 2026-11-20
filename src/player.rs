@@ -12,6 +12,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
+        menu::{ContextMenuExt, PopupMenuItem},
         tooltip::Tooltip,
         v_flex,
     },
@@ -29,6 +30,8 @@ use std::{
 };
 
 pub enum PlayerEvent {
+    Locate(Arc<crate::library::Track>, crate::browser::Destination),
+    ContinueCd(crate::queue::Entry),
     TrackChanged,
     PlaySelection,
     QueueChanged,
@@ -63,6 +66,7 @@ impl Render for LevelDrag {
 
 pub struct Player {
     pub can_start: bool,
+    pub play_request: crate::store::Ticket,
     transport: Transport,
     pub status: Status,
     queue: Arc<Queue>,
@@ -96,6 +100,7 @@ impl Player {
         .detach();
         Self {
             can_start: false,
+            play_request: Default::default(),
             transport,
             status: Status::default(),
             queue: Arc::default(),
@@ -116,6 +121,16 @@ impl Player {
         }
     }
     pub fn command(&mut self, c: Command, cx: &mut Context<Self>) {
+        if matches!(
+            c,
+            Command::Play(..)
+                | Command::PlayDisc(..)
+                | Command::Jump(_)
+                | Command::Stop
+                | Command::Step(_)
+        ) {
+            self.play_request.next();
+        }
         if matches!(c, Command::Toggle | Command::SetPlaying(true))
             && self.status.track.is_none()
             && self.queue.entries.is_empty()
@@ -132,6 +147,11 @@ impl Player {
     }
     pub fn queue(&self) -> &Arc<Queue> {
         &self.queue
+    }
+    pub fn playing_entry(&self) -> Option<&crate::queue::Entry> {
+        self.queue
+            .current_entry()
+            .filter(|e| Some(e.id) == self.status.entry)
     }
     /// A sender for control paths outside the window, such as media keys.
     pub fn sender(&self) -> crate::audio::Commands {
@@ -383,6 +403,49 @@ impl Render for Player {
             )
         };
 
+        let art = if let Some(track) = s.track.clone() {
+            use crate::browser::Destination;
+            let player = cx.entity();
+            let click = track.clone();
+            let entry = self
+                .playing_entry()
+                .filter(|e| e.disc_context.allows(&e.track))
+                .cloned();
+            let (destination, hint) = if entry.is_some() {
+                (Destination::Disc, "Open playing CD")
+            } else {
+                (Destination::Collection, "Show in Collection")
+            };
+            art.id("open-playing-cd")
+                .cursor_pointer()
+                .tooltip(move |w, cx| Tooltip::new(hint).build(w, cx))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(PlayerEvent::Locate(click.clone(), destination))
+                }))
+                .context_menu(move |menu, _, _| {
+                    let (p, t) = (player.clone(), track.clone());
+                    menu.item(
+                        PopupMenuItem::new("Show in Collection").on_click(move |_, _, cx| {
+                            p.update(cx, |_, cx| {
+                                cx.emit(PlayerEvent::Locate(t.clone(), Destination::Collection))
+                            })
+                        }),
+                    )
+                    .when_some(entry.clone(), |menu, entry| {
+                        let p = player.clone();
+                        menu.item(PopupMenuItem::new("Continue This CD").on_click(
+                            move |_, _, cx| {
+                                p.update(cx, |_, cx| {
+                                    cx.emit(PlayerEvent::ContinueCd(entry.clone()))
+                                })
+                            },
+                        ))
+                    })
+                })
+                .into_any_element()
+        } else {
+            art.into_any_element()
+        };
         let now = self.now_playing();
         let title = now
             .as_ref()

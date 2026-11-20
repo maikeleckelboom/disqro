@@ -11,6 +11,10 @@ pub type TrackList = std::sync::Arc<[std::sync::Arc<Track>]>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
+    /// Identity in the currently open library. Saved queues can also be
+    /// restored alongside a rebuilt database, so persist the locator only.
+    #[serde(skip)]
+    pub library_id: Option<crate::store::TrackId>,
     pub source: PathBuf,
     pub title: String,
     #[serde(default)]
@@ -38,9 +42,23 @@ pub struct DiscTrack {
     pub end: Option<u64>,
 }
 
+/// Only a deliberately selected CD can supply the context missing from a recording.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiscContext {
+    #[default]
+    Inferred,
+    Selected,
+}
+impl DiscContext {
+    pub fn allows(self, track: &Track) -> bool {
+        self == Self::Selected || track.has_disc_context()
+    }
+}
+
 impl Track {
     pub fn file(path: PathBuf) -> Self {
         Self {
+            library_id: None,
             title: name(&path),
             source: path,
             artist: String::new(),
@@ -59,6 +77,12 @@ impl Track {
             None => self.number,
         }
     }
+    pub fn has_disc_context(&self) -> bool {
+        self.disc.is_some()
+            || !self.album.trim().is_empty()
+            || self.disc_number.is_some_and(|n| n > 0)
+            || folder_disc_number(&self.source).is_some()
+    }
     pub fn format(&self) -> String {
         self.source
             .extension()
@@ -67,7 +91,10 @@ impl Track {
             .to_ascii_uppercase()
     }
     pub fn same_item(&self, other: &Self) -> bool {
-        self.source == other.source && self.disc == other.disc
+        match (self.library_id, other.library_id) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.source == other.source && self.disc == other.disc,
+        }
     }
     pub fn read_tags(&mut self) -> bool {
         let Ok(probe) = Probe::open(&self.source) else {
@@ -92,6 +119,17 @@ impl Track {
         }
         true
     }
+}
+
+/// A numbered CD directory supplies context when ordinary files have no tags.
+pub fn folder_disc_number(file: &Path) -> Option<u32> {
+    let name = file.parent()?.file_name()?.to_str()?.to_ascii_lowercase();
+    name.strip_prefix("disc")
+        .or_else(|| name.strip_prefix("cd"))?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|n| *n > 0)
 }
 
 pub fn name(path: &Path) -> String {

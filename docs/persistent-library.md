@@ -7,7 +7,7 @@
 - Click a heart or a star to edit one track. Alt+L toggles likes on the selection. Alt+1 through Alt+5 set its rating, and Alt+0 clears it. Liked Tracks includes saved favorites whose sources are missing.
 - Ctrl+N creates a playlist. Drag tracks onto its sidebar entry or choose **Add to Playlist** from their context menu. Ctrl-click or Shift-click selects multiple rows. Shift+Up and Shift+Down extend a range from the keyboard.
 - Playlists preserve repeated occurrences. In the original, unfiltered order, drag entries before another entry or use Ctrl+Shift+Up and Ctrl+Shift+Down. Delete removes selected occurrences. Browsing and editing a playlist leave the playback queue independent.
-- Double-click plays from the selected track. For large indexed views, this queues up to 5,000 surrounding entries. **Add All to Queue** explicitly requests the whole view. A root's context menu offers rescan and removal.
+- Double-click plays from the selected track within its CD, or from the chosen occurrence in a playlist. A loose recording plays individually. **Add All to Queue** explicitly requests the whole view. A root's context menu offers rescan and removal.
 
 ## Storage and identity
 
