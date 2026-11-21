@@ -2,23 +2,25 @@
 
 Disqro opens a folder or a CUE album directly. Browsing never changes what is playing: the queue retains the tracks independently of the browser, so you can open other folders, sort tables or rearrange panels while an album continues.
 
-![Default Windows workspace with an album playing](evidence/modular-workspace/refined/player-1240.webp)
+![Default Windows workspace with an album playing](evidence/modular-workspace/final/default.webp)
 
 ## Workspace
 
 Every view in the window is a panel in one dock: **Music Browser**, **Library**, **Locations**, **Queue** and **History**. The default workspace puts Library and Locations together on the left, a Music Browser in the middle, and Queue and History together on the right. The player along the bottom of the window is not a panel: no arrangement of panels closes it or changes what is playing.
 
-- **Tabs.** Each dock group owns its tabs. A single Music Browser uses its address row and a draggable icon. When browsers share a group, their content tabs appear directly above it. Library and Locations share a connected header, as do Queue and History. Right-click a tab or its icon, or use the group menu, to split, close or rename it. The title bar holds the panel picker and workspace menu.
-- **Arranging.** Drag a tab onto another tab, or onto the free space after a group's tabs, to move it there. Drag it onto the edge of a group to split that group and give the tab its own. Drag the line between groups to resize them. A group that loses its last tab gives its space to its neighbours.
-- **Opening and closing.** **+** lists every panel type. Library, Locations, Queue and History exist once: choosing one that is open shows it, and one you closed returns beside the panels it was with. **New Music Browser** opens another browser each time. Closing every panel leaves an empty workspace with **Open a Panel** while playback continues. **Restore Default Layout** in the workspace menu brings back the default arrangement and keeps the browser you were using.
-- **Music Browsers.** Each browser has its own breadcrumb, search field, Back and Forward history, table and view settings. Clicking a browser or its address row makes it the destination for Library and Locations. Its icon has a steel-blue accent. Click Liked Tracks, then a playlist, to navigate the same browser. Choose **Open in New Tab** or Ctrl-click to create another browser in the active group. Ctrl+T opens another browser at the current view. Drag its tab to a group edge to split it.
+- **Tabs.** A single Music Browser uses its address row and icon. Browsers sharing a group have tabs directly above that row. Library and Locations share a connected header, as do Queue and History. The title bar uses only the app icon for branding and holds the panel picker and workspace menu.
+- **Arranging.** The layout starts locked every time you open Disqro. You can switch tabs, drag music and resize a boundary while listening. Choose **Customize Layout** in the workspace menu to drag a tab onto another group, change tab order, or drop at a group edge to split it. The tab menu also offers **Split Right** and **Split Down** during editing. Choose **Done** in the title bar to lock the arrangement.
+- **Opening and closing.** **+** lists every panel type and offers **Reopen Closed Panel**. Immediately after a close, reopening restores the exact arrangement. The picker remembers the most recently closed instance of each type across restarts and uses surviving tab companions when available. Closing every panel leaves **Open a Panel** above the player.
+- **Recovery.** **Undo Layout Change** in the workspace menu restores the preceding panel arrangement during this session. **Restore Default Layout** returns to the three columns with your active browser. Undo can bring the preceding layout back. Both commands leave the queue, library and playlists alone.
+- **Music Browsers.** Each browser has its own breadcrumb, search, history, table and view settings. Click a browser to direct Library and Locations navigation there. Its navigation row takes on a steel-blue accent. **Open in New Tab** and Ctrl-click create a browser in the active group. **Open Beside** opens one to its right when the group has room for two readable tables, or in the same tab group at smaller widths. Ctrl+T opens another browser at the current view.
 - **Toolbars.** A browser's toolbar holds **All Tracks** and **Albums / CDs** for a collection, **Subfolders** for a folder, the way back from a CD or release page, and the browser's menu. **Hide Toolbar** in the tab menu hides it for that browser only, and the small arrow left in its corner brings it back. Hiding the toolbar leaves the view as it was.
-- **Saved workspace.** The arrangement, each panel's own state, the active browser, where closed panels return and the player's height are saved with the profile and restored at the next start. A layout saved by a build with the fixed Sidebar, Recordings, Queue and Now Playing panels is replaced once by the default workspace. The first browser restores the previous folder or collection view. Expanded folders, Places, playlists, table preferences, volume and the queue carry forward.
+- **Saved workspace.** The profile saves the arrangement, active browser, closed panels and player height. Each browser restores its current page, search and Back/Forward destinations. A layout saved by a build with the fixed Sidebar, Recordings, Queue and Now Playing panels is replaced once by the default workspace. The first browser restores the previous folder or collection view. Expanded folders, Places, playlists, table preferences, volume and the queue carry forward.
 
 ### Adding music by dragging
 
 - Drag a folder from Locations onto the Library tab, or onto the Library panel, to add it to the library. The folder is indexed where it is; nothing is moved or copied.
-- Drag a track or a selection from a browser onto a playlist in Library to add it. When Library is behind another tab, rest over the Library tab while dragging and it opens; then drop on the playlist. Resting over a tab only shows it. A playlist's own entries dropped on it are left alone; reorder them in the table instead.
+- Drag a track or selection onto a playlist in Library or into an open playlist, including its empty space. The drop preview names the destination and track count. A drop appends new references in selection order. Each repeated occurrence gets its own entry. To reorder within a playlist in its natural order, drop its entries on the row they should precede.
+- When Library is behind another tab, rest over its tab while dragging to reveal the playlist entries.
 - With Library and Locations side by side, drag directly from one to the other.
 - Dragging a track or folder never moves a panel, and dragging a tab never adds music.
 
@@ -51,11 +53,11 @@ The current folder appears as breadcrumbs. Click a crumb to open that folder. Cl
 **Library** holds the indexed collections, Liked Tracks and playlists. **Locations** holds the Places, and each Place opens in place to show its own folders: Music expands to the folders inside Music, so Locations never shows Music twice. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine. Library and Locations are separate panels. Each keeps its own scroll position and selection, and switching between them leaves the browser as it was.
 
 - Click a Place or folder name to open it. Click the arrow to open or close a branch without leaving the current folder.
-- Right-click a Place: **Open**, **Open in New Tab**, **Add to Library**, **Rename Shortcut**, **Remove from Places**.
+- The Place menu offers **Open**, **Open in New Tab**, **Open Beside**, **Add to Library**, **Rename Shortcut** and **Remove from Places**.
 - Right-click the Locations tab or the space below the Places: **Add Folder to Places…**, **Restore Missing Default Places**, **Reset Places to Defaults…**.
-- Right-click a folder: **Open**, **Open in New Tab**, **Add to Places**, **Add to Library**.
+- A folder's context menu offers the same three opening options, plus **Add to Places** and **Add to Library**.
 - Drag a Place onto another to move it there, or below the last row to move it to the end.
-- Right-click the Library tab, its empty space or a collection for **Add Music Folder…** and **New Playlist**. Collections, Liked Tracks and playlists offer **Open in New Tab**. The **+** beside Playlists creates a playlist. Entries are always visible beneath the heading and scroll with Library.
+- Right-click the Library tab, its empty space or a collection for **Add Music Folder…** and **New Playlist**. Collections, Liked Tracks and playlists offer both **Open in New Tab** and **Open Beside**. The **+** beside Playlists creates a playlist. Entries are always visible beneath the heading and scroll with Library.
 
 Removing a shortcut never touches its folder. Restoring adds back only the defaults you removed, at the end, and leaves your own shortcuts, names and order alone. Reset replaces the whole list after a confirmation. A drive that is not attached disappears until it returns; a custom Place whose folder is missing stays, dimmed.
 
@@ -113,7 +115,32 @@ On a normal close, and shortly after any change to the queue or Places, Disqro s
 - The tray icon lives on a hidden window owned by the interface thread, created with the Win32 API from the `windows` crate that GPUI already depends on. No second UI toolkit is involved. The media session uses `ISystemMediaTransportControlsInterop` on the same window.
 - The read-only Dekzer review covered its playback crate, native player integration, CUE handling, player qualification, and waveform research. Disqro adopted source-frame addressing, decoder preroll, a buffered boundary between decoding and output, and sample-oracle checks. It has its own implementation and no Dekzer source or runtime dependency.
 
-## Mission 10 Windows qualification
+## Final Mission 10 Windows qualification
+
+The final optimized Windows executable has SHA-256 `6f76a31e1dc6e8d8386b372634fa31cdd1e7d1193330a01c3175342b698daecd`. The locked release suite passed all 111 tests, including the Windows junction fixture, missing-source playlist copies, browser history persistence, FFmpeg fixtures and the six-figure collection test. Formatting, warnings-denied Clippy and the locked release build passed. [Release test output](evidence/modular-workspace/final/test-suite.txt)
+
+Native input and accessibility checks ran at 150% Windows scaling against an isolated copy of a 126-track collection. The following captures show the application during that run. [Default listening view](evidence/modular-workspace/final/default.webp) · [Three selected tracks over an empty Techno playlist](evidence/modular-workspace/final/playlist-transfer.webp) · [Customize Layout with Done visible](evidence/modular-workspace/final/customize-layout.webp)
+
+| Check | Observed in the optimized application |
+| --- | --- |
+| Navigation and sizing | Liked Tracks → Techno reused the same browser. Open in New Tab created a second tab. Open Beside tabbed at 720 × 460 and 900 × 600, then split at 1240 × 780 into tables measuring 362 and 361 logical pixels. Also checked the default view at 1540 × 940. |
+| Music transfers | Dragging three selected CUE chapters into an empty Techno browser appended the displayed recordings in order. Dropping one again onto a populated row appended a distinct occurrence. Copying from Techno into another playlist preserved Techno's occurrences. Source file digests, likes, ratings and queue entries matched the pre-transfer values. Tracks and folders also crossed the utility tabs, including indexing a folder in Library. |
+| Layout safety and recovery | Dragging a locked tab left its group intact. A splitter resized while locked. Customize Layout enabled splitting, reordering and moving between groups. Done locked them again. Undo restored the group and instance identities after rearrangement and reset. Reopening after a close restored the original arrangement. Closing all panels kept playback running and the panel picker accessible. |
+| Browser independence and restart | Clicks in vertically stacked Techno and Liked Tracks directed subsequent Library navigation to the chosen browser. Scrolling one of two side-by-side tables left the other in place. On restart, both browsers restored their locations, search text, Back and Forward destinations, active recipient and grouping. The layout reopened locked. A panel closed before quitting reopened with its previous ID, tab group and search. The library, playlists, favorites, ratings and saved queue survived restart. [Native check results](evidence/modular-workspace/final/windows-checks.txt) |
+| Playback during interaction | The two muted sessions recorded 8,648 and 5,124 callbacks across navigation, panel edits, resizing and empty-workspace recovery. Each had zero decode or device errors and one unchanged-position tick in a sample containing a transport command. These traces measure transport behavior. Audible output on speakers or headphones remains unverified. [First session](evidence/modular-workspace/final/playback.csv) · [After restart](evidence/modular-workspace/final/playback-after-restart.csv) |
+
+### Production playback comparison
+
+Both optimized executables played the same 44.1 kHz stereo FLAC at zero application volume in a visible 1240 × 780 window. Each run used a fresh isolated profile and six seconds of warm-up after audio callbacks began. Windows process counters measured CPU over the following 15 seconds and private memory at the end. Run order was production, Mission 10, Mission 10, production.
+
+| Build | CPU, percent of one logical core | Private memory | Audio callbacks |
+| --- | --- | --- | --- |
+| Production baseline | 11.14%, 10.42% | 118.3, 119.1 MiB | 1,502, 1,499 |
+| Final Mission 10 | 6.98%, 6.15% | 117.4, 117.5 MiB | 1,504, 1,498 |
+
+All four samples recorded zero device errors, decode errors and unchanged-position ticks. The production binary had SHA-256 `0c2ea99199946ebafe2964ae0639935de0b500f8fdf230b4f87dd87a5ea84427` and was built from the requested production baseline. These measurements cover foreground playback of one file on this Windows machine. Library indexing, startup and complex arrangements were outside this comparison. [Per-run measurements](evidence/modular-workspace/final/comparison.csv)
+
+## Earlier Mission 10 Windows qualification
 
 The optimized Windows executable was built from `f5e1cac859b5bbe474f8860d1f12aaeae0b1b45c` plus the working-tree refinement. Its SHA-256 is `75446b6b04551183db28beba548bed0b9bf3b13813b4bf5afb6c67bc8f368684`. Screenshots below are lossless window captures at 150% Windows scaling.
 
@@ -129,7 +156,7 @@ The optimized Windows executable was built from `f5e1cac859b5bbe474f8860d1f12aae
 | Existing profile | Used a copy of a version-2 profile with the old playlist disclosure set to closed. The new geometry opened with both playlists visible. Verified the original folder, expanded folders, Places, column preferences, volume, playback position, queue order, all 126 track IDs and the contents of the likes, ratings, playlists and playlist-entry tables. |
 | Playback during interaction | Resized the window and a dock splitter, switched tabs and dragged panels and music during muted playback. The 196-second trace recorded 18,959 callbacks, zero device or decode errors and one unchanged-position tick in a sample that also contained a transport command. Physical audio quality was outside this measurement. [Playback trace](evidence/modular-workspace/refined/playback.csv) |
 
-Formatting, warnings-denied Clippy and the locked optimized build passed. Running the complete suite including the FFmpeg and six-figure collection tests produced **108 passes and one fixture setup failure**. Windows returned access denied when `directory_junction_is_not_descended` invoked `mklink /j`. Repeating the fixture in a writable directory produced the same denial. The previous production-baseline build log ends with exit 101 during its CMake step. An optimized before-and-after performance comparison remains unverified.
+Formatting, warnings-denied Clippy and the locked optimized build passed in this earlier run. Running the complete suite including the FFmpeg and six-figure collection tests produced **108 passes and one fixture setup failure**. Windows returned access denied when `directory_junction_is_not_descended` invoked `mklink /j`. Repeating the fixture in a writable directory produced the same denial. At the time, the production-baseline build had exited 101 during its CMake step, leaving the performance comparison unverified.
 
 ## Earlier listening-workspace verification
 
