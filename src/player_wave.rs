@@ -234,7 +234,7 @@ impl Player {
             .relative()
             .flex_1()
             .min_w_0()
-            .h(px(34.))
+            .h_full()
             .overflow_hidden()
             .child(
                 canvas(

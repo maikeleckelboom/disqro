@@ -8,6 +8,10 @@ These Windows captures show the same paused position in chapter 14 of *Thunderdo
 
 ![Full CD perspective, 53:50 into a 1:17:30 CD](evidence/full-cd-perspective.png)
 
+At 150% Windows scaling the same player fits the minimum 720 × 460 logical client area. The waveform takes the height available beneath the controls as the dock resizes.
+
+![Compact Full CD player at minimum window size](evidence/compact-cd-perspective.png)
+
 ### Navigation and source ownership
 
 - Dragging previews a position. Releasing commits one occurrence-scoped seek. In Full CD, a destination must belong to the contiguous authored sequence around the current queue entry. Hover text identifies chapters outside that sequence. **Continue This CD** explicitly adds the following chapters when wanted.
@@ -28,13 +32,15 @@ Measurements used an optimized native player with isolated profiles. The primary
 | Cold request to first verified chapter geometry / first canvas paint | 55.899 ms / 68.793 ms |
 | Warm application reopen to first geometry / paint, timed from waveform request | 68.435 ms / 81.026 ms |
 | Player synchronization at natural chapter 14 → 15 | 11 µs |
-| Final build, 32 paused and 32 playing switches | 0 playback commands, decoder opens or voice creations in all switch intervals. Maximum handler time 3 µs |
+| Isolated run, 32 paused and 32 playing switches | 0 playback commands, decoder opens or voice creations in all switch intervals. Maximum handler time 3 µs |
 | Physical page reuse on this CD | Cold 1,163 pages decoded and 19 shared reads. Warm 1,182 reads and zero decoded pages |
 | Peak retained player waveform geometry | 733,416 bytes |
 | Peak Windows working-set increase over fresh optimized analysis-test process baseline | 8.55 MiB cold, 4.33 MiB warm, including SQLite, decoder, allocator and retained shapes |
 | Coordinate error in the four-rate integration fixture | 0 frames across 220,136 frames and 12 segments |
 
 A second run separated the switch bursts from an explicit paused seek from chapter 15 to 14 and a subsequent Play. The seek preserved pause. Only Play opened a voice. [Isolated switch counters](evidence/switch-windows.csv)
+
+The final compact-layout run repeated both bursts after resizing through 1720 × 1060, 1280 × 820 and 1102 × 701 physical window sizes. All 65 perspective changes kept occurrence 35. The switch intervals contained zero playback commands, opens or voice starts. Maximum switch-to-paint time was 13.757 ms to Full CD and 12.865 ms to Track. [Final optimized Windows trace](evidence/compact-window-switches.csv)
 
 Canvas paint measures application work through the paint callback. Display presentation and hardware output latency require separate instrumentation. The memory probe loaded the same complete disc through the production analysis function and kept the latest projections for every chapter. Its process peak working sets were 17,920,000 bytes cold and 13,496,320 bytes warm.
 

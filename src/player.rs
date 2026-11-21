@@ -74,6 +74,7 @@ pub struct Player {
     pub volume: f32,
     muted_from: Option<f32>,
     level_bounds: Rc<Cell<Bounds<Pixels>>>,
+    panel_height: Rc<Cell<Option<Pixels>>>,
     scrub: Option<f32>,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     source_info: artwork::MediaInfo,
@@ -127,6 +128,7 @@ impl Player {
             volume,
             muted_from: None,
             level_bounds: Default::default(),
+            panel_height: Default::default(),
             scrub: None,
             seek_bounds: Default::default(),
             source_info: Default::default(),
@@ -409,7 +411,9 @@ impl Render for Player {
         let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
 
         let mut art = div()
-            .size(px(72.))
+            .h(relative(0.9))
+            .max_h(px(72.))
+            .aspect_square()
             .flex_shrink_0()
             .overflow_hidden()
             .rounded(px(6.))
@@ -669,10 +673,24 @@ impl Render for Player {
                 .child(clock(t))
         };
 
-        h_flex()
-            .id("player")
-            .size_full()
-            .min_h(px(96.))
+        let height = self.panel_height.clone();
+        let player = cx.entity_id();
+        // The dock can clip its 100px minimum panel in a shorter window.
+        // Measure the visible slot independently of the player content.
+        let measure = canvas(
+            move |b, w, _| {
+                let h = b.intersect(&w.content_mask().bounds).size.height;
+                if h > px(0.) && height.replace(Some(h)) != Some(h) {
+                    w.on_next_frame(move |_, cx| cx.notify(player));
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let content = h_flex()
+            .w_full()
+            .h(self.panel_height.get().unwrap_or(px(100.)))
             .bg(m.raised)
             .px(px(16.))
             .gap(px(14.))
@@ -682,11 +700,15 @@ impl Render for Player {
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .h_full()
+                    .max_h(px(80.))
+                    .justify_center()
                     .gap(px(4.))
                     .child(
                         h_flex()
                             .w_full()
                             .gap(px(12.))
+                            .flex_shrink_0()
                             .items_center()
                             .child(
                                 v_flex()
@@ -727,11 +749,21 @@ impl Render for Player {
                         h_flex()
                             .w_full()
                             .gap(px(8.))
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(34.))
                             .items_center()
                             .child(time(shown_position).text_color(m.text_muted))
                             .child(seek)
                             .child(time(duration).text_right()),
                     ),
-            )
+            );
+        div()
+            .id("player")
+            .relative()
+            .size_full()
+            .bg(m.raised)
+            .child(measure)
+            .child(content)
     }
 }
