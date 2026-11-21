@@ -714,7 +714,7 @@ impl Browser {
                     "No liked tracks yet. Like a track from its menu or with Alt+L.".into()
                 }
                 Location::Playlist(_) => {
-                    "This playlist is empty. Add tracks from their menu or drag them here.".into()
+                    "Drag tracks here or use Add\u{a0}to\u{a0}Playlist.".into()
                 }
                 Location::Library(_) if self.catalog.read(cx).collections.is_empty() => {
                     "Add a music folder to the library to browse it here.".into()

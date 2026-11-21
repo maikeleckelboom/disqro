@@ -1799,16 +1799,33 @@ impl TableDelegate for MusicTable {
     ) -> impl IntoElement {
         let m = materials(cx);
         let browser = self.browser.clone();
+        let icon = match &self.rows.data {
+            Contents::Library(Paged {
+                scope: Scope::Playlist(_),
+                ..
+            }) => IconName::Music2,
+            _ => IconName::FolderOpen,
+        };
         gpui_kit::component::v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap(px(10.))
-            .text_size(px(13.))
-            .text_color(m.text_faint)
+            .gap(px(8.))
+            .px(px(24.))
             .when(!self.empty.is_empty() && !self.is_loading(), |d| {
-                d.child(Icon::new(IconName::FolderOpen).size(px(26.)))
-                    .child(self.empty.clone())
+                d.child(Icon::new(icon).size(px(24.)).text_color(m.text_faint))
+                    .child(
+                        div()
+                            .id("empty-table-message")
+                            .w_full()
+                            .max_w(px(320.))
+                            .text_center()
+                            .text_size(px(13.))
+                            .text_color(m.text_muted)
+                            .role(Role::Label)
+                            .aria_value(self.empty.clone())
+                            .child(self.empty.clone()),
+                    )
             })
             .when(self.offer_subfolders, |d| {
                 d.child(
