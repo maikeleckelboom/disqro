@@ -267,8 +267,7 @@ impl LibraryPanel {
                 Self::opens(
                     nav_row(
                         "all-music".into(),
-                        0,
-                        Some(Icon::new(IconName::Library)),
+                        Icon::new(IconName::Library),
                         "All Music".into(),
                         matches!(
                             location,
@@ -310,8 +309,7 @@ impl LibraryPanel {
             let view = Location::Library(Some(id));
             let row = nav_row(
                 ("collection", id as usize).into(),
-                1,
-                Some(Icon::new(IconName::Disc3)),
+                Icon::new(IconName::Disc3),
                 c.root.name.clone().into(),
                 selected,
                 &m,
@@ -379,8 +377,7 @@ impl LibraryPanel {
             Self::opens(
                 nav_row(
                     "liked".into(),
-                    0,
-                    Some(Icon::default().path(crate::assets::HEART_FILL)),
+                    Icon::default().path(crate::assets::HEART_FILL),
                     "Liked Tracks".into(),
                     location == Some(Location::Liked),
                     &m,
@@ -464,7 +461,8 @@ impl LibraryPanel {
                         }))
                         .child(
                             Icon::new(IconName::Music2)
-                                .size(px(15.))
+                                .size(px(16.))
+                                .mr(px(2.))
                                 .text_color(m.accent),
                         )
                         .child(
@@ -479,8 +477,7 @@ impl LibraryPanel {
             }
             let row = nav_row(
                 ("playlist", id as usize).into(),
-                0,
-                Some(Icon::new(IconName::Music2)),
+                Icon::new(IconName::Music2),
                 p.name.clone().into(),
                 selected,
                 &m,

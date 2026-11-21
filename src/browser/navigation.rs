@@ -187,7 +187,7 @@ impl Browser {
         let same_folder = dest.location.is_folder() && self.location == dest.location;
         self.prefs.albums = dest.albums;
         if !same_folder {
-            self.enter(dest.location, w, cx);
+            self.enter(dest.location, TreeReveal::PreserveExpansion, w, cx);
         }
         self.page = dest.page;
         self.reset_table(cx);
@@ -208,6 +208,7 @@ impl Browser {
     pub(super) fn enter(
         &mut self,
         location: Location,
+        tree_reveal: TreeReveal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -219,14 +220,15 @@ impl Browser {
                 self.reset_table(cx);
                 self.clear_search(window, cx);
                 if self.active {
-                    self.folders.update(cx, |f, cx| f.show(&path, None, cx));
+                    self.folders
+                        .update(cx, |f, cx| f.show(&path, None, tree_reveal, cx));
                 }
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
                 cx.emit(ViewChanged);
                 cx.notify();
             }
-            Location::Folder(path) => self.load(path, None, window, cx),
+            Location::Folder(path) => self.load_from(path, None, None, tree_reveal, window, cx),
             location => {
                 if self.location != location {
                     self.page = None;
@@ -252,7 +254,7 @@ impl Browser {
                 if self.active {
                     self.folders.update(cx, |f, cx| {
                         if !path.as_os_str().is_empty() && f.is_empty() {
-                            f.show(&path, None, cx);
+                            f.show(&path, None, TreeReveal::PreserveExpansion, cx);
                         }
                         f.set_highlight(false, cx);
                     });
@@ -415,7 +417,7 @@ impl Browser {
                         b.prefs.albums = false;
                     }
                     b.clear_search(w, cx);
-                    b.enter(location, w, cx);
+                    b.enter(location, TreeReveal::Ancestors, w, cx);
                     b.reveal_key = Some(RowKey::Key(disc.track));
                     // The key listing will reveal even an off-screen, unpaged chapter.
                 } else {

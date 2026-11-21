@@ -9,7 +9,7 @@ use gpui_kit::{
 use std::path::PathBuf;
 
 pub const ROW: f32 = 26.;
-/// Each level of a hierarchy, in Library and Locations alike.
+/// Each level of the Locations filesystem tree.
 pub const INDENT: f32 = 14.;
 
 /// A folder dragged from Locations: onto Library to add it there. Dragging
@@ -65,11 +65,10 @@ pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -
         })
 }
 
-/// A Library navigation row. Collections sit one level below All Music.
+/// Every Library destination shares the same leading icon and label columns.
 pub fn nav_row(
     id: ElementId,
-    depth: usize,
-    icon: Option<Icon>,
+    icon: Icon,
     label: SharedString,
     selected: bool,
     m: &Materials,
@@ -81,8 +80,7 @@ pub fn nav_row(
         .tab_stop(true)
         .h(px(ROW))
         .mx(px(6.))
-        .pl(px(8. + depth as f32 * INDENT))
-        .pr(px(8.))
+        .px(px(8.))
         .gap(px(4.))
         .rounded(px(5.))
         .flex_shrink_0()
@@ -92,13 +90,12 @@ pub fn nav_row(
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(m.selected))
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        .when_some(icon, |d, icon| {
-            d.child(
-                icon.size(px(16.))
-                    .flex_shrink_0()
-                    .mr(px(2.))
-                    .text_color(if selected { m.accent } else { m.text_faint }),
-            )
-        })
+        .focus_visible(|d| d.bg(m.hover).text_color(m.text))
+        .child(
+            icon.size(px(16.))
+                .flex_shrink_0()
+                .mr(px(2.))
+                .text_color(if selected { m.accent } else { m.text_faint }),
+        )
         .child(div().flex_1().min_w_0().truncate().child(label))
 }

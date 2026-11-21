@@ -12,7 +12,7 @@ use crate::{
     catalog::Targets,
     collection::Page,
     library::TrackList,
-    location::LocationBar,
+    location::{LocationBar, NAV_FIELD_HEIGHT},
     player::Player,
     table::{Layouts, queue_targets},
     theme::materials,
@@ -222,8 +222,8 @@ impl BrowserPane {
                     .flex_shrink_0()
                     .w((available * 0.23).clamp(px(44.), px(180.)))
                     .child(
-                        Input::new(&search)
-                            .small()
+                        Styled::h(Input::new(&search).small(), px(NAV_FIELD_HEIGHT))
+                            .bordered(false)
                             .prefix(
                                 Icon::new(IconName::Search)
                                     .size(px(14.))

@@ -3,7 +3,7 @@ use crate::{
     catalog::{Catalog, CatalogEvent},
     collection::{Disc, DiscId, Discs, Membership, Page, Shelf, ViewPrefs},
     discovery::Scanner,
-    folders::Folders,
+    folders::{Folders, TreeReveal},
     library::{self, Track, TrackList},
     player::{Player, PlayerEvent},
     store::{PlaylistId, RootId, Scope, Term, Ticket},
@@ -318,10 +318,10 @@ impl Browser {
                 return;
             }
             if folder {
-                f.show(&path, root.as_deref(), cx);
+                f.show(&path, root.as_deref(), TreeReveal::PreserveExpansion, cx);
             } else {
                 if f.is_empty() {
-                    f.show(&path, None, cx);
+                    f.show(&path, None, TreeReveal::PreserveExpansion, cx);
                 }
                 f.set_highlight(false, cx);
             }
@@ -335,7 +335,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.load_from(path, None, root, window, cx);
+        self.load_from(path, None, root, TreeReveal::PreserveExpansion, window, cx);
     }
     pub fn list_focus(&self, cx: &App) -> FocusHandle {
         if self.listing_discs() {
@@ -861,12 +861,12 @@ impl Browser {
     ) {
         self.remember(&Location::Folder(path.clone()), cx);
         self.page = None;
-        self.load_from(path, None, Some(root), window, cx);
+        self.load_from(path, None, Some(root), TreeReveal::Ancestors, window, cx);
     }
     /// Shows a library view and records the current view in the history.
     pub fn show(&mut self, location: Location, window: &mut Window, cx: &mut Context<Self>) {
         self.remember(&location, cx);
-        self.enter(location, window, cx);
+        self.enter(location, TreeReveal::Ancestors, window, cx);
     }
     pub fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let revision = self.revision();
@@ -894,7 +894,7 @@ impl Browser {
             Location::Folder(_) => {
                 let path = self.path.clone();
                 self.folders.update(cx, |f, cx| f.refresh(&path, cx));
-                self.load(path, None, window, cx);
+                self.restore_folder(path, self.tree_root.clone(), window, cx);
             }
             Location::Library(root)
             | Location::Album { root, .. }
@@ -925,7 +925,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.load_from(path, reveal, None, window, cx);
+        self.load_from(path, reveal, None, TreeReveal::Ancestors, window, cx);
     }
     /// Opens `path` and lists it. `root` is the Place Locations shows it in.
     fn load_from(
@@ -933,6 +933,7 @@ impl Browser {
         path: PathBuf,
         reveal: Option<Reveal>,
         root: Option<PathBuf>,
+        tree_reveal: TreeReveal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -954,7 +955,7 @@ impl Browser {
         cx.emit(ViewChanged);
         if self.active {
             self.folders
-                .update(cx, |f, cx| f.show(&path, root.as_deref(), cx));
+                .update(cx, |f, cx| f.show(&path, root.as_deref(), tree_reveal, cx));
         }
         self.tree_root = root;
         self.path = path;

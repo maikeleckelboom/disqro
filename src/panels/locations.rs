@@ -218,8 +218,7 @@ impl LocationsPanel {
             alert
                 .title("Reset Places to defaults?")
                 .description(
-                    "Your shortcuts, names and order will be replaced by Music, Downloads and \
-                     this computer's drives. Folders on disk are not changed.",
+                    "Replace your shortcuts, names and order with this computer’s default Places?",
                 )
                 .show_cancel(true)
                 .ok_text("Reset Places")
@@ -252,7 +251,7 @@ impl LocationsPanel {
         let folder_view = router
             .read(cx)
             .active()
-            .is_some_and(|b| b.read(cx).location.is_folder());
+            .is_some_and(|b| b.read(cx).location.is_folder() && !b.read(cx).is_page());
         if new_tab || !shown || !folder_view {
             let destination = Destination::Folder {
                 path,
@@ -475,7 +474,8 @@ impl LocationsPanel {
                 } else {
                     m.text_muted
                 })
-                .pl(px(depth as f32 * INDENT))
+                .pl(px(10. + depth as f32 * INDENT))
+                .pr(px(14.))
                 .when(!available, |d| d.opacity(0.45))
                 .child(expander)
                 .child(
@@ -508,9 +508,16 @@ impl LocationsPanel {
                 let (open_root, open_path) = (root.clone(), path.clone());
                 let open = move |e: &ClickEvent, window: &mut Window, cx: &mut App| {
                     // The tree's own click handling would select by row
-                    // position and expand; navigation does both by path.
+                    // position and toggle expansion. Navigate by path instead.
                     cx.stop_propagation();
                     let new_tab = e.modifiers().secondary(cx);
+                    if !new_tab {
+                        let state = f.read(cx).state.clone();
+                        state.update(cx, |t, cx| {
+                            t.focus(window, cx);
+                            t.set_selected_index(t.index_of(&id), cx);
+                        });
+                    }
                     Self::open(
                         &r,
                         &f,
@@ -573,10 +580,7 @@ impl LocationsPanel {
             };
             ListItem::new(("location", ix))
                 .h(px(ROW))
-                .pl(px(4.))
-                .pr(px(8.))
-                .py_0()
-                .mx(px(6.))
+                .p_0()
                 .rounded(px(5.))
                 .child(content)
         })
@@ -615,7 +619,7 @@ impl LocationsPanel {
 impl Render for LocationsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
-        let missing = self.model.read(cx).places.missing_defaults();
+        let menu_model = self.model.clone();
         let (menu_this, model) = (cx.weak_entity(), self.model.clone());
         let end_drop = move |d: &DraggedFolder, _: &mut Window, cx: &mut App| {
             if let Some(from) = d.place {
@@ -657,8 +661,12 @@ impl Render for LocationsPanel {
                         }
                     })
                     .on_drop(end_drop)
-                    .context_menu(move |menu, _, _| {
-                        Self::panel_menu(menu_this.clone(), menu, missing)
+                    .context_menu(move |menu, _, cx| {
+                        Self::panel_menu(
+                            menu_this.clone(),
+                            menu,
+                            menu_model.read(cx).places.missing_defaults(),
+                        )
                     })
                     .child(self.render_tree(cx)),
             )

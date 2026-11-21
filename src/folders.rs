@@ -9,8 +9,8 @@
 //!
 //! Entries are identified by their root and path, so a folder that two
 //! Places reach has two entries, each opened and closed on its own.
-//! Navigation expands the chain from the root down to the open folder and
-//! never collapses anything. Expansion is remembered across restarts.
+//! Explicit navigation opens only the ancestors needed to see a row.
+//! History, browser activation and restart retain the listener's expansion.
 use crate::library::{self, within};
 use gpui_kit::{
     component::tree::{TreeEvent, TreeItem, TreeState},
@@ -61,6 +61,23 @@ fn owner<'a>(
 /// The listener opened or closed folders, so the sidebar state is saved.
 pub struct ExpansionChanged;
 impl EventEmitter<ExpansionChanged> for Folders {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TreeReveal {
+    Ancestors,
+    PreserveExpansion,
+}
+
+fn reveal_ancestors(expanded: &mut HashSet<String>, root: &Path, path: &Path) -> bool {
+    let before = expanded.len();
+    expanded.extend(
+        path.ancestors()
+            .skip(1)
+            .take_while(|p| within(p, root))
+            .map(|p| entry_key(root, p)),
+    );
+    expanded.len() != before
+}
 
 pub struct Folders {
     pub state: Entity<TreeState>,
@@ -140,7 +157,9 @@ impl Folders {
                 .is_some_and(|r| self.places.iter().any(|(p, _)| key(p) == key(r)));
             if !kept || self.temporary.is_some() {
                 self.place(&current, None);
-                self.reveal(&current);
+                if let Some(root) = &self.shown_in {
+                    reveal_ancestors(&mut self.expanded, root, &current);
+                }
             }
         }
         self.update(false, cx);
@@ -187,7 +206,13 @@ impl Folders {
 
     /// Shows `path` as the open folder. `root` is the Place to show it in,
     /// as when the listener chose it there.
-    pub fn show(&mut self, path: &Path, root: Option<&Path>, cx: &mut Context<Self>) {
+    pub fn show(
+        &mut self,
+        path: &Path,
+        root: Option<&Path>,
+        reveal: TreeReveal,
+        cx: &mut Context<Self>,
+    ) {
         if path.as_os_str().is_empty() {
             return;
         }
@@ -195,8 +220,11 @@ impl Folders {
         // Discovery lists the folder afresh and reports it through `listed`.
         self.current = Some(path.to_owned());
         self.highlight = true;
-        self.revealing = true;
-        if self.reveal(path) {
+        self.revealing = reveal == TreeReveal::Ancestors;
+        if self.revealing
+            && let Some(root) = &self.shown_in
+            && reveal_ancestors(&mut self.expanded, root, path)
+        {
             cx.emit(ExpansionChanged);
         }
         self.update(true, cx);
@@ -245,22 +273,11 @@ impl Folders {
             self.expanded.remove(&k)
         };
         if changed {
+            self.revealing = false;
             cx.emit(ExpansionChanged);
             self.update(false, cx);
         }
     }
-    /// Expands the root showing `path` and every folder down to it,
-    /// including it. Returns whether anything opened.
-    fn reveal(&mut self, path: &Path) -> bool {
-        let mut opened = false;
-        if let Some(root) = self.shown_in.clone() {
-            for p in path.ancestors().take_while(|p| within(p, &root)) {
-                opened |= self.expanded.insert(entry_key(&root, p));
-            }
-        }
-        opened
-    }
-
     /// The roots shown, in order.
     fn roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self.places.iter().map(|(p, _)| p.clone()).collect();
@@ -372,7 +389,11 @@ impl Folders {
             && let Some(root) = self.shown_in.clone()
         {
             let chain = self.chain(&root);
-            self.revealing = chain.iter().any(|p| !self.listed.contains_key(&key(p)));
+            self.revealing = chain
+                .iter()
+                .rev()
+                .skip(1)
+                .any(|p| !self.listed.contains_key(&key(p)));
         }
         self.list_visible(cx);
         cx.notify();
@@ -445,8 +466,27 @@ impl Folders {
 
 #[cfg(test)]
 mod tests {
-    use super::owner;
+    use super::{entry_key, owner, reveal_ancestors};
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+    #[test]
+    fn revealing_rows_opens_only_missing_ancestors_under_the_chosen_place() {
+        let root = Path::new("Music");
+        let album = root.join("Archive").join("Album");
+        let archive = album.parent().unwrap();
+        let other = entry_key(root, &root.join("Live"));
+        let mut expanded = HashSet::from([other.clone()]);
+        assert!(!reveal_ancestors(&mut expanded, root, root));
+        assert!(reveal_ancestors(&mut expanded, root, &album));
+        assert_eq!(
+            expanded,
+            HashSet::from([other, entry_key(root, root), entry_key(root, archive)])
+        );
+        assert!(!reveal_ancestors(&mut expanded, root, &album));
+        expanded.insert(entry_key(root, &album));
+        assert!(!reveal_ancestors(&mut expanded, root, archive));
+        assert!(expanded.contains(&entry_key(root, &album)));
+    }
     #[test]
     fn a_folder_shows_in_its_outermost_place_then_its_drive() {
         let places = [
