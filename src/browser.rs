@@ -20,6 +20,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+pub use navigation::continue_cd;
 use navigation::{Bookmark, Visit};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -95,6 +96,10 @@ pub struct Browser {
     pub table: Entity<TableState<MusicTable>>,
     pub search: Entity<InputState>,
     pub catalog: Entity<Catalog>,
+    /// The Place the open folder is shown under in Locations, when one was chosen.
+    pub tree_root: Option<PathBuf>,
+    /// This is the browser the address bar, Locations and the player address.
+    active: bool,
     back: Vec<Visit>,
     forward: Vec<Visit>,
     bookmark: Option<Bookmark>,
@@ -130,12 +135,12 @@ impl Browser {
     pub fn new(
         player: Entity<Player>,
         catalog: Entity<Catalog>,
+        folders: Entity<Folders>,
         columns: Layouts,
         prefs: ViewPrefs,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let folders = cx.new(Folders::new);
         let this = cx.weak_entity();
         let table = cx.new(|cx| {
             TableState::new(
@@ -167,6 +172,10 @@ impl Browser {
         .detach();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find tracks"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
+            // Only the active browser starts playback from its selection.
+            if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
+                return;
+            }
             b.table.update(cx, |t, cx| match ev {
                 PlayerEvent::TrackChanged | PlayerEvent::StateChanged => cx.notify(),
                 PlayerEvent::PlaySelection => t.delegate().play(
@@ -236,6 +245,8 @@ impl Browser {
             table,
             search,
             catalog,
+            tree_root: None,
+            active: false,
             folder_ready: false,
             raw: vec![],
             prefs,
@@ -269,6 +280,61 @@ impl Browser {
     pub fn revision(&self) -> u64 {
         self.generation
     }
+    /// Makes this the browser the address bar, Locations and the player's
+    /// Play button address, or stops it being that.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if !active {
+            return;
+        }
+        self.sync_tree(cx);
+        let can_start = self.count > 0;
+        self.table
+            .read(cx)
+            .delegate()
+            .player
+            .clone()
+            .update(cx, |p, cx| {
+                if p.can_start != can_start {
+                    p.can_start = can_start;
+                    cx.notify();
+                }
+            });
+        cx.notify();
+    }
+    /// Shows this browser's folder in Locations, or keeps its last folder in
+    /// view without highlighting it while a library view is shown.
+    fn sync_tree(&self, cx: &mut App) {
+        let path = self.path.clone();
+        let root = self.tree_root.clone();
+        let folder = self.location.is_folder();
+        self.folders.update(cx, |f, cx| {
+            if path.as_os_str().is_empty() {
+                return;
+            }
+            if folder {
+                f.show(&path, root.as_deref(), cx);
+            } else {
+                if f.is_empty() {
+                    f.show(&path, None, cx);
+                }
+                f.set_highlight(false, cx);
+            }
+        });
+    }
+    /// Opens a saved folder view, under the Place it was shown in.
+    pub fn restore_folder(
+        &mut self,
+        path: PathBuf,
+        root: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_from(path, None, root, window, cx);
+    }
     pub fn list_focus(&self, cx: &App) -> FocusHandle {
         if self.listing_discs() {
             self.discs.read(cx).focus_handle(cx)
@@ -286,13 +352,6 @@ impl Browser {
             Location::Folder(_) => self.subfolders && self.folder_count > 0,
             Location::Library(_) => true,
             _ => false,
-        }
-    }
-    pub fn section_count(&self, cx: &App) -> usize {
-        if self.listing_discs() {
-            self.discs.read(cx).delegate().disc_count()
-        } else {
-            self.table.read(cx).delegate().section_count()
         }
     }
     pub fn listing_discs(&self) -> bool {
@@ -587,6 +646,7 @@ impl Browser {
         } else {
             "No supported recordings in this folder".into()
         };
+        let active = self.active;
         self.table.update(cx, |t, cx| {
             if let Some(selected) = t.selected_row().and_then(|i| t.delegate().selected_key(i)) {
                 self.selected = Some(selected);
@@ -596,12 +656,14 @@ impl Browser {
             }
             let selected = self.selected.as_ref();
             let can_start = !rows.is_empty();
-            t.delegate().player.update(cx, |p, cx| {
-                if p.can_start != can_start {
-                    p.can_start = can_start;
-                    cx.notify();
-                }
-            });
+            if active {
+                t.delegate().player.update(cx, |p, cx| {
+                    if p.can_start != can_start {
+                        p.can_start = can_start;
+                        cx.notify();
+                    }
+                });
+            }
             let context = if grouped || self.page.is_some() || single_disc {
                 ContextKind::Disc
             } else {
@@ -735,7 +797,7 @@ impl Browser {
     }
     /// The table finished listing a library view.
     pub fn library_listed(&mut self, count: usize, duration: f64, cx: &mut Context<Self>) {
-        if self.scope().is_some() {
+        if self.scope().is_some() && self.active {
             self.table
                 .read(cx)
                 .delegate()
@@ -786,10 +848,6 @@ impl Browser {
         self.remember(&Location::Folder(path.clone()), cx);
         self.page = None;
         self.load(path, reveal, window, cx);
-    }
-    /// Opens a Place, shown at its own root in Locations.
-    pub fn open_place(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_in(path.clone(), path, window, cx);
     }
     /// Opens a folder as Locations shows it under `root`.
     pub fn open_in(
@@ -892,8 +950,11 @@ impl Browser {
         let events = self.scanner.open(path.clone(), self.subfolders);
         self.location = Location::Folder(path.clone());
         cx.emit(ViewChanged);
-        self.folders
-            .update(cx, |f, cx| f.show(&path, root.as_deref(), cx));
+        if self.active {
+            self.folders
+                .update(cx, |f, cx| f.show(&path, root.as_deref(), cx));
+        }
+        self.tree_root = root;
         self.path = path;
         self.folder_ready = false;
         self.busy = true;

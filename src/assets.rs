@@ -36,7 +36,12 @@ gpui_kit::assets::icon_assets!(
         Trash,
         Copy,
         FolderSearch,
-        Image
+        Image,
+        Clock,
+        FolderTree,
+        LayoutPanelLeft,
+        SquareSplitHorizontal,
+        SquareSplitVertical
     ]
 );
 /// A filled variant of Lucide's heart (ISC licence), for liked tracks.

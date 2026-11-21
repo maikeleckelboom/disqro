@@ -16,15 +16,13 @@ mod library;
 mod location;
 mod movie;
 mod overview;
-mod pane;
+mod panels;
 mod places;
 mod player;
 mod profile;
 mod queue;
-mod queue_view;
 mod recording;
 mod release;
-mod sidebar;
 mod store;
 mod system;
 mod table;
@@ -48,7 +46,7 @@ fn main() {
             theme::install(theme::Appearance::Dark, cx);
             workspace::bind_keys(cx);
             location::bind_keys(cx);
-            queue_view::bind_keys(cx);
+            panels::queue::bind_keys(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,

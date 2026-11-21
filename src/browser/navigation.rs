@@ -48,6 +48,37 @@ impl Browser {
             bookmark,
         }
     }
+    /// Scrolls a restored view back to where it was, once it has listed.
+    pub fn restore_scroll(&mut self, offset: f32) {
+        if offset > 0. {
+            self.bookmark = Some(Bookmark {
+                selected: None,
+                marked: None,
+                offset: point(px(0.), px(-offset)),
+            });
+        }
+    }
+    /// How far the list is scrolled down.
+    pub fn scroll_offset(&self, cx: &App) -> f32 {
+        let offset = if self.listing_discs() {
+            self.discs
+                .read(cx)
+                .vertical_scroll_handle
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        } else {
+            self.table
+                .read(cx)
+                .vertical_scroll_handle
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        };
+        (-f32::from(offset.y)).max(0.)
+    }
     pub(super) fn cancel_reveal(&mut self) {
         self.navigation += 1;
         self.bookmark = None;
@@ -141,7 +172,9 @@ impl Browser {
                 self.notice = None;
                 self.reset_table(cx);
                 self.clear_search(window, cx);
-                self.folders.update(cx, |f, cx| f.show(&path, None, cx));
+                if self.active {
+                    self.folders.update(cx, |f, cx| f.show(&path, None, cx));
+                }
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
                 cx.emit(ViewChanged);
@@ -170,12 +203,14 @@ impl Browser {
                 // The tree keeps the last folder in view without marking it
                 // as the current location.
                 let path = self.path.clone();
-                self.folders.update(cx, |f, cx| {
-                    if !path.as_os_str().is_empty() && f.is_empty() {
-                        f.show(&path, None, cx);
-                    }
-                    f.set_highlight(false, cx);
-                });
+                if self.active {
+                    self.folders.update(cx, |f, cx| {
+                        if !path.as_os_str().is_empty() && f.is_empty() {
+                            f.show(&path, None, cx);
+                        }
+                        f.set_highlight(false, cx);
+                    });
+                }
                 cx.emit(ViewChanged);
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
@@ -390,49 +425,78 @@ impl Browser {
     }
 
     pub fn continue_cd(&self, request: crate::queue::Entry, cx: &mut Context<Self>) {
-        let crate::queue::Entry {
-            id: entry,
-            track,
-            disc_context: context,
-        } = request;
-        if !context.allows(&track) {
-            return;
+        let request = match self.continue_from_folder(request, cx) {
+            Some(request) => request,
+            None => return,
+        };
+        let player = self.table.read(cx).delegate().player.clone();
+        continue_cd(&self.catalog, &player, request, cx);
+    }
+    /// Continues a CD whose folder this browser has open, without asking the
+    /// library. Hands the request back when it cannot.
+    fn continue_from_folder(
+        &self,
+        request: crate::queue::Entry,
+        cx: &mut App,
+    ) -> Option<crate::queue::Entry> {
+        if !request.disc_context.allows(&request.track) {
+            return None;
         }
         let player = self.table.read(cx).delegate().player.clone();
-        if track.library_id.is_none()
+        if request.track.library_id.is_none()
             && self.location.is_folder()
             && !self.busy
-            && let Some(disc) = self.programs.iter().find(|d| d.id.contains(&track))
+            && let Some(disc) = self.programs.iter().find(|d| d.id.contains(&request.track))
         {
             let program = disc.tracks.clone().into();
+            let (entry, context) = (request.id, request.disc_context);
             player.update(cx, |p, cx| {
                 p.command(
                     crate::audio::Command::ContinueDisc(entry, program, context),
                     cx,
                 )
             });
-            return;
+            return None;
         }
-        let catalog = self.catalog.clone();
-        cx.spawn(async move |_, cx| {
-            let result = Catalog::program(catalog.clone(), track.clone(), context, cx).await;
-            match result {
-                Ok(tracks) if tracks.iter().any(|t| t.same_item(&track)) => {
-                    player.update(cx, |p, cx| {
-                        p.command(
-                            crate::audio::Command::ContinueDisc(entry, tracks, context),
-                            cx,
-                        )
-                    });
-                }
-                other => catalog.update(cx, |_, cx| {
-                    cx.emit(CatalogEvent::Notice(other.err().map_or_else(
-                        || "This CD is unavailable.".into(),
-                        |e| format!("{e:#}"),
-                    )))
-                }),
-            }
-        })
-        .detach();
+        Some(request)
     }
+}
+
+/// Continues the CD of a queue entry from the program Disqro reads for it,
+/// for when no open browser lists that CD.
+pub fn continue_cd(
+    catalog: &Entity<Catalog>,
+    player: &Entity<crate::player::Player>,
+    request: crate::queue::Entry,
+    cx: &mut App,
+) {
+    let crate::queue::Entry {
+        id: entry,
+        track,
+        disc_context: context,
+    } = request;
+    if !context.allows(&track) {
+        return;
+    }
+    let (catalog, player) = (catalog.clone(), player.clone());
+    cx.spawn(async move |cx| {
+        let result = Catalog::program(catalog.clone(), track.clone(), context, cx).await;
+        match result {
+            Ok(tracks) if tracks.iter().any(|t| t.same_item(&track)) => {
+                player.update(cx, |p, cx| {
+                    p.command(
+                        crate::audio::Command::ContinueDisc(entry, tracks, context),
+                        cx,
+                    )
+                });
+            }
+            other => catalog.update(cx, |_, cx| {
+                cx.emit(CatalogEvent::Notice(other.err().map_or_else(
+                    || "This CD is unavailable.".into(),
+                    |e| format!("{e:#}"),
+                )))
+            }),
+        }
+    })
+    .detach();
 }

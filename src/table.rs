@@ -1085,9 +1085,6 @@ impl MusicTable {
             Contents::Library(_) => self.query(cx),
         }
     }
-    pub fn section_count(&self) -> usize {
-        self.rows.sections.0.len()
-    }
     pub fn header(&self, ix: usize) -> Option<&Arc<Disc>> {
         self.rows.sections.header(ix)
     }

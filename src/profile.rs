@@ -1,4 +1,5 @@
 use crate::{
+    panels::{InstanceId, PanelRecord},
     places::PlacesState,
     queue::Queue,
     table::{Layouts, LegacyColumn},
@@ -25,24 +26,52 @@ pub struct SavedQueue {
     pub position: f64,
 }
 
+/// Where panels are beyond what the dock records: which group the title bar
+/// shows, which Music Browser is active, and where closed panels reopen.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceState {
+    /// A panel in the group the title bar shows.
+    pub title: Option<InstanceId>,
+    /// The Music Browser the address bar and Locations follow.
+    pub active: Option<InstanceId>,
+    /// Single-instance panels closed in an earlier session, by type.
+    pub closed: Vec<ClosedPanel>,
+    /// The height of the player along the bottom of the window.
+    pub player_height: Option<f32>,
+}
+
+/// A closed panel: its saved state, and the panels it was grouped with, so
+/// reopening it puts it back beside them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClosedPanel {
+    pub key: String,
+    pub record: PanelRecord,
+    #[serde(default)]
+    pub beside: Vec<InstanceId>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
-    pub folder: Option<PathBuf>,
     pub volume: f32,
     pub full_cd: bool,
+    /// The dock layout, with every panel instance's own state. A layout with
+    /// another version is replaced by the default layout.
     pub layout: Option<DockAreaState>,
+    pub workspace: WorkspaceState,
     #[serde(skip_serializing)]
     pub columns: Vec<LegacyColumn>,
+    /// The column layouts a new Music Browser starts with.
     pub table_layouts: Option<Layouts>,
     pub places: Option<PlacesState>,
     pub queue: Option<SavedQueue>,
     pub window: WindowPrefs,
+    /// The view settings a new Music Browser starts with, and the folders
+    /// shown with their subfolders.
     pub collection: crate::collection::ViewPrefs,
-    /// Open folders in Locations and whether playlists are shown.
-    pub sidebar: crate::sidebar::SidebarState,
-    /// The view shown at exit: a folder, a collection, Liked Tracks or a playlist.
-    pub location: Option<crate::browser::Location>,
+    /// Folders open in Locations.
+    pub expanded: Vec<String>,
     /// Version of the single-layout preference written before contextual tables.
     #[serde(skip_serializing)]
     pub columns_version: u32,
@@ -50,18 +79,17 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            folder: None,
             volume: 0.65,
             full_cd: false,
             layout: None,
+            workspace: WorkspaceState::default(),
             columns: vec![],
             table_layouts: None,
             places: None,
             queue: None,
             window: WindowPrefs::default(),
             collection: Default::default(),
-            sidebar: Default::default(),
-            location: None,
+            expanded: Vec::new(),
             // Missing from profiles written before the field existed.
             columns_version: 0,
         }
@@ -185,6 +213,48 @@ mod tests {
         let playlist = &json["table_layouts"]["playlist"]["columns"];
         assert_eq!(playlist[0]["field"], "Cover");
         assert_eq!(playlist[1]["width"], 310.);
+    }
+    #[test]
+    fn an_earlier_profile_keeps_everything_but_its_fixed_panel_layout() {
+        let p: Profile = serde_json::from_str(
+            r#"{"volume":0.3,"folder":"C:/Music","location":{"Playlist":4},
+                "sidebar":{"expanded":["c:/music"],"playlists_closed":true},
+                "layout":{"version":2,"center":{"panel_name":"StackPanel","children":[],
+                    "info":{"stack":{"sizes":[],"axis":0}}}},
+                "collection":{"albums":true,"subfolders":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.volume, 0.3);
+        assert!(p.collection.albums);
+        assert_eq!(p.layout.map(|l| l.version), Some(Some(2)));
+        assert!(p.workspace.closed.is_empty());
+    }
+    #[test]
+    fn the_workspace_state_round_trips() {
+        let closed = ClosedPanel {
+            key: "disqro.library".into(),
+            record: PanelRecord {
+                id: Some(InstanceId(9)),
+                ..Default::default()
+            },
+            beside: vec![InstanceId(4)],
+        };
+        let p = Profile {
+            workspace: WorkspaceState {
+                title: Some(InstanceId(1)),
+                active: Some(InstanceId(2)),
+                closed: vec![closed.clone()],
+                player_height: Some(120.),
+            },
+            expanded: vec!["c:/music".into()],
+            ..Default::default()
+        };
+        let back: Profile = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back.workspace.title, Some(InstanceId(1)));
+        assert_eq!(back.workspace.active, Some(InstanceId(2)));
+        assert_eq!(back.workspace.closed, vec![closed]);
+        assert_eq!(back.workspace.player_height, Some(120.));
+        assert_eq!(back.expanded, p.expanded);
     }
     #[test]
     fn late_snapshot_cannot_overwrite_shutdown() {

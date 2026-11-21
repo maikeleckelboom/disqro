@@ -36,6 +36,7 @@ pub struct LocationBar {
     request: u64,
     error: Option<SharedString>,
     width: Rc<Cell<Pixels>>,
+    _view: Subscription,
 }
 
 /// One clickable step of the current path.
@@ -184,18 +185,7 @@ impl LocationBar {
             _ => {}
         })
         .detach();
-        cx.subscribe_in(
-            &browser,
-            window,
-            |bar, _, _: &crate::browser::ViewChanged, _, cx| {
-                bar.request += 1;
-                bar.pending = false;
-                bar.editing = false;
-                bar.error = None;
-                cx.notify();
-            },
-        )
-        .detach();
+        let view = Self::follow(&browser, window, cx);
         Self {
             browser,
             input,
@@ -204,7 +194,40 @@ impl LocationBar {
             request: 0,
             error: None,
             width: Rc::new(Cell::new(px(0.))),
+            _view: view,
         }
+    }
+    fn follow(
+        browser: &Entity<Browser>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            browser,
+            window,
+            |bar, _, _: &crate::browser::ViewChanged, _, cx| bar.reset(cx),
+        )
+    }
+    fn reset(&mut self, cx: &mut Context<Self>) {
+        self.request += 1;
+        self.pending = false;
+        self.editing = false;
+        self.error = None;
+        cx.notify();
+    }
+    /// Addresses another Music Browser, leaving any half-typed path behind.
+    pub fn set_browser(
+        &mut self,
+        browser: Entity<Browser>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser == browser {
+            return;
+        }
+        self._view = Self::follow(&browser, window, cx);
+        self.browser = browser;
+        self.reset(cx);
     }
     /// Shows the path as text with everything selected, ready to replace.
     pub fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
