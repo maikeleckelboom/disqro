@@ -1,4 +1,8 @@
-use crate::{places::PlacesState, queue::Queue, table::LayoutColumn};
+use crate::{
+    places::PlacesState,
+    queue::Queue,
+    table::{Layouts, LegacyColumn},
+};
 use gpui_kit::component::dock::DockAreaState;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,12 +11,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// How the window behaves around the notification area. Both default to off,
+/// How the close button behaves. The preference defaults to off,
 /// so closing Disqro quits it unless the listener asks otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowPrefs {
-    pub minimize_to_tray: bool,
     pub close_to_tray: bool,
 }
 
@@ -29,7 +32,9 @@ pub struct Profile {
     pub volume: f32,
     pub full_cd: bool,
     pub layout: Option<DockAreaState>,
-    pub columns: Vec<LayoutColumn>,
+    #[serde(skip_serializing)]
+    pub columns: Vec<LegacyColumn>,
+    pub table_layouts: Option<Layouts>,
     pub places: Option<PlacesState>,
     pub queue: Option<SavedQueue>,
     pub window: WindowPrefs,
@@ -38,10 +43,10 @@ pub struct Profile {
     pub sidebar: crate::sidebar::SidebarState,
     /// The view shown at exit: a folder, a collection, Liked Tracks or a playlist.
     pub location: Option<crate::browser::Location>,
-    /// Layouts older than [`COLUMNS_VERSION`] gain the columns added since.
+    /// Version of the single-layout preference written before contextual tables.
+    #[serde(skip_serializing)]
     pub columns_version: u32,
 }
-pub const COLUMNS_VERSION: u32 = 2;
 impl Default for Profile {
     fn default() -> Self {
         Self {
@@ -50,6 +55,7 @@ impl Default for Profile {
             full_cd: false,
             layout: None,
             columns: vec![],
+            table_layouts: None,
             places: None,
             queue: None,
             window: WindowPrefs::default(),
@@ -168,6 +174,19 @@ impl ProfileFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_tray_setting_retires_independently_of_close_and_custom_layouts() {
+        let mut p: Profile = serde_json::from_str(r#"{"window":{"minimize_to_tray":true,"close_to_tray":true},"columns":[{"field":"Title","width":310},{"field":"Liked","width":40}]}"#).unwrap();
+        assert!(p.window.close_to_tray);
+        p.table_layouts = Some(Layouts::migrate(&p.columns, p.columns_version));
+        let json = serde_json::to_value(p).unwrap();
+        assert!(json["window"].get("minimize_to_tray").is_none());
+        assert!(json.get("columns").is_none());
+        assert_eq!(
+            json["table_layouts"]["playlist"]["columns"][0]["width"],
+            310.
+        );
+    }
     #[test]
     fn late_snapshot_cannot_overwrite_shutdown() {
         let dir = tempfile::tempdir().unwrap();

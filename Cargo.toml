@@ -6,6 +6,8 @@ publish = false
 description = "Native local music player for Windows"
 
 [dependencies]
+async-lock = "3.5"
+hashlink = "0.12"
 gpui-kit = "=0.10.0"
 kira = { version = "=0.12.6", default-features = false, features = ["cpal"] }
 serde = { version = "1", features = ["derive", "rc"] }

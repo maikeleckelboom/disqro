@@ -203,15 +203,23 @@ impl Player {
             ("wave-disc", "Full CD", true),
         ] {
             let selected = self.disc_view() == full;
-            let tip = reason
-                .cloned()
-                .unwrap_or_else(|| format!("{label} waveform · Alt+W"));
+            let tip = if full && !enabled {
+                reason.cloned().unwrap_or_else(|| {
+                    if self.status.track.is_some() && self.program.is_none() {
+                        "Checking CD availability".into()
+                    } else {
+                        "No authored CD is available".into()
+                    }
+                })
+            } else {
+                format!("{label} waveform · Alt+W")
+            };
             row = row.child(
                 Button::new(id)
                     .ghost()
                     .xsmall()
                     .label(label)
-                    .text_color(if selected { m.text } else { m.text_faint })
+                    .text_color(if selected { m.text } else { m.text_muted })
                     .when(selected, |b| b.bg(m.control_hover))
                     .disabled(full && !enabled)
                     .tooltip(tip)

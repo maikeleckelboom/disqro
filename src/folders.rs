@@ -33,6 +33,50 @@ fn key(path: &Path) -> String {
         .trim_end_matches('\\')
         .to_lowercase()
 }
+/// Shorten only a complete prefix already named by the parent. A leading
+/// catalog year moves to the end so the distinguishing title gets first space.
+fn display_label(path: &Path) -> String {
+    let full = library::display_name(path);
+    if full.chars().count() < 32 {
+        return full;
+    }
+    let Some(parent) = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+    else {
+        return full;
+    };
+    let (year, body) = full
+        .split_once("] ")
+        .filter(|(year, _)| {
+            year.strip_prefix('[')
+                .is_some_and(|n| n.len() == 4 && n.bytes().all(|c| c.is_ascii_digit()))
+        })
+        .map_or(("", full.as_str()), |(year, rest)| (&year[1..], rest));
+    let mut prefix = parent;
+    loop {
+        if let Some(tail) = body.strip_prefix(prefix).and_then(|s| s.strip_prefix(' ')) {
+            let title = tail.strip_prefix("- ").unwrap_or(tail).trim();
+            if !title.is_empty() {
+                return if year.is_empty() {
+                    title.to_owned()
+                } else {
+                    format!("{title} [{year}]")
+                };
+            }
+        }
+        let Some((shorter, _)) = prefix.rsplit_once(" - ") else {
+            break;
+        };
+        if !shorter.contains(" - ") {
+            break;
+        }
+        prefix = shorter;
+    }
+    full
+}
+
 /// An entry: a folder as one root shows it.
 fn entry_key(root: &Path, path: &Path) -> String {
     format!("{}\u{1}{}", key(root), key(path))
@@ -314,10 +358,10 @@ impl Folders {
                 .collect()
         } else {
             kids.iter()
-                .map(|k| TreeItem::new(self.id(root, k), library::display_name(k)))
+                .map(|k| TreeItem::new(self.id(root, k), display_label(k)))
                 .collect()
         };
-        TreeItem::new(id, library::display_name(path))
+        TreeItem::new(id, display_label(path))
             .children(children)
             .expanded(expanded)
     }

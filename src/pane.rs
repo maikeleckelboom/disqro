@@ -140,11 +140,14 @@ impl Panel for Pane {
             .child(
                 div()
                     .min_w_0()
+                    .id("pane-title")
                     .truncate()
+                    .text_ellipsis_middle()
                     .text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(m.text)
-                    .child(title),
+                    .child(title.clone())
+                    .tooltip(move |w, cx| tooltip::Tooltip::new(title.clone()).build(w, cx)),
             )
             .when(!detail.is_empty(), |d| {
                 d.child(
@@ -410,8 +413,15 @@ impl Pane {
                 ),
             );
         }
+        let table = b.table.clone();
         view.child(
             div()
+                .id("tracks-viewport")
+                .on_prepaint(move |bounds, _, cx| {
+                    table.update(cx, |t, cx| {
+                        crate::table::MusicTable::fit(t, f32::from(bounds.size.width).floor(), cx)
+                    });
+                })
                 .key_context("MusicTracks")
                 .flex_1()
                 .min_h_0()
@@ -419,6 +429,7 @@ impl Pane {
                 .child(
                     DataTable::new(&b.table)
                         .accessibility_label("Recordings")
+                        .fixed_cols_border(false)
                         .bordered(false)
                         .stripe(false)
                         .header_row_height(px(30.))

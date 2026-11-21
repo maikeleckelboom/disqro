@@ -1,6 +1,7 @@
 //! The track table shared by folder listings, collections, Liked Tracks and
 //! playlists. Columns, selection, menus and the like and rating cells are the
 //! same everywhere; only where rows come from differs.
+mod layout;
 mod playback;
 use crate::{
     audio::Command,
@@ -25,6 +26,8 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+pub use layout::{ContextKind, Layouts, LegacyColumn};
+use layout::{Layout, LayoutColumn};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -45,7 +48,6 @@ pub enum Field {
     Title,
     Artist,
     Album,
-    Liked,
     Rating,
     Length,
     Format,
@@ -54,22 +56,11 @@ pub enum Field {
     Path,
 }
 impl Field {
-    /// Shown until the listener chooses otherwise.
-    const DEFAULT: [Self; 7] = [
+    const ALL: [Self; 10] = [
         Self::Number,
         Self::Title,
         Self::Artist,
         Self::Album,
-        Self::Liked,
-        Self::Rating,
-        Self::Length,
-    ];
-    const ALL: [Self; 11] = [
-        Self::Number,
-        Self::Title,
-        Self::Artist,
-        Self::Album,
-        Self::Liked,
         Self::Rating,
         Self::Length,
         Self::Format,
@@ -83,7 +74,6 @@ impl Field {
             Self::Title => "Title",
             Self::Artist => "Artist",
             Self::Album => "Album",
-            Self::Liked => "Liked",
             Self::Rating => "Rating",
             Self::Length => "Time",
             Self::Format => "Format",
@@ -105,7 +95,6 @@ impl Field {
             Self::Title => 200.,
             Self::Artist => 135.,
             Self::Album => 148.,
-            Self::Liked => 34.,
             Self::Rating => 100.,
             Self::Length => 60.,
             Self::Format | Self::Year | Self::Disc => 64.,
@@ -115,11 +104,15 @@ impl Field {
     fn min_width(self) -> f32 {
         match self {
             Self::Number => 36.,
-            Self::Liked => 30.,
+            Self::Title => 142.,
+            Self::Year | Self::Disc => 48.,
             Self::Rating => 96.,
             Self::Length | Self::Format => 48.,
             _ => 72.,
         }
+    }
+    fn pinned(self) -> bool {
+        matches!(self, Self::Number | Self::Title)
     }
     fn right_aligned(self) -> bool {
         matches!(self, Self::Number | Self::Length)
@@ -133,7 +126,6 @@ impl Field {
             Self::Title => t.title.clone(),
             Self::Artist => t.artist.clone(),
             Self::Album => t.album.clone(),
-            Self::Liked => if mark.liked { "Liked" } else { "" }.into(),
             Self::Rating => match mark.rating {
                 0 => String::new(),
                 1 => "1 star".into(),
@@ -153,7 +145,6 @@ impl Field {
             Self::Title => O::Title,
             Self::Artist => O::Artist,
             Self::Album => O::Album,
-            Self::Liked => O::Liked,
             Self::Rating => O::Rating,
             Self::Length => O::Length,
             Self::Format => O::Format,
@@ -163,35 +154,6 @@ impl Field {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
-pub struct LayoutColumn {
-    field: Field,
-    width: f32,
-}
-/// Adds the Liked and Rating columns to a layout saved before they existed.
-pub fn add_personal_columns(columns: &mut Vec<LayoutColumn>) {
-    if columns.is_empty()
-        || columns
-            .iter()
-            .any(|c| matches!(c.field, Field::Liked | Field::Rating))
-    {
-        return;
-    }
-    let at = columns
-        .iter()
-        .position(|c| c.field == Field::Length)
-        .unwrap_or(columns.len());
-    for field in [Field::Rating, Field::Liked] {
-        columns.insert(
-            at,
-            LayoutColumn {
-                field,
-                width: field.width(),
-            },
-        );
-    }
-}
-
 /// A row's identity for selection: a physical file or authored segment in a
 /// folder, or a library view key. Tags and positions are deliberately
 /// absent, so a refresh or sort keeps the same selection.
@@ -419,7 +381,11 @@ pub struct MusicTable {
     folder_sections: Sections,
     pub programs: Arc<[Arc<Disc>]>,
     pub folder_cd: bool,
-    pub columns: Vec<LayoutColumn>,
+    pub layouts: Layouts,
+    context: ContextKind,
+    viewport: f32,
+    pub artwork_revision: u64,
+    pub folder_covers: Arc<HashMap<PathBuf, crate::artwork::CoverFile>>,
     pub sort: Option<(Field, ColumnSort)>,
     selection: Selection,
     pub player: Entity<Player>,
@@ -600,13 +566,9 @@ impl MusicTable {
     pub fn new(
         player: Entity<Player>,
         catalog: Entity<Catalog>,
-        saved: Vec<LayoutColumn>,
+        layouts: Layouts,
         browser: WeakEntity<crate::browser::Browser>,
     ) -> Self {
-        let valid = saved.iter().any(|c| c.field == Field::Title)
-            && saved.iter().enumerate().all(|(i, c)| {
-                (24. ..=1200.).contains(&c.width) && saved[..i].iter().all(|d| d.field != c.field)
-            });
         Self {
             player,
             catalog,
@@ -621,11 +583,11 @@ impl MusicTable {
             programs: Arc::default(),
             folder_cd: false,
             folder_sections: Sections::default(),
-            columns: if valid {
-                saved
-            } else {
-                Self::default_columns()
-            },
+            layouts,
+            context: ContextKind::Mixed,
+            viewport: 0.,
+            artwork_revision: 0,
+            folder_covers: Default::default(),
             sort: None,
             selection: Default::default(),
             empty: SharedString::default(),
@@ -638,20 +600,42 @@ impl MusicTable {
             view: 0,
         }
     }
-    fn default_columns() -> Vec<LayoutColumn> {
-        Field::DEFAULT
-            .into_iter()
-            .map(|field| LayoutColumn {
-                field,
-                width: field.width(),
-            })
-            .collect()
+    fn layout(&self) -> &Layout {
+        self.layouts.get(self.context)
+    }
+    fn layout_mut(&mut self) -> &mut Layout {
+        self.layouts.get_mut(self.context)
+    }
+    pub fn set_context(
+        table: &mut TableState<Self>,
+        context: ContextKind,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if table.delegate().context != context {
+            table.delegate_mut().context = context;
+            table
+                .horizontal_scroll_handle
+                .set_offset(point(px(0.), px(0.)));
+            table.refresh(cx);
+        }
+    }
+    pub fn fit(table: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
+        if table.delegate().viewport != width {
+            table.delegate_mut().viewport = width;
+            table.refresh(cx);
+            cx.notify();
+        }
+    }
+    fn save_layout(&self, cx: &mut App) {
+        let _ = self
+            .browser
+            .update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
     }
     /// Shows or hides a column. Title always stays.
     fn toggle_field(&mut self, field: Field, cx: &mut Context<TableState<Self>>) {
-        if let Some(i) = self.columns.iter().position(|c| c.field == field) {
+        if let Some(i) = self.layout().columns.iter().position(|c| c.field == field) {
             if field != Field::Title {
-                self.columns.remove(i);
+                self.layout_mut().columns.remove(i);
                 if self.sort.is_some_and(|(f, _)| f == field) {
                     self.sort = None;
                     match self.rows.data {
@@ -664,11 +648,12 @@ impl MusicTable {
         }
         let rank = |f: Field| Field::ALL.iter().position(|a| *a == f).unwrap();
         let at = self
+            .layout()
             .columns
             .iter()
             .rposition(|c| rank(c.field) < rank(field))
             .map_or(0, |i| i + 1);
-        self.columns.insert(
+        self.layout_mut().columns.insert(
             at,
             LayoutColumn {
                 field,
@@ -804,6 +789,7 @@ impl MusicTable {
                 let selected = t.selected_row().and_then(|i| t.delegate().rows.key(i));
                 let anchor = top_anchor(t);
                 let count = listing.keys.len();
+                t.delegate_mut().artwork_revision = generation;
                 t.delegate_mut().rows.sections = sections;
                 t.delegate_mut().selection.ordered.take();
                 if let Contents::Library(p) = &mut t.delegate_mut().rows.data {
@@ -902,7 +888,6 @@ impl MusicTable {
                 Field::Year => rows.sort_by_key(|t| t.year),
                 Field::Number => rows.sort_by_key(|t| t.display_number()),
                 Field::Rating => rows.sort_by_cached_key(|t| marks(t).rating),
-                Field::Liked => rows.sort_by_cached_key(|t| marks(t).liked),
                 _ => rows.sort_by_cached_key(|t| f.value(t, Mark::default()).to_lowercase()),
             }
             if order == ColumnSort::Descending {
@@ -939,8 +924,17 @@ impl MusicTable {
     }
 
     pub fn resize(&mut self, widths: &[Pixels]) {
-        for (c, w) in self.columns.iter_mut().zip(widths) {
-            c.width = f32::from(*w);
+        let previous = self.layout().widths(self.viewport);
+        for ((c, w), displayed) in self
+            .layout_mut()
+            .columns
+            .iter_mut()
+            .zip(widths)
+            .zip(previous)
+        {
+            if (f32::from(*w) - displayed).abs() >= 1. {
+                c.width = f32::from(*w);
+            }
         }
     }
     pub fn has_marks(&self) -> bool {
@@ -1070,6 +1064,51 @@ impl MusicTable {
         use std::hash::BuildHasher;
         FIXED.hash_one(self.rows.key(ix))
     }
+    fn artwork(
+        &self,
+        row: usize,
+        t: &Track,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let folder = t.disc.as_ref().and_then(|d| d.sheet.parent());
+        let fallback = match &self.rows.data {
+            Contents::Library(_) => self.rows.row(row).and_then(|r| r.cover.as_ref()).cloned(),
+            Contents::Folder { .. } => self
+                .folder_covers
+                .get(
+                    folder
+                        .or_else(|| t.source.parent())
+                        .unwrap_or(std::path::Path::new("")),
+                )
+                .map(|cover| cover.path().to_owned()),
+        };
+        let image = crate::artwork::TrackCover {
+            source: t.source.clone(),
+            authored_folder: folder
+                .filter(|f| Some(*f) != t.source.parent())
+                .map(ToOwned::to_owned),
+            disc_cover: fallback,
+            listing: self.artwork_revision,
+        }
+        .image(window, cx);
+        div()
+            .size(px(24.))
+            .flex_shrink_0()
+            .rounded(px(2.))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|d| match image {
+                Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                None => d.child(
+                    Icon::new(IconName::Music2)
+                        .size(px(13.))
+                        .text_color(materials(cx).text_faint),
+                ),
+            })
+    }
     fn render_like(
         &self,
         row: usize,
@@ -1083,7 +1122,15 @@ impl MusicTable {
         div()
             .id(("like", self.cell_id(row)))
             .role(Role::Button)
+            .focusable()
+            .tab_stop(true)
+            .aria_toggled(if liked {
+                gpui_kit::accesskit::Toggled::True
+            } else {
+                gpui_kit::accesskit::Toggled::False
+            })
             .aria_label(if liked { "Unlike track" } else { "Like track" })
+            .flex_shrink_0()
             .size(px(20.))
             .flex()
             .items_center()
@@ -1091,7 +1138,9 @@ impl MusicTable {
             .rounded(px(4.))
             .cursor_pointer()
             .when(!liked, |d| {
-                d.opacity(0.).group_hover("track-row", |s| s.opacity(1.))
+                d.opacity(0.)
+                    .group_hover("track-row", |s| s.opacity(1.))
+                    .focus_visible(|s| s.opacity(1.).bg(m.hover))
             })
             .hover(|d| d.bg(m.hover))
             .child(
@@ -1103,7 +1152,10 @@ impl MusicTable {
                 .size(px(14.))
                 .text_color(if liked { m.accent } else { m.text_faint }),
             )
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Left, |_, w, cx| {
+                w.prevent_default();
+                cx.stop_propagation();
+            })
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 let target = target.clone();
@@ -1154,13 +1206,13 @@ impl TableDelegate for MusicTable {
         self.rows.len()
     }
     fn columns_count(&self, _: &App) -> usize {
-        self.columns.len()
+        self.layout().columns.len()
     }
     fn column(&self, ix: usize, _: &App) -> Column {
-        let c = &self.columns[ix];
-        let pad = if c.field == Field::Liked { 7. } else { CELL_X };
+        let c = &self.layout().columns[ix];
+        let pad = CELL_X;
         let mut col = Column::new(c.field.label(), c.field.label())
-            .width(c.width)
+            .width(self.layout().widths(self.viewport)[ix])
             .min_width(px(c.field.min_width()))
             .paddings(Edges {
                 top: px(0.),
@@ -1168,6 +1220,9 @@ impl TableDelegate for MusicTable {
                 left: px(pad),
                 right: px(pad),
             });
+        if c.field.pinned() {
+            col = col.fixed_left().movable(false);
+        }
         if c.field.right_aligned() {
             col = col.text_right();
         }
@@ -1180,8 +1235,8 @@ impl TableDelegate for MusicTable {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
-        let c = self.columns.remove(ix);
-        self.columns.insert(to, c);
+        let c = self.layout_mut().columns.remove(ix);
+        self.layout_mut().columns.insert(to, c);
     }
     fn visible_rows_changed(
         &mut self,
@@ -1200,7 +1255,7 @@ impl TableDelegate for MusicTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let field = self.columns[col_ix].field;
+        let field = self.layout().columns[col_ix].field;
         let m = materials(cx);
         let sorted = self.sort.filter(|(f, _)| *f == field).map(|(_, d)| d);
         h_flex()
@@ -1208,7 +1263,6 @@ impl TableDelegate for MusicTable {
             .size_full()
             .gap_1()
             .when(field.right_aligned(), |d| d.justify_end())
-            .when(field == Field::Liked, |d| d.justify_center())
             .text_size(px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if sorted.is_some() {
@@ -1218,13 +1272,7 @@ impl TableDelegate for MusicTable {
             })
             .hover(|d| d.text_color(m.text_muted))
             .cursor_pointer()
-            .map(|d| match field {
-                Field::Liked if sorted.is_none() => {
-                    d.child(Icon::new(IconName::Heart).size(px(12.)))
-                }
-                Field::Liked => d,
-                _ => d.child(field.label()),
-            })
+            .child(field.label())
             .when_some(sorted, |d, dir| {
                 d.child(
                     Icon::new(if dir == ColumnSort::Ascending {
@@ -1246,8 +1294,10 @@ impl TableDelegate for MusicTable {
             }))
             .context_menu({
                 let table = cx.entity().downgrade();
-                let shown: Vec<Field> = self.columns.iter().map(|c| c.field).collect();
+                let artwork = self.layout().artwork;
+                let shown: Vec<Field> = self.layout().columns.iter().map(|c| c.field).collect();
                 move |mut menu, _, _| {
+                    let art_table = table.clone();
                     let edit = |field: Option<Field>| {
                         let table = table.clone();
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -1255,9 +1305,26 @@ impl TableDelegate for MusicTable {
                                 if let Some(field) = field {
                                     t.delegate_mut().toggle_field(field, cx);
                                 } else {
-                                    t.delegate_mut().columns = MusicTable::default_columns();
+                                    let context = t.delegate().context;
+                                    *t.delegate_mut().layout_mut() = Layout::new(context);
+                                    if let Some((field, _)) = t.delegate().sort
+                                        && !t
+                                            .delegate()
+                                            .layout()
+                                            .columns
+                                            .iter()
+                                            .any(|c| c.field == field)
+                                    {
+                                        let d = t.delegate_mut();
+                                        d.sort = None;
+                                        match d.rows.data {
+                                            Contents::Folder { .. } => d.apply_sort(cx),
+                                            Contents::Library(_) => d.query(cx),
+                                        }
+                                    }
                                 }
                                 t.refresh(cx);
+                                t.delegate().save_layout(cx);
                                 cx.notify();
                             });
                         }
@@ -1272,6 +1339,18 @@ impl TableDelegate for MusicTable {
                         );
                     }
                     menu.separator()
+                        .item(
+                            PopupMenuItem::new("Show Track Artwork")
+                                .checked(artwork)
+                                .on_click(move |_, _, cx| {
+                                    let _ = art_table.update(cx, |t, cx| {
+                                        let layout = t.delegate_mut().layout_mut();
+                                        layout.artwork = !layout.artwork;
+                                        t.delegate().save_layout(cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
                         .item(PopupMenuItem::new("Reset Columns").on_click(edit(None)))
                 }
             })
@@ -1281,16 +1360,21 @@ impl TableDelegate for MusicTable {
             return (col == 0).then(|| d.title.clone().into());
         }
         let t = self.rows.track(row)?;
-        Some(self.columns[col].field.value(t, self.mark(row, cx)).into())
+        Some(
+            self.layout().columns[col]
+                .field
+                .value(t, self.mark(row, cx))
+                .into(),
+        )
     }
     fn render_td(
         &mut self,
         row: usize,
         col: usize,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let f = self.columns[col].field;
+        let f = self.layout().columns[col].field;
         let m = *materials(cx);
         let cell = h_flex()
             .size_full()
@@ -1307,7 +1391,6 @@ impl TableDelegate for MusicTable {
         let playing = self.is_playing(&t, cx);
         let cell = cell.when(!available, |d| d.opacity(0.45));
         match f {
-            Field::Album if !self.rows.sections.0.is_empty() => cell.into_any_element(),
             Field::Number if playing => cell
                 .child(
                     Icon::new(IconName::AudioLines)
@@ -1334,16 +1417,17 @@ impl TableDelegate for MusicTable {
                         }),
                 )
                 .into_any_element(),
-            Field::Liked => cell
-                .justify_center()
-                .child(self.render_like(row, mark, cx))
-                .into_any_element(),
             Field::Rating => cell
                 .child(self.render_rating(row, mark, cx))
                 .into_any_element(),
             Field::Title => cell
+                .when(self.layout().artwork, |d| {
+                    d.child(self.artwork(row, &t, window, cx))
+                })
+                .gap(px(4.))
                 .text_color(if playing { m.accent } else { m.text })
-                .child(div().min_w_0().truncate().child(f.value(&t, mark)))
+                .child(div().flex_1().min_w_0().truncate().child(f.value(&t, mark)))
+                .child(self.render_like(row, mark, cx))
                 .into_any_element(),
             _ => cell
                 .text_color(match f {
@@ -1366,6 +1450,7 @@ impl TableDelegate for MusicTable {
             let disc = d.clone();
             return div()
                 .id(("cd-section", row))
+                .overflow_hidden()
                 .bg(m.raised)
                 .cursor_pointer()
                 .child(d.section(window, cx))

@@ -1394,10 +1394,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "async-lock",
  "embed-resource",
  "encoding_rs",
  "fastrand",
  "gpui-kit",
+ "hashlink",
  "image",
  "kira",
  "lofty",

@@ -118,6 +118,7 @@ pub struct Row {
     pub key: i64,
     pub id: TrackId,
     pub track: Arc<Track>,
+    pub cover: Option<PathBuf>,
     /// False when the last scan could not find the track or its source.
     pub available: bool,
     pub root: Option<RootId>,
