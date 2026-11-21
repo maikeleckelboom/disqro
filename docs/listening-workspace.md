@@ -132,7 +132,7 @@ The catalog uses SQLite FTS5 external-content tables. Schema migration backfills
 
 [Mission 11 Windows qualification and screenshots](unified-shell-qualification.md)
 
-## Sidebar and navigation qualification
+## Mission 10 sidebar and navigation qualification
 
 The optimized Windows player was exercised at 150% display scaling with Win32 input and Windows UI Automation. The address and local search fields share the original 28-logical-pixel height. Local search uses a borderless field. [Default workspace at 1240 × 780](evidence/modular-workspace/corrections/tabbed-1240.webp) · [Compact workspace at 720 × 460](evidence/modular-workspace/corrections/tabbed-720.webp)
 
