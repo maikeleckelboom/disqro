@@ -140,7 +140,8 @@ impl Layout {
     pub(super) fn scrolling(&self, widths: &[f32], viewport: f32) -> std::ops::Range<usize> {
         let mut range = 0..self.columns.len();
         let available = viewport.max(0.);
-        let mut budget = if viewport <= 0. || widths.iter().sum::<f32>() <= available {
+        let total: f32 = widths.iter().sum();
+        let mut budget = if viewport <= 0. || total <= available {
             f32::INFINITY
         } else {
             // Keep a usable strip of scrollable content in a cramped pane.
@@ -162,6 +163,15 @@ impl Layout {
             }
             budget -= widths[i];
             range.start += 1;
+        }
+        // With every column pinned, two flush pin groups share a divider.
+        // Let the inner left column scroll just far enough to expose its edge.
+        if viewport > 0.
+            && range.is_empty()
+            && (1..widths.len()).contains(&range.start)
+            && available - total <= 1.
+        {
+            range.start -= 1;
         }
         range
     }
@@ -490,6 +500,20 @@ mod tests {
         assert_eq!(layout.scrolling(&widths, 1000.), 2..4);
         assert_eq!(layout.widths(1000.), widths);
         assert_eq!(serde_json::to_value(layout).unwrap(), saved);
+    }
+    #[test]
+    fn touching_pin_groups_can_expose_both_edges_when_every_column_is_pinned() {
+        use Field::*;
+        let mut layout = Layout::new(ContextKind::Disc);
+        layout
+            .columns
+            .retain(|c| matches!(c.field, Title | Favorite));
+        layout.set_pin(Title, Pin::Left);
+        layout.set_pin(Favorite, Pin::Right);
+        let widths = layout.widths(700.);
+        assert_eq!(layout.scrolling(&widths, 700.), 0..1);
+        assert_eq!(layout.scrolling(&widths, 720.), 1..1);
+        assert_eq!(layout.columns[0].pin, Pin::Left);
     }
     #[test]
     fn pinning_and_moving_preserve_sibling_order_and_widths() {
