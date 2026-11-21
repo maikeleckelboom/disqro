@@ -11,7 +11,7 @@ use gpui_kit::{
     assets::IconName,
     base::ResizeHandleContext,
     component::{
-        Icon, Sizable,
+        Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         dock::{
             DockAreaRenderer, DockContext, DockSkin, DragPanel, DropIndicator, NodeId, PanelId,
@@ -25,7 +25,13 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+    time::Duration,
+};
 
 /// How long an item dragged over a tab rests there before the tab opens.
 const DWELL: Duration = Duration::from_millis(550);
@@ -35,6 +41,7 @@ pub const STRIP_HEIGHT: f32 = 34.;
 /// Shared panel commands and hover activation for all dock groups.
 pub struct SkinState {
     pub workspace: WeakEntity<Workspace>,
+    pub browser_count: Cell<usize>,
     dwell: RefCell<Dwell<PanelId>>,
     widths: RefCell<HashMap<NodeId, Pixels>>,
 }
@@ -84,12 +91,13 @@ impl SkinState {
     pub fn new(workspace: WeakEntity<Workspace>) -> Rc<Self> {
         Rc::new(Self {
             workspace,
+            browser_count: Cell::new(0),
             dwell: RefCell::new(Dwell::default()),
             widths: RefCell::default(),
         })
     }
     pub fn can_open_beside(&self, node: NodeId) -> bool {
-        // Room for navigation, search and a readable title in each half.
+        // Keep both tables readable when opening a browser beside this group.
         self.widths
             .borrow()
             .get(&node)
@@ -223,15 +231,14 @@ impl TabGroupRenderer for Tabs {
             .active_panel()
             .and_then(pane_of)
             .map(|p| p.read(cx).content.clone());
-        let has_address = active
+        let browser = active
             .as_ref()
-            .is_some_and(|content| content.as_any().is::<crate::panels::browser::BrowserPane>());
-        let single_browser = has_address && tabs.len() == 1;
-        let height = if has_address && !single_browser {
-            STRIP_HEIGHT * 2.
-        } else {
-            STRIP_HEIGHT
-        };
+            .and_then(|content| {
+                content
+                    .as_any()
+                    .downcast_ref::<crate::panels::browser::BrowserPane>()
+            })
+            .map(|pane| pane.browser.clone());
         let group = group.clone();
         let state = self.state.clone();
         let scroll = self.scroll.clone();
@@ -260,7 +267,7 @@ impl TabGroupRenderer for Tabs {
                     .icon(Icon::new(IconName::Ellipsis).text_color(m.text_faint))
                     .accessibility_label("Panel menu")
                     .tooltip("Panel menu")
-                    .tab_stop(utility)
+                    .tab_stop(true)
                     .dropdown_menu(move |mut menu, w, cx| {
                         if overflow {
                             for (ix, panel) in select
@@ -282,16 +289,27 @@ impl TabGroupRenderer for Tabs {
                         super::tab_menu(&workspace, &pane, menu, w, cx)
                     })
             });
-            let mut address = active
-                .as_ref()
-                .and_then(|content| {
-                    content
-                        .as_any()
-                        .downcast_ref::<crate::panels::browser::BrowserPane>()
-                })
-                .map(|browser| browser.address_bar(size.width, cx));
-            let strip =
-                h_flex()
+            let filter = browser.as_ref().map(|browser| {
+                let b = browser.read(cx);
+                let selected = b.filter_open || !b.search.read(cx).value().is_empty();
+                let browser = browser.clone();
+                let workspace = state.workspace.clone();
+                Button::new("filter-view")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Search)
+                    .selected(selected)
+                    .accessibility_label("Filter this view")
+                    .tooltip("Filter this view · Ctrl+F")
+                    .on_click(move |_, w, cx| {
+                        if let Some(workspace) = workspace.upgrade() {
+                            let router = workspace.read(cx).services.router.clone();
+                            router.update(cx, |r, cx| r.set_active(Some(&browser), cx));
+                        }
+                        browser.update(cx, |b, cx| b.set_filter_open(!b.filter_open, w, cx))
+                    })
+            });
+            h_flex()
                     .id(("tab-strip", node.as_u64()))
                     .w_full()
                     .h(px(STRIP_HEIGHT))
@@ -326,24 +344,15 @@ impl TabGroupRenderer for Tabs {
                                     }),
                             ),
                     )
-                    .when(single_browser, |d| d.children(address.take()))
-                    .when(!single_browser, |d| {
-                        d.child(
-                            drop_space(&group, ("strip-space", node.as_u64()), cx)
-                                .when(utility, |d| d.min_w_0())
-                                .when(editing.is_some(), |d| d.flex_none()),
-                        )
-                    })
-                    .children(menu);
-            gpui_kit::component::v_flex()
-                .size_full()
-                .bg(m.chrome)
-                .child(strip)
-                .when_some(address, |d, bar| {
-                    d.child(h_flex().w_full().h(px(STRIP_HEIGHT)).child(bar))
-                })
+                    .child(
+                        drop_space(&group, ("strip-space", node.as_u64()), cx)
+                            .when(utility, |d| d.min_w_0())
+                            .when(editing.is_some(), |d| d.flex_none()),
+                    )
+                    .children(filter)
+                    .children(menu)
         })
-        .h(px(height))
+        .h(px(STRIP_HEIGHT))
         .flex_shrink_0()
         .into_any_element()
     }
@@ -440,7 +449,8 @@ fn tab(
     };
     // A lone browser already names its destination in the breadcrumb. Keep
     // the icon as its drag handle. An explicit custom name stays visible.
-    let handle = group.panels().len() == 1
+    let handle = state.browser_count.get() == 1
+        && group.panels().len() == 1
         && pane.as_ref().is_some_and(|p| {
             let p = p.read(cx);
             p.content
@@ -533,7 +543,13 @@ fn tab(
             d.min_w(px(24.)).w(px(24.)).px_0().gap_0().justify_center()
         })
         .when(selected && !handle, |d| {
-            d.bg(if utility { m.chrome } else { m.control })
+            d.bg(if utility {
+                m.chrome
+            } else if active_browser {
+                m.selected
+            } else {
+                m.control
+            })
         })
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
         .child(icon.size(px(14.)).flex_shrink_0().text_color(

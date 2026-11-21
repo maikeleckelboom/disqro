@@ -727,3 +727,57 @@ fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
     assert_eq!(s.disc_keys(Scope::Release(one.id)).unwrap()[2], liked);
     assert_eq!(all(&s, Scope::Liked)[0].id, liked);
 }
+
+#[test]
+fn catalog_search_follows_cue_identity_and_catalog_edits() {
+    use search::Target;
+    let dir = tempfile::tempdir().unwrap();
+    collection(dir.path());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    index(&mut s, root);
+    let track = chapter(&all(&s, Scope::Library(Some(root))), "a.cue", 2).id;
+    let playlist = s.create_playlist("Two mixes", &[track, track]).unwrap();
+    let matches = s.search_library("Tw", 5, 0).unwrap().hits;
+    assert!(matches.iter().any(|h| h.target == Target::Track(track)
+        && h.detail.contains("a.cue")
+        && h.detail.contains("Chapter 2")));
+    assert!(
+        matches
+            .iter()
+            .any(|h| h.target == Target::Playlist(playlist))
+    );
+    assert!(
+        s.search_library("art", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Artist("Artist".into()))
+    );
+    fs::write(
+        dir.path().join("Album A/a.cue"),
+        ALBUM_A.replace("Two", "Deux"),
+    )
+    .unwrap();
+    index(&mut s, root);
+    assert!(
+        s.search_library("Deux", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Track(track))
+    );
+    assert!(
+        !s.search_library("Two", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Track(track))
+    );
+    s.remove_root(root).unwrap();
+    assert!(s.search_library("Deux", 5, 0).unwrap().hits.is_empty());
+    assert_eq!(
+        s.search_library("Two", 5, 0).unwrap().hits[0].target,
+        Target::Playlist(playlist)
+    );
+}

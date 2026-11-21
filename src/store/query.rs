@@ -59,6 +59,7 @@ pub enum Term {
     Any(String),
     Title(String),
     Artist(String),
+    ExactArtist(String),
     Album(String),
     Format(String),
     Year(u32),
@@ -67,6 +68,9 @@ pub enum Term {
 }
 impl Term {
     pub fn parse(search: &str) -> Vec<Self> {
+        if let Some(name) = search.strip_prefix("artist:=").filter(|v| !v.is_empty()) {
+            return vec![Self::ExactArtist(name.to_lowercase())];
+        }
         search
             .split_whitespace()
             .map(|word| {
@@ -104,6 +108,7 @@ impl Term {
                     || has(&t.source.to_string_lossy(), v)
             }
             Self::Title(v) => has(&t.title, v),
+            Self::ExactArtist(v) => t.artist.to_lowercase() == *v,
             Self::Artist(v) => has(&t.artist, v),
             Self::Album(v) => has(&t.album, v),
             Self::Format(v) => t.format() == *v,
@@ -124,6 +129,7 @@ impl Term {
                 format!("(instr(t.search, {p}) > 0 OR instr(s.path_key, {p}) > 0)")
             }
             Self::Title(v) => format!("instr(t.title_key, {}) > 0", arg(Box::new(v.clone()))),
+            Self::ExactArtist(v) => format!("t.artist_key = {}", arg(Box::new(v.clone()))),
             Self::Artist(v) => format!("instr(t.artist_key, {}) > 0", arg(Box::new(v.clone()))),
             Self::Album(v) => format!("instr(t.album_key, {}) > 0", arg(Box::new(v.clone()))),
             Self::Format(v) => format!("t.format = {}", arg(Box::new(v.clone()))),
@@ -457,7 +463,7 @@ impl Store {
 
     /// The release memberships of a collection's discs, from all of its
     /// available discs whatever a view's search shows.
-    fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
+    pub(super) fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
         let (filter, args): (&str, Vec<RootId>) = match root {
             Some(root) => ("al.root_id = ?1", vec![root]),
             None => ("al.root_id IS NOT NULL", vec![]),
@@ -465,10 +471,10 @@ impl Store {
         // One indexed look-up per disc rather than a pass over every track.
         let sql = format!(
             "SELECT al.id, al.folder, al.title,
-                (SELECT min(t.disc_number) FROM tracks t
+                (SELECT min(t.disc_number) FROM tracks t INDEXED BY tracks_album
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
              FROM albums al
-             WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t
+             WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t INDEXED BY tracks_album
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
              ORDER BY al.id"
         );

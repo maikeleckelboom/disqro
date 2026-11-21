@@ -12,7 +12,7 @@ use crate::{
     catalog::Targets,
     collection::Page,
     library::TrackList,
-    location::{LocationBar, NAV_FIELD_HEIGHT},
+    location::NAV_FIELD_HEIGHT,
     player::Player,
     table::{Layouts, queue_targets},
     theme::materials,
@@ -20,7 +20,7 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, ElementExt, Icon, Selectable, Sizable,
+        ElementExt, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
@@ -73,6 +73,8 @@ pub struct BrowserState {
     pub layouts: Option<Layouts>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub search: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub filter_open: bool,
     #[serde(skip_serializing_if = "is_zero")]
     pub scroll: f32,
 }
@@ -81,7 +83,6 @@ fn is_zero(v: &f32) -> bool {
 }
 
 pub struct BrowserPane {
-    pub location: Entity<LocationBar>,
     pub browser: Entity<Browser>,
     router: Entity<Router>,
     player: Entity<Player>,
@@ -119,121 +120,15 @@ impl BrowserPane {
             if !state.search.is_empty() {
                 b.restore_search(state.search, window, cx);
             }
+            b.filter_open = state.filter_open;
             b.restore_scroll(state.scroll);
             b
         });
-        let location = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         Self {
-            location,
             browser,
             router: services.router.clone(),
             player: services.player.clone(),
         }
-    }
-    fn nav_button(
-        id: &'static str,
-        icon: IconName,
-        label: &'static str,
-        enabled: bool,
-        cx: &App,
-    ) -> Button {
-        let m = materials(cx);
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
-            .accessibility_label(label)
-            .tooltip(label)
-            .disabled(!enabled)
-    }
-    /// Navigation and search for this instance, at its dock group’s width.
-    pub fn address_bar(&self, available: Pixels, cx: &App) -> AnyElement {
-        let m = *materials(cx);
-        let browser = self.browser.clone();
-        let location = self.location.clone();
-        let router = self.router.clone();
-        let owner = browser.clone();
-        let b = browser.read(cx);
-        let (can_back, can_forward, has_parent) =
-            (b.can_go_back(), b.can_go_forward(), b.can_go_up());
-        let search = b.search.clone();
-        let (back, forward, up) = (browser.clone(), browser.clone(), browser);
-        h_flex()
-            .id("address-bar")
-            .h_full()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .capture_any_mouse_down(move |_, _, cx| {
-                router.update(cx, |r, cx| r.set_active(Some(&owner), cx))
-            })
-            .px(px(3.))
-            .gap(px(3.))
-            .items_center()
-            .border_b_1()
-            .border_color(if b.active {
-                m.accent.opacity(0.55)
-            } else {
-                m.line
-            })
-            .bg(if b.active {
-                m.chrome.blend(m.accent.opacity(0.065))
-            } else {
-                m.chrome
-            })
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap(px(2.))
-                    .child(
-                        Self::nav_button(
-                            "back",
-                            IconName::ArrowLeft,
-                            "Back · Alt+Left",
-                            can_back,
-                            cx,
-                        )
-                        .on_click(move |_, w, cx| back.update(cx, |b, cx| b.back(w, cx))),
-                    )
-                    .child(
-                        Self::nav_button(
-                            "forward",
-                            IconName::ArrowRight,
-                            "Forward · Alt+Right",
-                            can_forward,
-                            cx,
-                        )
-                        .on_click(move |_, w, cx| forward.update(cx, |b, cx| b.forward(w, cx))),
-                    )
-                    .child(
-                        Self::nav_button(
-                            "up",
-                            IconName::ArrowUp,
-                            "Parent folder · Alt+Up",
-                            has_parent,
-                            cx,
-                        )
-                        .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
-                    ),
-            )
-            .child(div().flex_1().min_w_0().child(location))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w((available * 0.23).clamp(px(44.), px(180.)))
-                    .child(
-                        Styled::h(Input::new(&search).small(), px(NAV_FIELD_HEIGHT))
-                            .bordered(false)
-                            .prefix(
-                                Icon::new(IconName::Search)
-                                    .size(px(14.))
-                                    .text_color(m.text_faint),
-                            )
-                            .cleanable(true)
-                            .aria_label("Find tracks"),
-                    ),
-            )
-            .into_any_element()
     }
     /// What this instance saves, and what a new instance opened from it
     /// starts with.
@@ -255,6 +150,7 @@ impl BrowserPane {
             albums: Some(browser.prefs.albums),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
             search: browser.search.read(cx).value().to_string(),
+            filter_open: browser.filter_open,
             ..Default::default()
         }
     }
@@ -450,23 +346,7 @@ impl PaneContent for BrowserPane {
         let m = *materials(cx);
         let b = self.browser.read(cx);
         let mut items = Vec::new();
-        if b.is_page() {
-            let browser = self.browser.clone();
-            // A CD of a release goes back to the release.
-            let release = b.membership.is_some();
-            items.push(
-                Button::new("view-up")
-                    .ghost()
-                    .xsmall()
-                    .label(if release {
-                        "‹ Release"
-                    } else {
-                        "‹ Collection"
-                    })
-                    .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.up(w, cx)))
-                    .into_any_element(),
-            );
-        } else if b.can_list_discs() {
+        if !b.is_page() && b.can_list_discs() {
             let albums = b.prefs.albums;
             for (id, label, value) in [
                 ("view-tracks", "All Tracks", false),
@@ -557,6 +437,28 @@ impl Render for Browser {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|b, _, w, cx| b.forward(w, cx)),
             );
+        if self.filter_open {
+            view = view.child(
+                h_flex()
+                    .h(px(crate::workspace::STRIP_HEIGHT))
+                    .px(px(6.))
+                    .items_center()
+                    .child(
+                        Styled::h(Input::new(&self.search).small(), px(NAV_FIELD_HEIGHT))
+                            .cleanable(true)
+                            .aria_label("Filter this view"),
+                    )
+                    .child(
+                        Button::new("hide-filter")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::X)
+                            .tooltip("Hide filter")
+                            .accessibility_label("Hide filter")
+                            .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(false, w, cx))),
+                    ),
+            );
+        }
         if let Some(notice) = &self.notice {
             view = view.child(
                 gpui_kit::component::h_flex()

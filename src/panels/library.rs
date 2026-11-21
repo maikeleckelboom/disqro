@@ -290,6 +290,39 @@ impl LibraryPanel {
                 .into_any_element(),
             );
         }
+        let router = self.router.clone();
+        rows.push(
+            Self::opens(
+                nav_row(
+                    "liked".into(),
+                    Icon::default().path(crate::assets::HEART_FILL),
+                    "Liked Tracks".into(),
+                    location == Some(Location::Liked),
+                    &m,
+                ),
+                &self.router,
+                Location::Liked,
+            )
+            .context_menu(move |menu, _, _| {
+                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
+            })
+            .into_any_element(),
+        );
+        rows.push(
+            section("Collections", &m)
+                .child(
+                    Button::new("add-collection")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .tooltip("Add music folder")
+                        .accessibility_label("Add music folder")
+                        .on_click(|_, w, cx| {
+                            w.dispatch_action(Box::new(crate::workspace::AddMusicFolder), cx)
+                        }),
+                )
+                .into_any_element(),
+        );
         for c in &catalog.collections {
             let id = c.root.id;
             let path = c.root.path.clone();
@@ -372,24 +405,6 @@ impl LibraryPanel {
                 });
             rows.push(row.into_any_element());
         }
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "liked".into(),
-                    Icon::default().path(crate::assets::HEART_FILL),
-                    "Liked Tracks".into(),
-                    location == Some(Location::Liked),
-                    &m,
-                ),
-                &self.router,
-                Location::Liked,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
-            })
-            .into_any_element(),
-        );
         rows.extend(self.render_playlists(location, cx));
         rows
     }
@@ -400,19 +415,7 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
-        let header = h_flex()
-            .id("playlists")
-            .h(px(ROW))
-            .mx(px(6.))
-            .pl(px(8.))
-            .pr(px(2.))
-            .gap(px(4.))
-            .flex_shrink_0()
-            .items_center()
-            .mt(px(6.))
-            .text_size(px(12.))
-            .text_color(m.text_muted)
-            .child(div().flex_1().min_w_0().truncate().child("Playlists"))
+        let header = section("Playlists", &m)
             .child(
                 Button::new("new-playlist")
                     .ghost()
@@ -511,6 +514,21 @@ impl LibraryPanel {
         }
         rows
     }
+}
+
+fn section(name: &'static str, m: &crate::theme::Materials) -> Stateful<Div> {
+    h_flex()
+        .id(name)
+        .h(px(ROW))
+        .mx(px(6.))
+        .pl(px(8.))
+        .pr(px(2.))
+        .mt(px(10.))
+        .items_center()
+        .flex_shrink_0()
+        .text_size(px(12.))
+        .text_color(m.text_muted)
+        .child(div().flex_1().min_w_0().truncate().child(name))
 }
 
 /// Play, queue, rename, duplicate or delete a playlist.

@@ -104,6 +104,7 @@ pub fn rows(mode: Mode, q: &Queue) -> Vec<usize> {
 }
 
 pub struct Entries {
+    presented: bool,
     mode: Mode,
     player: Entity<Player>,
     focus: FocusHandle,
@@ -125,11 +126,14 @@ impl Entries {
                     q.index_of(*id)
                         .is_some_and(|ix| s.mode.indices(q).contains(&ix))
                 });
-                cx.notify();
+                if s.presented {
+                    cx.notify();
+                }
             }
         })
         .detach();
         Self {
+            presented: false,
             mode,
             player: services.player.clone(),
             focus: cx.focus_handle(),
@@ -458,6 +462,14 @@ impl Render for Entries {
 }
 
 impl PaneContent for Entity<Entries> {
+    fn set_presented(&self, presented: bool, cx: &mut App) {
+        self.update(cx, |s, cx| {
+            s.presented = presented;
+            if presented {
+                cx.notify();
+            }
+        });
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

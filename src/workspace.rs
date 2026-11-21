@@ -1,5 +1,5 @@
 //! The window owns the dock, the panel picker and the persistent player.
-//! Each Music Browser owns its navigation controls.
+//! The shell addresses the browser most recently activated in the dock.
 //!
 //! Every view in the dock is a [`Pane`]: an instance of a registered
 //! [`PanelType`](crate::panels::PanelType). The workspace creates, places,
@@ -8,6 +8,7 @@
 //! The player is not a dock panel: it is part of the window, so no
 //! arrangement of panels can close it or interrupt playback.
 mod recovery;
+mod search;
 mod sidebar;
 mod skin;
 
@@ -39,6 +40,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+pub(crate) use skin::STRIP_HEIGHT;
 use skin::{Skin, SkinState, pane_of};
 use std::{collections::HashMap, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
@@ -47,6 +49,9 @@ gpui_kit::actions!(
     [
         OpenFolder,
         FindTrack,
+        SearchLibrary,
+        ToggleLeftSidebar,
+        ToggleRightSidebar,
         PlayPause,
         ToggleWaveform,
         PlaySelected,
@@ -85,6 +90,9 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("alt-w", ToggleWaveform, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-o", OpenFolder, Some("Disqro")),
+        KeyBinding::new("ctrl-alt-left", ToggleLeftSidebar, Some("Disqro")),
+        KeyBinding::new("ctrl-alt-right", ToggleRightSidebar, Some("Disqro")),
+        KeyBinding::new("ctrl-k", SearchLibrary, Some("Disqro")),
         KeyBinding::new("ctrl-f", FindTrack, Some("Disqro")),
         KeyBinding::new("ctrl-l", FocusLocation, Some("Disqro")),
         KeyBinding::new("alt-d", FocusLocation, Some("Disqro")),
@@ -177,6 +185,10 @@ pub struct Workspace {
     drag_checkpoint: Option<(PanelId, NodeId, usize, recovery::Checkpoint)>,
     /// Recent closed instances, with their former group companions.
     closed: Vec<ClosedPanel>,
+    address: Option<Entity<crate::location::LocationBar>>,
+    search: Option<Entity<search::LibrarySearch>>,
+    left_hidden: bool,
+    right_hidden: bool,
     player_height: f32,
     profile: Option<Arc<profile::ProfileFile>>,
     save_revision: u64,
@@ -186,6 +198,7 @@ pub struct Workspace {
     prefs: WindowPrefs,
     system: Option<System>,
     hwnd: isize,
+    window_visible: bool,
     hidden_to_tray: bool,
     save_pending: bool,
     focus: FocusHandle,
@@ -277,8 +290,10 @@ impl Workspace {
             cx.subscribe(&locations, |s: &mut Self, _, _: &LocationsChanged, cx| {
                 s.schedule_save(cx)
             }),
-            cx.observe(&router, |s: &mut Self, _, cx| {
+            cx.observe_in(&router, window, |s: &mut Self, _, w, cx| {
+                s.bind_address(w, cx);
                 s.schedule_save(cx);
+                cx.notify();
             }),
             cx.subscribe_in(&router, window, |s: &mut Self, _, e, w, cx| match e {
                 RouterEvent::Open(destination) => {
@@ -329,6 +344,8 @@ impl Workspace {
             }),
             cx.observe_window_visibility(window, |s: &mut Self, visibility, _, cx| {
                 let visible = visibility == WindowVisibility::Visible;
+                s.window_visible = visible;
+                s.sync_panel_display(cx);
                 s.services
                     .player
                     .update(cx, |p, cx| p.set_visible(visible, cx));
@@ -345,6 +362,10 @@ impl Workspace {
             panes: HashMap::new(),
             undo: None,
             drag_checkpoint: None,
+            address: None,
+            search: None,
+            left_hidden: workspace.left_hidden,
+            right_hidden: workspace.right_hidden,
             closed: workspace.closed,
             player_height: workspace
                 .player_height
@@ -358,6 +379,7 @@ impl Workspace {
             prefs: saved.window,
             system,
             hwnd: native_handle(window),
+            window_visible: window.visibility() == WindowVisibility::Visible,
             hidden_to_tray: false,
             save_pending: false,
             focus: cx.focus_handle(),
@@ -393,6 +415,7 @@ impl Workspace {
         }
         app.set_customizing(false, window, cx);
         app.sync_active_browser(cx);
+        app.bind_address(window, cx);
         if let Some(saved) = saved.queue.take()
             && !saved.queue.entries.is_empty()
         {
@@ -546,6 +569,13 @@ impl Workspace {
             );
         }
         self.panes.retain(|id, _| ids.contains(id));
+        self.skin.browser_count.set(
+            self.panes
+                .values()
+                .filter(|t| t.pane.read(cx).ty == &panels::browser::TYPE)
+                .count(),
+        );
+        self.sync_panel_display(cx);
         // An identity appears once, even in a layout edited by hand.
         let mut seen = Vec::new();
         for pane in self.ordered(cx) {
@@ -612,6 +642,9 @@ impl Workspace {
             .id
             .filter(|id| !taken.contains(id))
             .unwrap_or_else(|| InstanceId::fresh(|id| taken.contains(&id)));
+        if record.id.is_none() && ty.toolbar {
+            record.toolbar_hidden = true;
+        }
         record.id = Some(id);
         let services = self.services.clone();
         cx.new(|cx| Pane::new(ty, id, &record, &services, window, cx))
@@ -716,6 +749,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        if self.sidebar_hidden(ty.home) {
+            self.toggle_sidebar(ty.home, window, cx);
+        }
         if ty.instances == Instances::Single
             && let Some(pane) = self.pane_of_type(ty, cx)
         {
@@ -932,6 +968,11 @@ impl Workspace {
         use panels::{browser, library, locations, queue};
         if initial.is_none() {
             self.remember_layout(None, cx);
+            if let Some(before) = &mut self.undo {
+                before.sidebar_visibility = Some((self.left_hidden, self.right_hidden));
+            }
+            self.left_hidden = false;
+            self.right_hidden = false;
         }
         let mut initial = initial;
         let mut get = |s: &mut Self, ty: &'static PanelType, cx: &mut Context<Self>| {
@@ -1034,6 +1075,8 @@ impl Workspace {
             full_cd: p.full_cd,
             layout: Some(self.dock.read(cx).dump(cx)),
             workspace: WorkspaceState {
+                left_hidden: self.left_hidden,
+                right_hidden: self.right_hidden,
                 active,
                 closed: self.closed.clone(),
                 player_height: Some(self.player_height),
@@ -1382,7 +1425,42 @@ impl Workspace {
             })
             .into_any_element()
     }
+    fn bind_address(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        match (self.browser(cx), &self.address) {
+            (Some(browser), Some(bar)) => bar.update(cx, |bar, cx| bar.bind(browser, w, cx)),
+            (Some(browser), None) => {
+                self.address = Some(cx.new(|cx| crate::location::LocationBar::new(browser, w, cx)))
+            }
+            (None, _) => self.address = None,
+        }
+    }
     fn title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let address = self
+            .address
+            .clone()
+            .map(|bar| {
+                div()
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .child(bar)
+                    .into_any_element()
+            })
+            .unwrap_or_else(|| {
+                div()
+                    .flex_1()
+                    .occlude()
+                    .child(
+                        Button::new("open-browser-nav")
+                            .ghost()
+                            .small()
+                            .label("Open Music Browser")
+                            .on_click(cx.listener(|s, _, w, cx| {
+                                s.ensure_browser(w, cx);
+                            })),
+                    )
+                    .into_any_element()
+            });
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1391,7 +1469,21 @@ impl Workspace {
             .gap(px(7.))
             .items_center()
             .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
-            .child(div().flex_1().h_full())
+            .child(div().w(px(24.)).h_full().flex_shrink_0())
+            .child(self.sidebar_button(Home::Leading, cx))
+            .child(address)
+            .child(
+                div().occlude().child(
+                    Button::new("search-library")
+                        .ghost()
+                        .small()
+                        .icon(IconName::Search)
+                        .tooltip("Search library · Ctrl+K")
+                        .accessibility_label("Search library")
+                        .on_click(cx.listener(|s, _, w, cx| s.open_search(w, cx))),
+                ),
+            )
+            .child(self.sidebar_button(Home::Trailing, cx))
             .when(!self.dock.read(cx).is_locked(), |d| {
                 d.child(
                     div().occlude().child(
@@ -1412,7 +1504,7 @@ impl Workspace {
             .child(div().occlude().child(self.workspace_menu(cx)))
             .into_any_element()
     }
-    /// Shown when every panel is closed. Playback continues below it.
+    /// Recovery when the center contains no visible panels.
     fn empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let workspace = cx.weak_entity();
@@ -1428,12 +1520,13 @@ impl Workspace {
                     .size(px(28.))
                     .text_color(m.text_faint),
             )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(m.text_muted)
-                    .child("No panels are open"),
-            )
+            .child(div().text_size(px(13.)).text_color(m.text_muted).child(
+                if self.panes.is_empty() {
+                    "No panels are open"
+                } else {
+                    "No panels are visible"
+                },
+            ))
             .child(
                 Button::new("empty-open")
                     .small()
@@ -1566,7 +1659,7 @@ fn tab_menu(
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
-        let empty = self.center(cx).panels().next().is_none();
+        let empty = self.dock.read(cx).is_empty(DockPlacement::Center, cx);
         let title = self.title_bar(cx);
         let player_height = self.player_height;
         let dock = AnyView::from(self.dock.clone());
@@ -1607,24 +1700,27 @@ impl Render for Workspace {
                     b.update(cx, |b, cx| b.reload(w, cx))
                 }
             }))
+            .on_action(
+                cx.listener(|s, _: &ToggleLeftSidebar, w, cx| {
+                    s.toggle_sidebar(Home::Leading, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|s, _: &ToggleRightSidebar, w, cx| {
+                s.toggle_sidebar(Home::Trailing, w, cx)
+            }))
             .on_action(cx.listener(|s, _: &FocusLocation, w, cx| {
+                s.ensure_browser(w, cx);
                 s.reveal_active_browser(w, cx);
-                if let Some(pane) = s.active_browser_pane(cx)
-                    && let Some(b) = pane.read(cx).content.as_any().downcast_ref::<BrowserPane>()
-                {
-                    let bar = b.location.clone();
-                    bar.update(cx, |l, cx| l.edit(w, cx))
+                s.bind_address(w, cx);
+                if let Some(bar) = &s.address {
+                    bar.update(cx, |bar, cx| bar.edit(w, cx));
                 }
             }))
+            .on_action(cx.listener(|s, _: &SearchLibrary, w, cx| s.open_search(w, cx)))
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
+                let browser = s.ensure_browser(w, cx);
                 s.reveal_active_browser(w, cx);
-                if let Some(b) = s.browser(cx) {
-                    let search = b.read(cx).search.clone();
-                    search.update(cx, |i, cx| {
-                        i.focus(w, cx);
-                        i.select_all(w, cx);
-                    });
-                }
+                browser.update(cx, |b, cx| b.set_filter_open(true, w, cx));
             }))
             .on_action(cx.listener(|s, _: &NewBrowserTab, w, cx| {
                 let state = s
@@ -1751,6 +1847,7 @@ impl Render for Workspace {
                             .on_drag(PlayerResize, |_, _, _, cx| cx.new(|_| PlayerResize)),
                     ),
             )
+            .children(self.search.clone())
     }
 }
 

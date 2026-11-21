@@ -36,8 +36,7 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable,
-        button::{Button, ButtonVariants},
+        Icon,
         dock::{BasePanel, PanelEvent, PanelInfo, PanelState, TabGroup},
         h_flex,
         input::{InputEvent, InputState},
@@ -179,6 +178,9 @@ pub trait PaneContent: 'static {
     /// The listener brought the panel forward: clicked inside it or chose
     /// its tab.
     fn focused(&self, window: &mut Window, cx: &mut App) {}
+    /// A displayed tab in a visible window can run its presentation work.
+    /// Analysis and animations can pause between these edges.
+    fn set_presented(&self, presented: bool, cx: &mut App) {}
     /// A folder dragged from Locations onto this panel's tab.
     fn accepts_folder(&self) -> bool {
         false
@@ -206,6 +208,8 @@ pub struct Pane {
     pub id: InstanceId,
     pub name: Option<String>,
     pub toolbar_hidden: bool,
+    sidebar_hidden: bool,
+    presented: bool,
     pub content: Rc<dyn PaneContent>,
     /// The tab group holding the pane, as the dock last reported it.
     pub group: Option<WeakEntity<TabGroup>>,
@@ -229,11 +233,16 @@ impl Pane {
     ) -> Self {
         let content = (ty.build)(services, record, window, cx);
         let focus = cx.focus_handle();
-        let subscriptions = content.watch(cx);
+        let mut subscriptions = content.watch(cx);
+        subscriptions.push(cx.on_focus_in(&focus, window, |pane: &mut Self, w, cx| {
+            pane.content.focused(w, cx)
+        }));
         Self {
             ty,
             id,
             name: record.name.clone().filter(|n| !n.trim().is_empty()),
+            sidebar_hidden: false,
+            presented: false,
             toolbar_hidden: record.toolbar_hidden,
             content,
             group: None,
@@ -267,6 +276,16 @@ impl Pane {
         cx.notify();
         if let Some(group) = self.group.as_ref().and_then(WeakEntity::upgrade) {
             group.update(cx, |_, cx| cx.notify());
+        }
+    }
+    pub fn sync_display(&mut self, hidden: bool, presented: bool, cx: &mut Context<Self>) {
+        if self.sidebar_hidden != hidden {
+            self.sidebar_hidden = hidden;
+            self.refresh(cx);
+        }
+        if self.presented != presented {
+            self.presented = presented;
+            self.content.set_presented(presented, cx);
         }
     }
     pub fn toolbar_shown(&self) -> bool {
@@ -393,6 +412,9 @@ impl Focusable for Pane {
 }
 
 impl BasePanel for Pane {
+    fn visible(&self, _: &App) -> bool {
+        !self.sidebar_hidden
+    }
     fn panel_name(&self) -> &'static str {
         self.ty.key
     }
@@ -402,8 +424,9 @@ impl BasePanel for Pane {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {
         self.group = Some(group);
     }
-    fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.group = None;
+        self.sync_display(self.sidebar_hidden, false, cx);
     }
     fn dump(&self, cx: &App) -> PanelState {
         self.record(cx).to_state(self.ty.key)
@@ -419,7 +442,7 @@ impl Render for Pane {
         let toolbar = controls.filter(|items| !items.is_empty()).map(|items| {
             h_flex()
                 .id("panel-toolbar")
-                .h(px(34.))
+                .h(px(crate::workspace::STRIP_HEIGHT))
                 .flex_shrink_0()
                 .pl(px(10.))
                 .pr(px(6.))
@@ -428,24 +451,6 @@ impl Render for Pane {
                 .border_b_1()
                 .border_color(m.line)
                 .children(items)
-        });
-        // A hidden toolbar leaves a small handle to bring it back.
-        let handle = (self.ty.toolbar && self.toolbar_hidden).then(|| {
-            // Above the content, such as the end of a table heading.
-            div().absolute().occlude().top(px(2.)).right(px(6.)).child(
-                Button::new("show-toolbar")
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .text_color(m.text_faint),
-                    )
-                    .accessibility_label("Show Toolbar")
-                    .tooltip("Show Toolbar")
-                    .tab_stop(false)
-                    .on_click(cx.listener(|p, _, _, cx| p.set_toolbar(true, cx))),
-            )
         });
         v_flex()
             .track_focus(&self.focus)
@@ -459,7 +464,6 @@ impl Render for Pane {
             .overflow_hidden()
             .children(toolbar)
             .child(div().flex_1().min_h_0().child(self.content.view()))
-            .children(handle)
     }
 }
 

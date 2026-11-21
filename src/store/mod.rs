@@ -29,6 +29,7 @@ mod index;
 mod playlists;
 pub mod query;
 mod schema;
+pub mod search;
 #[cfg(test)]
 mod tests;
 mod worker;

@@ -95,6 +95,7 @@ pub struct Browser {
     pub subfolders: bool,
     pub folders: Entity<Folders>,
     pub table: Entity<TableState<MusicTable>>,
+    pub filter_open: bool,
     pub search: Entity<InputState>,
     pub catalog: Entity<Catalog>,
     /// The Place the open folder is shown under in Locations, when one was chosen.
@@ -133,6 +134,22 @@ pub fn music_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 impl Browser {
+    pub fn set_filter_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_open != open {
+            self.filter_open = open;
+            cx.emit(ViewChanged);
+        }
+        if open {
+            self.search.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        } else {
+            self.list_focus(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
     pub fn new(
         player: Entity<Player>,
         catalog: Entity<Catalog>,
@@ -171,7 +188,7 @@ impl Browser {
             }
         })
         .detach();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find tracks"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this view…"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             // Only the active browser starts playback from its selection.
             if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
@@ -245,6 +262,7 @@ impl Browser {
             album: None,
             folders,
             table,
+            filter_open: false,
             search,
             catalog,
             tree_root: None,

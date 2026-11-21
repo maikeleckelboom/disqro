@@ -360,6 +360,22 @@ impl Browser {
         true
     }
 
+    /// Reveal the selected catalog identity even when its table page is unloaded.
+    pub fn show_search_track(
+        &mut self,
+        id: crate::store::TrackId,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let location = Location::Library(None);
+        self.remember(&location, cx);
+        self.clear_search(w, cx);
+        self.prefs.albums = false;
+        self.enter(location, TreeReveal::Ancestors, w, cx);
+        self.reveal_key = Some(RowKey::Key(id));
+        self.select_revealed(cx);
+    }
+
     pub fn locate(
         &mut self,
         track: Arc<Track>,

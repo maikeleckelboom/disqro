@@ -1,4 +1,4 @@
-//! Per-browser breadcrumbs and the explicit Go to Folder or File editor.
+//! Application-shell breadcrumbs and the explicit Go to Folder or File editor.
 use crate::{
     browser::{Browser, Location, Reveal},
     theme::materials,
@@ -6,7 +6,7 @@ use crate::{
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
-        Icon, Sizable, Size, StyleSized,
+        Disableable, Icon, Sizable, Size, StyleSized,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -23,7 +23,7 @@ use std::{
 
 gpui_kit::actions!(location, [CancelEdit]);
 
-/// Both fields in a Music Browser's navigation row use its original address height.
+/// Height shared by the shell editor and the contextual browser filter.
 pub const NAV_FIELD_HEIGHT: f32 = 28.;
 
 pub fn bind_keys(cx: &mut App) {
@@ -237,6 +237,14 @@ impl LocationBar {
             width: Rc::new(Cell::new(px(0.))),
             _view: view,
         }
+    }
+    pub fn bind(&mut self, browser: Entity<Browser>, w: &mut Window, cx: &mut Context<Self>) {
+        if self.browser == browser {
+            return;
+        }
+        self.reset(cx);
+        self._view = Self::follow(&browser, w, cx);
+        self.browser = browser;
     }
     fn follow(
         browser: &Entity<Browser>,
@@ -512,8 +520,8 @@ impl LocationBar {
     }
 }
 
-impl Render for LocationBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl LocationBar {
+    fn field(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         let width = self.width.clone();
         let measure = canvas(
@@ -592,10 +600,8 @@ impl Render for LocationBar {
             .bg(m.hover)
             .border_color(gpui::transparent_black())
             .hover(|d| d.border_color(m.control_line))
-            .when(address.is_some(), |d| {
-                d.cursor_text()
-                    .on_click(cx.listener(|bar, _, w, cx| bar.edit(w, cx)))
-            })
+            .cursor_text()
+            .on_click(cx.listener(|bar, _, w, cx| bar.edit(w, cx)))
             .child(self.render_crumbs(window, cx))
             .child(div().flex_1().h_full())
             .context_menu(move |menu, _, _| {
@@ -619,6 +625,75 @@ impl Render for LocationBar {
                     .action(Box::new(crate::workspace::FocusLocation)),
                 )
             })
+            .into_any_element()
+    }
+}
+
+impl LocationBar {
+    fn nav_button(
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        enabled: bool,
+        cx: &App,
+    ) -> Button {
+        let m = materials(cx);
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
+            .accessibility_label(label)
+            .tooltip(label)
+            .disabled(!enabled)
+    }
+}
+impl Render for LocationBar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let browser = self.browser.clone();
+        let field = self.field(window, cx).into_any_element();
+        let b = browser.read(cx);
+        let (can_back, can_forward, has_parent) =
+            (b.can_go_back(), b.can_go_forward(), b.can_go_up());
+        let (back, forward, up) = (browser.clone(), browser.clone(), browser);
+        h_flex()
+            .id("address-bar")
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .occlude()
+            .gap(px(4.))
+            .items_center()
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(2.))
+                    .child(
+                        Self::nav_button(
+                            "back",
+                            IconName::ArrowLeft,
+                            "Back · Alt+Left",
+                            can_back,
+                            cx,
+                        )
+                        .on_click(move |_, w, cx| back.update(cx, |b, cx| b.back(w, cx))),
+                    )
+                    .child(
+                        Self::nav_button(
+                            "forward",
+                            IconName::ArrowRight,
+                            "Forward · Alt+Right",
+                            can_forward,
+                            cx,
+                        )
+                        .on_click(move |_, w, cx| forward.update(cx, |b, cx| b.forward(w, cx))),
+                    )
+                    .child(
+                        Self::nav_button("up", IconName::ArrowUp, "Up · Alt+Up", has_parent, cx)
+                            .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
+                    ),
+            )
+            .child(field)
             .into_any_element()
     }
 }

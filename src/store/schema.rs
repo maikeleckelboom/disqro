@@ -9,7 +9,11 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Migrations in order. The database's `user_version` counts those applied.
-pub const MIGRATIONS: &[&str] = &[V1, include_str!("recording-identity.sql")];
+pub const MIGRATIONS: &[&str] = &[
+    V1,
+    include_str!("recording-identity.sql"),
+    include_str!("catalog-search.sql"),
+];
 
 const V1: &str = "
 -- Registered music collections. Removing one never touches files on disk.
@@ -262,7 +266,7 @@ mod tests {
              UPDATE sqlite_sequence SET seq=20 WHERE name='tracks';"
         ).unwrap();
         migrate(&mut db, Some(&path), MIGRATIONS).unwrap();
-        assert_eq!(version(&db).unwrap(), 2);
+        assert_eq!(version(&db).unwrap(), MIGRATIONS.len());
         let count: i64 = db
             .query_row(
                 "SELECT count(*) FROM playlist_entries e JOIN ratings r USING(track_id)
