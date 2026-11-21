@@ -159,18 +159,42 @@ fn base_title(title: &str, number: u32, subtitle: &str) -> Option<String> {
     Some(s.base)
 }
 
-/// The release title shown for a group: the shared base, with a shared
-/// suffix such as `(Light Grey)` kept when every disc carries it.
-fn display_title(titles: &[&str]) -> String {
+/// Explicit edition labels following a disc marker can sit beside ordinary
+/// subtitles, as in `(2020 Remaster) - Early Rave`.
+fn edition_labels(suffix: &str) -> impl Iterator<Item = String> {
+    suffix
+        .split(['(', ')', '[', ']', '–', '—'])
+        .flat_map(|part| part.split(" - "))
+        .map(str::trim)
+        .filter(|label| {
+            label.eq_ignore_ascii_case("original")
+                || label.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                    ["edition", "remaster", "remastered"]
+                        .iter()
+                        .any(|term| word.eq_ignore_ascii_case(term))
+                })
+        })
+        .map(normalized)
+}
+
+/// Discs must agree on explicit edition labels. Other suffixes may name
+/// individual discs, or form part of the shared title, such as `(Light Grey)`.
+fn group_title(titles: &[&str]) -> Option<String> {
     let splits: Vec<_> = titles.iter().map(|t| split(t)).collect();
     let first = &splits[0];
+    if splits[1..]
+        .iter()
+        .any(|s| edition_labels(s.rest).ne(edition_labels(first.rest)))
+    {
+        return None;
+    }
     let suffix = normalized(first.rest);
     let shared = !suffix.is_empty() && splits.iter().all(|s| normalized(s.rest) == suffix);
-    if shared {
+    Some(if shared {
         format!("{} {}", first.base, first.rest)
     } else {
         first.base.clone()
-    }
+    })
 }
 
 /// What a disc's title or folder adds to the release title.
@@ -258,10 +282,13 @@ pub fn releases(candidates: &[Candidate]) -> Vec<Grouping> {
             continue;
         }
         let titles: Vec<&str> = discs.iter().map(|(i, ..)| candidates[*i].title).collect();
+        let Some(shared_title) = group_title(&titles) else {
+            continue;
+        };
         let mut title = if reference.is_empty() {
             String::new()
         } else if split(titles[0]).number.is_some() {
-            display_title(&titles)
+            shared_title
         } else {
             bases[0].clone()
         };
@@ -319,7 +346,9 @@ pub fn releases(candidates: &[Candidate]) -> Vec<Grouping> {
             continue;
         }
         let titles: Vec<&str> = discs.iter().map(|&i| candidates[i].title).collect();
-        let title = display_title(&titles);
+        let Some(title) = group_title(&titles) else {
+            continue;
+        };
         out.push(Grouping {
             subtitles: titles.iter().map(|t| subtitle(t, "", &title)).collect(),
             title,
@@ -494,6 +523,31 @@ mod tests {
         none(&[(r"M:\A\CD1", "A", Some(2)), (r"M:\A\CD2", "A", Some(1))]);
         // Untitled discs beside titled ones.
         none(&[(r"M:\A\CD1", "", None), (r"M:\A\CD2", "A (CD2)", None)]);
+    }
+
+    #[test]
+    fn edition_qualifiers_after_disc_markers() {
+        for [one, two] in [[r"M:\Atlas\CD1", r"M:\Atlas\CD2"], [r"M:\Atlas"; 2]] {
+            let pair = |a, b| group(&[(one, a, Some(1)), (two, b, Some(2))]);
+            let original = "Atlas (CD1) (Original Edition)";
+            assert!(pair(original, "Atlas (CD2) (Remastered Edition)").is_empty());
+            assert!(pair(original, "Atlas (CD2)").is_empty());
+            assert_eq!(
+                pair(original, "Atlas (CD2) [ORIGINAL EDITION]"),
+                [(vec![0, 1], "Atlas (Original Edition)".into())]
+            );
+            assert_eq!(
+                pair("Atlas (CD1) - Original Mix", "Atlas (CD2) - Live Set"),
+                [(vec![0, 1], "Atlas".into())]
+            );
+            assert_eq!(
+                pair(
+                    "Atlas (CD1) (2020 Remaster) - Early Rave",
+                    "Atlas (CD2) (2020 Remaster) - Hardcore",
+                ),
+                [(vec![0, 1], "Atlas".into())]
+            );
+        }
     }
 
     #[test]
