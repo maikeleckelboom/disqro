@@ -377,12 +377,15 @@ impl Disc {
         let m = self.release.as_ref()?;
         Some((format!("CD {}", m.number), m.subtitle.as_str()))
     }
-    pub fn section(&self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    /// The header of a CD within a track table. Its cover follows the row
+    /// height, which grows with the table's Cover column.
+    pub fn section(&self, row_height: f32, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let m = *materials(cx);
+        let size = row_height - 6.;
         let cover = self
             .cover
             .as_ref()
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, window, cx).flatten());
+            .and_then(|file| crate::artwork::CoverThumbnail::get(file, size, window, cx).flatten());
         let mut detail = Vec::new();
         if let Some(year) = self.year {
             detail.push(year.to_string());
@@ -407,7 +410,7 @@ impl Disc {
             .border_color(m.control_line)
             .child(
                 div()
-                    .size(px(22.))
+                    .size(px(size))
                     .flex_shrink_0()
                     .overflow_hidden()
                     .rounded(px(2.))
@@ -543,8 +546,8 @@ impl TableDelegate for Discs {
                     )
                 });
         }
-        let cover =
-            cover.and_then(|file| crate::artwork::CoverThumbnail::get(file, window, cx).flatten());
+        let cover = cover
+            .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
         cell.child(
             div()
                 .size(px(32.))

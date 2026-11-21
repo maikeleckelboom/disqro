@@ -38,8 +38,15 @@ use std::{
     sync::Arc,
 };
 
-pub const ROW_HEIGHT: f32 = 28.;
+/// The compact row, which holds a default 24-pixel cover.
+const ROW_HEIGHT: f32 = 28.;
 const CELL_X: f32 = 10.;
+/// Cover thumbnails fill the column between its padding, from compact to
+/// large. Rows grow to keep a larger cover whole.
+const COVER_X: f32 = 8.;
+const THUMBNAIL: f32 = 24.;
+const LARGE_THUMBNAIL: f32 = 96.;
+const COVER_Y: f32 = 2.;
 /// Library rows kept in memory beyond the visible range.
 const ROW_CACHE: usize = 4096;
 const PREFETCH: usize = 64;
@@ -47,6 +54,9 @@ const PREFETCH: usize = 64;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
     Number,
+    /// The track's artwork: an image column, compact by default and
+    /// resizable up to a large cover, that never sorts.
+    Cover,
     Title,
     Artist,
     Album,
@@ -58,8 +68,9 @@ pub enum Field {
     Path,
 }
 impl Field {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Number,
+        Self::Cover,
         Self::Title,
         Self::Artist,
         Self::Album,
@@ -73,6 +84,7 @@ impl Field {
     fn label(self) -> &'static str {
         match self {
             Self::Number => "#",
+            Self::Cover => "Cover",
             Self::Title => "Title",
             Self::Artist => "Artist",
             Self::Album => "Album",
@@ -93,6 +105,7 @@ impl Field {
     }
     fn width(self) -> f32 {
         match self {
+            Self::Cover => THUMBNAIL + 2. * COVER_X,
             Self::Number => 40.,
             Self::Title => 200.,
             Self::Artist => 135.,
@@ -105,6 +118,7 @@ impl Field {
     }
     fn min_width(self) -> f32 {
         match self {
+            Self::Cover => self.width(),
             Self::Number => 36.,
             Self::Title => 142.,
             Self::Year | Self::Disc => 48.,
@@ -113,8 +127,14 @@ impl Field {
             _ => 72.,
         }
     }
+    fn max_width(self) -> f32 {
+        match self {
+            Self::Cover => LARGE_THUMBNAIL + 2. * COVER_X,
+            _ => 1200.,
+        }
+    }
     fn pinned(self) -> bool {
-        matches!(self, Self::Number | Self::Title)
+        matches!(self, Self::Number | Self::Cover | Self::Title)
     }
     fn right_aligned(self) -> bool {
         matches!(self, Self::Number | Self::Length)
@@ -125,6 +145,7 @@ impl Field {
                 .display_number()
                 .map(|n| n.to_string())
                 .unwrap_or_default(),
+            Self::Cover => String::new(),
             Self::Title => t.title.clone(),
             Self::Artist => t.artist.clone(),
             Self::Album => t.album.clone(),
@@ -140,9 +161,10 @@ impl Field {
             Self::Path => t.source.display().to_string(),
         }
     }
-    fn order(self) -> store::Order {
+    fn order(self) -> Option<store::Order> {
         use store::Order as O;
-        match self {
+        Some(match self {
+            Self::Cover => return None,
             Self::Number => O::Number,
             Self::Title => O::Title,
             Self::Artist => O::Artist,
@@ -153,7 +175,10 @@ impl Field {
             Self::Disc => O::Disc,
             Self::Year => O::Year,
             Self::Path => O::Path,
-        }
+        })
+    }
+    fn sortable(self) -> bool {
+        self.order().is_some()
     }
 }
 /// A row's identity for selection: a physical file or authored segment in a
@@ -386,6 +411,12 @@ pub struct MusicTable {
     pub layouts: Layouts,
     context: ContextKind,
     viewport: f32,
+    /// The painted cover edge and the row height that keeps it whole. They
+    /// follow the Cover column live, including while its boundary is dragged.
+    cover: f32,
+    row_height: f32,
+    /// The cover edge of the saved layout, which chooses the decoded size.
+    settled_cover: f32,
     pub artwork_revision: u64,
     pub folder_covers: Arc<HashMap<PathBuf, crate::artwork::CoverFile>>,
     pub sort: Option<(Field, ColumnSort)>,
@@ -445,7 +476,7 @@ pub fn set_rows_in_place(
 type Anchor = (usize, Point<Pixels>, Option<RowKey>);
 fn top_anchor(t: &TableState<MusicTable>) -> Anchor {
     let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
-    let first = (-offset.y / px(ROW_HEIGHT)).max(0.) as usize;
+    let first = (-offset.y / px(t.delegate().row_height)).max(0.) as usize;
     (
         first,
         offset,
@@ -455,7 +486,7 @@ fn top_anchor(t: &TableState<MusicTable>) -> Anchor {
     )
 }
 fn restore_anchor(t: &mut TableState<MusicTable>, (first, offset, anchor): Anchor) {
-    let height = px(ROW_HEIGHT);
+    let height = px(t.delegate().row_height);
     if let Some(now) = anchor.and_then(|k| t.delegate().rows.position(&k))
         && now != first
     {
@@ -588,6 +619,9 @@ impl MusicTable {
             layouts,
             context: ContextKind::Mixed,
             viewport: 0.,
+            cover: THUMBNAIL,
+            row_height: ROW_HEIGHT,
+            settled_cover: THUMBNAIL,
             artwork_revision: 0,
             folder_covers: Default::default(),
             sort: None,
@@ -620,6 +654,39 @@ impl MusicTable {
                 .set_offset(point(px(0.), px(0.)));
             table.refresh(cx);
         }
+    }
+    /// Sizes covers and rows from the Cover column and returns the row
+    /// height. The row at the top of the view stays there when it changes.
+    pub fn sync_rows(table: &mut TableState<Self>) -> f32 {
+        let d = table.delegate();
+        let column = d
+            .layout()
+            .columns
+            .iter()
+            .position(|c| c.field == Field::Cover);
+        let settled = column.map(|ix| d.layout().widths(d.viewport)[ix]);
+        let live = column
+            .and_then(|ix| table.col_width(ix))
+            .map(f32::from)
+            .or(settled);
+        let edge = |width: f32| {
+            (width - 2. * COVER_X)
+                .clamp(THUMBNAIL, LARGE_THUMBNAIL)
+                .round()
+        };
+        let cover = live.map_or(THUMBNAIL, edge);
+        let row = (cover + 2. * COVER_Y).max(ROW_HEIGHT);
+        if row != d.row_height {
+            let scroll = table.vertical_scroll_handle.0.borrow();
+            let offset = scroll.base_handle.offset();
+            let y = offset.y * (row / d.row_height);
+            scroll.base_handle.set_offset(point(offset.x, y));
+        }
+        let d = table.delegate_mut();
+        d.cover = cover;
+        d.row_height = row;
+        d.settled_cover = settled.map_or(THUMBNAIL, edge);
+        row
     }
     pub fn fit(table: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
         if table.delegate().viewport != width {
@@ -760,7 +827,7 @@ impl MusicTable {
             search: p.search.clone(),
             order: self
                 .sort
-                .map(|(f, d)| (f.order(), d == ColumnSort::Descending)),
+                .and_then(|(f, d)| Some((f.order()?, d == ColumnSort::Descending))),
         };
         let generation = self.keys_ticket.next();
         let view = self.view;
@@ -899,6 +966,9 @@ impl MusicTable {
     }
     /// Header clicks cycle ascending, descending, and the view's own order.
     fn cycle_sort(&mut self, field: Field, cx: &mut Context<TableState<Self>>) {
+        if !field.sortable() {
+            return;
+        }
         self.sort = match self.sort {
             Some((f, ColumnSort::Ascending)) if f == field => Some((field, ColumnSort::Descending)),
             Some((f, ColumnSort::Descending)) if f == field => None,
@@ -1062,7 +1132,11 @@ impl MusicTable {
         use std::hash::BuildHasher;
         FIXED.hash_one(self.rows.key(ix))
     }
-    fn artwork(
+    /// A painted Cover cell. A missing or pending image keeps a faint tile
+    /// in the same place, so the column stays aligned without repeating an
+    /// icon on every row. The texture is decoded for the settled size, so
+    /// dragging the column boundary scales it without decoding again.
+    fn render_cover(
         &self,
         row: usize,
         t: &Track,
@@ -1089,22 +1163,16 @@ impl MusicTable {
             disc_cover: fallback,
             listing: self.artwork_revision,
         }
-        .image(window, cx);
+        .image(self.settled_cover, window, cx);
         div()
-            .size(px(24.))
+            .size(px(self.cover))
             .flex_shrink_0()
             .rounded(px(2.))
             .overflow_hidden()
-            .flex()
-            .items_center()
-            .justify_center()
             .map(|d| match image {
                 Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
-                None => d.child(
-                    Icon::new(IconName::Music2)
-                        .size(px(13.))
-                        .text_color(materials(cx).text_faint),
-                ),
+                // Fainter than row hover, so even large empty tiles recede.
+                None => d.bg(materials(cx).hover.opacity(0.4)),
             })
     }
     fn render_like(
@@ -1216,10 +1284,15 @@ impl TableDelegate for MusicTable {
     }
     fn column(&self, ix: usize, _: &App) -> Column {
         let c = &self.layout().columns[ix];
-        let pad = CELL_X;
+        let pad = if c.field == Field::Cover {
+            COVER_X
+        } else {
+            CELL_X
+        };
         let mut col = Column::new(c.field.label(), c.field.label())
             .width(self.layout().widths(self.viewport)[ix])
             .min_width(px(c.field.min_width()))
+            .max_width(px(c.field.max_width()))
             .paddings(Edges {
                 top: px(0.),
                 bottom: px(0.),
@@ -1276,9 +1349,17 @@ impl TableDelegate for MusicTable {
             } else {
                 m.text_faint
             })
-            .hover(|d| d.text_color(m.text_muted))
-            .cursor_pointer()
-            .child(field.label())
+            .map(|d| {
+                if field == Field::Cover {
+                    d.justify_center()
+                        .child(Icon::new(IconName::Image).size(px(13.)))
+                        .tooltip(|w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("Cover").build(w, cx)
+                        })
+                } else {
+                    d.child(field.label())
+                }
+            })
             .when_some(sorted, |d, dir| {
                 d.child(
                     Icon::new(if dir == ColumnSort::Ascending {
@@ -1289,21 +1370,23 @@ impl TableDelegate for MusicTable {
                     .size(px(12.)),
                 )
             })
-            .on_click(cx.listener(move |t, _, _, cx| {
-                let selected = t.selected_row().and_then(|i| t.delegate().rows.key(i));
-                t.delegate_mut().cycle_sort(field, cx);
-                if let Some(ix) = selected.and_then(|k| t.delegate().rows.position(&k)) {
-                    t.set_selected_row(ix, cx);
-                }
-                t.refresh(cx);
-                cx.notify();
-            }))
+            .when(field.sortable(), |d| {
+                d.hover(|d| d.text_color(m.text_muted))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |t, _, _, cx| {
+                        let selected = t.selected_row().and_then(|i| t.delegate().rows.key(i));
+                        t.delegate_mut().cycle_sort(field, cx);
+                        if let Some(ix) = selected.and_then(|k| t.delegate().rows.position(&k)) {
+                            t.set_selected_row(ix, cx);
+                        }
+                        t.refresh(cx);
+                        cx.notify();
+                    }))
+            })
             .context_menu({
                 let table = cx.entity().downgrade();
-                let artwork = self.layout().artwork;
                 let shown: Vec<Field> = self.layout().columns.iter().map(|c| c.field).collect();
                 move |mut menu, _, _| {
-                    let art_table = table.clone();
                     let edit = |field: Option<Field>| {
                         let table = table.clone();
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -1345,18 +1428,6 @@ impl TableDelegate for MusicTable {
                         );
                     }
                     menu.separator()
-                        .item(
-                            PopupMenuItem::new("Show Track Artwork")
-                                .checked(artwork)
-                                .on_click(move |_, _, cx| {
-                                    let _ = art_table.update(cx, |t, cx| {
-                                        let layout = t.delegate_mut().layout_mut();
-                                        layout.artwork = !layout.artwork;
-                                        t.delegate().save_layout(cx);
-                                        cx.notify();
-                                    });
-                                }),
-                        )
                         .item(PopupMenuItem::new("Reset Columns").on_click(edit(None)))
                 }
             })
@@ -1366,12 +1437,8 @@ impl TableDelegate for MusicTable {
             return (col == 0).then(|| d.title.clone().into());
         }
         let t = self.rows.track(row)?;
-        Some(
-            self.layout().columns[col]
-                .field
-                .value(t, self.mark(row, cx))
-                .into(),
-        )
+        let field = self.layout().columns[col].field;
+        (field != Field::Cover).then(|| field.value(t, self.mark(row, cx)).into())
     }
     fn render_td(
         &mut self,
@@ -1426,10 +1493,11 @@ impl TableDelegate for MusicTable {
             Field::Rating => cell
                 .child(self.render_rating(row, mark, cx))
                 .into_any_element(),
+            Field::Cover => cell
+                .justify_center()
+                .child(self.render_cover(row, &t, window, cx))
+                .into_any_element(),
             Field::Title => cell
-                .when(self.layout().artwork, |d| {
-                    d.child(self.artwork(row, &t, window, cx))
-                })
                 .gap(px(4.))
                 .text_color(if playing { m.accent } else { m.text })
                 .child(
@@ -1469,7 +1537,7 @@ impl TableDelegate for MusicTable {
                 .overflow_hidden()
                 .bg(m.raised)
                 .cursor_pointer()
-                .child(d.section(window, cx))
+                .child(d.section(self.row_height, window, cx))
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(format!(
                         "{}  ·  {}",

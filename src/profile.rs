@@ -182,10 +182,9 @@ mod tests {
         let json = serde_json::to_value(p).unwrap();
         assert!(json["window"].get("minimize_to_tray").is_none());
         assert!(json.get("columns").is_none());
-        assert_eq!(
-            json["table_layouts"]["playlist"]["columns"][0]["width"],
-            310.
-        );
+        let playlist = &json["table_layouts"]["playlist"]["columns"];
+        assert_eq!(playlist[0]["field"], "Cover");
+        assert_eq!(playlist[1]["width"], 310.);
     }
     #[test]
     fn late_snapshot_cannot_overwrite_shutdown() {

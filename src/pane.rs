@@ -6,7 +6,6 @@ use crate::{
     player::Player,
     queue_view::QueueView,
     sidebar::Sidebar,
-    table::ROW_HEIGHT,
     table::queue_targets,
     theme::materials,
 };
@@ -379,7 +378,7 @@ impl Panel for Pane {
     }
 }
 impl Pane {
-    fn recordings(&self, cx: &App) -> impl IntoElement {
+    fn recordings(&self, row_height: f32, cx: &App) -> impl IntoElement {
         let m = *materials(cx);
         let b = self.browser.read(cx);
         let mut view = v_flex().size_full().bg(m.canvas);
@@ -433,7 +432,7 @@ impl Pane {
                         .bordered(false)
                         .stripe(false)
                         .header_row_height(px(30.))
-                        .with_size(gpui_kit::component::Size::Size(px(ROW_HEIGHT))),
+                        .with_size(gpui_kit::component::Size::Size(px(row_height))),
                 ),
         )
     }
@@ -442,7 +441,13 @@ impl Render for Pane {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match self.kind {
             Kind::Folders => self.sidebar.clone().into_any_element(),
-            Kind::Tracks => self.recordings(cx).into_any_element(),
+            Kind::Tracks => {
+                // Rows follow the Cover column, also while its boundary is
+                // dragged: the table's changes re-render this pane.
+                let table = self.browser.read(cx).table.clone();
+                let row_height = table.update(cx, |t, _| crate::table::MusicTable::sync_rows(t));
+                self.recordings(row_height, cx).into_any_element()
+            }
             Kind::Player => self.player.clone().into_any_element(),
             Kind::Queue => self.queue.clone().into_any_element(),
         };
