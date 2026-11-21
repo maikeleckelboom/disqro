@@ -89,13 +89,29 @@ impl Layout {
                         .max(c.field.min_width());
                 }
             }
-        } else if let Some(i) = self
-            .columns
-            .iter()
-            .position(|c| c.field == Field::Title && c.width == Field::Title.width())
-        {
-            widths[i] +=
-                (budget - total).min(((budget - pinned_number) * 0.65 - widths[i]).max(0.));
+        } else if total < budget {
+            // Give spare space to unmodified text columns. Album editions and
+            // artist names benefit from room on a wide display too.
+            let weights: Vec<f32> = self
+                .columns
+                .iter()
+                .map(|c| {
+                    if c.width != c.field.width() {
+                        return 0.;
+                    }
+                    match c.field {
+                        Field::Title => 2.,
+                        Field::Artist | Field::Album => 1.,
+                        _ => 0.,
+                    }
+                })
+                .collect();
+            let weight: f32 = weights.iter().sum();
+            if weight > 0. {
+                for (w, share) in widths.iter_mut().zip(weights) {
+                    *w += ((budget - total) * share / weight).floor();
+                }
+            }
         }
         widths
     }
@@ -139,6 +155,28 @@ impl Layouts {
             ContextKind::Mixed => &mut self.mixed,
             ContextKind::Playlist => &mut self.playlist,
         }
+    }
+
+    pub fn validate(mut self) -> Self {
+        for context in [ContextKind::Disc, ContextKind::Mixed, ContextKind::Playlist] {
+            let layout = self.get_mut(context);
+            let mut seen = Vec::new();
+            layout.columns.retain_mut(|c| {
+                if seen.contains(&c.field) {
+                    return false;
+                }
+                seen.push(c.field);
+                if !(24. ..=1200.).contains(&c.width) {
+                    c.width = c.field.width();
+                }
+                true
+            });
+            if !seen.contains(&Field::Title) {
+                layout.columns.push(LayoutColumn::new(Field::Title));
+            }
+            layout.normalize();
+        }
+        self
     }
 
     pub fn migrate(old: &[LegacyColumn], version: u32) -> Self {

@@ -157,9 +157,13 @@ impl Workspace {
         let volume = saved.volume.clamp(0., 1.);
         let player = cx.new(|cx| Player::new(volume, saved.full_cd, window, cx));
         let catalog = cx.new(Catalog::new);
-        let columns = saved.table_layouts.take().unwrap_or_else(|| {
-            crate::table::Layouts::migrate(&saved.columns, saved.columns_version)
-        });
+        let columns = saved
+            .table_layouts
+            .take()
+            .map(crate::table::Layouts::validate)
+            .unwrap_or_else(|| {
+                crate::table::Layouts::migrate(&saved.columns, saved.columns_version)
+            });
         let browser = cx.new(|cx| {
             Browser::new(
                 player.clone(),
@@ -319,7 +323,8 @@ impl Workspace {
         });
         app.browser.read(cx).list_focus(cx).focus(window, cx);
         if let Some(notice) = profile_notice {
-            window.push_notification(notice, cx);
+            // The component notification layer is installed after the workspace constructor.
+            window.on_next_frame(move |window, cx| window.push_notification(notice, cx));
         }
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events_rx.recv().await {

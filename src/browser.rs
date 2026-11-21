@@ -166,7 +166,7 @@ impl Browser {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find tracks"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             b.table.update(cx, |t, cx| match ev {
-                PlayerEvent::TrackChanged => cx.notify(),
+                PlayerEvent::TrackChanged | PlayerEvent::StateChanged => cx.notify(),
                 PlayerEvent::PlaySelection => t.delegate().play(
                     t.selected_row()
                         .filter(|&i| t.delegate().header(i).is_none())

@@ -1052,12 +1052,8 @@ impl MusicTable {
         }
     }
     fn is_playing(&self, t: &Track, cx: &App) -> bool {
-        self.player
-            .read(cx)
-            .status
-            .track
-            .as_ref()
-            .is_some_and(|p| p.same_item(t))
+        let status = &self.player.read(cx).status;
+        status.playing && status.track.as_ref().is_some_and(|p| p.same_item(t))
     }
     /// A stable element id for the cells of row `ix`.
     fn cell_id(&self, ix: usize) -> u64 {
@@ -1426,7 +1422,17 @@ impl TableDelegate for MusicTable {
                 })
                 .gap(px(4.))
                 .text_color(if playing { m.accent } else { m.text })
-                .child(div().flex_1().min_w_0().truncate().child(f.value(&t, mark)))
+                .child(
+                    div()
+                        .id(("track-title", self.cell_id(row)))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(t.title.clone())
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(t.title.clone()).build(w, cx)
+                        }),
+                )
                 .child(self.render_like(row, mark, cx))
                 .into_any_element(),
             _ => cell
