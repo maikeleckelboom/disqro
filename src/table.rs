@@ -136,6 +136,7 @@ impl Field {
     fn max_width(self) -> f32 {
         match self {
             Self::Cover => LARGE_THUMBNAIL + 2. * COVER_X,
+            Self::Favorite => 64.,
             _ => 1200.,
         }
     }
@@ -1477,23 +1478,17 @@ impl TableDelegate for MusicTable {
             } else {
                 m.text_faint
             })
-            .map(|d| {
-                if matches!(field, Field::Cover | Field::Favorite) {
-                    d.justify_center()
-                        .child(
-                            Icon::new(if field == Field::Cover {
-                                IconName::Image
-                            } else {
-                                IconName::Heart
-                            })
-                            .size(px(13.)),
-                        )
-                        .tooltip(move |w, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(field.label()).build(w, cx)
-                        })
-                } else {
-                    d.child(field.label())
-                }
+            .map(|d| match field {
+                Field::Cover => d
+                    .justify_center()
+                    .child(Icon::new(IconName::Image).size(px(13.)))
+                    .tooltip(|w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Cover").build(w, cx)
+                    }),
+                Field::Favorite => d.tooltip(|w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Favorite").build(w, cx)
+                }),
+                _ => d.child(field.label()),
             })
             .when_some(sorted, |d, dir| {
                 d.child(

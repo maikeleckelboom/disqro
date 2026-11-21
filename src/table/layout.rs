@@ -155,7 +155,8 @@ impl Layout {
         };
         while range.end > 0 {
             let i = range.end - 1;
-            if self.columns[i].pin != Pin::Right || widths[i] > budget {
+            let c = &self.columns[i];
+            if c.pin != Pin::Right || (widths[i] > budget && c.field != Field::Favorite) {
                 break;
             }
             budget -= widths[i];
