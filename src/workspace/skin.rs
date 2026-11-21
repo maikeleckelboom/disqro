@@ -1,18 +1,8 @@
-//! Disqro's appearance over GPUI Kit's dock.
-//!
-//! The dock owns the layout tree, the drag geometry and the tab groups. This
-//! skin draws them: compact, flat tabs with an icon and a label, a quiet
-//! background for the selected tab and no underline. One function draws a
-//! tab wherever it appears, so a strip inside the workspace and the strip in
-//! the title bar look and behave alike.
-//!
-//! The title bar shows one real tab group, the workspace's main group: its
-//! own strip is left out of the dock and drawn in the title bar from the
-//! same [`TabGroupContext`], so selecting, closing, reordering and dragging
-//! there edit the same dock model.
+//! Group-local tab strips and navigation above the panel they describe.
+//! The dock owns the layout, panel dragging, tab order and selection.
 use super::Workspace;
 use crate::{
-    panels::{Pane, nav::DraggedFolder},
+    panels::{Home, Pane, nav::DraggedFolder},
     table::DraggedTracks,
     theme::materials,
 };
@@ -34,23 +24,16 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-    sync::Arc,
-    time::Duration,
-};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 /// How long an item dragged over a tab rests there before the tab opens.
 const DWELL: Duration = Duration::from_millis(550);
 pub const TAB_HEIGHT: f32 = 28.;
 pub const STRIP_HEIGHT: f32 = 34.;
 
-/// What every group's renderer and the title bar share.
+/// Shared panel commands and hover activation for all dock groups.
 pub struct SkinState {
     pub workspace: WeakEntity<Workspace>,
-    /// The group the title bar shows instead of the dock.
-    pub title_group: Cell<Option<NodeId>>,
     dwell: RefCell<Dwell<PanelId>>,
 }
 
@@ -99,7 +82,6 @@ impl SkinState {
     pub fn new(workspace: WeakEntity<Workspace>) -> Rc<Self> {
         Rc::new(Self {
             workspace,
-            title_group: Cell::new(None),
             dwell: RefCell::new(Dwell::default()),
         })
     }
@@ -209,12 +191,19 @@ impl TabGroupRenderer for Tabs {
         div().id("tab-group").bg(materials(cx).chrome)
     }
     fn render_tab_bar(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> AnyElement {
-        if self.state.title_group.get() == Some(group.node()) {
+        let tabs = group
+            .panels()
+            .iter()
+            .enumerate()
+            .filter(|(_, panel)| panel.visible(cx))
+            .map(|(ix, _)| ix)
+            .collect::<Vec<_>>();
+        if tabs.is_empty() {
             return Empty.into_any_element();
         }
+        let utility = tabs.iter().all(|&ix| is_utility(&group.panels()[ix], cx));
         let m = *materials(cx);
         let node = group.node();
-        let tabs = tabs(group, &self.state, cx);
         let menu = group.active_panel().and_then(pane_of).map(|pane| {
             let workspace = self.state.workspace.clone();
             Button::new("group-menu")
@@ -226,39 +215,91 @@ impl TabGroupRenderer for Tabs {
                 .tab_stop(false)
                 .dropdown_menu(move |menu, w, cx| super::tab_menu(&workspace, &pane, menu, w, cx))
         });
-        h_flex()
-            .id(("tab-strip", node.as_u64()))
-            .h(px(STRIP_HEIGHT))
-            .flex_shrink_0()
-            .px(px(4.))
-            .gap(px(2.))
-            .items_center()
-            .bg(m.chrome)
-            .child(
-                h_flex()
-                    .id(("tabs", node.as_u64()))
-                    .min_w_0()
-                    .gap(px(2.))
-                    .overflow_x_scroll()
-                    .track_scroll(&self.scroll)
-                    .children(tabs),
-            )
-            .child(drop_space(group, ("strip-space", node.as_u64()), cx))
-            .children(menu)
-            .into_any_element()
+        let active = group
+            .active_panel()
+            .and_then(pane_of)
+            .map(|p| p.read(cx).content.clone());
+        let has_address = active
+            .as_ref()
+            .is_some_and(|content| content.as_any().is::<crate::panels::browser::BrowserPane>());
+        let single_browser = has_address && tabs.len() == 1;
+        let height = if has_address && !single_browser {
+            STRIP_HEIGHT * 2.
+        } else {
+            STRIP_HEIGHT
+        };
+        let group = group.clone();
+        let state = self.state.clone();
+        let scroll = self.scroll.clone();
+        container_query(move |size, _, cx| {
+            let compact = utility && tabs.len() > 1 && size.width < px(196.);
+            let mut address = active
+                .as_ref()
+                .and_then(|content| {
+                    content
+                        .as_any()
+                        .downcast_ref::<crate::panels::browser::BrowserPane>()
+                })
+                .map(|browser| browser.address_bar(size.width, cx));
+            let strip = h_flex()
+                .id(("tab-strip", node.as_u64()))
+                .w_full()
+                .h(px(STRIP_HEIGHT))
+                .flex_shrink_0()
+                .when(!compact, |d| d.pr(px(4.)))
+                .when(!utility, |d| d.pl(px(4.)).gap(px(2.)))
+                .items_center()
+                .bg(if utility { m.raised } else { m.chrome })
+                .child(
+                    h_flex()
+                        .id(("tabs", node.as_u64()))
+                        .min_w_0()
+                        .when(!utility, |d| d.gap(px(2.)))
+                        .overflow_x_scroll()
+                        .track_scroll(&scroll)
+                        .children(
+                            tabs.into_iter()
+                                .map(|ix| tab(&group, ix, &state, compact, cx)),
+                        ),
+                )
+                .when(single_browser, |d| d.children(address.take()))
+                .when(!single_browser, |d| {
+                    d.child(
+                        drop_space(&group, ("strip-space", node.as_u64()), cx)
+                            .when(compact, |d| d.min_w_0()),
+                    )
+                })
+                .children(menu);
+            gpui_kit::component::v_flex()
+                .size_full()
+                .bg(m.chrome)
+                .child(strip)
+                .when_some(address, |d, bar| {
+                    d.child(h_flex().w_full().h(px(STRIP_HEIGHT)).child(bar))
+                })
+        })
+        .h(px(height))
+        .flex_shrink_0()
+        .into_any_element()
     }
     fn render_active_panel(
         &self,
         panel: AnyView,
         _: &TabGroupContext,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut App,
     ) -> AnyElement {
         div()
             .id("tab-content")
             .flex_1()
             .relative()
-            .child(panel.cached(StyleRefinement::default().absolute().size_full()))
+            .child(if window.is_a11y_active() {
+                div().absolute().size_full().child(panel).into_any_element()
+            } else {
+                panel
+                    .cached(StyleRefinement::default().absolute().size_full())
+                    .into_any_element()
+            })
             .into_any_element()
     }
     fn render_drop_indicator(
@@ -290,26 +331,30 @@ pub fn pane_of(panel: &Arc<dyn gpui_kit::component::dock::BasePanelView>) -> Opt
     panel.as_any().downcast_ref::<Entity<Pane>>().cloned()
 }
 
-/// Every visible tab of a group, as the dock or the title bar shows them.
-pub fn tabs(group: &TabGroupContext, state: &Rc<SkinState>, cx: &mut App) -> Vec<AnyElement> {
-    let visible: Vec<usize> = (0..group.panels().len())
-        .filter(|&ix| group.panels()[ix].visible(cx))
-        .collect();
-    visible
-        .into_iter()
-        .map(|ix| tab(group, ix, state, cx))
-        .collect()
+fn is_utility(panel: &Arc<dyn gpui_kit::component::dock::BasePanelView>, cx: &App) -> bool {
+    pane_of(panel).is_some_and(|p| p.read(cx).ty.home != Home::Main)
 }
 
 /// One tab: icon, label and a close button that shows on the selected or
 /// hovered tab. It selects on click, closes on middle-click, drags to another
 /// group or edge, takes tabs dropped on it, and opens when a track or folder
 /// rests over it while being dragged.
-fn tab(group: &TabGroupContext, ix: usize, state: &Rc<SkinState>, cx: &mut App) -> AnyElement {
+fn tab(
+    group: &TabGroupContext,
+    ix: usize,
+    state: &Rc<SkinState>,
+    compact: bool,
+    cx: &mut App,
+) -> AnyElement {
     let m = *materials(cx);
     let panel = group.panels()[ix].clone();
     let id = panel.panel_id(cx);
     let pane = pane_of(&panel);
+    let utility = is_utility(&panel, cx);
+    let active_browser = pane
+        .as_ref()
+        .and_then(|p| super::browser_of(p, cx))
+        .is_some_and(|browser| browser.read(cx).active);
     let selected = group.active_panel().map(|p| p.panel_id(cx)) == Some(id);
     let (label, icon, renaming, accepts_folder) = match &pane {
         Some(pane) => {
@@ -328,6 +373,17 @@ fn tab(group: &TabGroupContext, ix: usize, state: &Rc<SkinState>, cx: &mut App) 
             false,
         ),
     };
+    // A lone browser already names its destination in the breadcrumb. Keep
+    // the icon as its drag handle. An explicit custom name stays visible.
+    let handle = group.panels().len() == 1
+        && pane.as_ref().is_some_and(|p| {
+            let p = p.read(cx);
+            p.content
+                .as_any()
+                .is::<crate::panels::browser::BrowserPane>()
+                && p.name.is_none()
+                && renaming.is_none()
+        });
     let hover_group = SharedString::from(format!("tab-{}", id.as_u64()));
     let workspace = state.workspace.clone();
     let close = {
@@ -360,6 +416,7 @@ fn tab(group: &TabGroupContext, ix: usize, state: &Rc<SkinState>, cx: &mut App) 
         }
         None => div()
             .flex_1()
+            .when(compact, |d| d.flex_none())
             .min_w_0()
             .truncate()
             .child(label.clone())
@@ -383,54 +440,79 @@ fn tab(group: &TabGroupContext, ix: usize, state: &Rc<SkinState>, cx: &mut App) 
         .occlude()
         .role(Role::Tab)
         .aria_label(label.clone())
+        .aria_selected(selected)
         .relative()
-        .h(px(TAB_HEIGHT))
+        .h(px(if utility { STRIP_HEIGHT } else { TAB_HEIGHT }))
         .min_w(px(48.))
         .max_w(px(220.))
         .px(px(8.))
         .gap(px(5.))
-        .rounded(px(6.))
+        .when(utility, |d| d.border_r_1().border_color(m.line))
+        .when(!utility, |d| d.rounded(px(6.)))
         .items_center()
         .text_size(px(12.5))
-        .text_color(if selected { m.text } else { m.text_muted })
-        .when(selected, |d| d.bg(m.control))
-        .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        .child(icon.size(px(14.)).flex_shrink_0().text_color(if selected {
-            m.text_muted
-        } else {
-            m.text_faint
-        }))
-        .child(label_element)
-        // The close button covers the end of the label while the pointer is
-        // over the tab, so no tab gives up width to a button it is not showing.
-        .child(
-            div()
-                .id(("tab-close", id.as_u64()))
-                .absolute()
-                .top(px((TAB_HEIGHT - 18.) / 2.))
-                .right(px(4.))
-                .size(px(18.))
-                .flex()
-                .items_center()
+        .when(compact, |d| {
+            d.flex_col()
                 .justify_center()
-                .rounded(px(4.))
-                .bg(m.chrome.blend(if selected { m.control } else { m.hover }))
-                .hover(|d| d.bg(m.chrome.blend(m.control_hover)))
-                .invisible()
-                .group_hover(hover_group, |s| s.visible())
-                .child(
-                    Icon::new(IconName::X)
-                        .size(px(12.))
-                        .text_color(m.text_faint),
-                )
-                .tooltip(|w, cx| Tooltip::new("Close").build(w, cx))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, w, cx| {
-                    cx.stop_propagation();
-                    close_click(w, cx)
+                .gap_0()
+                .px(px(3.))
+                .min_w(px(32.))
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .line_height(px(14.))
+        })
+        .text_color(if selected { m.text } else { m.text_muted })
+        .when(handle, |d| {
+            d.min_w(px(24.)).w(px(24.)).px_0().gap_0().justify_center()
+        })
+        .when(selected && !handle, |d| {
+            d.bg(if utility { m.chrome } else { m.control })
+        })
+        .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
+        .child(
+            icon.size(px(14.))
+                .flex_shrink_0()
+                .text_color(if active_browser {
+                    m.accent
+                } else if selected {
+                    m.text_muted
+                } else {
+                    m.text_faint
                 }),
         )
-        .when(long, |d| {
+        .when(!handle, |d| d.child(label_element))
+        // The close button covers the end of the label while the pointer is
+        // over the tab, so no tab gives up width to a button it is not showing.
+        .when(!utility && !handle, |d| {
+            d.child(
+                div()
+                    .id(("tab-close", id.as_u64()))
+                    .absolute()
+                    .top(px((TAB_HEIGHT - 18.) / 2.))
+                    .right(px(4.))
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .bg(m.chrome.blend(if selected { m.control } else { m.hover }))
+                    .hover(|d| d.bg(m.chrome.blend(m.control_hover)))
+                    .invisible()
+                    .group_hover(hover_group, |s| s.visible())
+                    .child(
+                        Icon::new(IconName::X)
+                            .size(px(12.))
+                            .text_color(m.text_faint),
+                    )
+                    .tooltip(|w, cx| Tooltip::new("Close").build(w, cx))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, w, cx| {
+                        cx.stop_propagation();
+                        close_click(w, cx)
+                    }),
+            )
+        })
+        .when(long || handle, |d| {
             let tip = label.clone();
             d.tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx))
         })

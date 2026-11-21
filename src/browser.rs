@@ -98,8 +98,8 @@ pub struct Browser {
     pub catalog: Entity<Catalog>,
     /// The Place the open folder is shown under in Locations, when one was chosen.
     pub tree_root: Option<PathBuf>,
-    /// This is the browser the address bar, Locations and the player address.
-    active: bool,
+    /// The browser that receives navigation from Library and Locations.
+    pub(crate) active: bool,
     back: Vec<Visit>,
     forward: Vec<Visit>,
     bookmark: Option<Bookmark>,

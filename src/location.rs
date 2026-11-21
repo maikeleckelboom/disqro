@@ -215,20 +215,6 @@ impl LocationBar {
         self.error = None;
         cx.notify();
     }
-    /// Addresses another Music Browser, leaving any half-typed path behind.
-    pub fn set_browser(
-        &mut self,
-        browser: Entity<Browser>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.browser == browser {
-            return;
-        }
-        self._view = Self::follow(&browser, window, cx);
-        self.browser = browser;
-        self.reset(cx);
-    }
     /// Shows the path as text with everything selected, ready to replace.
     pub fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = self.browser.read(cx).path.display().to_string();

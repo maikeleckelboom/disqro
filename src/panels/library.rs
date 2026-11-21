@@ -6,7 +6,7 @@
 //! dropped on a playlist are added to it as new entries.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, INDENT, ROW, disclosure, nav_row},
+    nav::{DraggedFolder, ROW, nav_row},
 };
 use crate::{
     audio::Command,
@@ -52,7 +52,6 @@ pub static TYPE: PanelType = PanelType {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LibraryState {
-    pub playlists_closed: bool,
     #[serde(skip_serializing_if = "is_zero")]
     pub scroll: f32,
 }
@@ -65,7 +64,6 @@ pub struct LibraryPanel {
     router: Entity<Router>,
     player: Entity<Player>,
     renaming: Option<(PlaylistId, Entity<InputState>)>,
-    playlists_open: bool,
     scroll: ScrollHandle,
     focus: FocusHandle,
     /// Follows the active browser, whose view the rows mark.
@@ -83,7 +81,6 @@ impl LibraryPanel {
             .detach();
         cx.subscribe_in(&services.catalog, window, |s, _, e, window, cx| {
             if let CatalogEvent::Created(id) = e {
-                s.playlists_open = true;
                 s.rename_playlist(*id, window, cx);
             }
         })
@@ -100,7 +97,6 @@ impl LibraryPanel {
             router: services.router.clone(),
             player: services.player.clone(),
             renaming: None,
-            playlists_open: !state.playlists_closed,
             scroll,
             focus: cx.focus_handle(),
             browser: None,
@@ -117,7 +113,6 @@ impl LibraryPanel {
     }
     fn state(&self) -> LibraryState {
         LibraryState {
-            playlists_closed: !self.playlists_open,
             scroll: -f32::from(self.scroll.offset().y),
         }
     }
@@ -268,9 +263,7 @@ impl LibraryPanel {
         let location = self.location(cx);
         let catalog = self.catalog.read(cx);
         let mut rows = vec![];
-        let single = catalog.collections.len() == 1;
-        // With one collection, its own row stands for All Music.
-        if !single {
+        {
             let all = Location::Library(None);
             let router = self.router.clone();
             rows.push(
@@ -315,18 +308,13 @@ impl LibraryPanel {
                     | Location::Album { root: Some(r), .. }
                     | Location::Release { root: Some(r), .. },
                 ) => r == id,
-                Some(Location::Library(None)) => single,
                 _ => false,
             };
             let view = Location::Library(Some(id));
             let row = nav_row(
                 ("collection", id as usize).into(),
-                usize::from(!single),
-                Some(Icon::new(if single {
-                    IconName::Library
-                } else {
-                    IconName::Disc3
-                })),
+                1,
+                Some(Icon::new(IconName::Disc3)),
                 c.root.name.clone().into(),
                 selected,
                 &m,
@@ -418,33 +406,18 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
-        let open = self.playlists_open;
         let header = h_flex()
             .id("playlists")
             .h(px(ROW))
             .mx(px(6.))
-            .pl(px(4.))
+            .pl(px(8.))
             .pr(px(2.))
             .gap(px(4.))
-            .rounded(px(5.))
             .flex_shrink_0()
             .items_center()
-            .text_size(px(13.))
+            .mt(px(6.))
+            .text_size(px(12.))
             .text_color(m.text_muted)
-            .cursor_pointer()
-            .hover(|d| d.bg(m.hover).text_color(m.text))
-            .child(disclosure(
-                "playlists-disclosure",
-                (!playlists.is_empty()).then_some(open),
-                &m,
-            ))
-            .child(
-                Icon::new(IconName::ListMusic)
-                    .size(px(16.))
-                    .flex_shrink_0()
-                    .mr(px(2.))
-                    .text_color(m.text_faint),
-            )
             .child(div().flex_1().min_w_0().truncate().child("Playlists"))
             .child(
                 Button::new("new-playlist")
@@ -462,10 +435,6 @@ impl LibraryPanel {
                         w.dispatch_action(Box::new(crate::workspace::NewPlaylist), cx)
                     }),
             )
-            .on_click(cx.listener(|s, _, _, cx| {
-                s.playlists_open = !s.playlists_open;
-                cx.notify();
-            }))
             .context_menu(|menu, _, _| {
                 menu.item(
                     PopupMenuItem::new("New Playlist")
@@ -475,9 +444,6 @@ impl LibraryPanel {
             })
             .into_any_element();
         let mut rows = vec![header];
-        if !open {
-            return rows;
-        }
         for p in playlists {
             let id = p.id;
             let selected = location == Some(Location::Playlist(id));
@@ -487,7 +453,7 @@ impl LibraryPanel {
                     h_flex()
                         .h(px(ROW))
                         .mx(px(6.))
-                        .pl(px(4. + INDENT))
+                        .pl(px(8.))
                         .pr(px(8.))
                         .gap(px(4.))
                         .flex_shrink_0()
@@ -499,7 +465,6 @@ impl LibraryPanel {
                                 cx.notify();
                             }
                         }))
-                        .child(div().size(px(20.)).flex_shrink_0())
                         .child(
                             Icon::new(IconName::Music2)
                                 .size(px(15.))
@@ -517,7 +482,7 @@ impl LibraryPanel {
             }
             let row = nav_row(
                 ("playlist", id as usize).into(),
-                1,
+                0,
                 Some(Icon::new(IconName::Music2)),
                 p.name.clone().into(),
                 selected,
@@ -736,8 +701,20 @@ impl PaneContent for Entity<LibraryPanel> {
 
 #[cfg(test)]
 mod tests {
-    use super::adds_to;
+    use super::{LibraryState, adds_to};
     use crate::{catalog::Targets, store::Scope};
+
+    #[test]
+    fn the_old_playlist_disclosure_is_ignored_and_scroll_is_kept() {
+        let state: LibraryState = serde_json::from_value(serde_json::json!({
+            "playlists_closed": true, "scroll": 114.
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!({"scroll": 114.})
+        );
+    }
 
     #[test]
     fn a_playlist_takes_tracks_and_other_playlists_entries_but_not_its_own() {

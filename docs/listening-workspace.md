@@ -2,18 +2,18 @@
 
 Disqro opens a folder or a CUE album directly. Browsing never changes what is playing: the queue retains the tracks independently of the browser, so you can open other folders, sort tables or rearrange panels while an album continues.
 
-![Disqro Dark with an album playing](evidence/disqro-dark.png)
+![Default Windows workspace with an album playing](evidence/modular-workspace/refined/player-1240.webp)
 
 ## Workspace
 
 Every view in the window is a panel in one dock: **Music Browser**, **Library**, **Locations**, **Queue** and **History**. The default workspace puts Library and Locations together on the left, a Music Browser in the middle, and Queue and History together on the right. The player along the bottom of the window is not a panel: no arrangement of panels closes it or changes what is playing.
 
-- **Tabs.** Panels that share a group show as tabs, and only the chosen tab is drawn. The main group's tabs sit in the title bar beside the **+** that opens a panel. Click a tab to show it; middle-click it or use its × to close it. Right-click a tab for the panel's own actions, **Rename Tab…**, **Open Panel Here**, **Split Right**, **Split Down**, **Close** and **Close Other Tabs**. The **⋯** at the end of a group's tabs opens the same menu for the tab shown.
+- **Tabs.** Each dock group owns its tabs. A single Music Browser uses its address row and a draggable icon. When browsers share a group, their content tabs appear directly above it. Library and Locations share a connected header, as do Queue and History. Right-click a tab or its icon, or use the group menu, to split, close or rename it. The title bar holds the panel picker and workspace menu.
 - **Arranging.** Drag a tab onto another tab, or onto the free space after a group's tabs, to move it there. Drag it onto the edge of a group to split that group and give the tab its own. Drag the line between groups to resize them. A group that loses its last tab gives its space to its neighbours.
 - **Opening and closing.** **+** lists every panel type. Library, Locations, Queue and History exist once: choosing one that is open shows it, and one you closed returns beside the panels it was with. **New Music Browser** opens another browser each time. Closing every panel leaves an empty workspace with **Open a Panel** while playback continues. **Restore Default Layout** in the workspace menu brings back the default arrangement and keeps the browser you were using.
-- **Music Browsers.** Each browser keeps its own folder or library view, Back and Forward history, search, selection, scroll position, view and columns. The address bar and the search field below the title bar belong to the browser you last clicked in or chose. Library and Locations open what you click in that browser; **Open in New Tab** in their menus, or a Ctrl-click, opens it in a new one. Ctrl+T opens a new browser showing the same view, and Ctrl+W closes the panel you are working in.
+- **Music Browsers.** Each browser has its own breadcrumb, search field, Back and Forward history, table and view settings. Clicking a browser or its address row makes it the destination for Library and Locations. Its icon has a steel-blue accent. Click Liked Tracks, then a playlist, to navigate the same browser. Choose **Open in New Tab** or Ctrl-click to create another browser in the active group. Ctrl+T opens another browser at the current view. Drag its tab to a group edge to split it.
 - **Toolbars.** A browser's toolbar holds **All Tracks** and **Albums / CDs** for a collection, **Subfolders** for a folder, the way back from a CD or release page, and the browser's menu. **Hide Toolbar** in the tab menu hides it for that browser only, and the small arrow left in its corner brings it back. Hiding the toolbar leaves the view as it was.
-- **Saved workspace.** The arrangement, each panel's own state, the browser the address bar follows, where closed panels return and the player's height are saved with the profile and restored at the next start. A layout saved by a build with the fixed Sidebar, Recordings, Queue and Now Playing panels is replaced once by the default workspace. Places, playlists, the queue and the rest of the profile are kept.
+- **Saved workspace.** The arrangement, each panel's own state, the active browser, where closed panels return and the player's height are saved with the profile and restored at the next start. A layout saved by a build with the fixed Sidebar, Recordings, Queue and Now Playing panels is replaced once by the default workspace. The first browser restores the previous folder or collection view. Expanded folders, Places, playlists, table preferences, volume and the queue carry forward.
 
 ### Adding music by dragging
 
@@ -55,7 +55,7 @@ The current folder appears as breadcrumbs. Click a crumb to open that folder. Cl
 - Right-click the Locations tab or the space below the Places: **Add Folder to Places…**, **Restore Missing Default Places**, **Reset Places to Defaults…**.
 - Right-click a folder: **Open**, **Open in New Tab**, **Add to Places**, **Add to Library**.
 - Drag a Place onto another to move it there, or below the last row to move it to the end.
-- Right-click the Library tab, its empty space or a collection for **Add Music Folder…** and **New Playlist**. Collections, Liked Tracks and playlists offer **Open in New Tab**. The **+** on Playlists creates a playlist; the arrow beside it closes a long list.
+- Right-click the Library tab, its empty space or a collection for **Add Music Folder…** and **New Playlist**. Collections, Liked Tracks and playlists offer **Open in New Tab**. The **+** beside Playlists creates a playlist. Entries are always visible beneath the heading and scroll with Library.
 
 Removing a shortcut never touches its folder. Restoring adds back only the defaults you removed, at the end, and leaves your own shortcuts, names and order alone. Reset replaces the whole list after a confirmation. A drive that is not attached disappears until it returns; a custom Place whose folder is missing stays, dimmed.
 
@@ -65,8 +65,8 @@ A registered collection and a Place can point at the same folder. The Library en
 
 - The open folder is shown under one Place: the one you chose it from while you stay inside it, otherwise the outermost Place other than a drive that holds it, then its drive. A folder outside every Place appears under a dimmed entry for its drive or share until you return to a Place.
 - Opening a folder expands the way down to it and the folder itself, never its neighbours or the discs inside a large collection. Nothing collapses because you navigated; the rest of the tree, its scroll position and the row under the pointer stay where they were.
-- Back, Forward, Parent, breadcrumbs and typed paths keep the highlighted folder, the breadcrumbs and the list in agreement. While a library view is shown, the tree keeps the last folder in view without highlighting it. The tree follows the browser the address bar follows.
-- Each Place keeps its own open folders, and they are remembered across restarts. Library remembers whether Playlists is open. Folders are listed off the interface thread, one listing task per Place, so a sleeping network drive holds up only its own branch.
+- Back, Forward, Parent, breadcrumbs and typed paths keep the highlighted folder, the breadcrumbs and the list in agreement. While a library view is shown, the tree keeps the last folder in view without highlighting it. The tree follows the active browser.
+- Each Place keeps its own open folders, and they are remembered across restarts. Folders are listed off the interface thread, one listing task per Place, so a sleeping network drive holds up only its own branch.
 - Folders whose names start with a dot, such as `.git` or `.cache`, and hidden or system folders are left out of the tree and of subfolder discovery. Typing the path of one in the address bar still opens it, and the tree shows the way to it.
 - Folders and files are ordered as Explorer orders them, so `CD 2` comes before `CD 10`.
 
@@ -104,14 +104,32 @@ On a normal close, and shortly after any change to the queue or Places, Disqro s
 
 - Panels are instances of registered types (`src/panels.rs`). A type names itself, its icon, whether it exists once or many times, where it opens, and how to build an instance from saved state. An instance has a stable identity and saves its own state into the dock layout. GPUI Kit's dock owns the layout tree, dragging, splitting and persistence, and rebuilds instances through its panel registry. The workspace creates, places, closes and reopens instances without knowing their types, so a new panel type, such as a visualizer, is a new module rather than a change to the workspace.
 - Shared state is not owned by any panel: the catalog, the player and queue, and the Places and folder tree live outside the dock. Closing Library, Locations or Queue loses nothing, and every Music Browser reads the same catalog while keeping its own view.
-- The title bar shows the main tab group itself. Its tabs are drawn from the same group state the dock uses, with the same select, close, drag and drop callbacks, so there is one tab model rather than a page switcher beside the dock.
-- Only the tab a group shows is drawn, and each shown panel is a cached view: dragging a splitter or a tab redraws the dock's chrome, not the tables, and the dock itself is cached so the player's redraws do not reach it.
+- GPUI Kit supplies each group's tabs, active panel, order and drag operations. A browser instance owns its address editor and search input. Moving it between groups moves those controls with it.
+- Each group renders its selected panel. Cached drawing isolates playback updates from the dock. When Windows assistive technology requests an accessibility tree, the dock and visible panels render their controls into that tree.
 - One transport owns playback and the queue on its own thread. The window, the tray and the Windows media controls all send it the same commands, so they cannot disagree about what is playing.
 - Redraws follow what is visible. The player redraws for position only when the playhead moves at least three quarters of a pixel or the clock changes a second, instead of on every 40 ms transport tick. While the window is hidden the transport stops waking the interface for position updates.
 - GPUI Kit's default "show while scrolling" scrollbars kept requesting animation frames for the folder tree, costing about 4% of a core in an idle window. Disqro uses hover scrollbars, which Windows 11 uses as well.
 - Controls inside the title bar are marked as occluding so Windows does not treat them as the caption.
 - The tray icon lives on a hidden window owned by the interface thread, created with the Win32 API from the `windows` crate that GPUI already depends on. No second UI toolkit is involved. The media session uses `ISystemMediaTransportControlsInterop` on the same window.
 - The read-only Dekzer review covered its playback crate, native player integration, CUE handling, player qualification, and waveform research. Disqro adopted source-frame addressing, decoder preroll, a buffered boundary between decoding and output, and sample-oracle checks. It has its own implementation and no Dekzer source or runtime dependency.
+
+## Mission 10 Windows qualification
+
+The optimized Windows executable was built from `f5e1cac859b5bbe474f8860d1f12aaeae0b1b45c` plus the working-tree refinement. Its SHA-256 is `75446b6b04551183db28beba548bed0b9bf3b13813b4bf5afb6c67bc8f368684`. Screenshots below are lossless window captures at 150% Windows scaling.
+
+| Check | Observed result |
+| --- | --- |
+| Default navigation | Clicking Liked Tracks and then Techno kept the same browser instance ID and the original three dock groups. [Techno in the original browser](evidence/modular-workspace/refined/same-browser-techno.webp) |
+| Explicit second browser | **Open in New Tab** on Liked Tracks added a second ID to the same content group. Library and Queue retained their selections. [Local content tabs](evidence/modular-workspace/refined/browser-tabs.webp) |
+| Split navigation and restoration | Splitting the browsers placed a breadcrumb and search above each table. Back and Forward in the upper pane changed only that browser. The two search fields kept different values. Two successive restarts restored both IDs, locations, searches, the active recipient and dock geometry to within one logical pixel. [Techno and Liked Tracks in separate panes](evidence/modular-workspace/refined/scoped-vertical-browsers.webp) |
+| Window sizes | Tested at requested window sizes of [720 × 460](evidence/modular-workspace/refined/player-720.webp), [900 × 600](evidence/modular-workspace/refined/player-900.webp), [1240 × 780](evidence/modular-workspace/refined/player-1240.webp) and [1540 × 940](evidence/modular-workspace/refined/player-1540.webp). The table measured 427, 527, 732 and 913 logical pixels wide, respectively. Narrow utility headers stacked each icon over its label. |
+| Utility docking and drops | A track dragged over inactive Library revealed its playlist target and created one entry. A folder hovered over Library and dropped into the panel produced an indexed track. A second folder dropped on the Library header from a separate Locations pane also indexed. Both pairs split and re-tabbed. [Library and Locations](evidence/modular-workspace/refined/split-library-locations.webp) · [Queue and History](evidence/modular-workspace/refined/split-queue-history.webp) |
+| Playlist operations | Created, renamed and deleted a playlist through the Windows UI. Added the same recording twice and moved the final occurrence to the start. Checked the order by occurrence ID in SQLite. |
+| Panel lifecycle | Hid and restored a browser toolbar, closed and reopened History, then closed every panel. The player and the empty-workspace picker remained available. Opening a browser and restoring the default layout recovered the three groups. |
+| Existing profile | Used a copy of a version-2 profile with the old playlist disclosure set to closed. The new geometry opened with both playlists visible. Verified the original folder, expanded folders, Places, column preferences, volume, playback position, queue order, all 126 track IDs and the contents of the likes, ratings, playlists and playlist-entry tables. |
+| Playback during interaction | Resized the window and a dock splitter, switched tabs and dragged panels and music during muted playback. The 196-second trace recorded 18,959 callbacks, zero device or decode errors and one unchanged-position tick in a sample that also contained a transport command. Physical audio quality was outside this measurement. [Playback trace](evidence/modular-workspace/refined/playback.csv) |
+
+Formatting, warnings-denied Clippy and the locked optimized build passed. Running the complete suite including the FFmpeg and six-figure collection tests produced **108 passes and one fixture setup failure**. Windows returned access denied when `directory_junction_is_not_descended` invoked `mklink /j`. Repeating the fixture in a writable directory produced the same denial. The previous production-baseline build log ends with exit 101 during its CMake step. An optimized before-and-after performance comparison remains unverified.
 
 ## Earlier listening-workspace verification
 
@@ -142,4 +160,4 @@ For repeatable audio checks, run `cargo test --release --locked` with CMake avai
 
 ## Not in this build
 
-Output device selection, ReplayGain-style loudness normalization, a persistent listening history beyond the session queue, a sleep timer, path autocompletion, Places in new tabs, the Light and Glass appearances, and the library features on the roadmap (paged global library, playlists, favorites, ratings, artwork and waveform cells, zoomable waveforms and visualizer panels).
+Future work includes output device selection, loudness normalization, zoomable waveforms and additional visualizer panel types.

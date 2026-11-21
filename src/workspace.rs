@@ -1,5 +1,5 @@
-//! The window: a title bar showing the main tab group, the address bar of the
-//! active Music Browser, the dock of panel instances, and the player.
+//! The window owns the dock, the panel picker and the persistent player.
+//! Each Music Browser owns its navigation controls.
 //!
 //! Every view in the dock is a [`Pane`]: an instance of a registered
 //! [`PanelType`](crate::panels::PanelType). The workspace creates, places,
@@ -13,7 +13,6 @@ use crate::{
     audio::Command,
     browser::{Browser, Reveal, music_home},
     catalog::{Catalog, CatalogEvent, Targets},
-    location::LocationBar,
     panels::{
         self, Destination, Home, InstanceId, Instances, Pane, PaneEvent, PanelRecord, PanelType,
         Router, RouterEvent, Services, Template,
@@ -32,7 +31,6 @@ use gpui_kit::{
     component::{
         button::*,
         dock::*,
-        input::Input,
         menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         *,
     },
@@ -170,12 +168,9 @@ impl Render for PlayerResize {
 
 pub struct Workspace {
     services: Services,
-    location: Option<Entity<LocationBar>>,
     dock: Entity<DockArea>,
     skin: Rc<SkinState>,
     panes: HashMap<PanelId, Tracked>,
-    /// The tab group the title bar shows.
-    title_group: Option<WeakEntity<TabGroup>>,
     /// Single-instance panels the listener closed, to reopen where they were.
     closed: Vec<ClosedPanel>,
     player_height: f32,
@@ -237,6 +232,9 @@ impl Workspace {
                 prefs: saved.collection.clone(),
             })
         });
+        if saved.expanded.is_empty() {
+            saved.expanded = std::mem::take(&mut saved.legacy_navigation.sidebar.expanded);
+        }
         let locations = cx
             .new(|cx| Locations::new(saved.places.take(), std::mem::take(&mut saved.expanded), cx));
         let services = Services {
@@ -275,8 +273,8 @@ impl Workspace {
             cx.subscribe(&locations, |s: &mut Self, _, _: &LocationsChanged, cx| {
                 s.schedule_save(cx)
             }),
-            cx.observe_in(&router, window, |s: &mut Self, _, w, cx| {
-                s.bind_location(w, cx)
+            cx.observe(&router, |s: &mut Self, _, cx| {
+                s.schedule_save(cx);
             }),
             cx.subscribe_in(&router, window, |s: &mut Self, _, e, w, cx| match e {
                 RouterEvent::Open(destination) => {
@@ -325,11 +323,9 @@ impl Workspace {
         let workspace = std::mem::take(&mut saved.workspace);
         let mut app = Self {
             services,
-            location: None,
             dock,
             skin,
             panes: HashMap::new(),
-            title_group: None,
             closed: workspace.closed,
             player_height: workspace
                 .player_height
@@ -364,12 +360,19 @@ impl Workspace {
                     .router
                     .update(cx, |r, cx| r.set_active(Some(&browser), cx));
             }
-            app.sync_title_group(workspace.title, cx);
         } else {
-            app.reset(window, cx);
+            let legacy = saved.legacy_navigation;
+            app.reset(
+                Some(BrowserState {
+                    folder: legacy.folder,
+                    location: legacy.location,
+                    ..Default::default()
+                }),
+                window,
+                cx,
+            );
         }
         app.sync_active_browser(cx);
-        app.bind_location(window, cx);
         if let Some(saved) = saved.queue.take()
             && !saved.queue.entries.is_empty()
         {
@@ -493,11 +496,9 @@ impl Workspace {
     }
 
     /// Follows the dock after any edit: tracks new panes, forgets closed
-    /// ones, and keeps the title bar and the active browser pointing at
-    /// panes that still exist.
+    /// ones, and keeps navigation directed at an open browser.
     fn layout_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_panes(window, cx);
-        self.sync_title_group(None, cx);
         self.sync_active_browser(cx);
         self.schedule_save(cx);
         cx.notify();
@@ -536,55 +537,6 @@ impl Workspace {
             }
         }
     }
-    /// Keeps the title bar on its group while that group exists; otherwise
-    /// it shows the group of `preferred`, of the active browser, or of the
-    /// first content panel.
-    fn sync_title_group(&mut self, preferred: Option<InstanceId>, cx: &mut Context<Self>) {
-        let tree = self.center(cx);
-        let alive =
-            |group: &Entity<TabGroup>, cx: &App| tree.find_node(group.read(cx).node()).is_some();
-        let current = self
-            .title_group
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .filter(|g| alive(g, cx));
-        let group = current.or_else(|| {
-            let active = self.browser(cx);
-            let candidates = preferred
-                .and_then(|id| self.pane_with(id, cx))
-                .into_iter()
-                .chain(
-                    self.ordered(cx)
-                        .into_iter()
-                        .filter(|p| browser_of(p, cx).is_some() && browser_of(p, cx) == active),
-                )
-                .chain(
-                    self.ordered(cx)
-                        .into_iter()
-                        .filter(|p| p.read(cx).ty.home == Home::Main),
-                )
-                .collect::<Vec<_>>();
-            candidates.into_iter().find_map(|pane| {
-                pane.read(cx)
-                    .group
-                    .as_ref()
-                    .and_then(WeakEntity::upgrade)
-                    .filter(|g| alive(g, cx))
-            })
-        });
-        let node = group.as_ref().map(|g| g.read(cx).node());
-        let previous = self.skin.title_group.replace(node);
-        if previous != node {
-            // The group that was in the title bar draws its own tabs again.
-            for pane in self.ordered(cx) {
-                if let Some(g) = pane.read(cx).group.as_ref().and_then(WeakEntity::upgrade) {
-                    g.update(cx, |_, cx| cx.notify());
-                }
-            }
-        }
-        self.title_group = group.map(|g| g.downgrade());
-    }
-
     fn pane_event(
         &mut self,
         pane: Entity<Pane>,
@@ -655,7 +607,11 @@ impl Workspace {
         };
         use gpui_kit::base::Placement::{Left, Right};
         Some(match ty.home {
-            Home::Main => match self.skin.title_group.get().or_else(|| group_of(Home::Main)) {
+            Home::Main => match self
+                .active_browser_pane(cx)
+                .and_then(|p| self.node_of(&p, cx))
+                .or_else(|| group_of(Home::Main))
+            {
                 Some(node) => Place::Group(node),
                 None => match (group_of(Home::Trailing), group_of(Home::Leading)) {
                     (Some(trailing), _) => Place::Beside(trailing, Left, None),
@@ -682,10 +638,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let id = Self::panel_id(pane);
-        let empty = self.center(cx).panels().next().is_none();
+        // GPUI registers new panels in the first tab group. When the new
+        // panel moves elsewhere, restore the tab that group originally showed.
+        let tree = self.center(cx);
+        let first_group = tree.panels().next().and_then(|p| tree.find_panel_node(p));
+        let previous = first_group.and_then(|node| match tree.find_node(node)?.kind() {
+            PaneRef::Tabs { panels, active_ix } => panels.get(active_ix).copied(),
+            PaneRef::Split { .. } => None,
+        });
         self.dock.update(cx, |d, cx| {
             d.add_panel(pane.clone(), DockPlacement::Center, None, window, cx);
-            if !empty {
+            if first_group.is_some() {
                 match place {
                     Some(Place::Group(node)) => d.move_panel(
                         id,
@@ -709,6 +672,13 @@ impl Workspace {
                     ),
                     None => {}
                 }
+            }
+            if let Some(previous) = previous
+                && d.layout(DockPlacement::Center)
+                    .and_then(|layout| layout.find_panel_node(id))
+                    != first_group
+            {
+                d.select_panel(previous, window, cx);
             }
             d.select_panel(id, window, cx);
         });
@@ -752,7 +722,7 @@ impl Workspace {
         self.place(&pane, place, window, cx);
         pane
     }
-    /// Opens a Music Browser, in `node` or the main group, showing
+    /// Opens a Music Browser, in `node` or the active content group, showing
     /// `destination` or the view `state` describes.
     fn open_browser(
         &mut self,
@@ -806,14 +776,14 @@ impl Workspace {
         self.dock.update(cx, |d, cx| d.select_panel(id, window, cx));
         pane.read(cx).focus_handle(cx).focus(window, cx);
     }
-    fn reveal_active_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(browser) = self.browser(cx) else {
-            return;
-        };
-        let pane = self
-            .ordered(cx)
+    fn active_browser_pane(&self, cx: &App) -> Option<Entity<Pane>> {
+        let browser = self.browser(cx)?;
+        self.ordered(cx)
             .into_iter()
-            .find(|p| browser_of(p, cx).as_ref() == Some(&browser));
+            .find(|p| browser_of(p, cx).as_ref() == Some(&browser))
+    }
+    fn reveal_active_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_browser_pane(cx);
         if let Some(pane) = pane
             && !self.is_displayed(&pane, cx)
         {
@@ -888,8 +858,14 @@ impl Workspace {
 
     /// The default arrangement: Library and Locations, one Music Browser,
     /// Queue and History. Open instances keep their state; other panels close.
-    fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn reset(
+        &mut self,
+        initial: Option<BrowserState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use panels::{browser, library, locations, queue};
+        let mut initial = initial;
         let mut get = |s: &mut Self, ty: &'static PanelType, cx: &mut Context<Self>| {
             let open = if ty == &browser::TYPE {
                 let active = s.browser(cx);
@@ -906,6 +882,13 @@ impl Workspace {
                     .iter()
                     .find(|c| c.key == ty.key)
                     .map(|c| c.record.clone())
+                    .or_else(|| {
+                        if ty == &browser::TYPE {
+                            initial.take().map(PanelRecord::with_state)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default();
                 s.new_pane(ty, record, window, cx)
             })
@@ -928,15 +911,12 @@ impl Workspace {
             );
         self.dock
             .update(cx, |d, cx| d.set_center(layout, window, cx));
-        self.title_group = None;
-        self.skin.title_group.set(None);
         self.sync_panes(window, cx);
         if let Some(b) = browser_of(&browser, cx) {
             self.services
                 .router
                 .update(cx, |r, cx| r.set_active(Some(&b), cx));
         }
-        self.sync_title_group(Some(browser.read(cx).id), cx);
         self.schedule_save(cx);
         cx.notify();
     }
@@ -962,32 +942,11 @@ impl Workspace {
             .router
             .update(cx, |r, cx| r.set_active(next.as_ref(), cx));
     }
-    /// Points the address bar at the active browser.
-    fn bind_location(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match (self.browser(cx), &self.location) {
-            (Some(browser), Some(bar)) => {
-                bar.update(cx, |bar, cx| bar.set_browser(browser, window, cx))
-            }
-            (Some(browser), None) => {
-                self.location = Some(cx.new(|cx| LocationBar::new(browser, window, cx)));
-            }
-            (None, _) => self.location = None,
-        }
-        cx.notify();
-    }
-
     fn snapshot(&self, cx: &App) -> Profile {
         let p = self.services.player.read(cx);
         let queue = p.queue();
         let router = self.services.router.read(cx);
         let locations = self.services.locations.read(cx);
-        let title = self
-            .title_group
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .and_then(|g| g.read(cx).active_panel(cx))
-            .and_then(|panel| pane_of(&panel))
-            .map(|pane| pane.read(cx).id);
         let active = router.active().and_then(|browser| {
             self.ordered(cx)
                 .into_iter()
@@ -999,7 +958,6 @@ impl Workspace {
             full_cd: p.full_cd,
             layout: Some(self.dock.read(cx).dump(cx)),
             workspace: WorkspaceState {
-                title,
                 active,
                 closed: self.closed.clone(),
                 player_height: Some(self.player_height),
@@ -1015,6 +973,7 @@ impl Workspace {
             collection: router.template.prefs.clone(),
             expanded: locations.expanded(cx),
             columns_version: 0,
+            legacy_navigation: Default::default(),
         }
     }
     /// What a library action applies to: the table's selection, or the
@@ -1294,7 +1253,7 @@ impl Workspace {
                 let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
                 menu.item(
                     PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
-                        let _ = s1.update(cx, |s, cx| s.reset(w, cx));
+                        let _ = s1.update(cx, |s, cx| s.reset(None, w, cx));
                     }),
                 )
                 .separator()
@@ -1322,140 +1281,27 @@ impl Workspace {
             })
             .into_any_element()
     }
-    fn nav_button(
-        id: &'static str,
-        icon: IconName,
-        label: &'static str,
-        enabled: bool,
-        cx: &Context<Self>,
-    ) -> Button {
-        let m = materials(cx);
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
-            .accessibility_label(label)
-            .tooltip(label)
-            .disabled(!enabled)
-    }
-    /// Back, Forward, Parent, the address bar and the search field of the
-    /// active Music Browser.
-    fn address_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let m = *materials(cx);
-        let browser = self.browser(cx)?;
-        let location = self.location.clone()?;
-        let b = browser.read(cx);
-        let (can_back, can_forward, has_parent) =
-            (b.can_go_back(), b.can_go_forward(), b.can_go_up());
-        let search = b.search.clone();
-        let (back, forward, up) = (browser.clone(), browser.clone(), browser);
-        Some(
-            h_flex()
-                .id("address-bar")
-                .h(px(40.))
-                .flex_shrink_0()
-                .px(px(8.))
-                .gap(px(8.))
-                .items_center()
-                .bg(m.chrome)
-                .border_b_1()
-                .border_color(m.line)
-                .child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap(px(2.))
-                        .child(
-                            Self::nav_button(
-                                "back",
-                                IconName::ArrowLeft,
-                                "Back · Alt+Left",
-                                can_back,
-                                cx,
-                            )
-                            .on_click(move |_, w, cx| back.update(cx, |b, cx| b.back(w, cx))),
-                        )
-                        .child(
-                            Self::nav_button(
-                                "forward",
-                                IconName::ArrowRight,
-                                "Forward · Alt+Right",
-                                can_forward,
-                                cx,
-                            )
-                            .on_click(move |_, w, cx| forward.update(cx, |b, cx| b.forward(w, cx))),
-                        )
-                        .child(
-                            Self::nav_button(
-                                "up",
-                                IconName::ArrowUp,
-                                "Parent folder · Alt+Up",
-                                has_parent,
-                                cx,
-                            )
-                            .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
-                        ),
-                )
-                .child(div().flex_1().min_w(px(160.)).child(location))
-                .child(
-                    div().flex_shrink_0().w(px(220.)).child(
-                        Input::new(&search)
-                            .small()
-                            .prefix(
-                                Icon::new(IconName::Search)
-                                    .size(px(14.))
-                                    .text_color(m.text_faint),
-                            )
-                            .cleanable(true)
-                            .aria_label("Find tracks"),
-                    ),
-                )
-                .into_any_element(),
-        )
-    }
-    /// The title bar: the main tab group, the panel picker, and the space
-    /// that moves the window.
     fn title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let group = self
-            .title_group
-            .as_ref()
-            .and_then(WeakEntity::upgrade)
-            .map(|g| g.read(cx).context(cx));
-        let tabs = group
-            .as_ref()
-            .map(|g| skin::tabs(g, &self.skin, cx))
-            .unwrap_or_default();
         h_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .gap(px(4.))
-            .pr(px(6.))
+            .px(px(6.))
+            .gap(px(7.))
             .items_center()
+            .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
             .child(
-                img("brand/compact.png")
-                    .size(px(18.))
-                    .flex_shrink_0()
-                    .mr(px(6.)),
+                div()
+                    .text_size(px(13.))
+                    .text_color(materials(cx).text_muted)
+                    .child("Disqro"),
             )
-            .child(
-                h_flex()
-                    .id("title-tabs")
-                    .min_w_0()
-                    .gap(px(2.))
-                    .overflow_x_scroll()
-                    .children(tabs),
-            )
+            .child(div().flex_1().h_full())
             .child(
                 div()
                     .occlude()
                     .child(skin::add_button(&self.skin, None, cx)),
             )
-            // The space between is the caption: drag to move the window, or
-            // drop a tab there to move it to the end of this group.
-            .child(match &group {
-                Some(group) => skin::drop_space(group, "title-space", cx),
-                None => div().id("title-space").h_full().flex_1().min_w(px(24.)),
-            })
             .child(div().occlude().child(self.workspace_menu(cx)))
             .into_any_element()
     }
@@ -1582,13 +1428,19 @@ fn tab_menu(
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         let empty = self.center(cx).panels().next().is_none();
         let title = self.title_bar(cx);
-        let address = self.address_bar(cx);
         let player_height = self.player_height;
-        let dock = AnyView::from(self.dock.clone()).cached(StyleRefinement::default().size_full());
+        let dock = AnyView::from(self.dock.clone());
+        // Cached drawing omits descendants from subsequent accessibility trees.
+        let dock = if window.is_a11y_active() {
+            dock.into_any_element()
+        } else {
+            dock.cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        };
         v_flex()
             .key_context("Disqro")
             .track_focus(&self.focus)
@@ -1620,11 +1472,16 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|s, _: &FocusLocation, w, cx| {
-                if let Some(bar) = &s.location {
+                s.reveal_active_browser(w, cx);
+                if let Some(pane) = s.active_browser_pane(cx)
+                    && let Some(b) = pane.read(cx).content.as_any().downcast_ref::<BrowserPane>()
+                {
+                    let bar = b.location.clone();
                     bar.update(cx, |l, cx| l.edit(w, cx))
                 }
             }))
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
+                s.reveal_active_browser(w, cx);
                 if let Some(b) = s.browser(cx) {
                     let search = b.read(cx).search.clone();
                     search.update(cx, |i, cx| {
@@ -1730,7 +1587,6 @@ impl Render for Workspace {
                 }
             }))
             .child(TitleBar::new().h(px(40.)).pl(px(10.)).child(title))
-            .children(address)
             .child(
                 div()
                     .flex_1()

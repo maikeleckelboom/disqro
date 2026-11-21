@@ -26,14 +26,11 @@ pub struct SavedQueue {
     pub position: f64,
 }
 
-/// Where panels are beyond what the dock records: which group the title bar
-/// shows, which Music Browser is active, and where closed panels reopen.
+/// Workspace preferences and panel placement beyond the dock geometry.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceState {
-    /// A panel in the group the title bar shows.
-    pub title: Option<InstanceId>,
-    /// The Music Browser the address bar and Locations follow.
+    /// The destination for navigation from Library and Locations.
     pub active: Option<InstanceId>,
     /// Single-instance panels closed in an earlier session, by type.
     pub closed: Vec<ClosedPanel>,
@@ -51,9 +48,26 @@ pub struct ClosedPanel {
     pub beside: Vec<InstanceId>,
 }
 
+/// Navigation from the fixed workspace, consumed when its geometry is replaced.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct LegacyNavigation {
+    pub folder: Option<PathBuf>,
+    pub location: Option<crate::browser::Location>,
+    pub sidebar: LegacySidebar,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct LegacySidebar {
+    pub expanded: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
+    #[serde(flatten, skip_serializing)]
+    pub legacy_navigation: LegacyNavigation,
     pub volume: f32,
     pub full_cd: bool,
     /// The dock layout, with every panel instance's own state. A layout with
@@ -79,6 +93,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
+            legacy_navigation: LegacyNavigation::default(),
             volume: 0.65,
             full_cd: false,
             layout: None,
@@ -226,6 +241,19 @@ mod tests {
         .unwrap();
         assert_eq!(p.volume, 0.3);
         assert!(p.collection.albums);
+        assert_eq!(
+            p.legacy_navigation.folder.as_deref(),
+            Some(Path::new("C:/Music"))
+        );
+        assert_eq!(
+            p.legacy_navigation.location,
+            Some(crate::browser::Location::Playlist(4))
+        );
+        assert_eq!(p.legacy_navigation.sidebar.expanded, ["c:/music"]);
+        let canonical = serde_json::to_value(&p).unwrap();
+        for retired in ["folder", "location", "sidebar"] {
+            assert!(canonical.get(retired).is_none());
+        }
         assert_eq!(p.layout.map(|l| l.version), Some(Some(2)));
         assert!(p.workspace.closed.is_empty());
     }
@@ -241,7 +269,6 @@ mod tests {
         };
         let p = Profile {
             workspace: WorkspaceState {
-                title: Some(InstanceId(1)),
                 active: Some(InstanceId(2)),
                 closed: vec![closed.clone()],
                 player_height: Some(120.),
@@ -250,7 +277,6 @@ mod tests {
             ..Default::default()
         };
         let back: Profile = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
-        assert_eq!(back.workspace.title, Some(InstanceId(1)));
         assert_eq!(back.workspace.active, Some(InstanceId(2)));
         assert_eq!(back.workspace.closed, vec![closed]);
         assert_eq!(back.workspace.player_height, Some(120.));

@@ -11,6 +11,7 @@ use crate::{
     browser::{Browser, Location, music_home},
     catalog::Targets,
     library::TrackList,
+    location::LocationBar,
     player::Player,
     table::{Layouts, queue_targets},
     theme::materials,
@@ -18,8 +19,10 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        ElementExt, Icon, Selectable, Sizable,
+        Disableable, ElementExt, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
+        h_flex,
+        input::Input,
         menu::{PopupMenu, PopupMenuItem},
         table::DataTable,
         v_flex,
@@ -61,6 +64,8 @@ pub struct BrowserState {
     pub albums: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub search: String,
     #[serde(skip_serializing_if = "is_zero")]
     pub scroll: f32,
 }
@@ -69,6 +74,7 @@ fn is_zero(v: &f32) -> bool {
 }
 
 pub struct BrowserPane {
+    pub location: Entity<LocationBar>,
     pub browser: Entity<Browser>,
     router: Entity<Router>,
     player: Entity<Player>,
@@ -89,21 +95,125 @@ impl BrowserPane {
         let browser = cx.new(|cx| {
             let mut b = Browser::new(player, catalog, folders, layouts, prefs, window, cx);
             let folder = state.folder.clone().unwrap_or_else(music_home);
-            match state.location.clone().filter(|l| !l.is_folder()) {
+            match state.location.clone() {
+                Some(Location::Folder(path)) => {
+                    b.restore_folder(path, state.root.clone(), window, cx)
+                }
                 Some(location) => {
                     b.path = folder;
                     b.show(location, window, cx);
                 }
                 None => b.restore_folder(folder, state.root.clone(), window, cx),
             }
+            if !state.search.is_empty() {
+                b.search.update(cx, |input, cx| {
+                    input.set_value(state.search.clone(), window, cx)
+                });
+            }
             b.restore_scroll(state.scroll);
             b
         });
+        let location = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         Self {
+            location,
             browser,
             router: services.router.clone(),
             player: services.player.clone(),
         }
+    }
+    fn nav_button(
+        id: &'static str,
+        icon: IconName,
+        label: &'static str,
+        enabled: bool,
+        cx: &App,
+    ) -> Button {
+        let m = materials(cx);
+        Button::new(id)
+            .ghost()
+            .small()
+            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
+            .accessibility_label(label)
+            .tooltip(label)
+            .disabled(!enabled)
+    }
+    /// Navigation and search for this instance, at its dock group’s width.
+    pub fn address_bar(&self, available: Pixels, cx: &App) -> AnyElement {
+        let m = *materials(cx);
+        let browser = self.browser.clone();
+        let location = self.location.clone();
+        let router = self.router.clone();
+        let owner = browser.clone();
+        let b = browser.read(cx);
+        let (can_back, can_forward, has_parent) =
+            (b.can_go_back(), b.can_go_forward(), b.can_go_up());
+        let search = b.search.clone();
+        let (back, forward, up) = (browser.clone(), browser.clone(), browser);
+        h_flex()
+            .id("address-bar")
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .capture_any_mouse_down(move |_, _, cx| {
+                router.update(cx, |r, cx| r.set_active(Some(&owner), cx))
+            })
+            .px(px(3.))
+            .gap(px(3.))
+            .items_center()
+            .bg(m.chrome)
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(2.))
+                    .child(
+                        Self::nav_button(
+                            "back",
+                            IconName::ArrowLeft,
+                            "Back · Alt+Left",
+                            can_back,
+                            cx,
+                        )
+                        .on_click(move |_, w, cx| back.update(cx, |b, cx| b.back(w, cx))),
+                    )
+                    .child(
+                        Self::nav_button(
+                            "forward",
+                            IconName::ArrowRight,
+                            "Forward · Alt+Right",
+                            can_forward,
+                            cx,
+                        )
+                        .on_click(move |_, w, cx| forward.update(cx, |b, cx| b.forward(w, cx))),
+                    )
+                    .child(
+                        Self::nav_button(
+                            "up",
+                            IconName::ArrowUp,
+                            "Parent folder · Alt+Up",
+                            has_parent,
+                            cx,
+                        )
+                        .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
+                    ),
+            )
+            .child(div().flex_1().min_w_0().child(location))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w((available * 0.23).clamp(px(44.), px(180.)))
+                    .child(
+                        Input::new(&search)
+                            .small()
+                            .prefix(
+                                Icon::new(IconName::Search)
+                                    .size(px(14.))
+                                    .text_color(m.text_faint),
+                            )
+                            .cleanable(true)
+                            .aria_label("Find tracks"),
+                    ),
+            )
+            .into_any_element()
     }
     /// What this instance saves, and what a new instance opened from it
     /// starts with.
@@ -114,6 +224,7 @@ impl BrowserPane {
             root: browser.tree_root.clone(),
             albums: Some(browser.prefs.albums),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
+            search: browser.search.read(cx).value().to_string(),
             scroll: browser.scroll_offset(cx),
         }
     }

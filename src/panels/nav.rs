@@ -42,8 +42,7 @@ pub fn chip(label: SharedString, cx: &App) -> Div {
         .child(label)
 }
 
-/// The disclosure slot that starts every row, so icons line up whether or
-/// not the row opens.
+/// The disclosure slot used by the Locations tree.
 pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -> Stateful<Div> {
     div()
         .id(id)
@@ -66,7 +65,7 @@ pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -
         })
 }
 
-/// A navigation row: disclosure slot, icon, label.
+/// A Library navigation row. Collections sit one level below All Music.
 pub fn nav_row(
     id: ElementId,
     depth: usize,
@@ -82,7 +81,7 @@ pub fn nav_row(
         .tab_stop(true)
         .h(px(ROW))
         .mx(px(6.))
-        .pl(px(4. + depth as f32 * INDENT))
+        .pl(px(8. + depth as f32 * INDENT))
         .pr(px(8.))
         .gap(px(4.))
         .rounded(px(5.))
@@ -93,7 +92,6 @@ pub fn nav_row(
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(m.selected))
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        .child(div().size(px(20.)).flex_shrink_0())
         .when_some(icon, |d, icon| {
             d.child(
                 icon.size(px(16.))

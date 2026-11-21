@@ -36,12 +36,12 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable,
+        Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         dock::{BasePanel, PanelEvent, PanelInfo, PanelState, TabGroup},
         h_flex,
         input::{InputEvent, InputState},
-        menu::{DropdownMenu, PopupMenu},
+        menu::PopupMenu,
         v_flex,
     },
     prelude::*,
@@ -411,9 +411,10 @@ impl BasePanel for Pane {
 impl Render for Pane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
-        let toolbar = self.toolbar_shown().then(|| {
-            let content = self.content.clone();
-            let this = cx.entity();
+        let controls = self
+            .toolbar_shown()
+            .then(|| self.content.toolbar(window, cx));
+        let toolbar = controls.filter(|items| !items.is_empty()).map(|items| {
             h_flex()
                 .id("panel-toolbar")
                 .h(px(34.))
@@ -424,22 +425,7 @@ impl Render for Pane {
                 .items_center()
                 .border_b_1()
                 .border_color(m.line)
-                .children(content.toolbar(window, cx))
-                .child(div().flex_1())
-                .child(
-                    Button::new("panel-menu")
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(IconName::Ellipsis).text_color(m.text_faint))
-                        .accessibility_label("Panel menu")
-                        .tooltip("More")
-                        .tab_stop(false)
-                        .dropdown_menu(move |menu, w, cx| {
-                            Pane::menu(&this, menu, w, cx)
-                                .separator()
-                                .item(Pane::close_item(&this))
-                        }),
-                )
+                .children(items)
         });
         // A hidden toolbar leaves a small handle to bring it back.
         let handle = (self.ty.toolbar && self.toolbar_hidden).then(|| {
@@ -543,8 +529,8 @@ impl Router {
         }
         cx.notify();
     }
-    /// Shows `destination` in the active browser, or in a new one when asked
-    /// for or when no browser is open.
+    /// Ordinary navigation addresses an existing browser. Only the new-tab
+    /// action asks the dock to create an instance.
     pub fn open(
         router: &Entity<Self>,
         destination: Destination,
@@ -552,12 +538,13 @@ impl Router {
         window: &mut Window,
         cx: &mut App,
     ) {
-        match router.read(cx).active().filter(|_| !new_tab) {
-            Some(browser) => {
-                browser.update(cx, |b, cx| destination.apply(b, window, cx));
-                router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal));
-            }
-            None => router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination))),
+        if new_tab {
+            router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination)));
+        } else if let Some(browser) = router.read(cx).active() {
+            browser.update(cx, |b, cx| destination.apply(b, window, cx));
+            router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal));
+        } else {
+            window.push_notification("Choose Open in New Tab to open a Music Browser.", cx);
         }
     }
 }

@@ -83,12 +83,23 @@ pub enum Mode {
     History,
 }
 
+impl Mode {
+    fn indices(self, q: &Queue) -> std::ops::Range<usize> {
+        let current = q.history().len();
+        match self {
+            Self::Queue => current..q.entries.len(),
+            Self::History => 0..current,
+        }
+    }
+}
+
 /// The queue indices a panel lists, in the order it lists them.
 pub fn rows(mode: Mode, q: &Queue) -> Vec<usize> {
+    let indices = mode.indices(q);
     match mode {
         // Before anything plays, everything is still to come.
-        Mode::Queue => (q.current.unwrap_or(0)..q.entries.len()).collect(),
-        Mode::History => (0..q.history().len()).rev().collect(),
+        Mode::Queue => indices.collect(),
+        Mode::History => indices.rev().collect(),
     }
 }
 
@@ -102,11 +113,18 @@ pub struct Entries {
 
 impl Entries {
     fn new(mode: Mode, services: &Services, cx: &mut Context<Self>) -> Self {
-        cx.subscribe(&services.player, |_, _, e, cx| {
+        cx.subscribe(&services.player, |s: &mut Self, player, e, cx| {
             if matches!(
                 e,
                 PlayerEvent::QueueChanged | PlayerEvent::TrackChanged | PlayerEvent::StateChanged
             ) {
+                // A seek or queue edit can move the selected entry into the
+                // other view. Its old pane must no longer act on that entry.
+                let q = player.read(cx).queue();
+                s.selected = s.selected.filter(|id| {
+                    q.index_of(*id)
+                        .is_some_and(|ix| s.mode.indices(q).contains(&ix))
+                });
                 cx.notify();
             }
         })
