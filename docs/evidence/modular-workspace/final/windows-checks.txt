@@ -1,0 +1,22 @@
+window 720 460 table width 640
+window 900 600 table width 790
+window 1240 780 table width 1098
+window 1540 940 table width 1370
+PASS locked drag and ordinary navigation
+PASS explicit tab and narrow Open Beside fallback
+wide split 543 541 rows [('', 323, 543), ('Cover', 323, 60), ('Title', 383, 232), ('Artist', 615, 175), ('Album', 790, 364), ('Time', 1154, 135), ('Suckerz, DJ Dione, Thunderdome - Chapter XXII (CD1), 4:24', 323, 543), ('', 323, 60), ('Suckerz', 383, 232), ('DJ Dione', 615, 175), ('Thunderdome - Chapter XXII (CD1)', 791, 364), ('4:24', 1155, 135)]
+destination [(3, 199), (4, 197), (5, 196)] expected [199, 197, 196]
+PASS empty and populated targets, three CUE tracks, repeated occurrence, source state, file SHA-256 and queue
+locked splitter 543 493
+PASS split, move, reorder, Done, splitter, reset undo and exact close recovery
+PASS Back and Forward travel in both restored browsers
+PASS restart and locked startup, library, likes, ratings, occurrences and queue
+PASS empty workspace and navigation creating a missing browser
+stacked tables [(328, 112, 1089, 418), (327, 582, 1091, 420)]
+PASS upper and lower click routing and independent Back histories
+PASS folder hover -> Library body -> indexed track
+PASS track and folder hover across utility tabs and folder Open Beside
+audio trace-1795295431641476400.csv {'callbacks': 8648, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 1}
+audio trace-1795295527718303600.csv {'callbacks': 5124, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 1}
+PASS picker restores closed tab, ID and search after restart
+PASS independent native table scrolling

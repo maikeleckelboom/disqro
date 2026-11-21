@@ -1,0 +1,133 @@
+Compiling disqro v0.1.0 (C:\dev\disqro)
+    Finished `release` profile [optimized] target(s) in 39.03s
+     Running unittests src\main.rs (target\release\deps\disqro-7e8c897527dd42f9.exe)
+
+running 117 tests
+test audio::tests::a_release_sequence_opens_each_disc_and_ends_with_the_release ... ok
+test artwork::tests::cache_retains_a_shared_source_and_evicts_the_oldest_other_source ... ok
+test audio::tests::paused_seek_updates_the_position_without_opening_output ... ok
+test audio::tests::queue_heading_tracks_pause_finish_stop_and_restoration ... ok
+test audio::tests::continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits ... ok
+test audio::tests::restoring_a_final_chapter_without_tag_duration_keeps_saved_position ... ok
+test audio::tests::seek_bursts_coalesce_without_crossing_transport_actions ... ok
+test audio::tests::shutdown_receipt_includes_pending_queue_edits ... ok
+test audio::tests::zero_volume_is_digital_silence ... ok
+test artwork::tests::covers_decode_at_few_edges_and_evict_by_pixels ... ok
+test artwork::tests::small_originals_are_not_enlarged ... ok
+test collection::tests::earlier_global_subfolder_switch_is_not_carried_over ... ok
+test collection::tests::subfolder_choices_hold_inside_a_folder_only ... ok
+test cue::tests::incomplete_sheet_does_not_mask_source ... ok
+test cue::tests::file_boundaries_and_recorded_pregaps ... ok
+test discovery::tests::loose_files_and_untagged_numbered_disc_directories_have_distinct_playback_contexts ... ok
+test artwork::tests::compact_decode_rejects_corrupt_or_oversized_input ... ok
+test collection::release_tests::a_release_lists_its_discs_beneath_it_at_its_first_disc ... ok
+test audio::tests::disc_seek_is_atomic_and_rejects_changed_queue_or_recording ... ok
+test folders::tests::a_folder_shows_in_its_outermost_place_then_its_drive ... ok
+test folders::tests::revealing_rows_opens_only_missing_ancestors_under_the_chosen_place ... ok
+test location::tests::breadcrumbs_for_drive_and_share ... ok
+test location::tests::only_physical_folder_views_offer_an_address ... ok
+test location::tests::parses_drive_unc_and_quoted_paths ... ok
+test audio::tests::unavailable_alternate_rip_is_not_a_second_disc ... ok
+test panels::browser::tests::a_folder_cd_page_and_both_navigation_stacks_round_trip ... ok
+test panels::browser::tests::a_saved_browser_keeps_its_view_and_a_new_one_starts_fresh ... ok
+test panels::library::tests::a_playlist_takes_tracks_and_other_playlists_entries_but_not_its_own ... ok
+test discovery::tests::loose_wavs_require_an_explicit_cd_selection_to_continue ... ok
+test panels::library::tests::the_old_playlist_disclosure_is_ignored_and_scroll_is_kept ... ok
+test discovery::tests::unreadable_audio_is_told_apart_from_untagged_audio ... ok
+test panels::queue::tests::before_anything_plays_everything_is_upcoming_and_history_is_empty ... ok
+test panels::queue::tests::queue_lists_the_current_entry_then_what_follows ... ok
+test panels::tests::a_minimal_record_writes_only_its_identity ... ok
+test panels::tests::fresh_identities_avoid_those_taken ... ok
+test discovery::tests::folders_and_files_sort_like_explorer ... ok
+test panels::tests::records_round_trip_through_the_dock_state ... ok
+test panels::tests::every_type_has_a_distinct_persisted_key ... ok
+test places::tests::moving_and_renaming ... ok
+test places::tests::available_defaults_start_with_c_downloads_and_music ... ok
+test profile::tests::an_earlier_profile_keeps_everything_but_its_fixed_panel_layout ... ok
+test discovery::tests::dot_folders_are_skipped_but_open_directly ... ok
+test discovery::tests::tagged_wavs_continue_in_track_order_within_the_same_album_and_disc ... ok
+test places::tests::removing_and_restoring_defaults_keeps_custom_places ... ok
+test places::tests::saved_order_labels_and_dismissals_survive_until_explicit_restoration ... ok
+test profile::tests::old_tray_setting_retires_independently_of_close_and_custom_layouts ... ok
+test queue::tests::continuing_promotes_one_occurrence_and_preserves_manual_repeats ... ok
+test profile::tests::the_workspace_state_round_trips ... ok
+test queue::tests::mixed_cue_chapters_and_files_keep_their_identity ... ok
+test queue::tests::play_next_and_add_respect_the_current_entry ... ok
+test queue::tests::reordering_removing_and_clearing ... ok
+test queue::tests::repeat_modes ... ok
+test queue::tests::survives_a_round_trip ... ok
+test release::tests::ambiguous_discs_stay_independent ... ok
+test release::tests::disc_folders_of_one_release_group_in_order ... ok
+test queue::tests::shuffle_only_reorders_upcoming_and_restores ... ok
+test release::tests::disc_markers_and_folders ... ok
+test release::tests::disc_tags_in_one_folder ... ok
+test release::tests::edition_qualifiers_after_disc_markers ... ok
+test profile::tests::late_snapshot_cannot_overwrite_shutdown ... ok
+test profile::tests::failed_replace_can_retry_same_revision ... ok
+test discovery::tests::closing_receiver_releases_backpressured_walk ... ok
+test profile::tests::corrupt_bytes_survive_recovery_and_subsequent_saves ... ok
+test cache::tests::changed_sheet_atomically_replaces_all_chapters_and_keeps_numbering ... ok
+test profile::tests::concurrent_sessions_cannot_replace_each_others_workspace ... ok
+test store::schema::tests::rows_with_user_data_cannot_be_deleted ... ok
+test audio::tests::cue_seek_and_both_channels_match_original_samples ... ok
+test discovery::tests::audio_headers_invalidate_without_changing_logical_identity ... ok
+test store::tests::detached_tracks_are_checked_before_playback_and_personal_edits ... ok
+test store::tests::browsed_tracks_get_identities_that_a_later_collection_adopts ... ok
+test store::tests::ambiguous_moves_and_unreadable_sheets_change_nothing ... ok
+test store::tests::copying_playlist_occurrences_keeps_chapters_order_and_missing_sources ... ok
+test store::tests::playlists_order_duplicates_and_queries ... ok
+test store::tests::missing_files_keep_their_place_until_they_return ... ok
+test store::schema::tests::recording_identity_upgrade_preserves_ids_and_foreign_keys ... ok
+test store::schema::tests::upgrade_keeps_user_data_backs_up_and_rolls_back_failures ... ok
+test system::imp::tests::missing_icon_cannot_enable_hiding_and_lost_registration_wakes_workspace ... ok
+test table::layout::tests::context_pins_round_trip_and_a_hidden_favorite_stays_hidden ... ok
+test table::layout::tests::cover_keeps_its_width_and_leaves_title_room ... ok
+test table::layout::tests::divider_ownership_tracks_visible_edges_across_pin_groups ... ok
+test table::layout::tests::each_context_keeps_its_own_cover_size ... ok
+test table::layout::tests::favorite_migration_preserves_explicit_order_visibility_width_and_pin ... ok
+test table::layout::tests::migration_distributes_old_widths_and_preserves_custom_fields ... ok
+test table::layout::tests::narrow_pane_releases_inner_pins_without_changing_any_saved_width_or_pin ... ok
+test store::tests::removing_a_collection_keeps_personal_tracks_and_rejoins_them ... ok
+test store::tests::indexed_releases_group_discs_of_one_folder_and_list_them_in_order ... ok
+test table::layout::tests::pinning_and_moving_preserve_sibling_order_and_widths ... ok
+test table::layout::tests::pinning_keeps_each_adaptive_columns_displayed_width ... ok
+test table::layout::tests::reset_restores_each_context_default ... ok
+test table::layout::tests::resizing_one_column_moves_only_its_own_boundary ... ok
+test table::layout::tests::saved_artwork_choice_becomes_a_single_cover_column ... ok
+test table::layout::tests::touching_pin_groups_can_expose_both_edges_when_every_column_is_pinned ... ok
+test store::tests::reauthored_program_keeps_only_matching_source_and_frame_ranges ... ok
+test store::tests::replacing_pending_queries_keeps_the_new_read_after_an_intervening_edit ... ok
+test table::tests::additive_selection_survives_reorder_and_shift_uses_logical_anchor ... ok
+test table::tests::section_indices_map_only_tracks_into_actions ... ok
+test workspace::sidebar::tests::stacking_in_either_order_and_regrouping_preserves_the_outer_slots ... ok
+test workspace::skin::tests::leaving_or_moving_on_cancels_the_rest ... ok
+test workspace::skin::tests::resting_over_a_hidden_tab_opens_it_once ... ok
+test workspace::skin::tests::the_shown_tab_needs_no_rest ... ok
+test workspace::skin::utility::tests::both_boundaries_reserve_the_menu_at_every_tab_count ... ok
+test store::tests::stale_playlist_keys_cannot_target_another_occurrence ... ok
+test workspace::tests::only_a_layout_of_this_version_is_restored ... ok
+test store::tests::identities_survive_rescans_sheet_edits_and_verified_moves ... ok
+test store::tests::same_prefix_and_filename_are_insufficient_relocation_evidence ... ok
+test audio::tests::renderer_preserves_stereo_samples_across_a_disc_chapter ... ok
+test store::tests::search_and_disc_playback_share_exact_chapter_identity_across_relocation ... ok
+test store::tests::a_superseded_scan_cannot_publish_after_root_removal_or_a_new_scan ... ok
+test timeline::tests::mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof ... ok
+test timeline::tests::missing_recording_requires_a_verified_duration_for_this_sheet_revision ... ok
+test timeline::tests::only_tracks_from_a_cd_offer_full_cd ... ok
+test timeline::tests::source_page_reused_across_chapters_and_invalidated_on_change ... ok
+test store::tests::tag_corrections_moves_and_same_path_replacement_keep_personal_ownership ... ok
+test discovery::tests::nested_programs_deduplicate_sources_and_keep_distinct_editions ... ok
+lossless.flac: 48000 frames, decode + reopen/seek 1.3307ms, peak sample difference 0
+test discovery::tests::directory_junction_is_not_descended ... ok
+lossless.aiff: 48000 frames, decode + reopen/seek 623µs, peak sample difference 0
+apple.m4a: 48000 frames, decode + reopen/seek 1.6326ms, peak sample difference 0
+lossy.mp3: 48000 frames, decode + reopen/seek 1.5503ms, peak sample difference 0
+aac.m4a: 48000 frames, decode + reopen/seek 2.3718ms, peak sample difference 0.14703728
+music.opus: 48000 frames, decode + reopen/seek 7.696ms, peak sample difference 0.00001168251
+Opus vs FFmpeg maximum absolute sample difference: 0.0000002682209
+vorbis.ogg: 48000 frames, decode + reopen/seek 2.8803ms, peak sample difference 0
+test audio::tests::encoded_formats_open_decode_and_seek ... ok
+Synthetic: 100089 tracks; discovery 761.0596ms, grouping 21.1576ms, query 26.9947ms
+test discovery::tests::six_figure_collection_projection ... ok
+
+test result: ok. 117 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.41s

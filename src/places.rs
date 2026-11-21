@@ -16,7 +16,7 @@ pub enum Known {
     Home,
 }
 impl Known {
-    const DEFAULTS: [Self; 2] = [Self::Music, Self::Downloads];
+    const DEFAULTS: [Self; 2] = [Self::Downloads, Self::Music];
     pub fn label(self) -> &'static str {
         match self {
             Self::Music => "Music",
@@ -65,7 +65,7 @@ impl Place {
             Origin::Drive => self
                 .system_label
                 .clone()
-                .unwrap_or_else(|| drive_name(&self.path, None)),
+                .unwrap_or_else(|| drive_name(&self.path)),
             Origin::Custom => crate::library::folder_name(&self.path),
         }
     }
@@ -181,14 +181,12 @@ impl Places {
     /// Re-adds removed defaults at the end. Custom places, labels and order
     /// stay as they are.
     pub fn restore_missing(&mut self) -> usize {
-        self.dismissed.clear();
         let mut added = 0;
         for d in defaults() {
-            if !self
-                .items
-                .iter()
-                .any(|p| p.default_key() == d.default_key())
-            {
+            let key = d.default_key();
+            self.dismissed
+                .retain(|dismissed| Some(dismissed) != key.as_ref());
+            if !self.items.iter().any(|p| p.default_key() == key) {
                 self.items.push(d);
                 added += 1;
             }
@@ -232,32 +230,44 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 fn defaults() -> Vec<Place> {
+    available_defaults(known_path, drives())
+}
+
+fn available_defaults(
+    known: impl Fn(Known) -> Option<PathBuf>,
+    drives: Vec<(PathBuf, String)>,
+) -> Vec<Place> {
     let mut items: Vec<Place> = Known::DEFAULTS
         .iter()
         .filter_map(|k| {
             Some(Place {
-                path: known_path(*k)?,
+                path: known(*k)?,
                 origin: Origin::Known(*k),
                 label: None,
                 system_label: None,
             })
         })
         .collect();
-    items.extend(drives().into_iter().map(|(path, name)| Place {
-        path,
-        origin: Origin::Drive,
-        label: None,
-        system_label: Some(name),
-    }));
+    for (path, name) in drives {
+        let first = same_path(&path, Path::new(r"C:\"));
+        let drive = Place {
+            path,
+            origin: Origin::Drive,
+            label: None,
+            system_label: Some(name),
+        };
+        if first {
+            items.insert(0, drive);
+        } else {
+            items.push(drive);
+        }
+    }
     items
 }
 
-fn drive_name(root: &Path, volume: Option<&str>) -> String {
+fn drive_name(root: &Path) -> String {
     let letter = root.to_string_lossy().trim_end_matches('\\').to_owned();
-    match volume.filter(|v| !v.is_empty()) {
-        Some(v) => format!("{v} ({letter})"),
-        None => format!("Local Disk ({letter})"),
-    }
+    format!("Local Disk ({letter})")
 }
 
 #[cfg(windows)]
@@ -300,7 +310,10 @@ pub fn known_path(k: Known) -> Option<PathBuf> {
 #[cfg(windows)]
 fn drives() -> Vec<(PathBuf, String)> {
     use windows::{
-        Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW},
+        Win32::{
+            Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives},
+            UI::Shell::{SHFILEINFOW, SHGFI_DISPLAYNAME, SHGetFileInfoW},
+        },
         core::HSTRING,
     };
     const REMOVABLE: u32 = 2;
@@ -320,17 +333,23 @@ fn drives() -> Vec<(PathBuf, String)> {
         let short = format!("{letter}:");
         let name = match kind {
             FIXED | REMOVABLE => {
-                let mut buf = [0u16; 261];
-                let ok = unsafe {
-                    GetVolumeInformationW(&h, Some(&mut buf), None, None, None, None).is_ok()
+                let mut info = SHFILEINFOW::default();
+                let found = unsafe {
+                    SHGetFileInfoW(
+                        &h,
+                        Default::default(),
+                        Some(&mut info),
+                        std::mem::size_of::<SHFILEINFOW>() as u32,
+                        SHGFI_DISPLAYNAME,
+                    )
                 };
-                let vol = ok.then(|| {
-                    String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)])
-                });
-                match vol.filter(|v| !v.is_empty()) {
-                    Some(v) => format!("{v} ({short})"),
-                    None if kind == REMOVABLE => format!("Removable Disk ({short})"),
-                    None => format!("Local Disk ({short})"),
+                let name = info.szDisplayName;
+                if found != 0 && name[0] != 0 {
+                    String::from_utf16_lossy(name.split(|c| *c == 0).next().unwrap_or_default())
+                } else if kind == REMOVABLE {
+                    format!("Removable Disk ({short})")
+                } else {
+                    drive_name(Path::new(&root))
                 }
             }
             REMOTE => format!("Network Drive ({short})"),
@@ -351,6 +370,52 @@ mod tests {
     use super::*;
     fn custom(p: &str) -> Place {
         Place::custom(PathBuf::from(p))
+    }
+    #[test]
+    fn available_defaults_start_with_c_downloads_and_music() {
+        let known = |k: Known| Some(PathBuf::from(k.label()));
+        let drives = vec![
+            (PathBuf::from(r"D:\"), "Media".into()),
+            (PathBuf::from(r"C:\"), "Windows (C:)".into()),
+        ];
+        let items = available_defaults(known, drives);
+        assert_eq!(
+            items.iter().map(Place::name).collect::<Vec<_>>(),
+            ["Windows (C:)", "Downloads", "Music", "Media"]
+        );
+        let items = available_defaults(|k| (k == Known::Music).then(|| "Music".into()), vec![]);
+        assert_eq!(items.iter().map(Place::name).collect::<Vec<_>>(), ["Music"]);
+    }
+
+    #[test]
+    fn saved_order_labels_and_dismissals_survive_until_explicit_restoration() {
+        let mut places = Places::restore(None);
+        let fresh = places.items.clone();
+        places.add("Custom fixture".into());
+        places.move_item(fresh.len(), 0);
+        places.rename(0, "Live recordings");
+        if fresh.len() > 1 {
+            places.move_item(fresh.len(), 1);
+            places.rename(1, "Archive");
+        }
+        let removed = places.items.last().cloned().unwrap();
+        places.remove(places.items.len() - 1);
+        let saved = places.items.clone();
+        let offline = DefaultKey::Drive(PathBuf::from(r"\\offline\media"));
+        places.dismissed.push(offline.clone());
+        let mut restored = Places::restore(Some(places.state()));
+        assert_eq!(restored.items, saved);
+        assert_eq!(restored.restore_missing(), 1);
+        assert_eq!(&restored.items[..saved.len()], saved);
+        assert_eq!(
+            restored.items.last().unwrap().default_key(),
+            removed.default_key()
+        );
+        assert_eq!(restored.restore_missing(), 0);
+        assert!(restored.dismissed.contains(&offline));
+        restored.reset();
+        assert_eq!(restored.items, fresh);
+        assert!(restored.dismissed.is_empty());
     }
     #[test]
     fn removing_and_restoring_defaults_keeps_custom_places() {

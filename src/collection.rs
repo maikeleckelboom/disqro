@@ -68,7 +68,7 @@ impl ViewPrefs {
         self.subfolders.drain(..excess);
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
@@ -115,7 +115,7 @@ pub struct Membership {
 }
 
 /// A page within a collection: one CD, or every CD of a release.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Disc(DiscId),
     /// Identified by its first disc.
@@ -236,13 +236,6 @@ impl Discs {
             rows.extend(found.into_iter().map(Shelf::Disc));
         }
         rows
-    }
-    /// The discs listed, releases counted by their discs.
-    pub fn disc_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|r| matches!(r, Shelf::Disc(_)))
-            .count()
     }
     pub fn group<'a>(
         rows: impl IntoIterator<Item = &'a Arc<Track>>,
@@ -693,11 +686,7 @@ mod release_tests {
             })
             .collect();
         assert_eq!(labels, ["Single", "release Live 2", "CD 1", "CD 2"]);
-        let disc_count = Discs {
-            rows: shelf,
-            ..Default::default()
-        }
-        .disc_count();
-        assert_eq!(disc_count, 3);
+        let discs = shelf.iter().filter(|r| matches!(r, Shelf::Disc(_))).count();
+        assert_eq!(discs, 3);
     }
 }

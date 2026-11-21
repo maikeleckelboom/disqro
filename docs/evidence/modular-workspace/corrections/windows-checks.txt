@@ -1,0 +1,85 @@
+Dock layout, dimensions in device pixels at 150% scaling
+PASS tabbed window 1540 940 table (401, 162, 1370, 1081) tabs [('Library', 110, 51), ('Locations', 133, 51), ('All Music', 36, 42), ('Queue', 108, 51), ('History', 113, 51)]
+PASS tabbed window 1240 780 table (323, 162, 1098, 841) tabs [('Library', 110, 51), ('Locations', 133, 51), ('All Music', 36, 42), ('Queue', 109, 51), ('History', 113, 51)]
+PASS tabbed window 900 600 table (235, 162, 790, 571) tabs [('Library', 48, 51), ('Locations', 48, 51), ('All Music', 36, 42), ('Queue', 109, 51), ('History', 113, 51)]
+PASS tabbed window 720 460 table (193, 162, 640, 372) tabs [('Library', 48, 51), ('Locations', 48, 51), ('All Music', 36, 42), ('Queue', 48, 51), ('History', 48, 51)]
+PASS locked stacking kept browser bounds (323, 162, 1098, 841) (323, 162, 1098, 841)
+PASS both stacked dividers resized while locked and restored after restart
+PASS stacked window 720 460 (193, 162, 640, 372)
+PASS stacked window 900 600 (235, 162, 790, 571)
+PASS stacked window 1240 780 (323, 162, 1098, 841)
+PASS stacked window 1540 940 (401, 162, 1370, 1081)
+PASS pane close/reopen, inverted stacks, undo, restore, drag re-tab and reorder
+audio trace-1795299431344114500.csv {'callbacks': 3468, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 1}
+audio trace-1795299469857935000.csv {'callbacks': 0, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 0}
+
+Window and sidebar sweeps at 150% scaling
+PASS continuous sidebar divider sweep Library 110 48 110
+PASS continuous sidebar divider sweep Queue 109 48 109
+PASS keyboard Right/Left switched compact utility tabs
+PASS overflow menu selected hidden History after deliberate docking
+PASS both stacked splitter sweeps retained single-row menus and pane order
+
+Locations and single-browser navigation
+PASS row, chevron, repeat, Right/Left, Down/Enter, history and restart
+PASS typed absolute path revealed its ancestors and breadcrumb retained expansion
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape All Music
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Liked Tracks
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Techno
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape [1993] VA - Thunderdome IV - The Original Dreamteam [Total Recall] (flac)
+PASS missing absolute address leaves collection intact after Escape
+
+Independent scrolling and Places
+PASS independent scrolling with 60 folders and 47 playlists
+PASS reset order, dismissal across restart, missing default appended
+
+Playlist transfers and browser persistence
+PASS playlist creation, rename, delete
+PASS empty and populated targets, three CUE tracks, repeated occurrence, source state, file SHA-256 and queue
+PASS Back and Forward travel in both restored browsers
+PASS restart and locked startup, library, likes, ratings, occurrences and queue
+PASS folder hover -> Library body -> indexed track
+PASS track and folder hover across utility tabs and folder Open Beside
+PASS music workflow and independent browser restart
+audio trace-1795299162305601000.csv {'callbacks': 2357, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 1}
+audio trace-1795299200953541700.csv {'callbacks': 0, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 0}
+
+Playlist transfer repeat with centered empty state
+PASS playlist creation, rename, delete
+PASS empty and populated targets, three CUE tracks, repeated occurrence, source state, file SHA-256 and queue
+PASS Back and Forward travel in both restored browsers
+PASS restart and locked startup, library, likes, ratings, occurrences and queue
+audio trace-1795300311555827900.csv {'callbacks': 2878, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 1}
+audio trace-1795300354901854400.csv {'callbacks': 0, 'decode_errors': 0, 'device_errors': 0, 'unchanged_ticks': 0}
+
+The repeat reached folder registration before its 700 ms indexed-track assertion. The focused run waited for that recording to appear in the index.
+
+Focused folder drop and catalog indexing
+PASS folder hover -> Library body -> indexed track
+
+Independent browser address contexts
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Techno
+PASS two side-by-side browsers own separate physical and virtual Ctrl+L values, Escape, typed Enter and Back
+
+Two browsers and indexed and folder-backed CD views
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape All Music
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Liked Tracks
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Techno
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape [1993] VA - Thunderdome IV - The Original Dreamteam [Total Recall] (flac)
+PASS second browser navigated all root and playlist views while first browser kept its folder
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape Thunderdome IV - The Original Dreamteam
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape CD 1
+PASS virtual breadcrumb, empty Ctrl+L, invalid Enter and Escape CD 1
+PASS typed CUE file opened its physical parent with independent browser intact
+
+Invalid absolute paths and local search
+PASS missing absolute path and Escape left playlist and history intact
+PASS Ctrl+F focused borderless local search, Ctrl+L and Escape preserved the query 1240 780
+PASS Ctrl+F focused borderless local search, Ctrl+L and Escape preserved the query 720 460
+
+Sidebar captures
+PASS final optimized captures and identical browser bounds in both stack orders (323, 162, 1098, 841)
+
+Final executable, playlist empty state pixel alignment
+PASS playlist instruction centered in its own pane playlist-breadcrumb lines 1 offsets in device pixels [0.5]
+PASS playlist instruction centered in its own pane empty-playlist-compact lines 2 offsets in device pixels [-2.0, -0.5]

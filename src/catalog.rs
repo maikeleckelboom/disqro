@@ -32,6 +32,11 @@ pub enum Targets {
     Tracks(Vec<Arc<Track>>),
 }
 impl Targets {
+    /// The playlist's own occurrences are reordered by its table. Other
+    /// sources append references in selection order, including repeats.
+    pub fn can_copy_to(&self, playlist: PlaylistId) -> bool {
+        !self.is_empty() && !matches!(self, Self::Keys(Scope::Playlist(p), _) if *p == playlist)
+    }
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Keys(_, k) => k.is_empty(),

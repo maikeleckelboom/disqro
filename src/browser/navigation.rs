@@ -4,13 +4,22 @@ use super::*;
 /// A history entry owns navigation state only. Folder CD pages can project
 /// the open scan without replacing its root or starting another walker.
 pub(super) struct Visit {
-    location: Location,
-    page: Option<Page>,
-    albums: bool,
-    query: String,
+    destination: SavedVisit,
     sort: Option<(Field, ColumnSort)>,
     bookmark: Bookmark,
 }
+
+/// A history destination survives a restart. The live visit also remembers
+/// its table selection and sort while the instance remains open.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SavedVisit {
+    location: Location,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<Page>,
+    albums: bool,
+    query: String,
+}
+#[derive(Default)]
 pub(super) struct Bookmark {
     selected: Option<RowKey>,
     marked: Option<crate::table::Selection>,
@@ -40,13 +49,80 @@ impl Browser {
             }
         };
         Visit {
-            location: self.location.clone(),
-            page: self.page.clone(),
-            albums: self.prefs.albums,
-            query: self.query.clone(),
+            destination: SavedVisit {
+                location: self.location.clone(),
+                page: self.page.clone(),
+                albums: self.prefs.albums,
+                query: self.query.clone(),
+            },
             sort: table.delegate().sort,
             bookmark,
         }
+    }
+    pub(crate) fn saved_history(&self) -> (Vec<SavedVisit>, Vec<SavedVisit>) {
+        let save = |visits: &[Visit]| visits.iter().map(|v| v.destination.clone()).collect();
+        (save(&self.back), save(&self.forward))
+    }
+    pub(crate) fn restore_history(&mut self, back: Vec<SavedVisit>, forward: Vec<SavedVisit>) {
+        let restore = |visits: Vec<SavedVisit>| {
+            let skip = visits.len().saturating_sub(HISTORY);
+            visits
+                .into_iter()
+                .skip(skip)
+                .map(|destination| Visit {
+                    destination,
+                    sort: None,
+                    bookmark: Bookmark::default(),
+                })
+                .collect()
+        };
+        self.back = restore(back);
+        self.forward = restore(forward);
+    }
+    /// Restores the persisted filter before asynchronous listing completes.
+    pub(crate) fn restore_search(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Set both sides before the input event arrives, so restoring the
+        // filter doesn't look like a new edit that cancels the scroll bookmark.
+        self.query = text.trim().to_lowercase();
+        self.search
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.filter(cx);
+    }
+    /// Scrolls a restored view back to where it was, once it has listed.
+    pub fn restore_scroll(&mut self, offset: f32) {
+        if offset > 0. {
+            self.bookmark = Some(Bookmark {
+                selected: None,
+                marked: None,
+                offset: point(px(0.), px(-offset)),
+            });
+        }
+    }
+    /// How far the list is scrolled down.
+    pub fn scroll_offset(&self, cx: &App) -> f32 {
+        let offset = if self.listing_discs() {
+            self.discs
+                .read(cx)
+                .vertical_scroll_handle
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        } else {
+            self.table
+                .read(cx)
+                .vertical_scroll_handle
+                .0
+                .borrow()
+                .base_handle
+                .offset()
+        };
+        (-f32::from(offset.y)).max(0.)
     }
     pub(super) fn cancel_reveal(&mut self) {
         self.navigation += 1;
@@ -107,16 +183,17 @@ impl Browser {
     }
     fn restore_visit(&mut self, visit: Visit, w: &mut Window, cx: &mut Context<Self>) {
         self.cancel_reveal();
-        let same_folder = visit.location.is_folder() && self.location == visit.location;
-        self.prefs.albums = visit.albums;
+        let dest = visit.destination;
+        let same_folder = dest.location.is_folder() && self.location == dest.location;
+        self.prefs.albums = dest.albums;
         if !same_folder {
-            self.enter(visit.location, w, cx);
+            self.enter(dest.location, TreeReveal::PreserveExpansion, w, cx);
         }
-        self.page = visit.page;
+        self.page = dest.page;
         self.reset_table(cx);
         self.table
             .update(cx, |t, _| t.delegate_mut().sort = visit.sort);
-        self.query = visit.query;
+        self.query = dest.query;
         self.search
             .update(cx, |s, cx| s.set_value(self.query.clone(), w, cx));
         self.bookmark = Some(visit.bookmark);
@@ -131,6 +208,7 @@ impl Browser {
     pub(super) fn enter(
         &mut self,
         location: Location,
+        tree_reveal: TreeReveal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -141,13 +219,16 @@ impl Browser {
                 self.notice = None;
                 self.reset_table(cx);
                 self.clear_search(window, cx);
-                self.folders.update(cx, |f, cx| f.show(&path, None, cx));
+                if self.active {
+                    self.folders
+                        .update(cx, |f, cx| f.show(&path, None, tree_reveal, cx));
+                }
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
                 cx.emit(ViewChanged);
                 cx.notify();
             }
-            Location::Folder(path) => self.load(path, None, window, cx),
+            Location::Folder(path) => self.load_from(path, None, None, tree_reveal, window, cx),
             location => {
                 if self.location != location {
                     self.page = None;
@@ -170,12 +251,14 @@ impl Browser {
                 // The tree keeps the last folder in view without marking it
                 // as the current location.
                 let path = self.path.clone();
-                self.folders.update(cx, |f, cx| {
-                    if !path.as_os_str().is_empty() && f.is_empty() {
-                        f.show(&path, None, cx);
-                    }
-                    f.set_highlight(false, cx);
-                });
+                if self.active {
+                    self.folders.update(cx, |f, cx| {
+                        if !path.as_os_str().is_empty() && f.is_empty() {
+                            f.show(&path, None, TreeReveal::PreserveExpansion, cx);
+                        }
+                        f.set_highlight(false, cx);
+                    });
+                }
                 cx.emit(ViewChanged);
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
@@ -231,7 +314,7 @@ impl Browser {
         if self
             .back
             .last()
-            .is_some_and(|v| v.location == target.0 && v.page == target.1)
+            .is_some_and(|v| v.destination.location == target.0 && v.destination.page == target.1)
         {
             self.back(window, cx);
         } else if target.0 == self.location {
@@ -246,11 +329,9 @@ impl Browser {
         if self.page.is_none() {
             return;
         }
-        if self
-            .back
-            .last()
-            .is_some_and(|v| v.location == self.location && v.page.is_none())
-        {
+        if self.back.last().is_some_and(|v| {
+            v.destination.location == self.location && v.destination.page.is_none()
+        }) {
             self.back(window, cx);
         } else {
             self.push_visit(cx);
@@ -336,7 +417,7 @@ impl Browser {
                         b.prefs.albums = false;
                     }
                     b.clear_search(w, cx);
-                    b.enter(location, w, cx);
+                    b.enter(location, TreeReveal::Ancestors, w, cx);
                     b.reveal_key = Some(RowKey::Key(disc.track));
                     // The key listing will reveal even an off-screen, unpaged chapter.
                 } else {
@@ -390,49 +471,78 @@ impl Browser {
     }
 
     pub fn continue_cd(&self, request: crate::queue::Entry, cx: &mut Context<Self>) {
-        let crate::queue::Entry {
-            id: entry,
-            track,
-            disc_context: context,
-        } = request;
-        if !context.allows(&track) {
-            return;
+        let request = match self.continue_from_folder(request, cx) {
+            Some(request) => request,
+            None => return,
+        };
+        let player = self.table.read(cx).delegate().player.clone();
+        continue_cd(&self.catalog, &player, request, cx);
+    }
+    /// Continues a CD whose folder this browser has open, without asking the
+    /// library. Hands the request back when it cannot.
+    fn continue_from_folder(
+        &self,
+        request: crate::queue::Entry,
+        cx: &mut App,
+    ) -> Option<crate::queue::Entry> {
+        if !request.disc_context.allows(&request.track) {
+            return None;
         }
         let player = self.table.read(cx).delegate().player.clone();
-        if track.library_id.is_none()
+        if request.track.library_id.is_none()
             && self.location.is_folder()
             && !self.busy
-            && let Some(disc) = self.programs.iter().find(|d| d.id.contains(&track))
+            && let Some(disc) = self.programs.iter().find(|d| d.id.contains(&request.track))
         {
             let program = disc.tracks.clone().into();
+            let (entry, context) = (request.id, request.disc_context);
             player.update(cx, |p, cx| {
                 p.command(
                     crate::audio::Command::ContinueDisc(entry, program, context),
                     cx,
                 )
             });
-            return;
+            return None;
         }
-        let catalog = self.catalog.clone();
-        cx.spawn(async move |_, cx| {
-            let result = Catalog::program(catalog.clone(), track.clone(), context, cx).await;
-            match result {
-                Ok(tracks) if tracks.iter().any(|t| t.same_item(&track)) => {
-                    player.update(cx, |p, cx| {
-                        p.command(
-                            crate::audio::Command::ContinueDisc(entry, tracks, context),
-                            cx,
-                        )
-                    });
-                }
-                other => catalog.update(cx, |_, cx| {
-                    cx.emit(CatalogEvent::Notice(other.err().map_or_else(
-                        || "This CD is unavailable.".into(),
-                        |e| format!("{e:#}"),
-                    )))
-                }),
-            }
-        })
-        .detach();
+        Some(request)
     }
+}
+
+/// Continues the CD of a queue entry from the program Disqro reads for it,
+/// for when no open browser lists that CD.
+pub fn continue_cd(
+    catalog: &Entity<Catalog>,
+    player: &Entity<crate::player::Player>,
+    request: crate::queue::Entry,
+    cx: &mut App,
+) {
+    let crate::queue::Entry {
+        id: entry,
+        track,
+        disc_context: context,
+    } = request;
+    if !context.allows(&track) {
+        return;
+    }
+    let (catalog, player) = (catalog.clone(), player.clone());
+    cx.spawn(async move |cx| {
+        let result = Catalog::program(catalog.clone(), track.clone(), context, cx).await;
+        match result {
+            Ok(tracks) if tracks.iter().any(|t| t.same_item(&track)) => {
+                player.update(cx, |p, cx| {
+                    p.command(
+                        crate::audio::Command::ContinueDisc(entry, tracks, context),
+                        cx,
+                    )
+                });
+            }
+            other => catalog.update(cx, |_, cx| {
+                cx.emit(CatalogEvent::Notice(other.err().map_or_else(
+                    || "This CD is unavailable.".into(),
+                    |e| format!("{e:#}"),
+                )))
+            }),
+        }
+    })
+    .detach();
 }

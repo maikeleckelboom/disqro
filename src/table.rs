@@ -3,6 +3,7 @@
 //! same everywhere; only where rows come from differs.
 mod layout;
 mod playback;
+mod transfer;
 use crate::{
     audio::Command,
     catalog::{Catalog, Targets},
@@ -37,6 +38,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+pub use transfer::{DraggedTracks, playlist_target};
 
 /// The compact row, which holds a default 24-pixel cover.
 const ROW_HEIGHT: f32 = 28.;
@@ -387,28 +389,6 @@ impl Selection {
             }
             self.anchor = Some(clicked);
         }
-    }
-}
-
-/// Tracks dragged from a table: onto a sidebar playlist, or within a playlist.
-#[derive(Clone)]
-pub struct DraggedTracks {
-    pub targets: Arc<Targets>,
-    label: SharedString,
-}
-impl Render for DraggedTracks {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let m = materials(cx);
-        div()
-            .px(px(10.))
-            .py(px(5.))
-            .rounded(px(5.))
-            .bg(m.overlay)
-            .border_1()
-            .border_color(m.control_line)
-            .text_size(px(13.))
-            .text_color(m.text)
-            .child(self.label.clone())
     }
 }
 
@@ -1084,9 +1064,6 @@ impl MusicTable {
             Contents::Folder { .. } => self.apply_sort(cx),
             Contents::Library(_) => self.query(cx),
         }
-    }
-    pub fn section_count(&self) -> usize {
-        self.rows.sections.0.len()
     }
     pub fn header(&self, ix: usize) -> Option<&Arc<Disc>> {
         self.rows.sections.header(ix)
@@ -1768,11 +1745,8 @@ impl TableDelegate for MusicTable {
             .group("track-row")
             .when(marked, |d| d.bg(m.selected))
             .on_drag(
-                DraggedTracks {
-                    targets: dragged,
-                    label,
-                },
-                |d, _, _, cx| cx.new(|_| d.clone()),
+                DraggedTracks::new(dragged, label),
+                |d, _, _, cx| d.start(cx),
             )
             .when_some(reorder, |d, (playlist,before)| {
                 d.drag_over::<DraggedTracks>(move |s, d, _, _| {
@@ -1792,6 +1766,8 @@ impl TableDelegate for MusicTable {
                             .catalog
                             .clone()
                             .update(cx, |c, cx| c.move_entries(playlist, entries, Some(before), cx));
+                    } else {
+                        d.copy_to(playlist, &t.delegate().catalog, cx);
                     }
                 }))
             })
@@ -1823,16 +1799,33 @@ impl TableDelegate for MusicTable {
     ) -> impl IntoElement {
         let m = materials(cx);
         let browser = self.browser.clone();
+        let icon = match &self.rows.data {
+            Contents::Library(Paged {
+                scope: Scope::Playlist(_),
+                ..
+            }) => IconName::Music2,
+            _ => IconName::FolderOpen,
+        };
         gpui_kit::component::v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap(px(10.))
-            .text_size(px(13.))
-            .text_color(m.text_faint)
+            .gap(px(8.))
+            .px(px(24.))
             .when(!self.empty.is_empty() && !self.is_loading(), |d| {
-                d.child(Icon::new(IconName::FolderOpen).size(px(26.)))
-                    .child(self.empty.clone())
+                d.child(Icon::new(icon).size(px(24.)).text_color(m.text_faint))
+                    .child(
+                        div()
+                            .id("empty-table-message")
+                            .w_full()
+                            .max_w(px(320.))
+                            .text_center()
+                            .text_size(px(13.))
+                            .text_color(m.text_muted)
+                            .role(Role::Label)
+                            .aria_value(self.empty.clone())
+                            .child(self.empty.clone()),
+                    )
             })
             .when(self.offer_subfolders, |d| {
                 d.child(
