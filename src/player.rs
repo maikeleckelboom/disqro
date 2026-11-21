@@ -263,7 +263,7 @@ impl Player {
             || self.status.track.as_deref() != status.track.as_deref()
             || self.status.entry != status.entry
             || self.status.source_revision != status.source_revision;
-        let state_changed = self.status.playing != status.playing
+        let state_changed = self.status.playback_state() != status.playback_state()
             || self.status.next != status.next
             || self.status.previous != status.previous
             || (self.status.position - status.position).abs() > 1.5;

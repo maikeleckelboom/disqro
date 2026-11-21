@@ -54,6 +54,22 @@ enum Step {
     Current,
 }
 
+impl Step {
+    fn open(
+        &self,
+        browser: &mut Browser,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Browser>,
+    ) {
+        match self {
+            Self::Folder => browser.open(path, window, cx),
+            Self::Collection => browser.show_collection(window, cx),
+            Self::Release(key, title) => browser.open_release(key, title.clone(), window, cx),
+            Self::Current => {}
+        }
+    }
+}
 fn crumbs(path: &Path) -> Vec<Crumb> {
     let mut out = vec![];
     let mut acc = PathBuf::new();
@@ -333,6 +349,7 @@ impl LocationBar {
                         .id("album-parent")
                         .min_w_0()
                         .truncate()
+                        .text_ellipsis_middle()
                         .cursor_pointer()
                         .child(title)
                         .on_click(move |_, w, cx| {
@@ -353,6 +370,7 @@ impl LocationBar {
                         .id("album-release")
                         .min_w_0()
                         .truncate()
+                        .text_ellipsis_middle()
                         .cursor_pointer()
                         .child(title.clone())
                         .on_click(move |_, w, cx| {
@@ -369,7 +387,14 @@ impl LocationBar {
                         .text_color(m.text_faint)
                         .mx(px(2.)),
                 )
-                .child(div().min_w_0().truncate().text_color(m.text).child(name))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_ellipsis_middle()
+                        .text_color(m.text)
+                        .child(name),
+                )
             })
             .into_any_element()
     }
@@ -447,10 +472,10 @@ impl LocationBar {
         let last = all.len().saturating_sub(1);
         let mut row = h_flex().h_full().min_w_0().items_center().overflow_hidden();
         if hidden > 0 {
-            let collapsed: Vec<(SharedString, PathBuf)> = all[..hidden]
+            let collapsed: Vec<(SharedString, PathBuf, Step)> = all[..hidden]
                 .iter()
                 .rev()
-                .map(|c| (c.label.clone(), c.path.clone()))
+                .map(|c| (c.label.clone(), c.path.clone(), c.step.clone()))
                 .collect();
             let browser = browser.clone();
             row = row.child(
@@ -461,12 +486,14 @@ impl LocationBar {
                         .icon(Icon::new(IconName::Ellipsis).text_color(m.text_muted))
                         .accessibility_label("Earlier folders")
                         .dropdown_menu(move |mut menu, _, _| {
-                            for (label, path) in &collapsed {
+                            for (label, path, step) in &collapsed {
+                                let step = step.clone();
                                 let browser = browser.clone();
                                 let path = path.clone();
                                 menu = menu.item(PopupMenuItem::new(label.clone()).on_click(
                                     move |_, w, cx| {
-                                        browser.update(cx, |b, cx| b.open(path.clone(), w, cx))
+                                        browser
+                                            .update(cx, |b, cx| step.open(b, path.clone(), w, cx))
                                     },
                                 ));
                             }
@@ -497,8 +524,8 @@ impl LocationBar {
             row = row.child(
                 div()
                     .id(("crumb", i))
-                    .flex_shrink_0()
-                    .when(i == last, |d| d.min_w_0())
+                    .min_w_0()
+                    .when(i != last, |d| d.flex_shrink_0())
                     .px(px(7.))
                     .h(px(22.))
                     .flex()
@@ -508,16 +535,20 @@ impl LocationBar {
                     .text_color(if i == last { m.text } else { m.text_muted })
                     .hover(|d| d.bg(m.hover).text_color(m.text))
                     .cursor_pointer()
-                    .child(div().truncate().child(c.label))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_ellipsis_middle()
+                            .child(c.label.clone()),
+                    )
+                    .tooltip(move |w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(c.label.clone()).build(w, cx)
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, w, cx| {
                         cx.stop_propagation();
-                        browser.update(cx, |b, cx| match &step {
-                            Step::Folder => b.open(target.clone(), w, cx),
-                            Step::Collection => b.show_collection(w, cx),
-                            Step::Release(key, title) => b.open_release(key, title.clone(), w, cx),
-                            Step::Current => {}
-                        });
+                        browser.update(cx, |b, cx| step.open(b, target.clone(), w, cx));
                     }),
             );
         }
@@ -594,7 +625,7 @@ impl Render for LocationBar {
                             .text_size(px(12.))
                             .text_color(m.danger)
                             .child(Icon::new(IconName::CircleAlert).size(px(13.)))
-                            .child(div().truncate().child(e)),
+                            .child(div().truncate().text_ellipsis_middle().child(e)),
                     )
                 })
                 .into_any_element();

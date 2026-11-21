@@ -46,6 +46,7 @@ gpui_kit::actions!(
         HideToTray,
         Quit,
         ToggleLike,
+        ActivateTrackLike,
         RateOne,
         RateTwo,
         RateThree,
@@ -72,6 +73,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f4", FocusLocation, Some("Disqro")),
         KeyBinding::new("space", PlayPause, Some("Disqro && !Input")),
         KeyBinding::new("enter", PlaySelected, Some("DataTable")),
+        KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
+        KeyBinding::new("space", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("enter", OpenDirectory, Some("Tree")),
         KeyBinding::new("alt-left", GoBack, Some("Disqro")),
         KeyBinding::new("backspace", GoBack, Some("Disqro && !Input")),
@@ -157,10 +160,13 @@ impl Workspace {
         let volume = saved.volume.clamp(0., 1.);
         let player = cx.new(|cx| Player::new(volume, saved.full_cd, window, cx));
         let catalog = cx.new(Catalog::new);
-        if saved.columns_version < profile::COLUMNS_VERSION {
-            crate::table::add_personal_columns(&mut saved.columns);
-        }
-        let columns = std::mem::take(&mut saved.columns);
+        let columns = saved
+            .table_layouts
+            .take()
+            .map(crate::table::Layouts::validate)
+            .unwrap_or_else(|| {
+                crate::table::Layouts::migrate(&saved.columns, saved.columns_version)
+            });
         let browser = cx.new(|cx| {
             Browser::new(
                 player.clone(),
@@ -247,17 +253,11 @@ impl Workspace {
                 }
                 PlayerEvent::PlaySelection => {}
             }),
-            cx.observe_window_visibility(window, |s: &mut Self, visibility, window, cx| {
+            cx.observe_window_visibility(window, |s: &mut Self, visibility, _, cx| {
                 let visible = visibility == WindowVisibility::Visible;
                 s.player.update(cx, |p, cx| p.set_visible(visible, cx));
                 if visible {
                     s.hidden_to_tray = false;
-                } else if s.prefs.minimize_to_tray
-                    && s.tray_available()
-                    && !s.hidden_to_tray
-                    && is_minimized(window)
-                {
-                    s.hide_to_tray(window, cx);
                 }
             }),
         ];
@@ -326,7 +326,8 @@ impl Workspace {
         });
         app.browser.read(cx).list_focus(cx).focus(window, cx);
         if let Some(notice) = profile_notice {
-            window.push_notification(notice, cx);
+            // The component notification layer is installed after the workspace constructor.
+            window.on_next_frame(move |window, cx| window.push_notification(notice, cx));
         }
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = events_rx.recv().await {
@@ -363,7 +364,8 @@ impl Workspace {
             folder: Some(b.path.clone()),
             volume: p.saved_volume(),
             full_cd: p.full_cd,
-            columns: b.table.read(cx).delegate().columns.clone(),
+            columns: vec![],
+            table_layouts: Some(b.table.read(cx).delegate().layouts.clone()),
             layout: Some(self.dock.read(cx).dump(cx)),
             places: Some(self.sidebar.read(cx).places.state()),
             sidebar: self.sidebar.read(cx).state(cx),
@@ -374,7 +376,7 @@ impl Workspace {
             window: self.prefs,
             collection: b.prefs.clone(),
             location: Some(b.location.clone()),
-            columns_version: profile::COLUMNS_VERSION,
+            columns_version: 0,
         }
     }
     /// What a library action applies to: the table's selection, or the
@@ -651,13 +653,7 @@ impl Workspace {
                         ),
                     );
                 }
-                let (s1, s2, s3, s4, s5) = (
-                    shell.clone(),
-                    shell.clone(),
-                    shell.clone(),
-                    shell.clone(),
-                    shell.clone(),
-                );
+                let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
                 menu.item(
                     PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
                         let _ = s1.update(cx, |s, cx| s.reset(w, cx));
@@ -665,19 +661,7 @@ impl Workspace {
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new("Minimize to Tray")
-                        .checked(prefs.minimize_to_tray)
-                        .disabled(!tray)
-                        .on_click(move |_, _, cx| {
-                            let _ = s2.update(cx, |s, cx| {
-                                s.prefs.minimize_to_tray = !s.prefs.minimize_to_tray;
-                                s.schedule_save(cx);
-                                cx.notify();
-                            });
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Close Button Keeps Playing in Tray")
+                    PopupMenuItem::new("Close to Tray")
                         .checked(prefs.close_to_tray)
                         .disabled(!tray)
                         .on_click(move |_, _, cx| {
@@ -715,17 +699,6 @@ impl Workspace {
             .tooltip(label)
             .disabled(!enabled)
     }
-}
-
-#[cfg(windows)]
-fn is_minimized(window: &Window) -> bool {
-    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
-    let h = native_handle(window);
-    h != 0 && unsafe { IsIconic(HWND(h as _)).as_bool() }
-}
-#[cfg(not(windows))]
-fn is_minimized(_: &Window) -> bool {
-    false
 }
 
 impl Render for Workspace {

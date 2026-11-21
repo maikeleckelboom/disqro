@@ -377,13 +377,15 @@ impl Disc {
         let m = self.release.as_ref()?;
         Some((format!("CD {}", m.number), m.subtitle.as_str()))
     }
-    pub fn section(&self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    /// The header of a CD within a track table. Its cover follows the row
+    /// height, which grows with the table's Cover column.
+    pub fn section(&self, row_height: f32, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let m = *materials(cx);
-        let cover = self.cover.as_ref().and_then(|file| {
-            window
-                .use_asset::<crate::artwork::CoverThumbnail>(file, cx)
-                .flatten()
-        });
+        let size = row_height - 6.;
+        let cover = self
+            .cover
+            .as_ref()
+            .and_then(|file| crate::artwork::CoverThumbnail::get(file, size, window, cx).flatten());
         let mut detail = Vec::new();
         if let Some(year) = self.year {
             detail.push(year.to_string());
@@ -408,7 +410,7 @@ impl Disc {
             .border_color(m.control_line)
             .child(
                 div()
-                    .size(px(22.))
+                    .size(px(size))
                     .flex_shrink_0()
                     .overflow_hidden()
                     .rounded(px(2.))
@@ -420,6 +422,7 @@ impl Disc {
                 div()
                     .min_w_0()
                     .truncate()
+                    .text_ellipsis_middle()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(12.5))
                     .text_color(m.text)
@@ -429,6 +432,7 @@ impl Disc {
                 div()
                     .min_w_0()
                     .truncate()
+                    .text_ellipsis_middle()
                     .flex_shrink_0()
                     .text_size(px(11.))
                     .text_color(m.text_faint)
@@ -523,7 +527,7 @@ impl TableDelegate for Discs {
             Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
         };
         if c != 0 {
-            return cell.child(div().truncate().child(row.label(c)));
+            return cell.child(div().truncate().text_ellipsis_middle().child(row.label(c)));
         }
         // A disc of a release sits beneath the release's cover, without one
         // of its own.
@@ -536,16 +540,14 @@ impl TableDelegate for Discs {
                         div()
                             .min_w_0()
                             .truncate()
+                            .text_ellipsis_middle()
                             .text_color(m.text_faint)
                             .child(subtitle.to_owned()),
                     )
                 });
         }
-        let cover = cover.and_then(|file| {
-            window
-                .use_asset::<crate::artwork::CoverThumbnail>(file, cx)
-                .flatten()
-        });
+        let cover = cover
+            .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
         cell.child(
             div()
                 .size(px(32.))
@@ -565,7 +567,18 @@ impl TableDelegate for Discs {
                     ),
                 }),
         )
-        .child(div().min_w_0().truncate().child(row.label(0)))
+        .child({
+            let label = row.label(0);
+            div()
+                .id(("disc-title", r))
+                .min_w_0()
+                .truncate()
+                .text_ellipsis_middle()
+                .child(label.clone())
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
+                })
+        })
         .when_some(discs, |d, n| {
             d.child(
                 div()
