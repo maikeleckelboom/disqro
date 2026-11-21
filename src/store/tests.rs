@@ -354,7 +354,7 @@ fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
         (disc.root, disc.album, disc.track),
         (r, sections[0].id, selected.id)
     );
-    let cd = s.disc_keys(disc.album).unwrap();
+    let cd = s.disc_keys(Scope::Album(disc.album)).unwrap();
     assert_eq!(cd.len(), 2);
     assert_eq!(cd[1], selected.id);
     fs::rename(root.join("Album B"), root.join("Moved B")).unwrap();
@@ -598,4 +598,99 @@ fn detached_tracks_are_checked_before_playback_and_personal_edits() {
     assert!(!DetachedFiles::default().available(&row));
     assert_ne!(s.resolve(&track).unwrap(), old);
     assert!(!all(&s, Scope::Playlist(mix))[0].available);
+}
+
+/// Two two-disc volumes side by side and a single CD: discs of one volume
+/// form a release, the volumes and the single stay apart.
+fn releases(root: &Path) {
+    for (folder, title) in [
+        ("Vol I/CD1", "Vol I (CD1)"),
+        ("Vol I/CD2", "Vol I (CD2)"),
+        ("Vol II/CD1", "Vol II (CD1)"),
+        ("Vol II/CD2", "Vol II (CD2)"),
+        ("Single/CD", "Single"),
+    ] {
+        let dir = root.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("disc.cue"),
+            format!(
+                "TITLE \"{title}\"\nFILE \"disc.flac\" WAVE\nTRACK 01 AUDIO\nTITLE \"{title} one\"\n\
+                 INDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE \"{title} two\"\nINDEX 01 01:00:00\n"
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("disc.flac"), format!("image of {title}")).unwrap();
+    }
+}
+
+#[test]
+fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Music");
+    releases(&root);
+    let mut s = Store::memory();
+    let r = s.add_root(&root).unwrap();
+    index(&mut s, r);
+    let albums = s.albums(Some(r), "").unwrap();
+    assert_eq!(albums.len(), 5);
+    let by_title = |t: &str| albums.iter().find(|a| a.title == t).unwrap();
+    let (one, two) = (by_title("Vol I (CD1)"), by_title("Vol I (CD2)"));
+    let release = two.release.clone().unwrap();
+    assert_eq!(
+        (release.first, release.number, release.title.as_str()),
+        (one.id, 2, "Vol I")
+    );
+    assert_eq!(
+        by_title("Vol II (CD1)").release.as_ref().unwrap().title,
+        "Vol II"
+    );
+    assert_ne!(
+        by_title("Vol II (CD2)").release.as_ref().unwrap().first,
+        one.id
+    );
+    assert!(by_title("Single").release.is_none());
+    assert_eq!(s.release_discs(two.id).unwrap(), [one.id, two.id]);
+    assert_eq!(s.release_discs(by_title("Single").id).unwrap().len(), 1);
+    assert_eq!(s.membership(one.id).unwrap().unwrap().number, 1);
+
+    // Play Release lists CD 1 then CD 2 in authored order, and only them.
+    let keys = s.disc_keys(Scope::Release(one.id)).unwrap();
+    let titles: Vec<_> = s
+        .rows(Scope::Release(one.id), &keys)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.track.title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Vol I (CD1) one",
+            "Vol I (CD1) two",
+            "Vol I (CD2) one",
+            "Vol I (CD2) two"
+        ]
+    );
+    // A release page groups its discs; a search keeps the matching disc.
+    let query = Query {
+        scope: Scope::Release(one.id),
+        search: "two".into(),
+        order: None,
+    };
+    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    assert_eq!((listing.keys.len(), sections.len()), (2, 2));
+    let query = Query {
+        search: "title:cd2".into(),
+        ..query
+    };
+    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    assert_eq!((listing.keys.len(), sections.len()), (2, 1));
+    assert_eq!(sections[0].id, two.id);
+
+    // Grouping is derived on every read: personal marks keep their tracks.
+    let liked = keys[2];
+    s.set_liked(&[liked], true).unwrap();
+    index(&mut s, r);
+    assert_eq!(s.disc_keys(Scope::Release(one.id)).unwrap()[2], liked);
+    assert_eq!(all(&s, Scope::Liked)[0].id, liked);
 }

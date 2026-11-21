@@ -5,7 +5,7 @@ use super::*;
 /// the open scan without replacing its root or starting another walker.
 pub(super) struct Visit {
     location: Location,
-    disc: Option<DiscId>,
+    page: Option<Page>,
     albums: bool,
     query: String,
     sort: Option<(Field, ColumnSort)>,
@@ -26,8 +26,8 @@ impl Browser {
                 marked: None,
                 selected: t
                     .selected_row()
-                    .and_then(|i| t.delegate().items.get(i))
-                    .map(|d| RowKey::Disc(d.id.clone())),
+                    .and_then(|i| t.delegate().rows.get(i))
+                    .map(Shelf::key),
                 offset: t.vertical_scroll_handle.0.borrow().base_handle.offset(),
             }
         } else {
@@ -41,7 +41,7 @@ impl Browser {
         };
         Visit {
             location: self.location.clone(),
-            disc: self.disc.clone(),
+            page: self.page.clone(),
             albums: self.prefs.albums,
             query: self.query.clone(),
             sort: table.delegate().sort,
@@ -64,7 +64,7 @@ impl Browser {
     pub(super) fn remember(&mut self, next: &Location, cx: &App) {
         let same = match (&self.location, next) {
             (Location::Folder(a), Location::Folder(b)) => {
-                a.as_os_str().is_empty() || (self.disc.is_none() && crate::places::same_path(a, b))
+                a.as_os_str().is_empty() || (self.page.is_none() && crate::places::same_path(a, b))
             }
             (a, b) => a == b,
         };
@@ -80,12 +80,9 @@ impl Browser {
         };
         if self.listing_discs() {
             self.discs.update(cx, |t, cx| {
-                let ix = mark.selected.and_then(|k| {
-                    t.delegate()
-                        .items
-                        .iter()
-                        .position(|d| k == RowKey::Disc(d.id.clone()))
-                });
+                let ix = mark
+                    .selected
+                    .and_then(|k| t.delegate().rows.iter().position(|r| r.key() == k));
                 reselect(t, ix, cx);
                 t.vertical_scroll_handle
                     .0
@@ -115,7 +112,7 @@ impl Browser {
         if !same_folder {
             self.enter(visit.location, w, cx);
         }
-        self.disc = visit.disc;
+        self.page = visit.page;
         self.reset_table(cx);
         self.table
             .update(cx, |t, _| t.delegate_mut().sort = visit.sort);
@@ -140,11 +137,11 @@ impl Browser {
         match location {
             Location::Folder(path) if self.folder_ready && self.path == path => {
                 self.location = Location::Folder(path.clone());
-                self.disc = None;
+                self.page = None;
                 self.notice = None;
                 self.reset_table(cx);
                 self.clear_search(window, cx);
-                self.folders.update(cx, |f, cx| f.show(&path, false, cx));
+                self.folders.update(cx, |f, cx| f.show(&path, None, cx));
                 self.filter(cx);
                 self.list_focus(cx).focus(window, cx);
                 cx.emit(ViewChanged);
@@ -153,7 +150,7 @@ impl Browser {
             Location::Folder(path) => self.load(path, None, window, cx),
             location => {
                 if self.location != location {
-                    self.disc = None;
+                    self.page = None;
                     self.search.update(cx, |s, cx| s.set_value("", window, cx));
                     self.query.clear();
                     self.table.update(cx, |t, _| scroll_to_top(t));
@@ -163,6 +160,10 @@ impl Browser {
                 self.generation += 1;
                 self.busy = false;
                 self.notice = None;
+                self.membership = None;
+                if let Location::Album { id, .. } = location {
+                    self.load_membership(id, cx);
+                }
                 self.location = location;
                 self.count = 0;
                 self.duration = None;
@@ -171,7 +172,7 @@ impl Browser {
                 let path = self.path.clone();
                 self.folders.update(cx, |f, cx| {
                     if !path.as_os_str().is_empty() && f.is_empty() {
-                        f.show(&path, false, cx);
+                        f.show(&path, None, cx);
                     }
                     f.set_highlight(false, cx);
                 });
@@ -194,35 +195,73 @@ impl Browser {
             self.restore_visit(l, window, cx);
         }
     }
+    /// Goes up one level: from a CD to its release, from a release or a CD
+    /// to the collection, from a folder to its parent. When the level above
+    /// is the previous history entry, Back restores it as it was.
     pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.disc.is_some() {
-            if self
-                .back
-                .last()
-                .is_some_and(|v| v.location == self.location && v.disc.is_none())
-            {
-                self.back(window, cx);
-            } else {
-                self.push_visit(cx);
-                self.project_disc(None, window, cx);
+        let release = self.membership.clone();
+        let target = match (&self.page, &self.location) {
+            (Some(Page::Disc(_)), location) if let Some(m) = &release => {
+                (location.clone(), Some(Page::Release(m.key.clone())))
             }
-            return;
-        }
-        match &self.location {
-            Location::Folder(_) => {
+            (Some(_), location) => (location.clone(), None),
+            (None, Location::Album { root, .. }) => match &release {
+                Some(m) => match m.key {
+                    DiscId::Library(id) => (
+                        Location::Release {
+                            root: *root,
+                            id,
+                            title: m.title.clone(),
+                        },
+                        None,
+                    ),
+                    _ => (Location::Library(*root), None),
+                },
+                None => (Location::Library(*root), None),
+            },
+            (None, Location::Release { root, .. }) => (Location::Library(*root), None),
+            (None, Location::Folder(_)) => {
                 if let Some(parent) = self.path.parent().map(Path::to_owned) {
                     self.open(parent, window, cx);
                 }
+                return;
             }
-            Location::Album { root, .. } => self.show(Location::Library(*root), window, cx),
-            _ => {}
+            _ => return,
+        };
+        if self
+            .back
+            .last()
+            .is_some_and(|v| v.location == target.0 && v.page == target.1)
+        {
+            self.back(window, cx);
+        } else if target.0 == self.location {
+            self.push_visit(cx);
+            self.project_page(target.1, window, cx);
+        } else {
+            self.show(target.0, window, cx);
+        }
+    }
+    /// Returns from a CD or release page of a folder to its collection.
+    pub fn show_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page.is_none() {
+            return;
+        }
+        if self
+            .back
+            .last()
+            .is_some_and(|v| v.location == self.location && v.page.is_none())
+        {
+            self.back(window, cx);
+        } else {
+            self.push_visit(cx);
+            self.project_page(None, window, cx);
         }
     }
     pub fn can_go_up(&self) -> bool {
         match self.location {
-            Location::Folder(_) => self.disc.is_some() || self.path.parent().is_some(),
-            Location::Album { .. } => true,
-            _ => self.disc.is_some(),
+            Location::Folder(_) => self.page.is_some() || self.path.parent().is_some(),
+            Location::Album { .. } | Location::Release { .. } => true,
+            _ => self.page.is_some(),
         }
     }
     pub(super) fn select_revealed(&mut self, cx: &mut App) -> bool {
@@ -332,9 +371,9 @@ impl Browser {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let disc = (dest == Destination::Disc).then(|| DiscId::of(&track));
+        let page = (dest == Destination::Disc).then(|| Page::Disc(DiscId::of(&track)));
         let same_folder = self.location == Location::Folder(folder.clone());
-        if !same_folder || self.disc != disc || self.listing_discs() || !self.query.is_empty() {
+        if !same_folder || self.page != page || self.listing_discs() || !self.query.is_empty() {
             self.push_visit(cx);
         }
         if dest == Destination::Collection {
@@ -343,7 +382,7 @@ impl Browser {
         if !same_folder {
             self.load(folder, None, w, cx);
         }
-        self.project_disc(disc, w, cx);
+        self.project_page(page, w, cx);
         self.reveal_key = Some(RowKey::Track(track.source.clone(), track.disc.clone()));
         if !self.select_revealed(cx) && !self.busy {
             self.notice = Some("This recording is unavailable.".into());

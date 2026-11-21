@@ -5,7 +5,7 @@ mod playback;
 use crate::{
     audio::Command,
     catalog::{Catalog, Targets},
-    collection::{Disc, DiscId},
+    collection::{Disc, DiscId, Page},
     library::{DiscTrack, Track, TrackList, clock},
     player::Player,
     store::{self, Mark, PlaylistId, Row, Scope, Ticket},
@@ -198,6 +198,8 @@ pub fn add_personal_columns(columns: &mut Vec<LayoutColumn>) {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RowKey {
     Disc(DiscId),
+    /// A release in the Albums / CDs list, by its first disc.
+    Release(DiscId),
     Track(PathBuf, Option<DiscTrack>),
     Key(i64),
 }
@@ -427,6 +429,8 @@ pub struct MusicTable {
     pub empty: SharedString,
     /// An empty folder with subfolders offers to include them.
     pub offer_subfolders: bool,
+    /// An empty library offers to add a music folder.
+    pub offer_library: bool,
     /// Folder sources whose audio header could not be read.
     pub unreadable: Arc<HashSet<PathBuf>>,
     keys_ticket: Ticket,
@@ -502,6 +506,69 @@ pub fn scroll_to_top<D: TableDelegate>(t: &mut TableState<D>) {
     scroll.base_handle.set_offset(point(px(0.), px(0.)));
 }
 
+/// The menu of a CD: open or play it, and its release when it has one.
+pub fn disc_menu(
+    menu: PopupMenu,
+    disc: &Arc<Disc>,
+    browser: WeakEntity<crate::browser::Browser>,
+    table: WeakEntity<TableState<MusicTable>>,
+    cx: &App,
+) -> PopupMenu {
+    let (d, b, t) = (disc.clone(), browser.clone(), table.clone());
+    let page = Page::Disc(disc.id.clone());
+    let menu = menu
+        .item(PopupMenuItem::new("Open CD").on_click(move |_, w, cx| {
+            let _ = b.update(cx, |b, cx| b.open_disc(&d, w, cx));
+        }))
+        .item(
+            PopupMenuItem::new("Play CD")
+                .icon(IconName::Play)
+                .on_click(move |_, _, cx| {
+                    let _ = t.update(cx, |t, cx| t.delegate().play_page(&page, cx));
+                }),
+        );
+    match &disc.release {
+        Some(m) => release_items(
+            menu.separator(),
+            m.key.clone(),
+            m.title.clone(),
+            browser,
+            table,
+            cx,
+        ),
+        None => menu,
+    }
+}
+/// Open Release and Play Release, for a disc that belongs to one. The
+/// release page itself offers only Play Release.
+pub fn release_items(
+    menu: PopupMenu,
+    key: DiscId,
+    title: String,
+    browser: WeakEntity<crate::browser::Browser>,
+    table: WeakEntity<TableState<MusicTable>>,
+    cx: &App,
+) -> PopupMenu {
+    let page = Page::Release(key.clone());
+    let shown = browser
+        .upgrade()
+        .is_some_and(|b| b.read(cx).shows_release(&key));
+    menu.when(!shown, |menu| {
+        menu.item(
+            PopupMenuItem::new("Open Release").on_click(move |_, w, cx| {
+                let _ = browser.update(cx, |b, cx| b.open_release(&key, title.clone(), w, cx));
+            }),
+        )
+    })
+    .item(
+        PopupMenuItem::new("Play Release")
+            .icon(IconName::Play)
+            .on_click(move |_, _, cx| {
+                let _ = table.update(cx, |t, cx| t.delegate().play_page(&page, cx));
+            }),
+    )
+}
+
 /// Sends the playable tracks of `targets` to the player once they are known.
 pub fn queue_targets(
     catalog: &Entity<Catalog>,
@@ -563,6 +630,7 @@ impl MusicTable {
             selection: Default::default(),
             empty: SharedString::default(),
             offer_subfolders: false,
+            offer_library: false,
             unreadable: Arc::default(),
             keys_ticket: Ticket::default(),
             page_ticket: Ticket::default(),
@@ -1413,6 +1481,17 @@ impl TableDelegate for MusicTable {
                         }),
                 )
             })
+            .when(self.offer_library, |d| {
+                d.child(
+                    Button::new("add-music-folder")
+                        .outline()
+                        .small()
+                        .label("Add Music Folder…")
+                        .on_click(|_, w, cx| {
+                            w.dispatch_action(Box::new(crate::workspace::AddMusicFolder), cx)
+                        }),
+                )
+            })
     }
     fn context_menu(
         &mut self,
@@ -1422,16 +1501,7 @@ impl TableDelegate for MusicTable {
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         if let Some(disc) = self.header(ix).cloned() {
-            let browser = self.browser.clone();
-            let table = cx.weak_entity();
-            let id = disc.id.clone();
-            return menu
-                .item(PopupMenuItem::new("Open CD").on_click(move |_, w, cx| {
-                    let _ = browser.update(cx, |b, cx| b.open_disc(&disc, w, cx));
-                }))
-                .item(PopupMenuItem::new("Play CD").on_click(move |_, _, cx| {
-                    let _ = table.update(cx, |t, cx| t.delegate().play_disc(&id, cx));
-                }));
+            return disc_menu(menu, &disc, self.browser.clone(), cx.weak_entity(), cx);
         }
         let Some(track) = self.rows.track(ix).cloned() else {
             return menu;

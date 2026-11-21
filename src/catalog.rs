@@ -494,14 +494,21 @@ impl Catalog {
         album: store::AlbumId,
         cx: &AsyncApp,
     ) -> anyhow::Result<TrackList> {
+        Self::authored_tracks(catalog, Scope::Album(album), cx).await
+    }
+    /// The available tracks of an indexed disc, or of every disc of a
+    /// release with [`Scope::Release`], in authored order.
+    pub async fn authored_tracks(
+        catalog: Entity<Self>,
+        scope: Scope,
+        cx: &AsyncApp,
+    ) -> anyhow::Result<TrackList> {
         let store = catalog
             .read_with(cx, |c, _| c.handle())
             .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
-        let keys = store.call(move |s| s.disc_keys(album)).await?;
+        let keys = store.call(move |s| s.disc_keys(scope)).await?;
         catalog
-            .read_with(cx, |c, cx| {
-                c.tracks(Targets::Keys(Scope::Album(album), keys), cx)
-            })
+            .read_with(cx, |c, cx| c.tracks(Targets::Keys(scope, keys), cx))
             .await
     }
     pub fn handle(&self) -> Option<Handle> {

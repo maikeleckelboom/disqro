@@ -16,6 +16,8 @@ pub enum Scope {
     /// One registered collection, or all of them.
     Library(Option<RootId>),
     Album(AlbumId),
+    /// Every disc of the release whose first disc this is, in disc order.
+    Release(AlbumId),
     Liked,
     Playlist(PlaylistId),
 }
@@ -165,6 +167,25 @@ pub struct AlbumRow {
     pub duration: f64,
     pub complete: bool,
     pub format: String,
+    /// Its place in a release of several discs.
+    pub release: Option<AlbumRelease>,
+}
+
+/// A disc's place in a release, as [`crate::release`] finds it among the
+/// discs of its collection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlbumRelease {
+    pub first: AlbumId,
+    pub title: String,
+    pub number: u32,
+    pub subtitle: String,
+}
+
+/// Which discs an album query reads.
+#[derive(Clone)]
+enum Albums<'a> {
+    Root(Option<RootId>),
+    Ids(&'a [AlbumId]),
 }
 
 pub struct RegisteredDisc {
@@ -189,7 +210,30 @@ impl Store {
     }
     pub fn listing(&self, q: &Query) -> Result<Listing> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
+        let release_order;
         let (key, from, mut filter, default) = match q.scope {
+            Scope::Release(first) => {
+                // Album ids come from the database, so they are inlined.
+                let discs = self.release_discs(first)?;
+                let ids = discs.iter().map(i64::to_string).collect::<Vec<_>>();
+                release_order = format!(
+                    "CASE t.album_id {} END, t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
+                    ids.iter()
+                        .enumerate()
+                        .map(|(i, id)| format!("WHEN {id} THEN {i}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                (
+                    "t.id",
+                    "tracks t",
+                    vec![format!(
+                        "t.album_id IN ({}) AND t.present = 1",
+                        ids.join(",")
+                    )],
+                    release_order.as_str(),
+                )
+            }
             Scope::Library(root) => (
                 "t.id",
                 "tracks t LEFT JOIN albums al ON al.id = t.album_id",
@@ -260,6 +304,10 @@ impl Store {
         let listing = self.listing(query)?;
         let sections = match query.scope {
             Scope::Library(root) if grouped => self.albums(root, &query.search)?,
+            Scope::Release(first) if grouped => {
+                let discs = self.release_discs(first)?;
+                self.album_rows(Albums::Ids(&discs), &query.search)?
+            }
             _ => vec![],
         };
         snapshot.commit()?;
@@ -288,10 +336,12 @@ impl Store {
         Ok(disc.flatten())
     }
 
-    pub fn disc_keys(&self, album: AlbumId) -> Result<Vec<i64>> {
+    /// The tracks of a disc, or with [`Scope::Release`] of every disc of a
+    /// release, in authored order.
+    pub fn disc_keys(&self, scope: Scope) -> Result<Vec<i64>> {
         Ok(self
             .listing(&Query {
-                scope: Scope::Album(album),
+                scope,
                 search: String::new(),
                 order: None,
             })?
@@ -376,13 +426,101 @@ impl Store {
 
     /// The discs of a collection view that hold matching tracks.
     pub fn albums(&self, root: Option<RootId>, search: &str) -> Result<Vec<AlbumRow>> {
+        self.album_rows(Albums::Root(root), search)
+    }
+
+    /// Whether an indexed disc belongs to a release of several discs.
+    pub fn membership(&self, album: AlbumId) -> Result<Option<AlbumRelease>> {
+        Ok(match self.album_root(album)? {
+            Some(root) => self.releases(Some(root))?.remove(&album),
+            None => None,
+        })
+    }
+
+    /// The discs of one release in disc order, or the album alone.
+    pub fn release_discs(&self, album: AlbumId) -> Result<Vec<AlbumId>> {
+        let Some(root) = self.album_root(album)? else {
+            return Ok(vec![album]);
+        };
+        let releases = self.releases(Some(root))?;
+        let Some(first) = releases.get(&album).map(|r| r.first) else {
+            return Ok(vec![album]);
+        };
+        let mut discs: Vec<_> = releases
+            .iter()
+            .filter(|(_, r)| r.first == first)
+            .map(|(id, r)| (r.number, *id))
+            .collect();
+        discs.sort();
+        Ok(discs.into_iter().map(|(_, id)| id).collect())
+    }
+
+    /// The release memberships of a collection's discs, from all of its
+    /// available discs whatever a view's search shows.
+    fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
+        let (filter, args): (&str, Vec<RootId>) = match root {
+            Some(root) => ("al.root_id = ?1", vec![root]),
+            None => ("al.root_id IS NOT NULL", vec![]),
+        };
+        // One indexed look-up per disc rather than a pass over every track.
+        let sql = format!(
+            "SELECT al.id, al.folder, al.title,
+                (SELECT min(t.disc_number) FROM tracks t
+                 WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
+             FROM albums al
+             WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t
+                 WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
+             ORDER BY al.id"
+        );
+        let mut stmt = self.db.prepare_cached(&sql)?;
+        let discs = stmt
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok((
+                    r.get::<_, AlbumId>(0)?,
+                    PathBuf::from(r.get::<_, String>(1)?),
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<u32>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let candidates: Vec<_> = discs
+            .iter()
+            .map(|(_, folder, title, number)| crate::release::Candidate {
+                folder,
+                title,
+                number: *number,
+            })
+            .collect();
+        let mut out = HashMap::new();
+        for g in crate::release::releases(&candidates) {
+            let first = discs[g.discs[0]].0;
+            for (n, &i) in g.discs.iter().enumerate() {
+                out.insert(
+                    discs[i].0,
+                    AlbumRelease {
+                        first,
+                        title: g.title.clone(),
+                        number: n as u32 + 1,
+                        subtitle: g.subtitles[n].clone(),
+                    },
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    fn album_rows(&self, albums: Albums, search: &str) -> Result<Vec<AlbumRow>> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
-        let mut filter = vec![match root {
-            Some(root) => {
-                args.push(Box::new(root));
+        let mut filter = vec![match &albums {
+            Albums::Root(Some(root)) => {
+                args.push(Box::new(*root));
                 format!("t.root_id = ?{} AND t.present = 1", args.len())
             }
-            None => "t.root_id IS NOT NULL AND t.present = 1".into(),
+            Albums::Root(None) => "t.root_id IS NOT NULL AND t.present = 1".into(),
+            Albums::Ids(ids) => format!(
+                "t.album_id IN ({}) AND t.present = 1",
+                ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+            ),
         }];
         filter.extend(Term::parse(search).iter().map(|t| t.sql(&mut args)));
         let sql = format!(
@@ -417,9 +555,39 @@ impl Store {
                 duration: r.get(6)?,
                 complete: r.get(7)?,
                 format: r.get(8)?,
+                release: None,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut rows: Vec<AlbumRow> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut releases = match albums {
+            Albums::Root(root) => self.releases(root)?,
+            Albums::Ids(ids) => {
+                let order: HashMap<AlbumId, usize> =
+                    ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+                rows.sort_by_key(|r| order.get(&r.id).copied());
+                match ids.first() {
+                    Some(&id) => match self.album_root(id)? {
+                        Some(root) => self.releases(Some(root))?,
+                        None => HashMap::new(),
+                    },
+                    None => HashMap::new(),
+                }
+            }
+        };
+        for row in &mut rows {
+            row.release = releases.remove(&row.id);
+        }
+        Ok(rows)
+    }
+    fn album_root(&self, album: AlbumId) -> Result<Option<RootId>> {
+        Ok(self
+            .db
+            .prepare_cached(
+                "SELECT t.root_id FROM tracks t WHERE t.album_id = ?1 AND t.present = 1 LIMIT 1",
+            )?
+            .query_row([album], |r| r.get(0))
+            .optional()?
+            .flatten())
     }
 }
 

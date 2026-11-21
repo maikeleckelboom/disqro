@@ -33,6 +33,8 @@ pub struct Profile {
     pub queue: Option<SavedQueue>,
     pub window: WindowPrefs,
     pub collection: crate::collection::ViewPrefs,
+    /// Open folders in Locations and whether playlists are shown.
+    pub sidebar: crate::sidebar::SidebarState,
     /// The view shown at exit: a folder, a collection, Liked Tracks or a playlist.
     pub location: Option<crate::browser::Location>,
     /// Layouts older than [`COLUMNS_VERSION`] gain the columns added since.
@@ -50,6 +52,7 @@ impl Default for Profile {
             queue: None,
             window: WindowPrefs::default(),
             collection: Default::default(),
+            sidebar: Default::default(),
             location: None,
             // Missing from profiles written before the field existed.
             columns_version: 0,

@@ -1,6 +1,6 @@
 //! Resolve listening intent independently of display order and filtering.
 use super::*;
-use crate::library::DiscContext;
+use crate::{collection::release_discs, library::DiscContext};
 
 impl MusicTable {
     pub fn play(&self, row: usize, cx: &mut App) {
@@ -75,7 +75,7 @@ impl MusicTable {
                             .filter(|r| r.available)
                             .ok_or_else(|| anyhow::anyhow!("The selected track is unavailable."))?
                             .track;
-                        let context = if matches!(scope, Scope::Album(_)) {
+                        let context = if matches!(scope, Scope::Album(_) | Scope::Release(_)) {
                             DiscContext::Selected
                         } else {
                             DiscContext::Inferred
@@ -105,15 +105,25 @@ impl MusicTable {
             }
         }
     }
-    pub fn play_disc(&self, id: &DiscId, cx: &mut App) {
+    /// Plays one CD, or every CD of a release, from the beginning in authored
+    /// order. The queue then ends with it.
+    pub fn play_page(&self, page: &Page, cx: &mut App) {
         let player = self.player.clone();
-        if let DiscId::Library(album) = id {
+        let unavailable = match page {
+            Page::Disc(_) => "This CD is unavailable.",
+            Page::Release(_) => "This release is unavailable.",
+        };
+        let scope = match page {
+            Page::Disc(DiscId::Library(album)) => Some(Scope::Album(*album)),
+            Page::Release(DiscId::Library(album)) => Some(Scope::Release(*album)),
+            _ => None,
+        };
+        if let Some(scope) = scope {
             let catalog = self.catalog.clone();
-            let album = *album;
             let request = player.read(cx).play_request.clone();
             let generation = request.next();
             cx.spawn(async move |cx| {
-                let tracks = Catalog::album_tracks(catalog.clone(), album, cx).await;
+                let tracks = Catalog::authored_tracks(catalog.clone(), scope, cx).await;
                 if !request.is_current(generation) {
                     return;
                 }
@@ -123,22 +133,43 @@ impl MusicTable {
                     }),
                     other => catalog.update(cx, |_, cx| {
                         cx.emit(crate::catalog::CatalogEvent::Notice(
-                            other.err().map_or_else(
-                                || "This CD is unavailable.".into(),
-                                |e| format!("{e:#}"),
-                            ),
+                            other
+                                .err()
+                                .map_or_else(|| unavailable.into(), |e| format!("{e:#}")),
                         ))
                     }),
                 }
             })
             .detach();
-        } else if let Some(disc) = self.programs.iter().find(|d| &d.id == id) {
+            return;
+        }
+        let tracks: Vec<Arc<Track>> = match page {
+            Page::Disc(id) => self
+                .programs
+                .iter()
+                .filter(|d| &d.id == id)
+                .flat_map(|d| d.tracks.iter().cloned())
+                .collect(),
+            Page::Release(key) => release_discs(&self.programs, key)
+                .iter()
+                .flat_map(|d| d.tracks.iter().cloned())
+                .collect(),
+        };
+        if !tracks.is_empty() {
             self.player.update(cx, |p, cx| {
                 p.command(
-                    Command::PlayDisc(disc.tracks.clone().into(), 0, DiscContext::Selected),
+                    Command::PlayDisc(tracks.into(), 0, DiscContext::Selected),
                     cx,
                 )
             });
+        }
+    }
+    /// Whether the rows in memory include `track`, as the rows of a short
+    /// page such as a release do.
+    pub fn lists(&self, track: &Track) -> bool {
+        match &self.rows.data {
+            Contents::Folder { original, .. } => original.iter().any(|t| t.same_item(track)),
+            Contents::Library(p) => p.cache.values().any(|r| r.track.same_item(track)),
         }
     }
     pub fn page_contains(&self, disc: &DiscId, track: &Track) -> bool {
