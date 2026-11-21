@@ -103,11 +103,22 @@ impl Player {
         }
         self.run = left..right;
     }
+    /// Only a track from a CD offers the Track and Full CD perspectives.
+    pub(super) fn on_cd(&self) -> bool {
+        self.status
+            .track
+            .as_ref()
+            .is_some_and(|t| crate::timeline::from_cd(t, self.program.as_deref()))
+    }
+    /// Full CD is offered once the CD resolves to more than the track itself.
+    fn full_cd_available(&self) -> bool {
+        self.on_cd() && self.program.as_ref().is_some_and(|p| p.full_cd)
+    }
     fn disc_view(&self) -> bool {
-        self.full_cd && self.segment.is_some() && self.program.as_ref().is_some_and(|p| p.full_cd)
+        self.full_cd && self.segment.is_some() && self.full_cd_available()
     }
     pub(crate) fn set_perspective(&mut self, full_cd: bool, cx: &mut Context<Self>) {
-        if self.full_cd == full_cd || !self.program.as_ref().is_some_and(|p| p.full_cd) {
+        if self.full_cd == full_cd || !self.full_cd_available() {
             return;
         }
         let _timer = crate::diagnostics::Timer::measure(|d| &d.switch_us);
@@ -192,7 +203,7 @@ impl Player {
         cx.notify();
     }
     pub(super) fn perspectives(&self, m: &Materials, cx: &Context<Self>) -> impl IntoElement {
-        let enabled = self.program.as_ref().is_some_and(|p| p.full_cd);
+        let enabled = self.full_cd_available();
         let reason = self
             .unavailable
             .as_ref()

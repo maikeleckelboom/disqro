@@ -735,13 +735,7 @@ impl Render for Player {
                                             .child(subtitle),
                                     ),
                             )
-                            .when(
-                                self.program
-                                    .as_ref()
-                                    .is_some_and(|p| p.full_cd || p.limitation.is_some())
-                                    || self.unavailable.is_some(),
-                                |row| row.child(self.perspectives(&m, cx)),
-                            )
+                            .when(self.on_cd(), |row| row.child(self.perspectives(&m, cx)))
                             .child(transport)
                             .child(volume),
                     )

@@ -15,6 +15,12 @@ use std::{
 };
 
 pub const SECOND: u64 = 1_000_000_000;
+/// Whether `track` comes from a CD: a CUE chapter, known before its program
+/// resolves, or one of several tracks that resolved as one CD. A recording
+/// that stands alone, including a one-track album, has no Full CD.
+pub fn from_cd(track: &Track, program: Option<&Program>) -> bool {
+    track.disc.is_some() || program.is_some_and(|p| p.full_cd && p.segments.len() > 1)
+}
 pub fn frame_time(frame: usize, rate: u32) -> u64 {
     ((frame as u128 * u128::from(SECOND) + u128::from(rate / 2)) / u128::from(rate)) as u64
 }
