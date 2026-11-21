@@ -211,6 +211,7 @@ pub struct Pane {
     pub group: Option<WeakEntity<TabGroup>>,
     /// The tab's name field while the listener renames it.
     pub renaming: Option<Entity<InputState>>,
+    pub tab_focus: FocusHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -237,6 +238,7 @@ impl Pane {
             content,
             group: None,
             renaming: None,
+            tab_focus: cx.focus_handle(),
             focus,
             _subscriptions: subscriptions,
         }

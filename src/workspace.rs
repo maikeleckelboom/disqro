@@ -8,6 +8,7 @@
 //! The player is not a dock panel: it is part of the window, so no
 //! arrangement of panels can close it or interrupt playback.
 mod recovery;
+mod sidebar;
 mod skin;
 
 use crate::{
@@ -1500,8 +1501,20 @@ fn tab_menu(
     });
     let (a, b, c) = (workspace.clone(), workspace.clone(), workspace.clone());
     let (p1, p2, p3) = (pane.clone(), pane.clone(), pane.clone());
+    let id = Workspace::panel_id(pane);
+    let arrangement = workspace
+        .upgrade()
+        .and_then(|w| w.read(cx).sidebar_action(id, cx));
+    let sidebar = workspace.clone();
     Pane::menu(pane, menu, window, cx)
         .separator()
+        .when_some(arrangement, |menu, action| {
+            menu.item(
+                PopupMenuItem::new(action.label()).on_click(move |_, w, cx| {
+                    let _ = sidebar.update(cx, |s, cx| s.arrange_sidebar(id, action, w, cx));
+                }),
+            )
+        })
         .submenu("Open Panel Here", window, cx, move |menu, _, cx| {
             picker_menu(&picker, node, menu, cx)
         })

@@ -1,5 +1,6 @@
 //! Group-local tab strips and navigation above the panel they describe.
 //! The dock owns the layout, panel dragging, tab order and selection.
+mod utility;
 use super::Workspace;
 use crate::{
     panels::{Home, Pane, nav::DraggedFolder},
@@ -18,7 +19,7 @@ use gpui_kit::{
         },
         h_flex,
         input::Input,
-        menu::{ContextMenuExt, DropdownMenu},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         tooltip::Tooltip,
     },
     prelude::*,
@@ -218,17 +219,6 @@ impl TabGroupRenderer for Tabs {
         let utility = tabs.iter().all(|&ix| is_utility(&group.panels()[ix], cx));
         let m = *materials(cx);
         let node = group.node();
-        let menu = group.active_panel().and_then(pane_of).map(|pane| {
-            let workspace = self.state.workspace.clone();
-            Button::new("group-menu")
-                .ghost()
-                .xsmall()
-                .icon(Icon::new(IconName::Ellipsis).text_color(m.text_faint))
-                .accessibility_label("Panel menu")
-                .tooltip("More")
-                .tab_stop(false)
-                .dropdown_menu(move |menu, w, cx| super::tab_menu(&workspace, &pane, menu, w, cx))
-        });
         let active = group
             .active_panel()
             .and_then(pane_of)
@@ -245,9 +235,53 @@ impl TabGroupRenderer for Tabs {
         let group = group.clone();
         let state = self.state.clone();
         let scroll = self.scroll.clone();
-        container_query(move |size, _, cx| {
+        container_query(move |size, window, cx| {
             state.widths.borrow_mut().insert(node, size.width);
-            let compact = utility && tabs.len() > 1 && size.width < px(196.);
+            let mode = if utility {
+                utility::presentation(&group, &tabs, size.width, window, cx)
+            } else {
+                utility::Presentation::Labels
+            };
+            let compact = mode != utility::Presentation::Labels;
+            let overflow = mode == utility::Presentation::Overflow;
+            let editing = utility
+                .then(|| {
+                    tabs.iter().copied().find(|&ix| {
+                        pane_of(&group.panels()[ix]).is_some_and(|p| p.read(cx).renaming.is_some())
+                    })
+                })
+                .flatten();
+            let menu = group.active_panel().and_then(pane_of).map(|pane| {
+                let workspace = state.workspace.clone();
+                let select = group.clone();
+                Button::new("group-menu")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::Ellipsis).text_color(m.text_faint))
+                    .accessibility_label("Panel menu")
+                    .tooltip("Panel menu")
+                    .tab_stop(utility)
+                    .dropdown_menu(move |mut menu, w, cx| {
+                        if overflow {
+                            for (ix, panel) in select
+                                .panels()
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| p.visible(cx))
+                            {
+                                let Some(tab) = pane_of(panel) else { continue };
+                                let select = select.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(tab.read(cx).label(cx))
+                                        .checked(ix == select.active_ix())
+                                        .on_click(move |_, w, cx| select.select_tab(ix, w, cx)),
+                                );
+                            }
+                            menu = menu.separator();
+                        }
+                        super::tab_menu(&workspace, &pane, menu, w, cx)
+                    })
+            });
             let mut address = active
                 .as_ref()
                 .and_then(|content| {
@@ -256,35 +290,51 @@ impl TabGroupRenderer for Tabs {
                         .downcast_ref::<crate::panels::browser::BrowserPane>()
                 })
                 .map(|browser| browser.address_bar(size.width, cx));
-            let strip = h_flex()
-                .id(("tab-strip", node.as_u64()))
-                .w_full()
-                .h(px(STRIP_HEIGHT))
-                .flex_shrink_0()
-                .when(!compact, |d| d.pr(px(4.)))
-                .when(!utility, |d| d.pl(px(4.)).gap(px(2.)))
-                .items_center()
-                .bg(if utility { m.raised } else { m.chrome })
-                .child(
-                    h_flex()
-                        .id(("tabs", node.as_u64()))
-                        .min_w_0()
-                        .when(!utility, |d| d.gap(px(2.)))
-                        .overflow_x_scroll()
-                        .track_scroll(&scroll)
-                        .children(
-                            tabs.into_iter()
-                                .map(|ix| tab(&group, ix, &state, compact, cx)),
-                        ),
-                )
-                .when(single_browser, |d| d.children(address.take()))
-                .when(!single_browser, |d| {
-                    d.child(
-                        drop_space(&group, ("strip-space", node.as_u64()), cx)
-                            .when(compact, |d| d.min_w_0()),
+            let strip =
+                h_flex()
+                    .id(("tab-strip", node.as_u64()))
+                    .w_full()
+                    .h(px(STRIP_HEIGHT))
+                    .flex_shrink_0()
+                    .pr(px(4.))
+                    .when(!utility, |d| d.pl(px(4.)).gap(px(2.)))
+                    .items_center()
+                    .bg(if utility { m.raised } else { m.chrome })
+                    .child(
+                        h_flex()
+                            .id(("tabs", node.as_u64()))
+                            .min_w_0()
+                            .when(utility, |d| d.tab_group().role(Role::TabList))
+                            .when(editing.is_some(), |d| d.flex_1())
+                            .when(!utility, |d| d.gap(px(2.)))
+                            .overflow_x_scroll()
+                            .track_scroll(&scroll)
+                            .children(
+                                tabs.into_iter()
+                                    .filter(|&ix| match editing {
+                                        Some(editing) => editing == ix,
+                                        None => {
+                                            !overflow
+                                                || (ix == group.active_ix()
+                                                    && size.width
+                                                        >= px(utility::MENU_SPACE
+                                                            + utility::ICON_WIDTH))
+                                        }
+                                    })
+                                    .map(|ix| {
+                                        tab(&group, ix, &state, compact && editing.is_none(), cx)
+                                    }),
+                            ),
                     )
-                })
-                .children(menu);
+                    .when(single_browser, |d| d.children(address.take()))
+                    .when(!single_browser, |d| {
+                        d.child(
+                            drop_space(&group, ("strip-space", node.as_u64()), cx)
+                                .when(utility, |d| d.min_w_0())
+                                .when(editing.is_some(), |d| d.flex_none()),
+                        )
+                    })
+                    .children(menu);
             gpui_kit::component::v_flex()
                 .size_full()
                 .bg(m.chrome)
@@ -414,12 +464,13 @@ fn tab(
         }
     };
     let close_click = close.clone();
+    let editing = renaming.is_some();
     let label_element = match renaming {
         Some(input) => {
             let pane = pane.clone();
             div()
                 .flex_1()
-                .min_w(px(80.))
+                .min_w_0()
                 .key_context("LocationBar")
                 .on_action(move |_: &crate::location::CancelEdit, w, cx| {
                     if let Some(pane) = &pane {
@@ -431,7 +482,6 @@ fn tab(
         }
         None => div()
             .flex_1()
-            .when(compact, |d| d.flex_none())
             .min_w_0()
             .truncate()
             .child(label.clone())
@@ -456,6 +506,9 @@ fn tab(
         .role(Role::Tab)
         .aria_label(label.clone())
         .aria_selected(selected)
+        .when(utility && !editing, |d| {
+            utility::keyboard_tab(d, group, ix, cx)
+        })
         .relative()
         .h(px(if utility { STRIP_HEIGHT } else { TAB_HEIGHT }))
         .min_w(px(48.))
@@ -467,15 +520,14 @@ fn tab(
         .items_center()
         .text_size(px(12.5))
         .when(compact, |d| {
-            d.flex_col()
-                .justify_center()
+            d.justify_center()
                 .gap_0()
-                .px(px(3.))
-                .min_w(px(32.))
+                .px_0()
+                .w(px(utility::ICON_WIDTH))
+                .min_w(px(utility::ICON_WIDTH))
                 .flex_shrink_0()
-                .text_size(px(11.))
-                .line_height(px(14.))
         })
+        .when(utility && editing, |d| d.flex_1().min_w_0())
         .text_color(if selected { m.text } else { m.text_muted })
         .when(handle, |d| {
             d.min_w(px(24.)).w(px(24.)).px_0().gap_0().justify_center()
@@ -484,18 +536,16 @@ fn tab(
             d.bg(if utility { m.chrome } else { m.control })
         })
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        .child(
-            icon.size(px(14.))
-                .flex_shrink_0()
-                .text_color(if active_browser {
-                    m.accent
-                } else if selected {
-                    m.text_muted
-                } else {
-                    m.text_faint
-                }),
-        )
-        .when(!handle, |d| d.child(label_element))
+        .child(icon.size(px(14.)).flex_shrink_0().text_color(
+            if active_browser || (compact && selected) {
+                m.accent
+            } else if selected {
+                m.text_muted
+            } else {
+                m.text_faint
+            },
+        ))
+        .when(!handle && !compact, |d| d.child(label_element))
         // The close button covers the end of the label while the pointer is
         // over the tab, so no tab gives up width to a button it is not showing.
         .when(!utility && !handle, |d| {
@@ -527,7 +577,7 @@ fn tab(
                     }),
             )
         })
-        .when(long || handle, |d| {
+        .when(long || handle || compact, |d| {
             let tip = label.clone();
             d.tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx))
         })
@@ -605,8 +655,12 @@ pub fn drop_space(group: &TabGroupContext, id: impl Into<ElementId>, cx: &App) -
             d.drag_over::<DragPanel>(move |d, _, _, _| d.bg(m.accent.opacity(0.08)))
                 .on_drop(move |drag: &DragPanel, w, cx| {
                     // A tab dropped past its own group's last tab moves to the end.
-                    let ix = (drag.source() == node).then(|| count.saturating_sub(1));
-                    group.drop_panel(drag.clone(), ix, true, w, cx);
+                    let ix = if drag.source() == node {
+                        count.saturating_sub(1)
+                    } else {
+                        count
+                    };
+                    group.drop_panel(drag.clone(), Some(ix), true, w, cx);
                 })
         })
 }
