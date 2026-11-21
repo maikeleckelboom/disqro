@@ -146,7 +146,7 @@ impl Layout {
     /// the pane grows. Nothing here is written back to the profile.
     pub(super) fn scrolling(&self, widths: &[f32], viewport: f32) -> std::ops::Range<usize> {
         let mut range = 0..self.columns.len();
-        let available = (viewport - 8.).max(0.);
+        let available = viewport.max(0.);
         let mut budget = if viewport <= 0. || widths.iter().sum::<f32>() <= available {
             f32::INFINITY
         } else {
@@ -182,30 +182,29 @@ impl Layout {
         if viewport <= 0. {
             return widths;
         }
-        let budget = (viewport - 8.).max(0.);
+        let budget = viewport;
         let total: f32 = widths.iter().sum();
         if self.adaptive && total < budget {
             // Give spare space to unmodified text columns. Album editions and
             // artist names benefit from room on a wide display too.
-            let weights: Vec<f32> = self
-                .columns
-                .iter()
-                .map(|c| {
-                    if c.width != c.field.width() {
-                        return 0.;
-                    }
-                    match c.field {
-                        Field::Title => 2.,
-                        Field::Artist | Field::Album => 1.,
-                        _ => 0.,
-                    }
+            // Distribute whole pixels in field order. Moving a column to
+            // another pin group cannot change which field gets the remainder.
+            let eligible: Vec<_> = [(Field::Title, 2.), (Field::Artist, 1.), (Field::Album, 1.)]
+                .into_iter()
+                .filter_map(|(field, weight)| {
+                    self.columns
+                        .iter()
+                        .position(|c| c.field == field && c.width == field.width())
+                        .map(|i| (i, weight))
                 })
                 .collect();
-            let weight: f32 = weights.iter().sum();
-            if weight > 0. {
-                for (w, share) in widths.iter_mut().zip(weights) {
-                    *w += ((budget - total) * share / weight).floor();
-                }
+            let mut remaining_weight: f32 = eligible.iter().map(|(_, w)| w).sum();
+            let mut remaining = budget - total;
+            for (i, weight) in eligible {
+                let extra = (remaining * weight / remaining_weight).round();
+                widths[i] += extra;
+                remaining -= extra;
+                remaining_weight -= weight;
             }
         }
         widths
@@ -270,7 +269,7 @@ impl Layouts {
                     return false;
                 }
                 seen.push(c.field);
-                if !(24. ..=c.field.max_width()).contains(&c.width) {
+                if c.field == Field::Favorite || !(24. ..=c.field.max_width()).contains(&c.width) {
                     c.width = c.field.width();
                 }
                 true
@@ -316,11 +315,12 @@ impl Layouts {
                 continue;
             };
             if !saved.iter().any(|s| s.field == field) {
-                let width = if (24. ..=1200.).contains(&c.width) {
-                    c.width
-                } else {
-                    field.width()
-                };
+                let width =
+                    if field != Field::Favorite && (24. ..=field.max_width()).contains(&c.width) {
+                        c.width
+                    } else {
+                        field.width()
+                    };
                 saved.push(LayoutColumn {
                     width,
                     ..LayoutColumn::new(field)
@@ -564,6 +564,37 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn compact_action_and_last_metadata_share_one_boundary() {
+        use Field::*;
+        let mut layouts = Layouts::default();
+        layouts.disc.columns.last_mut().unwrap().width = 62.;
+        let layouts = layouts.validate();
+        assert_eq!(layouts.disc.columns.last().unwrap().width, 34.);
+        for viewport in [567., 658., 659., 660., 991.] {
+            let widths = layouts.disc.widths(viewport);
+            assert_eq!(widths.iter().sum::<f32>(), viewport);
+            assert_eq!(widths[3], Length.width());
+            assert_eq!(widths[4], Favorite.width());
+        }
+    }
+
+    #[test]
+    fn pinning_keeps_each_adaptive_columns_displayed_width() {
+        let mut layout = Layout::new(ContextKind::Mixed);
+        let original = fields(&layout);
+        let widths = layout.widths(1001.);
+        layout.set_pin(Field::Artist, Pin::Left);
+        layout.set_pin(Field::Title, Pin::Right);
+        for (column, shown) in layout.columns.iter().zip(layout.widths(1001.)) {
+            let index = original
+                .iter()
+                .position(|field| *field == column.field)
+                .unwrap();
+            assert_eq!(shown, widths[index]);
+        }
+    }
+
     #[test]
     fn resizing_one_column_moves_only_its_own_boundary() {
         // An untouched layout fills a wide table.

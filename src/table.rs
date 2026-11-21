@@ -125,7 +125,7 @@ impl Field {
         match self {
             Self::Cover => self.width(),
             Self::Number => 36.,
-            Self::Favorite => 32.,
+            Self::Favorite => self.width(),
             Self::Title => 142.,
             Self::Year | Self::Disc => 48.,
             Self::Rating => 96.,
@@ -136,7 +136,7 @@ impl Field {
     fn max_width(self) -> f32 {
         match self {
             Self::Cover => LARGE_THUMBNAIL + 2. * COVER_X,
-            Self::Favorite => 64.,
+            Self::Favorite => self.width(),
             _ => 1200.,
         }
     }
@@ -433,6 +433,7 @@ struct Resize {
     x: Pixels,
     width: f32,
     grow_left: bool,
+    follow_end: bool,
 }
 
 pub struct MusicTable {
@@ -749,6 +750,12 @@ impl MusicTable {
         if column.width != width {
             column.width = width;
             table.refresh(cx);
+            if r.follow_end {
+                let d = table.delegate();
+                let total: f32 = d.layout().widths(d.viewport).iter().sum();
+                let x = px((d.viewport - total).min(0.));
+                table.horizontal_scroll_handle.set_offset(point(x, px(0.)));
+            }
             cx.notify();
         }
     }
@@ -1308,7 +1315,7 @@ impl MusicTable {
                     d.right(pad).border_r_1()
                 }
             })
-            .border_color(if active {
+            .border_color(if active && ix == host {
                 m.text_faint
             } else {
                 transparent_black()
@@ -1317,12 +1324,23 @@ impl MusicTable {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |t, e: &MouseDownEvent, _, _| {
+                    let d = t.delegate();
+                    let widths = d.layout().widths(d.viewport);
+                    let scrolling = d.layout().scrolling(&widths, d.viewport);
+                    let total: f32 = widths.iter().sum();
+                    let end = (d.viewport - total).min(0.);
+                    // While dragging at the right end, keep the last metadata
+                    // cell readable as the center viewport changes width.
+                    let follow_end = scrolling.end < widths.len()
+                        && ix + 1 >= scrolling.end
+                        && (f32::from(t.horizontal_scroll_handle.offset().x) - end).abs() <= 1.;
                     let width = t.col_width(ix).map(f32::from);
                     t.delegate_mut().resizing = width.map(|width| Resize {
                         ix,
                         x: e.position.x,
                         width,
                         grow_left,
+                        follow_end,
                     });
                 }),
             )
@@ -1453,18 +1471,32 @@ impl TableDelegate for MusicTable {
         let widths = layout.widths(self.viewport);
         let scrolling = layout.scrolling(&widths, self.viewport);
         let right_fixed = col_ix >= scrolling.end;
-        let leading = if right_fixed {
-            Some(self.render_edge(col_ix, col_ix, true, true, cx))
-        } else {
+        // Each physical boundary has one owner. Favorite has no resize
+        // handle. Its blank header can extend the preceding metadata grip
+        // only when both cells actually meet. A gap or a scrolled-away cell
+        // must never leave a second handle floating at the pinned edge.
+        let grip =
+            |owner: usize, leading: bool, grow_left: bool, cx: &mut Context<TableState<Self>>| {
+                (layout.columns[owner].field != Field::Favorite)
+                    .then(|| self.render_edge(owner, col_ix, leading, grow_left, cx))
+            };
+        let leading = if right_fixed && field != Field::Favorite {
+            grip(col_ix, true, true, cx)
+        } else if !right_fixed
+            || (col_ix == scrolling.end && widths.iter().sum::<f32>() == self.viewport)
+        {
             col_ix
                 .checked_sub(1)
-                .map(|ix| self.render_edge(ix, col_ix, true, false, cx))
+                .and_then(|ix| grip(ix, true, false, cx))
+        } else {
+            None
         };
         let trailing = if right_fixed {
             (col_ix + 1 < widths.len())
-                .then(|| self.render_edge(col_ix + 1, col_ix, false, true, cx))
+                .then(|| col_ix + 1)
+                .and_then(|ix| grip(ix, false, true, cx))
         } else {
-            Some(self.render_edge(col_ix, col_ix, false, false, cx))
+            grip(col_ix, false, false, cx)
         };
         h_flex()
             .id(("sort", col_ix))
@@ -1576,6 +1608,14 @@ impl TableDelegate for MusicTable {
         let field = self.layout().columns[col].field;
         (!matches!(field, Field::Cover | Field::Favorite))
             .then(|| field.value(t, self.mark(row, cx)).into())
+    }
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // The scrollable header and body end at the last real column.
+        div()
     }
     fn render_td(
         &mut self,
