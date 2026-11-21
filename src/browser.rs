@@ -145,6 +145,8 @@ impl Browser {
             )
             .select_on_modifier_click(false)
             .col_selectable(false)
+            // The heading resizes its own columns, refitting them live.
+            .col_resizable(false)
             .sortable(false)
         });
         let discs = cx.new(|cx| {
@@ -196,14 +198,6 @@ impl Browser {
             |b: &mut Self, t, event, w, cx| match event {
                 TableEvent::SelectRow(_) => t.update(cx, |t, _| t.delegate_mut().clear_marks()),
                 TableEvent::DoubleClickedRow(i) => b.activate(*i, w, cx),
-                TableEvent::ColumnWidthsChanged(widths) => {
-                    t.update(cx, |t, cx| {
-                        t.delegate_mut().resize(widths);
-                        t.refresh(cx);
-                        cx.notify();
-                    });
-                    cx.emit(ViewChanged);
-                }
                 TableEvent::MoveColumn(_, _) => cx.emit(ViewChanged),
                 _ => {}
             },

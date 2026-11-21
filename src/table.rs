@@ -133,6 +133,10 @@ impl Field {
             _ => 1200.,
         }
     }
+    /// The horizontal padding inside each cell and heading of the column.
+    fn padding(self) -> f32 {
+        if self == Self::Cover { COVER_X } else { CELL_X }
+    }
     fn pinned(self) -> bool {
         matches!(self, Self::Number | Self::Cover | Self::Title)
     }
@@ -403,6 +407,25 @@ impl Render for DraggedTracks {
     }
 }
 
+/// Grab room on each side of a column boundary in the track table's
+/// heading. Both halves sit in the cells' padding.
+const EDGE: f32 = 6.;
+/// A column boundary dragged in the track table's heading.
+#[derive(Clone)]
+struct ColumnEdge;
+impl Render for ColumnEdge {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+/// The column being resized: where the press began, and its shown width then.
+#[derive(Clone, Copy)]
+struct Resize {
+    ix: usize,
+    x: Pixels,
+    width: f32,
+}
+
 pub struct MusicTable {
     rows: Rows,
     folder_sections: Sections,
@@ -416,7 +439,9 @@ pub struct MusicTable {
     cover: f32,
     row_height: f32,
     /// The cover edge of the saved layout, which chooses the decoded size.
+    /// It holds still while a column boundary is dragged.
     settled_cover: f32,
+    resizing: Option<Resize>,
     pub artwork_revision: u64,
     pub folder_covers: Arc<HashMap<PathBuf, crate::artwork::CoverFile>>,
     pub sort: Option<(Field, ColumnSort)>,
@@ -622,6 +647,7 @@ impl MusicTable {
             cover: THUMBNAIL,
             row_height: ROW_HEIGHT,
             settled_cover: THUMBNAIL,
+            resizing: None,
             artwork_revision: 0,
             folder_covers: Default::default(),
             sort: None,
@@ -685,8 +711,42 @@ impl MusicTable {
         let d = table.delegate_mut();
         d.cover = cover;
         d.row_height = row;
-        d.settled_cover = settled.map_or(THUMBNAIL, edge);
+        if d.resizing.is_none() {
+            d.settled_cover = settled.map_or(THUMBNAIL, edge);
+        }
         row
+    }
+    /// Follows a dragged column boundary, updating the table on every move.
+    /// The first move fixes the other columns at their shown widths, so only
+    /// this boundary moves and the table scrolls rather than squeezing.
+    fn drag_edge(table: &mut TableState<Self>, x: Pixels, cx: &mut Context<TableState<Self>>) {
+        let Some(r) = table.delegate().resizing else {
+            return;
+        };
+        if table.delegate().layout().adaptive {
+            let shown: Vec<f32> = (0..table.delegate().layout().columns.len())
+                .map_while(|ix| table.col_width(ix).map(f32::from))
+                .collect();
+            table.delegate_mut().layout_mut().freeze(&shown);
+        }
+        let Some(column) = table.delegate_mut().layout_mut().columns.get_mut(r.ix) else {
+            return;
+        };
+        let field = column.field;
+        let width = (r.width + f32::from(x - r.x))
+            .clamp(field.min_width(), field.max_width())
+            .round();
+        if column.width != width {
+            column.width = width;
+            table.refresh(cx);
+            cx.notify();
+        }
+    }
+    fn end_resize(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
+        if table.delegate_mut().resizing.take().is_some() {
+            table.delegate().save_layout(cx);
+            cx.notify();
+        }
     }
     pub fn fit(table: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
         if table.delegate().viewport != width {
@@ -995,20 +1055,6 @@ impl MusicTable {
         self.rows.sections.display_index(0)
     }
 
-    pub fn resize(&mut self, widths: &[Pixels]) {
-        let previous = self.layout().widths(self.viewport);
-        for ((c, w), displayed) in self
-            .layout_mut()
-            .columns
-            .iter_mut()
-            .zip(widths)
-            .zip(previous)
-        {
-            if (f32::from(*w) - displayed).abs() >= 1. {
-                c.width = f32::from(*w);
-            }
-        }
-    }
     pub fn has_marks(&self) -> bool {
         !self.selection.marked.is_empty()
     }
@@ -1237,6 +1283,68 @@ impl MusicTable {
             })
             .into_any_element()
     }
+    /// Half of the grab area of the boundary after column `ix`: the trailing
+    /// half inside that column, or the leading half inside the next one. It
+    /// covers the heading beneath it, so pressing it never sorts or moves a
+    /// column, and shows a hairline on hover and while dragging.
+    fn render_edge(
+        &self,
+        ix: usize,
+        leading: bool,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let m = *materials(cx);
+        let host = if leading { ix + 1 } else { ix };
+        let pad = -px(self.layout().columns[host].field.padding());
+        let active = self.resizing.is_some_and(|r| r.ix == ix);
+        div()
+            .id((if leading { "edge-leading" } else { "edge" }, ix))
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .w(px(EDGE))
+            .occlude()
+            .cursor_col_resize()
+            .map(|d| {
+                if leading {
+                    d.left(pad).border_l_1()
+                } else {
+                    d.right(pad).border_r_1()
+                }
+            })
+            .border_color(if active {
+                m.text_faint
+            } else {
+                transparent_black()
+            })
+            .when(!active, |d| d.hover(|d| d.border_color(m.control_line)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |t, e: &MouseDownEvent, _, _| {
+                    let width = t.col_width(ix).map(f32::from);
+                    t.delegate_mut().resizing = width.map(|width| Resize {
+                        ix,
+                        x: e.position.x,
+                        width,
+                    });
+                }),
+            )
+            .on_drag(ColumnEdge, |edge, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| edge.clone())
+            })
+            .on_drag_move(cx.listener(|t, e: &DragMoveEvent<ColumnEdge>, _, cx| {
+                Self::drag_edge(t, e.event.position.x, cx)
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|t, _, _, cx| Self::end_resize(t, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|t, _, _, cx| Self::end_resize(t, cx)),
+            )
+    }
     fn render_rating(
         &self,
         row: usize,
@@ -1284,11 +1392,7 @@ impl TableDelegate for MusicTable {
     }
     fn column(&self, ix: usize, _: &App) -> Column {
         let c = &self.layout().columns[ix];
-        let pad = if c.field == Field::Cover {
-            COVER_X
-        } else {
-            CELL_X
-        };
+        let pad = c.field.padding();
         let mut col = Column::new(c.field.label(), c.field.label())
             .width(self.layout().widths(self.viewport)[ix])
             .min_width(px(c.field.min_width()))
@@ -1335,8 +1439,12 @@ impl TableDelegate for MusicTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let field = self.layout().columns[col_ix].field;
-        let m = materials(cx);
+        let m = *materials(cx);
         let sorted = self.sort.filter(|(f, _)| *f == field).map(|(_, d)| d);
+        let trailing = self.render_edge(col_ix, false, cx);
+        let leading = col_ix
+            .checked_sub(1)
+            .map(|ix| self.render_edge(ix, true, cx));
         h_flex()
             .id(("sort", col_ix))
             .size_full()
@@ -1370,6 +1478,8 @@ impl TableDelegate for MusicTable {
                     .size(px(12.)),
                 )
             })
+            .child(trailing)
+            .children(leading)
             .when(field.sortable(), |d| {
                 d.hover(|d| d.text_color(m.text_muted))
                     .cursor_pointer()

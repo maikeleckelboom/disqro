@@ -23,10 +23,17 @@ pub struct LegacyColumn {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layout {
     pub(super) columns: Vec<LayoutColumn>,
+    /// An untouched layout gives spare room to its text columns. The first
+    /// column the listener resizes fixes every width as shown.
+    #[serde(default = "adaptive")]
+    pub(super) adaptive: bool,
     /// Earlier layouts drew artwork inside Title. Loading turns the saved
     /// choice into the Cover column.
     #[serde(default, skip_serializing)]
     artwork: Option<bool>,
+}
+fn adaptive() -> bool {
+    true
 }
 
 impl Layout {
@@ -39,8 +46,21 @@ impl Layout {
         };
         Self {
             columns: fields.iter().copied().map(LayoutColumn::new).collect(),
+            adaptive: true,
             artwork: None,
         }
+    }
+
+    /// Keeps every column at the width it is shown at, so resizing one
+    /// column moves nothing but its own boundary.
+    pub(super) fn freeze(&mut self, shown: &[f32]) {
+        if !self.adaptive || shown.len() != self.columns.len() {
+            return;
+        }
+        for (column, width) in self.columns.iter_mut().zip(shown) {
+            column.width = width.round();
+        }
+        self.adaptive = false;
     }
 
     pub(super) fn has(&self, field: Field) -> bool {
@@ -67,11 +87,14 @@ impl Layout {
         });
     }
 
+    /// The shown widths. Columns keep their own widths and the table scrolls
+    /// when they need more room than the viewport. Only the pinned columns
+    /// give way, in a narrow window, so the scrolling ones stay reachable.
     pub(super) fn widths(&self, viewport: f32) -> Vec<f32> {
         let mut widths: Vec<_> = self
             .columns
             .iter()
-            .map(|c| c.width.max(c.field.min_width()))
+            .map(|c| c.width.clamp(c.field.min_width(), c.field.max_width()))
             .collect();
         if viewport <= 0. {
             return widths;
@@ -95,27 +118,8 @@ impl Layout {
                 _ => {}
             }
         }
-        // The chosen cover size is kept when other columns overflow.
-        let floor = |c: &LayoutColumn, w: f32| match c.field {
-            Field::Cover => w,
-            f => f.min_width(),
-        };
         let total: f32 = widths.iter().sum();
-        if total > budget {
-            let slack: f32 = self
-                .columns
-                .iter()
-                .zip(&widths)
-                .map(|(c, w)| (w - floor(c, *w)).max(0.))
-                .sum();
-            if slack > 0. {
-                let fraction = ((total - budget) / slack).min(1.);
-                for (c, w) in self.columns.iter().zip(&mut widths) {
-                    let floor = floor(c, *w);
-                    *w = (*w - (*w - floor).max(0.) * fraction).floor().max(floor);
-                }
-            }
-        } else if total < budget {
+        if self.adaptive && total < budget {
             // Give spare space to unmodified text columns. Album editions and
             // artist names benefit from room on a wide display too.
             let weights: Vec<f32> = self
@@ -370,7 +374,7 @@ mod tests {
         assert!(layouts.mixed.has(Field::Cover));
     }
     #[test]
-    fn fitting_does_not_change_saved_widths_or_consume_scrollable_viewport() {
+    fn pinned_columns_leave_the_scrolling_ones_reachable() {
         let mut layout = Layout::new(ContextKind::Disc);
         layout.columns[1].width = 1100.;
         layout.columns.push(LayoutColumn::new(Field::Path));
@@ -385,9 +389,38 @@ mod tests {
                     .all(|(s, c)| *s >= c.field.min_width())
             );
         }
-        let mixed = Layout::new(ContextKind::Mixed);
-        assert!(mixed.widths(490.).iter().sum::<f32>() <= 490.);
         assert_eq!(layout.columns[1].width, 1100.);
+        // Columns never squeeze to fit: a narrow table scrolls instead.
+        let mixed = Layout::new(ContextKind::Mixed);
+        let saved: Vec<f32> = mixed.columns.iter().map(|c| c.width).collect();
+        assert_eq!(mixed.widths(490.), saved);
+    }
+    #[test]
+    fn resizing_one_column_moves_only_its_own_boundary() {
+        // An untouched layout fills a wide table.
+        let mut layout = Layout::new(ContextKind::Mixed);
+        let shown = layout.widths(1200.);
+        assert!(shown.iter().sum::<f32>() > 1188.);
+        // The first resize keeps every column as shown...
+        layout.freeze(&shown);
+        assert!(!layout.adaptive);
+        assert_eq!(layout.widths(1200.), shown);
+        // ...so widening one column moves nothing else, and the table
+        // scrolls rather than squeezing its neighbours.
+        layout.columns[3].width += 120.;
+        let after = layout.widths(1200.);
+        for (ix, (before, now)) in shown.iter().zip(&after).enumerate() {
+            let expected = if ix == 3 { before + 120. } else { *before };
+            assert_eq!(*now, expected);
+        }
+        // A resized layout no longer stretches with the window.
+        assert_eq!(layout.widths(2400.), after);
+        assert_eq!(serde_json::to_value(&layout).unwrap()["adaptive"], false);
+        // Reset, and layouts saved before the flag existed, stay adaptive.
+        assert!(Layout::new(ContextKind::Mixed).adaptive);
+        let saved: Layout =
+            serde_json::from_str(r#"{"columns":[{"field":"Title","width":200}]}"#).unwrap();
+        assert!(saved.adaptive);
     }
     #[test]
     fn cover_keeps_its_width_and_leaves_title_room() {
@@ -405,8 +438,8 @@ mod tests {
         assert_eq!(wide[0], Field::Cover.width());
         assert!(wide[1] > Field::Title.width());
 
-        // A large cover keeps its size while other columns overflow and
-        // scroll, and gives way in a narrow window so the title keeps room.
+        // A large cover keeps its size while other columns scroll, and gives
+        // way in a narrow window so the title keeps room.
         let large = Field::Cover.max_width();
         layout.columns[1].width = large;
         layout.columns[2].width = 1100.;
