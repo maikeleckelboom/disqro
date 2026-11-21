@@ -20,6 +20,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
+pub(crate) use navigation::SavedVisit;
 pub use navigation::continue_cd;
 use navigation::{Bookmark, Visit};
 use serde::{Deserialize, Serialize};
@@ -190,6 +191,7 @@ impl Browser {
         .detach();
         cx.subscribe(&search, |s: &mut Self, e, ev, cx| {
             if matches!(ev, InputEvent::Change) {
+                cx.emit(ViewChanged);
                 let query = e.read(cx).value().trim().to_lowercase();
                 if s.query == query {
                     return;
@@ -287,6 +289,7 @@ impl Browser {
             return;
         }
         self.active = active;
+        cx.notify();
         if !active {
             return;
         }
@@ -303,7 +306,6 @@ impl Browser {
                     cx.notify();
                 }
             });
-        cx.notify();
     }
     /// Shows this browser's folder in Locations, or keeps its last folder in
     /// view without highlighting it while a library view is shown.

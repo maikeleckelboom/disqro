@@ -259,6 +259,8 @@ impl LocationsPanel {
                 root: Some(root),
             };
             Router::open(router, destination, new_tab, window, cx);
+        } else {
+            router.update(cx, |_, cx| cx.emit(super::RouterEvent::Reveal));
         }
     }
     fn panel_menu(this: WeakEntity<Self>, menu: PopupMenu, missing: usize) -> PopupMenu {
@@ -306,18 +308,18 @@ impl LocationsPanel {
         let (b, c) = (this.clone(), this);
         let (open, tab, library) = (path.clone(), path.clone(), path);
         let (r1, f1) = (router.clone(), folders.clone());
-        menu.item(
+        let menu = menu.item(
             PopupMenuItem::new("Open")
                 .icon(IconName::FolderOpen)
                 .on_click(move |_, w, cx| {
                     Self::open(&r1, &f1, open.clone(), open.clone(), false, w, cx)
                 }),
-        )
-        .item(
-            PopupMenuItem::new("Open in New Tab").on_click(move |_, w, cx| {
-                Self::open(&router, &folders, tab.clone(), tab.clone(), true, w, cx)
-            }),
-        )
+        );
+        Destination::Folder {
+            path: tab.clone(),
+            root: Some(tab),
+        }
+        .open_items(menu, router)
         .item(
             PopupMenuItem::new("Add to Library")
                 .icon(IconName::Library)
@@ -360,18 +362,18 @@ impl LocationsPanel {
     ) -> PopupMenu {
         let (open, tab, add, library) = (path.clone(), path.clone(), path.clone(), path);
         let (r1, f1, root1) = (router.clone(), folders.clone(), root.clone());
-        menu.item(
+        let menu = menu.item(
             PopupMenuItem::new("Open")
                 .icon(IconName::FolderOpen)
                 .on_click(move |_, w, cx| {
                     Self::open(&r1, &f1, root1.clone(), open.clone(), false, w, cx)
                 }),
-        )
-        .item(
-            PopupMenuItem::new("Open in New Tab").on_click(move |_, w, cx| {
-                Self::open(&router, &folders, root.clone(), tab.clone(), true, w, cx)
-            }),
-        )
+        );
+        Destination::Folder {
+            path: tab,
+            root: Some(root),
+        }
+        .open_items(menu, router)
         .separator()
         .item(
             PopupMenuItem::new(if pinned {

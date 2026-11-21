@@ -331,6 +331,39 @@ fn playlists_order_duplicates_and_queries() {
 }
 
 #[test]
+fn copying_playlist_occurrences_keeps_chapters_order_and_missing_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Music");
+    collection(&root);
+    let mut store = Store::memory();
+    let collection = store.add_root(&root).unwrap();
+    index(&mut store, collection);
+    let tracks = all(&store, Scope::Library(Some(collection)));
+    let first = chapter(&tracks, "a.cue", 1).id;
+    let second = chapter(&tracks, "a.cue", 2).id;
+    let source = store
+        .create_playlist("Source", &[first, second, first])
+        .unwrap();
+    let destination = store.create_playlist("Destination", &[]).unwrap();
+    let occurrences = store.entries(source).unwrap();
+
+    fs::remove_file(root.join("Album A/a.flac")).unwrap();
+    index(&mut store, collection);
+    let selection = [occurrences[1].0, occurrences[0].0, occurrences[2].0];
+    let ids = store
+        .track_ids(Scope::Playlist(source), &selection)
+        .unwrap();
+    let added = store.add_entries(destination, &ids, None).unwrap();
+    assert_eq!(store.entries(source).unwrap(), occurrences);
+    assert_eq!(ids, [second, first, first]);
+    assert_eq!(
+        store.entries(destination).unwrap(),
+        added.iter().copied().zip(ids).collect::<Vec<_>>()
+    );
+    assert!(added.iter().all(|entry| !selection.contains(entry)));
+}
+
+#[test]
 fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("Music");

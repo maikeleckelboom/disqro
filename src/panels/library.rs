@@ -14,7 +14,7 @@ use crate::{
     catalog::{Catalog, CatalogEvent, Targets},
     player::Player,
     store::{PlaylistId, RootId, Scope},
-    table::{DraggedTracks, queue_targets},
+    table::{playlist_target, queue_targets},
     theme::materials,
 };
 use gpui_kit::{
@@ -232,15 +232,12 @@ impl LibraryPanel {
         icon: IconName,
     ) -> PopupMenu {
         let (r, l) = (router.clone(), location.clone());
-        menu.item(
+        let menu = menu.item(
             PopupMenuItem::new("Open")
                 .icon(icon)
                 .on_click(move |_, w, cx| Self::open(&r, l.clone(), false, w, cx)),
-        )
-        .item(
-            PopupMenuItem::new("Open in New Tab")
-                .on_click(move |_, w, cx| Self::open(&router, location.clone(), true, w, cx)),
-        )
+        );
+        Destination::View(location).open_items(menu, router)
     }
     /// A row that opens `location`: in the active browser, or in a new one
     /// with Ctrl.
@@ -495,30 +492,24 @@ impl LibraryPanel {
             );
             let this = cx.weak_entity();
             rows.push(
-                Self::opens(row, &self.router, Location::Playlist(id))
-                    .drag_over::<DraggedTracks>(move |s, _, _, _| {
-                        s.bg(m.selected)
-                            .border_1()
-                            .border_color(m.accent.opacity(0.6))
-                    })
-                    .on_drop(cx.listener(move |s, d: &DraggedTracks, _, cx| {
-                        if adds_to(d.targets.as_ref(), id) {
-                            let targets = d.targets.as_ref().clone();
-                            s.catalog
-                                .update(cx, |c, cx| c.add_to_playlist(id, targets, cx));
-                        }
-                    }))
-                    .context_menu(move |menu, _, _| {
-                        let menu = Self::open_items(
-                            menu,
-                            router.clone(),
-                            Location::Playlist(id),
-                            IconName::ListMusic,
-                        )
-                        .separator();
-                        playlist_menu(menu, id, catalog.clone(), player.clone(), this.clone())
-                    })
-                    .into_any_element(),
+                playlist_target(
+                    Self::opens(row, &self.router, Location::Playlist(id)),
+                    id,
+                    p.name.clone().into(),
+                    catalog.clone(),
+                    cx,
+                )
+                .context_menu(move |menu, _, _| {
+                    let menu = Self::open_items(
+                        menu,
+                        router.clone(),
+                        Location::Playlist(id),
+                        IconName::ListMusic,
+                    )
+                    .separator();
+                    playlist_menu(menu, id, catalog.clone(), player.clone(), this.clone())
+                })
+                .into_any_element(),
             );
         }
         rows
@@ -601,14 +592,6 @@ fn playlist_menu(
                 let _ = c.update(cx, |s, cx| s.confirm_delete_playlist(id, w, cx));
             }),
     )
-}
-
-/// Whether tracks dropped on `playlist` are added to it. Its own entries are
-/// not: that would add copies, which is rarely meant, and reordering happens
-/// in the table. Every drop adds references to the tracks, never files.
-fn adds_to(targets: &Targets, playlist: PlaylistId) -> bool {
-    !targets.is_empty()
-        && !matches!(targets, Targets::Keys(Scope::Playlist(p), _) if *p == playlist)
 }
 
 /// Adds a folder to the library where it is.
@@ -701,7 +684,7 @@ impl PaneContent for Entity<LibraryPanel> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibraryState, adds_to};
+    use super::LibraryState;
     use crate::{catalog::Targets, store::Scope};
 
     #[test]
@@ -718,10 +701,10 @@ mod tests {
 
     #[test]
     fn a_playlist_takes_tracks_and_other_playlists_entries_but_not_its_own() {
-        assert!(adds_to(&Targets::Keys(Scope::Library(None), vec![1, 2]), 7));
-        assert!(adds_to(&Targets::Keys(Scope::Playlist(3), vec![1, 1]), 7));
-        assert!(adds_to(&Targets::Keys(Scope::Liked, vec![4]), 7));
-        assert!(!adds_to(&Targets::Keys(Scope::Playlist(7), vec![1]), 7));
-        assert!(!adds_to(&Targets::Tracks(vec![]), 7));
+        assert!(Targets::Keys(Scope::Library(None), vec![1, 2]).can_copy_to(7));
+        assert!(Targets::Keys(Scope::Playlist(3), vec![1, 1]).can_copy_to(7));
+        assert!(Targets::Keys(Scope::Liked, vec![4]).can_copy_to(7));
+        assert!(!Targets::Keys(Scope::Playlist(7), vec![1]).can_copy_to(7));
+        assert!(!Targets::Tracks(vec![]).can_copy_to(7));
     }
 }

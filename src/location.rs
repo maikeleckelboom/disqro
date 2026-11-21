@@ -327,6 +327,7 @@ impl LocationBar {
             Location::Library(None) => None,
             _ => Some(b.crumb_title(cx)),
         };
+        let compact = name.is_some() && self.width.get() < px(190.);
         h_flex()
             .h_full()
             .min_w_0()
@@ -334,10 +335,18 @@ impl LocationBar {
             .gap(px(4.))
             .px(px(7.))
             .text_size(px(13.))
-            .child(Icon::new(icon).size(px(14.)).text_color(m.text_faint))
             .child(
-                div()
+                h_flex()
                     .id("library-crumb")
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(Icon::new(icon).size(px(14.)).text_color(m.text_faint))
+                    .when(compact, |d| {
+                        d.tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(section).build(w, cx)
+                        })
+                    })
                     .when(section == "Library" && name.is_some(), |d| {
                         d.cursor_pointer().on_click(move |_, w, cx| {
                             cx.stop_propagation();
@@ -345,7 +354,7 @@ impl LocationBar {
                         })
                     })
                     .text_color(if name.is_some() { m.text_muted } else { m.text })
-                    .child(section),
+                    .when(!compact, |d| d.child(section)),
             )
             .when_some(parent, |d, (root, title)| {
                 d.child(
@@ -398,11 +407,15 @@ impl LocationBar {
                 )
                 .child(
                     div()
+                        .id("current-view-crumb")
                         .min_w_0()
                         .truncate()
                         .text_ellipsis_middle()
                         .text_color(m.text)
-                        .child(name),
+                        .child(name.clone())
+                        .tooltip(move |w, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(w, cx)
+                        }),
                 )
             })
             .into_any_element()

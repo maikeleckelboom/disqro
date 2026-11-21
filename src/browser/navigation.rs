@@ -4,13 +4,22 @@ use super::*;
 /// A history entry owns navigation state only. Folder CD pages can project
 /// the open scan without replacing its root or starting another walker.
 pub(super) struct Visit {
-    location: Location,
-    page: Option<Page>,
-    albums: bool,
-    query: String,
+    destination: SavedVisit,
     sort: Option<(Field, ColumnSort)>,
     bookmark: Bookmark,
 }
+
+/// A history destination survives a restart. The live visit also remembers
+/// its table selection and sort while the instance remains open.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SavedVisit {
+    location: Location,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    page: Option<Page>,
+    albums: bool,
+    query: String,
+}
+#[derive(Default)]
 pub(super) struct Bookmark {
     selected: Option<RowKey>,
     marked: Option<crate::table::Selection>,
@@ -40,13 +49,49 @@ impl Browser {
             }
         };
         Visit {
-            location: self.location.clone(),
-            page: self.page.clone(),
-            albums: self.prefs.albums,
-            query: self.query.clone(),
+            destination: SavedVisit {
+                location: self.location.clone(),
+                page: self.page.clone(),
+                albums: self.prefs.albums,
+                query: self.query.clone(),
+            },
             sort: table.delegate().sort,
             bookmark,
         }
+    }
+    pub(crate) fn saved_history(&self) -> (Vec<SavedVisit>, Vec<SavedVisit>) {
+        let save = |visits: &[Visit]| visits.iter().map(|v| v.destination.clone()).collect();
+        (save(&self.back), save(&self.forward))
+    }
+    pub(crate) fn restore_history(&mut self, back: Vec<SavedVisit>, forward: Vec<SavedVisit>) {
+        let restore = |visits: Vec<SavedVisit>| {
+            let skip = visits.len().saturating_sub(HISTORY);
+            visits
+                .into_iter()
+                .skip(skip)
+                .map(|destination| Visit {
+                    destination,
+                    sort: None,
+                    bookmark: Bookmark::default(),
+                })
+                .collect()
+        };
+        self.back = restore(back);
+        self.forward = restore(forward);
+    }
+    /// Restores the persisted filter before asynchronous listing completes.
+    pub(crate) fn restore_search(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Set both sides before the input event arrives, so restoring the
+        // filter doesn't look like a new edit that cancels the scroll bookmark.
+        self.query = text.trim().to_lowercase();
+        self.search
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        self.filter(cx);
     }
     /// Scrolls a restored view back to where it was, once it has listed.
     pub fn restore_scroll(&mut self, offset: f32) {
@@ -138,16 +183,17 @@ impl Browser {
     }
     fn restore_visit(&mut self, visit: Visit, w: &mut Window, cx: &mut Context<Self>) {
         self.cancel_reveal();
-        let same_folder = visit.location.is_folder() && self.location == visit.location;
-        self.prefs.albums = visit.albums;
+        let dest = visit.destination;
+        let same_folder = dest.location.is_folder() && self.location == dest.location;
+        self.prefs.albums = dest.albums;
         if !same_folder {
-            self.enter(visit.location, w, cx);
+            self.enter(dest.location, w, cx);
         }
-        self.page = visit.page;
+        self.page = dest.page;
         self.reset_table(cx);
         self.table
             .update(cx, |t, _| t.delegate_mut().sort = visit.sort);
-        self.query = visit.query;
+        self.query = dest.query;
         self.search
             .update(cx, |s, cx| s.set_value(self.query.clone(), w, cx));
         self.bookmark = Some(visit.bookmark);
@@ -266,7 +312,7 @@ impl Browser {
         if self
             .back
             .last()
-            .is_some_and(|v| v.location == target.0 && v.page == target.1)
+            .is_some_and(|v| v.destination.location == target.0 && v.destination.page == target.1)
         {
             self.back(window, cx);
         } else if target.0 == self.location {
@@ -281,11 +327,9 @@ impl Browser {
         if self.page.is_none() {
             return;
         }
-        if self
-            .back
-            .last()
-            .is_some_and(|v| v.location == self.location && v.page.is_none())
-        {
+        if self.back.last().is_some_and(|v| {
+            v.destination.location == self.location && v.destination.page.is_none()
+        }) {
             self.back(window, cx);
         } else {
             self.push_visit(cx);

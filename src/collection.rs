@@ -68,7 +68,7 @@ impl ViewPrefs {
         self.subfolders.drain(..excess);
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
@@ -115,7 +115,7 @@ pub struct Membership {
 }
 
 /// A page within a collection: one CD, or every CD of a release.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Page {
     Disc(DiscId),
     /// Identified by its first disc.

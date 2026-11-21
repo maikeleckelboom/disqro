@@ -8,8 +8,9 @@ use super::{Pane, PaneContent, PanelType, Router, Services};
 use crate::{
     assets::FileIcon,
     audio::Command,
-    browser::{Browser, Location, music_home},
+    browser::{Browser, Location, SavedVisit, music_home},
     catalog::Targets,
+    collection::Page,
     library::TrackList,
     location::LocationBar,
     player::Player,
@@ -53,6 +54,12 @@ pub struct BrowserState {
     /// The view shown: a folder, a collection, Liked Tracks or a playlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<Page>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) back: Vec<SavedVisit>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) forward: Vec<SavedVisit>,
     /// The folder shown, or the last one while a library view is shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
@@ -105,10 +112,12 @@ impl BrowserPane {
                 }
                 None => b.restore_folder(folder, state.root.clone(), window, cx),
             }
+            if b.location.is_folder() {
+                b.page = state.page;
+            }
+            b.restore_history(state.back, state.forward);
             if !state.search.is_empty() {
-                b.search.update(cx, |input, cx| {
-                    input.set_value(state.search.clone(), window, cx)
-                });
+                b.restore_search(state.search, window, cx);
             }
             b.restore_scroll(state.scroll);
             b
@@ -154,13 +163,24 @@ impl BrowserPane {
             .h_full()
             .flex_1()
             .min_w_0()
+            .overflow_hidden()
             .capture_any_mouse_down(move |_, _, cx| {
                 router.update(cx, |r, cx| r.set_active(Some(&owner), cx))
             })
             .px(px(3.))
             .gap(px(3.))
             .items_center()
-            .bg(m.chrome)
+            .border_b_1()
+            .border_color(if b.active {
+                m.accent.opacity(0.55)
+            } else {
+                m.line
+            })
+            .bg(if b.active {
+                m.chrome.blend(m.accent.opacity(0.065))
+            } else {
+                m.chrome
+            })
             .child(
                 h_flex()
                     .flex_shrink_0()
@@ -218,14 +238,24 @@ impl BrowserPane {
     /// What this instance saves, and what a new instance opened from it
     /// starts with.
     pub fn state(browser: &Browser, cx: &App) -> BrowserState {
+        let (back, forward) = browser.saved_history();
+        BrowserState {
+            back,
+            forward,
+            scroll: browser.scroll_offset(cx),
+            ..Self::new_tab_state(browser, cx)
+        }
+    }
+    pub fn new_tab_state(browser: &Browser, cx: &App) -> BrowserState {
         BrowserState {
             location: Some(browser.location.clone()),
+            page: browser.page.clone(),
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
             albums: Some(browser.prefs.albums),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
             search: browser.search.read(cx).value().to_string(),
-            scroll: browser.scroll_offset(cx),
+            ..Default::default()
         }
     }
 }
@@ -561,6 +591,25 @@ impl Render for Browser {
         view.child(
             div()
                 .id("tracks-viewport")
+                .when_some(
+                    match self.location {
+                        Location::Playlist(id) => self
+                            .catalog
+                            .read(cx)
+                            .playlist(id)
+                            .map(|p| (id, p.name.clone())),
+                        _ => None,
+                    },
+                    |d, (id, name)| {
+                        crate::table::playlist_target(
+                            d.border_1().border_color(m.canvas),
+                            id,
+                            name.into(),
+                            self.catalog.clone(),
+                            cx,
+                        )
+                    },
+                )
                 // Keep the outermost header grips clear of the dock splitters.
                 .mx(px(4.))
                 .on_prepaint(move |bounds, _, cx| {
@@ -603,6 +652,7 @@ mod tests {
         let json = serde_json::to_value(&state).unwrap();
         assert!(json.get("root").is_none());
         assert!(json.get("layouts").is_none());
+        assert!(json.get("back").is_none() && json.get("forward").is_none());
         let back: BrowserState = serde_json::from_value(json).unwrap();
         assert_eq!(back.location, Some(Location::Playlist(3)));
         assert_eq!(back.albums, Some(true));
@@ -611,5 +661,17 @@ mod tests {
         let fresh: BrowserState =
             serde_json::from_value(serde_json::Value::Null).unwrap_or_default();
         assert!(fresh.location.is_none() && fresh.albums.is_none());
+    }
+
+    #[test]
+    fn a_folder_cd_page_and_both_navigation_stacks_round_trip() {
+        let state = serde_json::json!({
+            "location":{"Folder":"C:/Music"},
+            "page":{"Disc":{"Cue":"C:/Music/Disc.cue"}},
+            "back":[{"location":"Liked","albums":false,"query":"mix"}],
+            "forward":[{"location":{"Playlist":4},"albums":false,"query":"set"}]
+        });
+        let restored: BrowserState = serde_json::from_value(state.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), state);
     }
 }

@@ -36,7 +36,7 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable, WindowExt,
+        Icon, Sizable,
         button::{Button, ButtonVariants},
         dock::{BasePanel, PanelEvent, PanelInfo, PanelState, TabGroup},
         h_flex,
@@ -472,6 +472,21 @@ pub enum Destination {
     View(Location),
 }
 impl Destination {
+    /// The same explicit browser actions for every navigation destination.
+    pub fn open_items(self, menu: PopupMenu, router: Entity<Router>) -> PopupMenu {
+        use gpui_kit::component::menu::PopupMenuItem;
+        let tab = router.clone();
+        let destination = self.clone();
+        menu.item(
+            PopupMenuItem::new("Open in New Tab").on_click(move |_, _, cx| {
+                tab.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination.clone())));
+            }),
+        )
+        .item(PopupMenuItem::new("Open Beside").on_click(move |_, _, cx| {
+            router.update(cx, |_, cx| cx.emit(RouterEvent::Beside(self.clone())));
+        }))
+    }
+
     pub fn apply(self, browser: &mut Browser, window: &mut Window, cx: &mut Context<Browser>) {
         match self {
             Self::Folder {
@@ -495,6 +510,7 @@ pub struct Template {
 pub enum RouterEvent {
     /// Open a destination in a new Music Browser.
     Open(Destination),
+    Beside(Destination),
     /// Show the active browser where it sits in the dock.
     Reveal,
 }
@@ -538,13 +554,11 @@ impl Router {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if new_tab {
-            router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination)));
-        } else if let Some(browser) = router.read(cx).active() {
+        if !new_tab && let Some(browser) = router.read(cx).active() {
             browser.update(cx, |b, cx| destination.apply(b, window, cx));
             router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal));
         } else {
-            window.push_notification("Choose Open in New Tab to open a Music Browser.", cx);
+            router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination)));
         }
     }
 }

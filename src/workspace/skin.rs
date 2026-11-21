@@ -24,7 +24,7 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 /// How long an item dragged over a tab rests there before the tab opens.
 const DWELL: Duration = Duration::from_millis(550);
@@ -35,6 +35,7 @@ pub const STRIP_HEIGHT: f32 = 34.;
 pub struct SkinState {
     pub workspace: WeakEntity<Workspace>,
     dwell: RefCell<Dwell<PanelId>>,
+    widths: RefCell<HashMap<NodeId, Pixels>>,
 }
 
 /// Which tab a dragged item rests over. Each arrival starts a new rest, and
@@ -83,7 +84,20 @@ impl SkinState {
         Rc::new(Self {
             workspace,
             dwell: RefCell::new(Dwell::default()),
+            widths: RefCell::default(),
         })
+    }
+    pub fn can_open_beside(&self, node: NodeId) -> bool {
+        // Room for navigation, search and a readable title in each half.
+        self.widths
+            .borrow()
+            .get(&node)
+            .is_some_and(|width| *width >= px(2. * 320. + 4.))
+    }
+    pub fn retain_groups(&self, tree: &gpui_kit::component::dock::PaneTree) {
+        self.widths
+            .borrow_mut()
+            .retain(|node, _| tree.find_node(*node).is_some());
     }
     /// An item dragged over `panel`'s tab: open the tab once it rests there.
     /// Hovering alone never changes anything but which tab is shown.
@@ -232,6 +246,7 @@ impl TabGroupRenderer for Tabs {
         let state = self.state.clone();
         let scroll = self.scroll.clone();
         container_query(move |size, _, cx| {
+            state.widths.borrow_mut().insert(node, size.width);
             let compact = utility && tabs.len() > 1 && size.width < px(196.);
             let mut address = active
                 .as_ref()
@@ -529,11 +544,14 @@ fn tab(
             close(w, cx)
         })
         .when_some(drag, |d, drag| {
-            let preview = (label.clone(), panel.clone());
+            let preview = label.clone();
+            let workspace = workspace.clone();
+            let node = group.node();
             d.on_drag(drag, move |drag, offset, _, cx| {
+                let _ = workspace.update(cx, |s, cx| s.start_panel_drag(id, node, ix, cx));
                 drag.set_drag_offset(offset);
                 drag.set_preview_size(size(px(140.), px(TAB_HEIGHT)));
-                let label = preview.0.clone();
+                let label = preview.clone();
                 cx.new(|_| TabPreview { label })
             })
         })
@@ -608,7 +626,7 @@ pub fn add_button(state: &Rc<SkinState>, node: Option<NodeId>, cx: &App) -> AnyE
         .accessibility_label("Open a panel")
         .tooltip("Open a panel")
         .tab_stop(false)
-        .dropdown_menu(move |menu, _, _| super::picker_menu(&workspace, node, menu))
+        .dropdown_menu(move |menu, _, cx| super::picker_menu(&workspace, node, menu, cx))
         .into_any_element()
 }
 

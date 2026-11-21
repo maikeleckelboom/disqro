@@ -32,7 +32,7 @@ pub struct SavedQueue {
 pub struct WorkspaceState {
     /// The destination for navigation from Library and Locations.
     pub active: Option<InstanceId>,
-    /// Single-instance panels closed in an earlier session, by type.
+    /// The most recently closed instance of each type, in closing order.
     pub closed: Vec<ClosedPanel>,
     /// The height of the player along the bottom of the window.
     pub player_height: Option<f32>,
