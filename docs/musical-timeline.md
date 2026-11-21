@@ -2,11 +2,11 @@
 
 In the bottom player, choose **Track** or **Full CD**, or press **Alt+W**. The first view follows the playing chapter. The second shows its position in the authored disc, with chapter boundaries and a highlight over the current chapter. Hover over a chapter to see its title. Disqro remembers the preference and shows the track waveform for a standalone recording.
 
-These Windows captures show the same paused position in chapter 14 of *Thunderdome X*, CD2. The chapter starts at 52:53.667 on the disc. At 57.250 seconds into the chapter the disc position is 53:50.917. The player rounds its labels to the nearest second.
+These Windows captures show the same paused position in chapter 14 of *Thunderdome X*, CD2. The chapter starts at 52:53.667 on the disc. At 57.250 seconds into the chapter the disc position is 53:50.917. The player displays elapsed whole seconds, so the disc label reads **53:50**.
 
 ![Track perspective, 0:57 into a 3:07 chapter](evidence/track-perspective.png)
 
-![Full CD perspective, 53:51 into a 1:17:30 CD](evidence/full-cd-perspective.png)
+![Full CD perspective, 53:50 into a 1:17:30 CD](evidence/full-cd-perspective.png)
 
 ### Navigation and source ownership
 
@@ -28,11 +28,13 @@ Measurements used an optimized native player with isolated profiles. The primary
 | Cold request to first verified chapter geometry / first canvas paint | 55.899 ms / 68.793 ms |
 | Warm application reopen to first geometry / paint, timed from waveform request | 68.435 ms / 81.026 ms |
 | Player synchronization at natural chapter 14 → 15 | 11 µs |
-| Playback commands / decoder opens / voice creations caused by switching | 0 / 0 / 0 |
+| Final build, 32 paused and 32 playing switches | 0 playback commands, decoder opens or voice creations in all switch intervals. Maximum handler time 3 µs |
 | Physical page reuse on this CD | Cold 1,163 pages decoded and 19 shared reads. Warm 1,182 reads and zero decoded pages |
 | Peak retained player waveform geometry | 733,416 bytes |
 | Peak Windows working-set increase over fresh optimized analysis-test process baseline | 8.55 MiB cold, 4.33 MiB warm, including SQLite, decoder, allocator and retained shapes |
 | Coordinate error in the four-rate integration fixture | 0 frames across 220,136 frames and 12 segments |
+
+A second run separated the switch bursts from an explicit paused seek from chapter 15 to 14 and a subsequent Play. The seek preserved pause. Only Play opened a voice. [Isolated switch counters](evidence/switch-windows.csv)
 
 Canvas paint measures application work through the paint callback. Display presentation and hardware output latency require separate instrumentation. The memory probe loaded the same complete disc through the production analysis function and kept the latest projections for every chapter. Its process peak working sets were 17,920,000 bytes cold and 13,496,320 bytes warm.
 
