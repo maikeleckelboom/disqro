@@ -470,7 +470,7 @@ struct Resize {
     x: Pixels,
     width: f32,
     grow_left: bool,
-    follow_end: bool,
+    end_gap: Option<f32>,
 }
 
 pub struct MusicTable {
@@ -789,12 +789,10 @@ impl MusicTable {
         if column.width != width {
             column.width = width;
             table.refresh(cx);
-            if r.follow_end {
+            if let Some(gap) = r.end_gap {
                 let d = table.delegate();
                 let widths = d.layout().widths(d.viewport);
-                let range = d.layout().scrolling(&widths, d.viewport);
-                let total = widths.iter().sum::<f32>() + scroll_tail(&range, widths.len());
-                let x = px((d.viewport - total).min(0.));
+                let x = px((d.viewport - widths.iter().sum::<f32>() - gap).min(0.));
                 table.horizontal_scroll_handle.set_offset(point(x, px(0.)));
             }
             cx.notify();
@@ -1370,20 +1368,20 @@ impl MusicTable {
                     let d = t.delegate();
                     let widths = d.layout().widths(d.viewport);
                     let scrolling = d.layout().scrolling(&widths, d.viewport);
-                    let total = widths.iter().sum::<f32>() + scroll_tail(&scrolling, widths.len());
-                    let end = (d.viewport - total).min(0.);
-                    // While dragging at the right end, keep the last metadata
-                    // cell readable as the center viewport changes width.
-                    let follow_end = scrolling.end < widths.len()
-                        && ix + 1 >= scrolling.end
-                        && (f32::from(t.horizontal_scroll_handle.offset().x) - end).abs() <= 1.;
+                    // Keep the last visible scrollable edge in view, including
+                    // when it is flush with the first right pin before the drag.
+                    let offset = f32::from(t.horizontal_scroll_handle.offset().x);
+                    let gap = d.viewport - widths.iter().sum::<f32>() - offset;
+                    let end_gap =
+                        (scrolling.end < widths.len() && ix + 1 >= scrolling.end && gap >= -1.)
+                            .then(|| gap.clamp(0., scroll_tail(&scrolling, widths.len())));
                     let width = t.col_width(ix).map(f32::from);
                     t.delegate_mut().resizing = width.map(|width| Resize {
                         ix,
                         x: e.position.x,
                         width,
                         grow_left,
-                        follow_end,
+                        end_gap,
                     });
                 }),
             )
