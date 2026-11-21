@@ -118,22 +118,15 @@ impl Layout {
     }
 
     fn normalize(&mut self) {
-        // Stable partition. A right-pinned Favorite owns the outside edge.
-        self.columns.sort_by_key(|c| match (c.pin, c.field) {
-            (Pin::Left, _) => 0,
-            (Pin::None, _) => 1,
-            (Pin::Right, Field::Favorite) => 3,
-            (Pin::Right, _) => 2,
+        self.columns.sort_by_key(|c| match c.pin {
+            Pin::Left => 0,
+            Pin::None => 1,
+            Pin::Right => 2,
         });
     }
 
     pub(super) fn move_column(&mut self, from: usize, to: usize) -> bool {
-        let source = &self.columns[from];
-        let target = &self.columns[to];
-        if source.pin != target.pin
-            || (source.pin == Pin::Right
-                && (source.field == Field::Favorite || target.field == Field::Favorite))
-        {
+        if self.columns[from].pin != self.columns[to].pin {
             return false;
         }
         let column = self.columns.remove(from);
@@ -156,7 +149,7 @@ impl Layout {
         while range.end > 0 {
             let i = range.end - 1;
             let c = &self.columns[i];
-            if c.pin != Pin::Right || (widths[i] > budget && c.field != Field::Favorite) {
+            if c.pin != Pin::Right || widths[i] > budget {
                 break;
             }
             budget -= widths[i];
@@ -216,11 +209,7 @@ impl LayoutColumn {
         Self {
             field,
             width: field.width(),
-            pin: if field == Field::Favorite {
-                Pin::Right
-            } else {
-                Pin::None
-            },
+            pin: Pin::None,
         }
     }
 }
@@ -236,7 +225,7 @@ pub struct Layouts {
 impl Default for Layouts {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             disc: Layout::new(ContextKind::Disc),
             mixed: Layout::new(ContextKind::Mixed),
             playlist: Layout::new(ContextKind::Playlist),
@@ -260,7 +249,7 @@ impl Layouts {
     }
 
     pub fn validate(mut self) -> Self {
-        let migrate_favorite = self.version == 0;
+        let version = self.version;
         for context in [ContextKind::Disc, ContextKind::Mixed, ContextKind::Playlist] {
             let layout = self.get_mut(context);
             let mut seen = Vec::new();
@@ -269,7 +258,9 @@ impl Layouts {
                     return false;
                 }
                 seen.push(c.field);
-                if c.field == Field::Favorite || !(24. ..=c.field.max_width()).contains(&c.width) {
+                if (version < 2 && c.field == Field::Favorite && c.width == 34.)
+                    || !(24. ..=c.field.max_width()).contains(&c.width)
+                {
                     c.width = c.field.width();
                 }
                 true
@@ -283,21 +274,12 @@ impl Layouts {
             if let Some(artwork) = layout.artwork.take() {
                 layout.show_cover(artwork);
             }
-            if migrate_favorite {
-                if !layout.has(Field::Favorite) {
-                    layout.toggle(Field::Favorite);
-                }
-                if let Some(c) = layout
-                    .columns
-                    .iter_mut()
-                    .find(|c| c.field == Field::Favorite)
-                {
-                    c.pin = Pin::Right;
-                }
+            if version == 0 && !seen.contains(&Field::Favorite) {
+                layout.columns.push(LayoutColumn::new(Field::Favorite));
             }
             layout.normalize();
         }
-        self.version = 1;
+        self.version = 2;
         self
     }
 
@@ -315,12 +297,13 @@ impl Layouts {
                 continue;
             };
             if !saved.iter().any(|s| s.field == field) {
-                let width =
-                    if field != Field::Favorite && (24. ..=field.max_width()).contains(&c.width) {
-                        c.width
-                    } else {
-                        field.width()
-                    };
+                let width = if !(field == Field::Favorite && c.width == 34.)
+                    && (24. ..=field.max_width()).contains(&c.width)
+                {
+                    c.width
+                } else {
+                    field.width()
+                };
                 saved.push(LayoutColumn {
                     width,
                     ..LayoutColumn::new(field)
@@ -436,7 +419,7 @@ mod tests {
             ]
         );
         let widths: Vec<f32> = layouts.disc.columns.iter().map(|c| c.width).collect();
-        assert_eq!(widths, [44., 40., 354., 81., 34.]);
+        assert_eq!(widths, [44., 40., 354., 81., 88.]);
         assert_eq!(
             fields(&layouts.mixed),
             [Field::Title, Field::Path, Field::Artist, Field::Favorite]
@@ -496,13 +479,14 @@ mod tests {
         layout.columns[0].width = Cover.max_width();
         layout.set_pin(Cover, Pin::Left);
         layout.set_pin(Artist, Pin::Left);
+        layout.set_pin(Favorite, Pin::Right);
         layout.set_pin(Album, Pin::Right);
         layout.adaptive = false;
         let saved = serde_json::to_value(&layout).unwrap();
         let widths = layout.widths(304.);
         // The right pair fits. Neither left column fits beside it with room to scroll.
         assert_eq!(layout.scrolling(&widths, 304.), 0..4);
-        assert_eq!(layout.scrolling(&widths, 380.), 1..4);
+        assert_eq!(layout.scrolling(&widths, 420.), 1..4);
         assert_eq!(layout.scrolling(&widths, 1000.), 2..4);
         assert_eq!(layout.widths(1000.), widths);
         assert_eq!(serde_json::to_value(layout).unwrap(), saved);
@@ -512,13 +496,14 @@ mod tests {
         use Field::*;
         let mut l = Layout::new(ContextKind::Mixed);
         l.columns[1].width = 381.;
+        l.set_pin(Favorite, Pin::Right);
         l.set_pin(Album, Pin::Right);
         l.set_pin(Title, Pin::Left);
         l.set_pin(Artist, Pin::Left);
         assert_eq!(fields(&l), [Title, Artist, Cover, Length, Album, Favorite]);
         assert!(l.move_column(0, 1));
         assert!(!l.move_column(1, 2));
-        assert!(!l.move_column(4, 5));
+        assert!(l.move_column(4, 5));
         l.set_pin(Title, Pin::None);
         l.set_pin(Favorite, Pin::None);
         assert!(l.move_column(4, 1));
@@ -540,7 +525,7 @@ mod tests {
         let mut json = serde_json::to_value(layouts).unwrap();
         assert_eq!(json["mixed"]["columns"][0]["pin"], "Left");
         assert_eq!(json["mixed"]["columns"][5]["pin"], "None");
-        assert_eq!(json["disc"]["columns"][3]["pin"], "Right");
+        assert_eq!(json["disc"]["columns"][4]["pin"], "Right");
         json["mixed"]["columns"].as_array_mut().unwrap().reverse();
         json["mixed"]["columns"][1]["pin"] = "unknown".into();
         let mut loaded: Layouts = serde_json::from_value(json).unwrap();
@@ -552,7 +537,7 @@ mod tests {
         assert!(!loaded.playlist.has(Favorite));
         loaded.playlist.toggle(Favorite);
         assert_eq!(loaded.playlist.columns[0].pin, Pin::Left);
-        assert_eq!(loaded.disc.columns[3].field, Artist);
+        assert_eq!(loaded.disc.columns[4].field, Artist);
         for kind in [ContextKind::Disc, ContextKind::Mixed, ContextKind::Playlist] {
             *loaded.get_mut(kind) = Layout::new(kind);
             let cols = &loaded.get(kind).columns;
@@ -560,23 +545,70 @@ mod tests {
             let last = cols.last().unwrap();
             assert_eq!(
                 (last.field, last.pin, last.width),
-                (Favorite, Pin::Right, 34.)
+                (Favorite, Pin::None, 88.)
             );
         }
     }
     #[test]
-    fn compact_action_and_last_metadata_share_one_boundary() {
+    fn favorite_migration_preserves_explicit_order_visibility_width_and_pin() {
         use Field::*;
-        let mut layouts = Layouts::default();
-        layouts.disc.columns.last_mut().unwrap().width = 62.;
-        let layouts = layouts.validate();
-        assert_eq!(layouts.disc.columns.last().unwrap().width, 34.);
-        for viewport in [567., 658., 659., 660., 991.] {
-            let widths = layouts.disc.widths(viewport);
-            assert_eq!(widths.iter().sum::<f32>(), viewport);
-            assert_eq!(widths[3], Length.width());
-            assert_eq!(widths[4], Favorite.width());
+        let mut old = Layouts {
+            version: 1,
+            ..Default::default()
+        };
+        old.disc.columns.last_mut().unwrap().width = 34.;
+        old.disc.set_pin(Favorite, Pin::Right);
+        old.mixed.columns.last_mut().unwrap().width = 137.;
+        old.mixed.move_column(5, 2);
+        old.playlist.columns.last_mut().unwrap().width = 119.;
+        old.playlist.set_pin(Favorite, Pin::Left);
+        old.playlist.toggle(Favorite);
+        let json = serde_json::to_string(&old).unwrap();
+        let loaded = serde_json::from_str::<Layouts>(&json).unwrap().validate();
+        let disc = loaded.disc.columns.last().unwrap();
+        assert_eq!(
+            (disc.field, disc.width, disc.pin),
+            (Favorite, 88., Pin::Right)
+        );
+        assert_eq!(loaded.mixed.columns[2].field, Favorite);
+        assert_eq!(loaded.mixed.columns[2].width, 137.);
+        assert!(!loaded.playlist.has(Favorite));
+        let hidden = &loaded.playlist.hidden[0];
+        assert_eq!(
+            (hidden.field, hidden.width, hidden.pin),
+            (Favorite, 119., Pin::Left)
+        );
+    }
+
+    #[test]
+    fn divider_ownership_tracks_visible_edges_across_pin_groups() {
+        use super::super::resize_owner;
+        let widths = [48., 160., 60., 88., 90.];
+        // Every shared divider in an ordinary table targets its preceding field.
+        for i in 1..widths.len() {
+            for (host, leading) in [(i - 1, false), (i, true)] {
+                assert_eq!(
+                    resize_owner(&widths, &(0..5), 446., 0., host, leading),
+                    Some(i - 1)
+                );
+            }
         }
+        assert_eq!(resize_owner(&widths, &(0..5), 446., 0., 4, false), Some(4));
+        // With two pins on the right their shared boundary grows the outer pin left.
+        let owner = |viewport, offset, host, leading| {
+            resize_owner(&widths, &(1..3), viewport, offset, host, leading)
+        };
+        for (host, leading) in [(3, false), (4, true)] {
+            assert_eq!(owner(446., 0., host, leading), Some(4));
+        }
+        // Flush, clipped, and separated positions of the last scrollable edge.
+        for (host, leading) in [(2, false), (3, true)] {
+            assert_eq!(owner(400., -46., host, leading), Some(3));
+        }
+        assert_eq!(owner(400., -40., 2, false), None);
+        assert_eq!(owner(400., -58., 2, false), Some(2));
+        assert_eq!(owner(400., -58., 3, true), Some(3));
+        assert_eq!(owner(400., -58., 1, true), None);
     }
 
     #[test]
