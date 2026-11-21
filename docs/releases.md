@@ -1,12 +1,12 @@
 # Releases and Locations
 
-The sidebar has two parts. **Library** holds the indexed collections, Liked Tracks and playlists. **Locations** holds the Places, and every Place opens in place to show its own folders. A collection can also tell which of its CDs belong to one release, so a two-CD album appears as one release with its CDs beneath it, and **Play Release** plays them in order.
+**Library** holds the indexed collections, Liked Tracks and playlists. **Locations**, a panel of its own, holds the Places, and every Place opens in place to show its own folders. A collection can also tell which of its CDs belong to one release, so a two-CD album appears as one release with its CDs beneath it, and **Play Release** plays them in order.
 
 ![Locations revealing a CD opened from the address bar](evidence/locations-reveal.png)
 
 ## Locations
 
-Music, Downloads, the drives and your own Places are the roots of one tree. The arrow opens a branch; the name opens the folder. Opening a folder from the address bar, Back, Forward or Parent opens the way down to it under the Place it belongs to, and nothing else. The Library keeps at most half of the sidebar, so a long list of playlists cannot push Locations out of view, and each part scrolls on its own. [Controls and menus](listening-workspace.md#library-and-locations)
+Music, Downloads, the drives and your own Places are the roots of one tree. The arrow opens a branch; the name opens the folder. Opening a folder from the address bar, Back, Forward or Parent opens the way down to it under the Place it belongs to, and nothing else. Library and Locations are separate panels, tabbed together by default, and each scrolls on its own. [Controls and menus](listening-workspace.md#library-and-locations)
 
 Add Music Folder moved out of the list into the Library heading's menu, the collection menus and the empty All Music view. With one registered collection, its row stands in for All Music.
 
