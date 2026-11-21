@@ -33,7 +33,7 @@ pub fn bind_keys(cx: &mut App) {
 pub struct LocationBar {
     browser: Entity<Browser>,
     input: Entity<InputState>,
-    editing: bool,
+    editing: Option<(Location, Option<crate::collection::Page>)>,
     pending: bool,
     request: u64,
     error: Option<SharedString>,
@@ -222,7 +222,7 @@ impl LocationBar {
                 bar.error = None;
                 cx.notify();
             }
-            InputEvent::Blur if bar.editing => bar.cancel(window, cx),
+            InputEvent::Blur if bar.editing.is_some() => bar.cancel(window, cx),
             _ => {}
         })
         .detach();
@@ -230,7 +230,7 @@ impl LocationBar {
         Self {
             browser,
             input,
-            editing: false,
+            editing: None,
             pending: false,
             request: 0,
             error: None,
@@ -246,13 +246,24 @@ impl LocationBar {
         cx.subscribe_in(
             browser,
             window,
-            |bar, _, _: &crate::browser::ViewChanged, _, cx| bar.reset(cx),
+            |bar, browser, _: &crate::browser::ViewChanged, _, cx| {
+                let browser = browser.read(cx);
+                // Metadata and table updates also emit ViewChanged. Keep a draft
+                // while its browser still shows the destination it was opened from.
+                if bar.editing.as_ref().is_some_and(|(location, page)| {
+                    *location != browser.location || *page != browser.page
+                }) {
+                    bar.reset(cx);
+                } else {
+                    cx.notify();
+                }
+            },
         )
     }
     fn reset(&mut self, cx: &mut Context<Self>) {
         self.request += 1;
         self.pending = false;
-        self.editing = false;
+        self.editing = None;
         self.error = None;
         cx.notify();
     }
@@ -264,7 +275,7 @@ impl LocationBar {
             .unwrap_or_default();
         self.pending = false;
         self.request += 1;
-        self.editing = true;
+        self.editing = Some((browser.location.clone(), browser.page.clone()));
         self.error = None;
         self.input.update(cx, |s, cx| {
             s.set_value(path, window, cx);
@@ -276,7 +287,7 @@ impl LocationBar {
     fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request += 1;
         let was_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
-        self.editing = false;
+        self.editing = None;
         self.pending = false;
         self.error = None;
         if was_focused {
@@ -319,12 +330,12 @@ impl LocationBar {
                 bar.pending = false;
                 match target {
                     Target::Folder => {
-                        bar.editing = false;
+                        bar.editing = None;
                         bar.browser.update(cx, |b, cx| b.open(path, window, cx));
                         bar.focus_list(window, cx);
                     }
                     Target::Playable => {
-                        bar.editing = false;
+                        bar.editing = None;
                         bar.focus_list(window, cx);
                         if let Some(parent) = path.parent().map(Path::to_owned) {
                             bar.browser.update(cx, |b, cx| {
@@ -529,7 +540,7 @@ impl Render for LocationBar {
             .border_1()
             .child(measure)
             .on_action(cx.listener(|bar, _: &CancelEdit, w, cx| bar.cancel(w, cx)));
-        if self.editing {
+        if self.editing.is_some() {
             return base
                 .bg(m.canvas)
                 .border_color(if self.error.is_some() {
