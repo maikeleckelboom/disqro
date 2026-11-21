@@ -27,6 +27,7 @@ pub struct SavedQueue {
 pub struct Profile {
     pub folder: Option<PathBuf>,
     pub volume: f32,
+    pub full_cd: bool,
     pub layout: Option<DockAreaState>,
     pub columns: Vec<LayoutColumn>,
     pub places: Option<PlacesState>,
@@ -46,6 +47,7 @@ impl Default for Profile {
         Self {
             folder: None,
             volume: 0.65,
+            full_cd: false,
             layout: None,
             columns: vec![],
             places: None,

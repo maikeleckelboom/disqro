@@ -4,16 +4,18 @@ use crate::library::{DiscTrack, Track};
 use rusqlite::{Connection, params};
 use std::{fs, path::Path, time::UNIX_EPOCH};
 
-pub struct Cache(Connection);
+pub struct Cache(pub(crate) Connection);
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Stamp {
     pub(crate) bytes: i64,
     pub(crate) modified: i64,
 }
 impl Stamp {
     pub fn read(path: &Path) -> Option<Self> {
-        let m = fs::metadata(path).ok()?;
+        Self::from_metadata(&fs::metadata(path).ok()?)
+    }
+    pub fn from_metadata(m: &fs::Metadata) -> Option<Self> {
         Some(Self {
             bytes: m.len().try_into().ok()?,
             modified: m
@@ -42,7 +44,10 @@ impl Cache {
             CREATE INDEX IF NOT EXISTS chapters_artist ON chapters(artist COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS chapters_album ON chapters(album COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS peaks(path BLOB, first_tick INTEGER, last_tick INTEGER, bytes INTEGER, modified INTEGER, data BLOB, PRIMARY KEY(path,first_tick,last_tick)) WITHOUT ROWID;")?;
+            CREATE TABLE IF NOT EXISTS wave_pages_v1(path BLOB, bytes INTEGER, modified INTEGER,
+                page INTEGER, data BLOB, UNIQUE(path,page));
+            CREATE TABLE IF NOT EXISTS disc_sources_v1(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
+                path BLOB, bytes INTEGER, modified INTEGER, rate INTEGER, frames INTEGER, PRIMARY KEY(sheet,path)) WITHOUT ROWID;")?;
         Ok(Self(db))
     }
     pub fn program(&self, path: &Path) -> anyhow::Result<Vec<Track>> {
@@ -154,37 +159,6 @@ impl Cache {
             ])?;
         Ok(())
     }
-    pub fn peaks(
-        &self,
-        path: &Path,
-        start: u64,
-        end: Option<u64>,
-        stamp: &Stamp,
-    ) -> Option<Vec<u8>> {
-        self.0.query_row("SELECT data FROM peaks WHERE path=? AND first_tick=? AND last_tick=? AND bytes=? AND modified=?",
-            params![path.as_os_str().as_encoded_bytes(), start as i64, end.map_or(-1, |v| v as i64), stamp.bytes, stamp.modified], |r| r.get(0)).ok()
-    }
-    pub fn store_peaks(
-        &self,
-        path: &Path,
-        start: u64,
-        end: Option<u64>,
-        stamp: &Stamp,
-        data: &[u8],
-    ) -> rusqlite::Result<()> {
-        self.0.execute(
-            "INSERT OR REPLACE INTO peaks VALUES(?,?,?,?,?,?)",
-            params![
-                path.as_os_str().as_encoded_bytes(),
-                start as i64,
-                end.map_or(-1, |v| v as i64),
-                stamp.bytes,
-                stamp.modified,
-                data
-            ],
-        )?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -214,24 +188,6 @@ mod tests {
             db.0.query_row("SELECT count(*) FROM chapters", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             1
-        );
-    }
-    #[test]
-    fn more_than_32_peak_ranges_coexist_and_source_changes_invalidate() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Cache::open(dir.path()).unwrap();
-        let path = dir.path().join("disc.flac");
-        fs::write(&path, b"old").unwrap();
-        let before = Stamp::read(&path).unwrap();
-        for n in 0..80 {
-            db.store_peaks(&path, n, Some(n + 1), &before, &[n as u8])
-                .unwrap();
-        }
-        assert_eq!(db.peaks(&path, 0, Some(1), &before).unwrap(), [0]);
-        fs::write(&path, b"replaced").unwrap();
-        assert!(
-            db.peaks(&path, 0, Some(1), &Stamp::read(&path).unwrap())
-                .is_none()
         );
     }
 }

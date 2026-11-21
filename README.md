@@ -26,6 +26,8 @@ A folder shows the recordings it holds, and Locations shows where it sits within
 
 The Windows workspace includes an editable address bar, a Library and Locations sidebar, native tray and media controls, real artwork, and waveform seeking. It remembers the queue, folder, volume, collection view, columns and dock layout. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
 
+In the bottom player, switch between **Track** and **Full CD** with the waveform control or **Alt+W**. Both views follow the same running playback position. [Waveform perspectives and Windows verification](docs/musical-timeline.md)
+
 ## Persistent library and personal collections
 
 Open a music folder and choose **Add Folder to Library** in the Recordings panel menu. Its indexed albums and tracks appear in the sidebar. Like a CUE chapter, give it up to five stars, or drag it to a playlist. A playlist can mix chapters and individual files from any folder. [Library controls, storage policy and Windows verification](docs/persistent-library.md)

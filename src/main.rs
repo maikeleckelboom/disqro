@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 extern crate gpui_kit as gpui;
+mod analysis;
 mod artwork;
 mod assets;
 mod audio;
@@ -8,6 +9,7 @@ mod cache;
 mod catalog;
 mod collection;
 mod cue;
+mod diagnostics;
 mod discovery;
 mod folders;
 mod library;
@@ -27,11 +29,14 @@ mod store;
 mod system;
 mod table;
 mod theme;
+mod timeline;
+mod waveform;
 mod workspace;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};
 use workspace::*;
 fn main() {
+    diagnostics::start();
     let arg = std::env::args_os()
         .nth(1)
         .map(std::path::PathBuf::from)

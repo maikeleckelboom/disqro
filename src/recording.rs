@@ -26,6 +26,8 @@ pub struct Recording {
     preroll: usize,
     samples: Vec<f32>,
     gain: f32,
+    pub stamp: Option<crate::cache::Stamp>,
+    pub(crate) playback_probe: Option<std::time::Instant>,
 }
 pub fn disc_frame(tick: u64, rate: u32) -> usize {
     ((u128::from(tick) * u128::from(rate) + 37) / 75) as usize
@@ -33,6 +35,10 @@ pub fn disc_frame(tick: u64, rate: u32) -> usize {
 impl Recording {
     pub fn open(track: &Track, end: Option<u64>) -> Result<Self> {
         let file = Box::new(File::open(&track.source)?);
+        let stamp = file
+            .metadata()
+            .ok()
+            .and_then(|m| crate::cache::Stamp::from_metadata(&m));
         let reader = symphonia::default::get_probe().probe(
             &Hint::default(),
             MediaSourceStream::new(file, Default::default()),
@@ -131,6 +137,8 @@ impl Recording {
             preroll,
             samples: Vec::new(),
             gain,
+            stamp,
+            playback_probe: None,
         })
     }
     fn timestamp(&self, frame: usize) -> io::Result<i64> {
@@ -176,6 +184,17 @@ impl Decoder for Recording {
         Ok(local)
     }
     fn decode(&mut self) -> io::Result<Vec<Frame>> {
+        let _timer = self.playback_probe.as_mut().and_then(|last| {
+            let d = crate::diagnostics::get()?;
+            let now = std::time::Instant::now();
+            d.packet_gap_us.fetch_max(
+                now.duration_since(*last).as_micros() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            *last = now;
+            d.packets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::diagnostics::Timer::measure(|d| &d.decode_us)
+        });
         if self.cursor == self.length {
             return Ok(vec![]);
         }
