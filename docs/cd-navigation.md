@@ -10,8 +10,9 @@
 | --- | --- |
 | Double-click a chapter, including a filtered or globally sorted result | Start at that chapter in the complete authored CD sequence. Previous reaches earlier chapters and Up Next contains the remainder of that CD. |
 | Double-click a loose file | Play the single file. Album tags, a disc tag, a CUE program or a numbered CD folder supply disc context. Opening a disc page also explicitly selects that scope. |
-| Choose **Play CD** from a section menu or CD page menu | Start the whole CD at the beginning, including a recorded lead-in. Disc playback uses authored order and clears shuffle and repeat-one. |
-| Choose **Play All** or **Add All to Queue** from a collection | Play or append the whole displayed track sequence. A search limits these actions to the results. |
+| Choose **Play CD** from a CD row, section or page menu | Start the whole CD at the beginning, including a recorded lead-in. Disc playback uses authored order and clears shuffle and repeat-one. The queue ends with the CD. |
+| Choose **Play Release** from a release, one of its CDs, or the release page | Start CD 1, then each following CD of the release in authored order, then stop. Only CDs that belong to a release of several discs offer it. [Releases](releases.md) |
+| Choose **Play Collection** or **Add All to Queue** from a collection | Play or append the whole displayed track sequence, several releases and loose recordings included. A search limits these actions to the results. Liked Tracks, playlists and single folders call it **Play All**. |
 | Double-click a playlist occurrence | Play from that occurrence in the displayed playlist sequence. Repeated occurrences retain independent queue entries. |
 | Click the player artwork | Open the playing CD and select the exact chapter. A loose recording opens in its collection or folder and its artwork menu offers only **Show in Collection**. |
 | Choose **Show Track on CD** from a queue entry | Reveal that entry’s chapter. The playback indicator stays on the active recording. |

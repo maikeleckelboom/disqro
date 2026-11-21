@@ -2,7 +2,7 @@
 
 ## Listening controls
 
-- Open a folder and choose **Add Folder to Library** from the Recordings panel. Choose its sidebar entry to browse the index. **Albums / CDs** opens the disc list. Open a disc to browse its CUE chapters. The address bar, Back and Forward follow indexed locations.
+- Open a folder and choose **Add Folder to Library** from the Recordings panel, or **Add to Library** from its menu in Locations. **Add Music Folder…** is in the Library heading's menu and the empty All Music view. Choose its Library entry to browse the index. **Albums / CDs** opens the disc list. Open a disc to browse its CUE chapters. The address bar, Back and Forward follow indexed locations.
 - Ctrl+F searches the current view. Terms include `artist:`, `album:`, `format:`, `liked:yes` and `rating:4` (four or five stars). Click a heading to cycle through ascending, descending and original order.
 - Click a heart or a star to edit one track. Alt+L toggles likes on the selection. Alt+1 through Alt+5 set its rating, and Alt+0 clears it. Liked Tracks includes saved favorites whose sources are missing.
 - Ctrl+N creates a playlist. Drag tracks onto its sidebar entry or choose **Add to Playlist** from their context menu. Ctrl-click or Shift-click selects multiple rows. Shift+Up and Shift+Down extend a range from the keyboard.
