@@ -149,27 +149,6 @@ fn paused_seek_updates_the_position_without_opening_output() {
 }
 
 #[test]
-fn cached_overview_is_reused_only_for_the_same_source_range() {
-    use std::sync::atomic::AtomicU64;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("disc.wav");
-    fixture(&path, 48000, 48000);
-    let cache = Some(dir.path().join("cache"));
-    let generation = AtomicU64::new(1);
-    let mut track = Track::file(path);
-    let bins = crate::overview::load(&track, cache.clone(), &generation, 1).unwrap();
-    // A cancelled analysis can return already-persisted data, but cannot decode.
-    let cached = crate::overview::load(&track, cache.clone(), &generation, 2).unwrap();
-    assert_eq!(bins, cached);
-    track.disc = Some(DiscTrack {
-        sheet: "disc.cue".into(),
-        number: 2,
-        start: 1,
-        end: None,
-    });
-    assert!(crate::overview::load(&track, cache, &generation, 2).is_none());
-}
-#[test]
 #[ignore = "uses FFmpeg to encode the test recording"]
 fn encoded_formats_open_decode_and_seek() {
     let dir = tempfile::tempdir().unwrap();
@@ -309,6 +288,7 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
         id: current,
         offset: 0.,
     }];
+    e.rate = 48000;
     e.length = 3.;
     e.revalidate();
     e.update_position(0.42);
@@ -383,4 +363,53 @@ fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
         release.len(),
         "each chapter is its own occurrence"
     );
+}
+
+#[test]
+fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.wav");
+    fixture(&path, 32000, 32000);
+    let sheet = dir.path().join("set.cue");
+    std::fs::write(&sheet,"FILE source.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:00:01").unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let mut e = Engine::default();
+    e.queue.replace(&tracks, 0);
+    e.select(Some(0), 0.);
+    let origin = e.status.entry;
+    let target = e.queue.entries[1].id;
+    let before = e.queue.revision;
+    let stamp = crate::cache::Stamp::read(&path).unwrap();
+    let seek = |revision| Command::SeekOnDisc {
+        target,
+        revision,
+        seconds: 0.125,
+        duration: (32000 - 427) as f64 / 32000.,
+        source_revision: stamp.clone(),
+        sheet_revision: crate::cache::Stamp::read(&sheet),
+    };
+    assert!(
+        !Pending {
+            entry: origin,
+            command: seek(before)
+        }
+        .applies_to(Some(target))
+    );
+    e.command(seek(before + 1)).unwrap();
+    assert_eq!(e.status.entry, origin);
+    e.command(seek(before)).unwrap();
+    assert_eq!(
+        (e.status.entry, e.status.position, e.status.playing),
+        (Some(target), 0.125, false)
+    );
+    assert_eq!(e.queue.entries.len(), 2);
+    assert!(e.device.is_none() && e.voice.is_none());
+    e.select(Some(0), 0.);
+    fixture(&path, 32000, 32001);
+    e.command(seek(e.queue.revision)).unwrap();
+    assert_eq!(e.status.entry, origin);
 }

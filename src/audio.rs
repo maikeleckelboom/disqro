@@ -27,6 +27,7 @@ pub struct Status {
     pub track: Option<Arc<Track>>,
     /// The queue entry that is playing, which tells two copies of a track apart.
     pub entry: Option<u64>,
+    pub source_revision: Option<crate::cache::Stamp>,
     pub position: f64,
     pub duration: f64,
     pub playing: bool,
@@ -51,6 +52,14 @@ pub enum Command {
     Seek(f64),
     /// Seek to a time in seconds within the current track.
     SeekTo(f64),
+    SeekOnDisc {
+        target: u64,
+        source_revision: crate::cache::Stamp,
+        sheet_revision: Option<crate::cache::Stamp>,
+        revision: u64,
+        seconds: f64,
+        duration: f64,
+    },
     Step(i8),
     Volume(f32),
     Jump(u64),
@@ -93,7 +102,10 @@ impl Pending {
         ) && self.entry == old.entry
     }
     fn applies_to(&self, entry: Option<u64>) -> bool {
-        !matches!(self.command, Command::Seek(_) | Command::SeekTo(_)) || self.entry == entry
+        !matches!(
+            self.command,
+            Command::Seek(_) | Command::SeekTo(_) | Command::SeekOnDisc { .. }
+        ) || self.entry == entry
     }
 }
 
@@ -283,6 +295,7 @@ struct Engine {
     /// Consecutive chapters of one disc image share a decoder.
     group: Vec<Chapter>,
     chapter: usize,
+    rate: u32,
     /// Where the group ends in the decoder, earlier than `length` when the
     /// queue changed after the group was opened.
     limit: f64,
@@ -318,6 +331,7 @@ impl Engine {
                 ..Default::default()
             });
         }
+        self.status.source_revision = None;
         self.group.clear();
         self.status.playing = false;
     }
@@ -352,7 +366,7 @@ impl Engine {
                 }
                 group.push(Chapter {
                     id: next.id,
-                    offset: (disc_start(&next.track) - disc_start(&entry.track)) as f64 / 75.,
+                    offset: 0.,
                 });
                 last += 1;
             }
@@ -362,17 +376,30 @@ impl Engine {
             .disc
             .as_ref()
             .and_then(|d| d.end);
-        let recording = Recording::open(&entry.track, end)
+        let mut recording = Recording::open(&entry.track, end)
             .with_context(|| format!("Cannot play {}", entry.track.title))?;
+        if let Some(d) = crate::diagnostics::get() {
+            d.opens.fetch_add(1, Ordering::Relaxed);
+            recording.playback_probe = Some(std::time::Instant::now());
+        }
+        self.status.source_revision = recording.stamp.clone();
+        self.rate = recording.sample_rate();
+        let first = crate::recording::disc_frame(disc_start(&entry.track), self.rate);
+        for (chapter, queued) in group.iter_mut().zip(&self.queue.entries[index..]) {
+            let frame = crate::recording::disc_frame(disc_start(&queued.track), self.rate);
+            chapter.offset = (frame - first) as f64 / f64::from(self.rate);
+        }
         self.decoder_end = end;
         self.length = recording.num_frames() as f64 / f64::from(recording.sample_rate());
         ensure!(
             group.last().unwrap().offset < self.length,
             "A CUE track begins beyond the recording"
         );
+        let start =
+            ((position * f64::from(self.rate)).round() as usize).min(recording.num_frames() - 1);
         let data = StreamingSoundData::from_decoder(recording)
             .volume(db(self.volume))
-            .start_position(position.min((self.length - 0.001).max(0.)));
+            .start_position(kira::sound::PlaybackPosition::Samples(start));
         if self.device.is_none() {
             self.device = Some(
                 AudioManager::<DefaultBackend>::new(Default::default())
@@ -380,11 +407,14 @@ impl Engine {
             );
         }
         self.voice = Some(self.device.as_mut().unwrap().play(data)?);
+        if let Some(d) = crate::diagnostics::get() {
+            d.voices.fetch_add(1, Ordering::Relaxed);
+        }
         self.group = group;
         self.chapter = 0;
         self.limit = self.length;
         self.status.playing = true;
-        self.update_position(position);
+        self.update_position(start as f64 / f64::from(self.rate));
         Ok(())
     }
     fn update_position(&mut self, p: f64) {
@@ -420,7 +450,11 @@ impl Engine {
         };
         let active = &self.queue.entries[ix].track;
         let Some(segment) = &active.disc else { return };
-        let offset = |tick: u64| current.offset + tick.saturating_sub(segment.start) as f64 / 75.;
+        let offset = |tick: u64| {
+            let frame = |tick| crate::recording::disc_frame(tick, self.rate);
+            current.offset
+                + frame(tick).saturating_sub(frame(segment.start)) as f64 / f64::from(self.rate)
+        };
         self.group.truncate(self.chapter + 1);
         let mut last = active;
         if self.queue.repeat != Repeat::One {
@@ -502,6 +536,9 @@ impl Engine {
         }
     }
     fn command(&mut self, c: Command) -> Result<()> {
+        if let Some(d) = crate::diagnostics::get() {
+            d.commands.fetch_add(1, Ordering::Relaxed);
+        }
         match c {
             Command::PlayDisc(tracks, i, context) => {
                 self.queue.shuffle = false;
@@ -558,6 +595,36 @@ impl Engine {
                 self.seek_to(position)?;
             }
             Command::SeekTo(position) => self.seek_to(position)?,
+            Command::SeekOnDisc {
+                target,
+                source_revision,
+                sheet_revision,
+                revision,
+                seconds,
+                duration,
+            } => {
+                if self.queue.revision == revision
+                    && let Some(i) = self.queue.index_of(target)
+                    && crate::cache::Stamp::read(&self.queue.entries[i].track.source)
+                        == Some(source_revision)
+                    && sheet_revision.is_none_or(|s| {
+                        self.queue.entries[i]
+                            .track
+                            .disc
+                            .as_ref()
+                            .is_some_and(|d| crate::cache::Stamp::read(&d.sheet) == Some(s))
+                    })
+                {
+                    if self.status.playing {
+                        self.play(i, seconds)?;
+                    } else {
+                        self.stop_voice();
+                        self.select(Some(i), 0.);
+                        self.status.duration = duration;
+                        self.status.position = seconds;
+                    }
+                }
+            }
             Command::PlayNext(tracks) => {
                 self.queue.play_next(&tracks);
                 self.revalidate();
@@ -624,7 +691,12 @@ impl Engine {
         if self.status.duration <= 0. {
             return Ok(());
         }
-        let position = position.clamp(0., (self.status.duration - 0.001).max(0.));
+        let position = position.clamp(0., self.status.duration);
+        let position = if self.rate > 0 {
+            position.min((self.status.duration - 1. / f64::from(self.rate)).max(0.))
+        } else {
+            position
+        };
         if self.status.playing {
             if let Some(i) = self.queue.current {
                 self.play(i, position)?;
@@ -641,7 +713,31 @@ impl Engine {
         let Some(v) = &mut self.voice else {
             return Ok(());
         };
+        if let Some(d) = crate::diagnostics::get() {
+            if let Some(device) = &mut self.device {
+                let backend = device.backend_mut();
+                while let Some(ratio) = backend.pop_cpu_usage() {
+                    d.callbacks.fetch_add(1, Ordering::Relaxed);
+                    d.cpu_permille
+                        .fetch_max((ratio * 1000.) as u64, Ordering::Relaxed);
+                }
+                while backend.pop_error().is_some() {
+                    d.device_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if self.status.playing
+                && self
+                    .group
+                    .get(self.chapter)
+                    .is_some_and(|c| (v.position() - c.offset - self.status.position).abs() < 1e-9)
+            {
+                d.stalls.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         if let Some(error) = v.pop_error() {
+            if let Some(d) = crate::diagnostics::get() {
+                d.decode_errors.fetch_add(1, Ordering::Relaxed);
+            }
             return Err(error.into());
         }
         let stopped = v.state() == PlaybackState::Stopped;

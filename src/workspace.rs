@@ -32,6 +32,7 @@ gpui_kit::actions!(
         OpenFolder,
         FindTrack,
         PlayPause,
+        ToggleWaveform,
         PlaySelected,
         OpenDirectory,
         GoBack,
@@ -63,6 +64,7 @@ gpui_kit::actions!(
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("alt-w", ToggleWaveform, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-o", OpenFolder, Some("Disqro")),
         KeyBinding::new("ctrl-f", FindTrack, Some("Disqro")),
         KeyBinding::new("ctrl-l", FocusLocation, Some("Disqro")),
@@ -153,7 +155,7 @@ impl Workspace {
             ),
         };
         let volume = saved.volume.clamp(0., 1.);
-        let player = cx.new(|cx| Player::new(volume, window, cx));
+        let player = cx.new(|cx| Player::new(volume, saved.full_cd, window, cx));
         let catalog = cx.new(Catalog::new);
         if saved.columns_version < profile::COLUMNS_VERSION {
             crate::table::add_personal_columns(&mut saved.columns);
@@ -360,6 +362,7 @@ impl Workspace {
         Profile {
             folder: Some(b.path.clone()),
             volume: p.saved_volume(),
+            full_cd: p.full_cd,
             columns: b.table.read(cx).delegate().columns.clone(),
             layout: Some(self.dock.read(cx).dump(cx)),
             places: Some(self.sidebar.read(cx).places.state()),
@@ -835,6 +838,10 @@ impl Render for Workspace {
                     i.focus(w, cx);
                     i.select_all(w, cx);
                 });
+            }))
+            .on_action(cx.listener(|s, _: &ToggleWaveform, _, cx| {
+                s.player
+                    .update(cx, |p, cx| p.set_perspective(!p.full_cd, cx))
             }))
             .on_action(cx.listener(|s, _: &PlayPause, _, cx| s.play_pause(cx)))
             .on_action(cx.listener(|s, _: &NextTrack, _, cx| {

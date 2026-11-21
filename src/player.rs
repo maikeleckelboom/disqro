@@ -1,10 +1,11 @@
 use crate::{
+    analysis::{Analysis, Shape, Update},
     artwork,
     audio::{Command, Status, Transport},
     library::clock,
-    overview::Bin,
     queue::{Queue, Repeat},
     theme::materials,
+    timeline::{Program, SECOND},
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
@@ -23,11 +24,11 @@ use std::{
     cell::Cell,
     path::PathBuf,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
 };
+
+#[path = "player_wave.rs"]
+mod wave;
 
 pub enum PlayerEvent {
     Locate(Arc<crate::library::Track>, crate::browser::Destination),
@@ -79,20 +80,39 @@ pub struct Player {
     cover_path: Option<PathBuf>,
     cover: Option<Arc<Image>>,
     cover_bytes: Option<Arc<Vec<u8>>>,
-    peaks: Option<Arc<[Bin]>>,
-    analysis: Arc<AtomicU64>,
-    analysed: Option<u64>,
+    pub full_cd: bool,
+    analysis: Analysis,
+    generation: u64,
+    view_trace: Rc<crate::diagnostics::ViewTrace>,
+    program: Option<Arc<Program>>,
+    segment: Option<usize>,
+    shapes: Vec<Shape>,
+    unavailable: Option<String>,
+    run: std::ops::Range<usize>,
+    scrub_entry: Option<(u64, u64)>,
     visible: bool,
     drawn_position: f64,
 }
 impl Player {
-    pub fn new(volume: f32, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(volume: f32, full_cd: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _ = window;
         let transport = Transport::new(volume);
         let events = transport.changed.clone();
         cx.spawn(async move |this, cx| {
             while events.recv().await.is_ok() {
                 if this.update(cx, |p, cx| p.sync(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let (analysis, updates) = Analysis::new();
+        cx.spawn(async move |this, cx| {
+            while let Ok((generation, event)) = updates.recv().await {
+                if this
+                    .update(cx, |p, cx| p.wave_update(generation, event, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -113,9 +133,16 @@ impl Player {
             cover_path: None,
             cover: None,
             cover_bytes: None,
-            peaks: None,
-            analysis: Default::default(),
-            analysed: None,
+            full_cd,
+            analysis,
+            generation: 0,
+            view_trace: Default::default(),
+            program: None,
+            segment: None,
+            shapes: vec![],
+            unavailable: None,
+            run: 0..0,
+            scrub_entry: None,
             visible: true,
             drawn_position: 0.,
         }
@@ -157,21 +184,18 @@ impl Player {
     pub fn sender(&self) -> crate::audio::Commands {
         self.transport.sender()
     }
-    /// While hidden, the player stops drawing and analysing; playback and
-    /// media controls carry on.
+    /// Hidden windows suppress position-only redraws while playback continues.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
         }
         self.visible = visible;
         self.transport.set_quiet(!visible);
-        if !visible && self.peaks.is_none() {
-            self.analysis.fetch_add(1, Ordering::Relaxed);
-            self.analysed = None;
-        }
         if visible {
             self.sync(cx);
-            self.analyse(cx);
+            if self.program.is_none() {
+                self.request_wave();
+            }
             cx.notify();
         }
     }
@@ -196,7 +220,8 @@ impl Player {
         if status == self.status {
             return;
         }
-        if status.queue_revision != self.status.queue_revision {
+        let queue_changed = status.queue_revision != self.status.queue_revision;
+        if queue_changed {
             self.queue = queue;
             cx.emit(PlayerEvent::QueueChanged);
         }
@@ -229,7 +254,8 @@ impl Player {
             }
         }
         let track_changed = self.status.track.as_deref() != status.track.as_deref()
-            || self.status.entry != status.entry;
+            || self.status.entry != status.entry
+            || self.status.source_revision != status.source_revision;
         let state_changed = self.status.playing != status.playing
             || self.status.next != status.next
             || self.status.previous != status.previous
@@ -239,13 +265,33 @@ impl Player {
             a.position = status.position;
             a == status
         };
+        let _transition =
+            track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
         self.status = status;
         if track_changed {
-            self.analysis.fetch_add(1, Ordering::Relaxed);
-            self.peaks = None;
-            self.analysed = None;
-            self.analyse(cx);
+            self.segment = self
+                .program
+                .as_ref()
+                .zip(self.status.track.as_ref())
+                .and_then(|(p, t)| {
+                    p.index(t).filter(|&i| {
+                        self.status
+                            .source_revision
+                            .as_ref()
+                            .is_none_or(|r| r == &p.segments[i].source.stamp)
+                    })
+                });
+            if let Some(i) = self.segment {
+                self.analysis.focus(i);
+            } else {
+                self.request_wave();
+            }
             cx.emit(PlayerEvent::TrackChanged);
+        }
+        if queue_changed || track_changed {
+            self.scrub = None;
+            self.scrub_entry = None;
+            self.update_run();
         }
         if state_changed {
             cx.emit(PlayerEvent::StateChanged);
@@ -253,48 +299,17 @@ impl Player {
         // Redraw for position alone only when the playhead moves on screen or
         // the clock turns over; a long track then redraws a few times a second
         // instead of on every transport tick.
+        let (shown_position, shown_duration) = self.wave_time();
         let redraw = !position_only || {
             let width = f64::from(f32::from(self.seek_bounds.get().size.width)).max(1.);
-            let moved = (self.status.position - self.drawn_position).abs();
-            let pixels = moved * width / self.status.duration.max(1.);
-            pixels >= 0.75 || self.status.position.floor() != self.drawn_position.floor()
+            let moved = (shown_position - self.drawn_position).abs();
+            let pixels = moved * width / shown_duration.max(1.);
+            pixels >= 0.75 || shown_position.floor() != self.drawn_position.floor()
         };
         if redraw && (self.visible || !position_only) {
-            self.drawn_position = self.status.position;
+            self.drawn_position = shown_position;
             cx.notify();
         }
-    }
-    fn analyse(&mut self, cx: &mut Context<Self>) {
-        if !self.visible {
-            return;
-        }
-        let Some(item) = self.status.track.clone() else {
-            return;
-        };
-        let Some(entry) = self.status.entry else {
-            return;
-        };
-        if self.analysed == Some(entry) {
-            return;
-        }
-        self.analysed = Some(entry);
-        let revision = self.analysis.fetch_add(1, Ordering::Relaxed) + 1;
-        let generation = self.analysis.clone();
-        let cache = crate::profile::location().and_then(|p| p.parent().map(|p| p.join("Cache")));
-        cx.spawn(async move |this, cx| {
-            let peaks = cx
-                .background_spawn(async move {
-                    crate::overview::load(&item, cache, &generation, revision)
-                })
-                .await;
-            let _ = this.update(cx, |p, cx| {
-                if p.analysis.load(Ordering::Relaxed) == revision {
-                    p.peaks = peaks;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
     fn set_volume(&mut self, v: f32, cx: &mut Context<Self>) {
         self.apply_volume(v.clamp(0., 1.), None, cx);
@@ -374,15 +389,17 @@ impl Player {
 
 impl Render for Player {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timer = crate::diagnostics::Timer::measure(|d| &d.ui_us);
         let m = *materials(cx);
         let s = &self.status;
         let active = s.track.is_some();
-        let progress = self.scrub.unwrap_or(if s.duration > 0. {
-            (s.position / s.duration) as f32
+        let (position, duration) = self.wave_time();
+        let progress = self.scrub.unwrap_or(if duration > 0. {
+            (position / duration).clamp(0., 1.) as f32
         } else {
             0.
         });
-        let shown_position = self.scrub.map_or(s.position, |f| f64::from(f) * s.duration);
+        let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
 
         let mut art = div()
             .size(px(72.))
@@ -635,90 +652,7 @@ impl Render for Player {
                     }))
             });
 
-        let bounds = self.seek_bounds.clone();
-        let seek = div()
-            .id("seek")
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .h(px(34.))
-            .child(
-                canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                    .absolute()
-                    .size_full(),
-            )
-            .map(|d| match self.peaks.clone() {
-                Some(peaks) => d.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .child(crate::overview::paint(peaks, progress, m.wave)),
-                ),
-                // Before the overview is ready, a quiet progress line.
-                None => d.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(16.))
-                        .h(px(2.))
-                        .rounded_full()
-                        .bg(m.wave.ahead_body)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded_full()
-                                .w(relative(progress))
-                                .bg(m.wave.played_body),
-                        ),
-                ),
-            })
-            .when(active, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(relative(progress))
-                        .w(px(2.))
-                        .ml(px(-1.))
-                        .rounded_full()
-                        .bg(m.wave.cursor),
-                )
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|p, e: &MouseDownEvent, _, cx| {
-                        p.scrub = Some(p.fraction_at(e.position.x, p.seek_bounds.get()));
-                        cx.notify();
-                    }),
-                )
-                .on_drag(Scrub, |_, _, _, cx| {
-                    cx.stop_propagation();
-                    cx.new(|_| Scrub)
-                })
-                .on_drag_move(cx.listener(|p, e: &DragMoveEvent<Scrub>, _, cx| {
-                    p.scrub = Some(p.fraction_at(e.event.position.x, e.bounds));
-                    cx.notify();
-                }))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|p, _, _, cx| {
-                        if let Some(f) = p.scrub.take() {
-                            p.command(Command::Seek(f64::from(f)), cx);
-                        }
-                    }),
-                )
-                .on_mouse_up_out(
-                    MouseButton::Left,
-                    cx.listener(|p, _, _, cx| {
-                        if let Some(f) = p.scrub.take() {
-                            p.command(Command::Seek(f64::from(f)), cx);
-                        }
-                    }),
-                )
-            });
-
+        let seek = self.waveform(progress, active, &m, cx);
         let time = |t: f64| {
             div()
                 .flex_shrink_0()
@@ -772,6 +706,13 @@ impl Render for Player {
                                             .child(subtitle),
                                     ),
                             )
+                            .when(
+                                self.program
+                                    .as_ref()
+                                    .is_some_and(|p| p.full_cd || p.limitation.is_some())
+                                    || self.unavailable.is_some(),
+                                |row| row.child(self.perspectives(&m, cx)),
+                            )
                             .child(transport)
                             .child(volume),
                     )
@@ -782,7 +723,7 @@ impl Render for Player {
                             .items_center()
                             .child(time(shown_position).text_color(m.text_muted))
                             .child(seek)
-                            .child(time(s.duration).text_right()),
+                            .child(time(duration).text_right()),
                     ),
             )
     }
