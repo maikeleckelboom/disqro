@@ -341,8 +341,13 @@ impl Engine {
         let entry = self.queue.current_entry();
         self.status.track = entry.map(|e| e.track.clone());
         self.status.entry = entry.map(|e| e.id);
-        self.status.duration = entry.and_then(|e| e.track.duration).unwrap_or(0.);
-        self.status.position = position.clamp(0., self.status.duration.max(0.));
+        let duration = entry.and_then(|e| e.track.duration);
+        self.status.duration = duration.unwrap_or(0.);
+        self.status.position =
+            duration.map_or(position.max(0.), |end| position.clamp(0., end.max(0.)));
+        if entry.is_none() {
+            self.status.position = 0.;
+        }
         self.status.error = None;
     }
     fn play(&mut self, index: usize, position: f64) -> Result<()> {
@@ -519,12 +524,13 @@ impl Engine {
         else {
             return Ok(());
         };
-        let position =
-            if self.queue.current == Some(index) && self.status.position < self.status.duration {
-                self.status.position
-            } else {
-                0.
-            };
+        let position = if self.queue.current == Some(index)
+            && (self.status.duration == 0. || self.status.position < self.status.duration)
+        {
+            self.status.position
+        } else {
+            0.
+        };
         self.play(index, position)
     }
     fn pause(&mut self) {

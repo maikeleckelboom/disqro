@@ -220,6 +220,10 @@ impl Player {
         if status == self.status {
             return;
         }
+        let old_context = self.playing_entry().map(|e| e.disc_context);
+        let new_context = queue.current_entry().map(|e| e.disc_context);
+        let context_changed = old_context != new_context
+            && status.track.as_ref().is_some_and(|t| !t.has_disc_context());
         let queue_changed = status.queue_revision != self.status.queue_revision;
         if queue_changed {
             self.queue = queue;
@@ -253,7 +257,8 @@ impl Player {
                 .detach();
             }
         }
-        let track_changed = self.status.track.as_deref() != status.track.as_deref()
+        let track_changed = context_changed
+            || self.status.track.as_deref() != status.track.as_deref()
             || self.status.entry != status.entry
             || self.status.source_revision != status.source_revision;
         let state_changed = self.status.playing != status.playing
@@ -275,10 +280,12 @@ impl Player {
                 .zip(self.status.track.as_ref())
                 .and_then(|(p, t)| {
                     p.index(t).filter(|&i| {
-                        self.status
-                            .source_revision
-                            .as_ref()
-                            .is_none_or(|r| r == &p.segments[i].source.stamp)
+                        !context_changed
+                            && self
+                                .status
+                                .source_revision
+                                .as_ref()
+                                .is_none_or(|r| r == &p.segments[i].source.stamp)
                     })
                 });
             if let Some(i) = self.segment {

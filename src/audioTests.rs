@@ -413,3 +413,14 @@ fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
     e.command(seek(e.queue.revision)).unwrap();
     assert_eq!(e.status.entry, origin);
 }
+
+#[test]
+fn restoring_a_final_chapter_without_tag_duration_keeps_saved_position() {
+    let mut e = Engine::default();
+    let mut q = Queue::default();
+    let track = Arc::new(Track::file("unknown-length.wav".into()));
+    q.replace(&[track], 0);
+    e.command(Command::Restore(Box::new(q), 12.25)).unwrap();
+    assert_eq!(e.status.position, 12.25);
+    assert!(!e.status.playing && e.voice.is_none());
+}

@@ -52,17 +52,56 @@ pub fn start() {
         return;
     };
     let d = COUNTERS.get_or_init(Default::default);
-    let _ = std::thread::Builder::new().name("disqro-trace".into()).spawn(move || {
-        let start = Instant::now();
-        let _ = writeln!(out, "ms,commands,opens,voices,packets,decode_max_us,packet_gap_max_us,callbacks,callback_max_permille,device_errors,decode_errors,unchanged_ticks,wave_paints,wave_paint_max_us,player_render_max_us,switches,switch_max_us,chapter_sync_max_us,page_hits,page_misses,disc_switch_to_paint_us,track_switch_to_paint_us,first_data_us,first_wave_to_paint_us,retained_geometry_bytes,last_entry,last_chapter_ms,last_disc_ms");
-        for _ in 0..1800 {
-            std::thread::sleep(Duration::from_secs(1));
-            let values = [&d.commands,&d.opens,&d.voices,&d.packets,&d.decode_us,&d.packet_gap_us,&d.callbacks,&d.cpu_permille,&d.device_errors,&d.decode_errors,&d.stalls,&d.frames,&d.paint_us,&d.ui_us,&d.changes,&d.switch_us,&d.transition_us,&d.page_hits,&d.page_misses,&d.disc_paint,&d.track_paint,&d.first_data,&d.first_paint,&d.geometry_bytes,&d.entry,&d.chapter_ms,&d.disc_ms];
-            if write!(out, "{}", start.elapsed().as_millis()).is_err() { break }
-            for n in values { let _ = write!(out, ",{}", n.swap(0, Relaxed)); }
-            if writeln!(out).is_err() { break }
-        }
-    });
+    let _ = std::thread::Builder::new()
+        .name("disqro-trace".into())
+        .spawn(move || {
+            let start = Instant::now();
+            let columns = [
+                ("commands", &d.commands),
+                ("opens", &d.opens),
+                ("voices", &d.voices),
+                ("packets", &d.packets),
+                ("decode_max_us", &d.decode_us),
+                ("packet_gap_max_us", &d.packet_gap_us),
+                ("callbacks", &d.callbacks),
+                ("callback_max_permille", &d.cpu_permille),
+                ("device_errors", &d.device_errors),
+                ("decode_errors", &d.decode_errors),
+                ("unchanged_ticks", &d.stalls),
+                ("wave_paints", &d.frames),
+                ("wave_paint_max_us", &d.paint_us),
+                ("player_render_max_us", &d.ui_us),
+                ("switches", &d.changes),
+                ("switch_max_us", &d.switch_us),
+                ("chapter_sync_max_us", &d.transition_us),
+                ("page_hits", &d.page_hits),
+                ("page_misses", &d.page_misses),
+                ("disc_switch_to_paint_us", &d.disc_paint),
+                ("track_switch_to_paint_us", &d.track_paint),
+                ("first_data_us", &d.first_data),
+                ("first_wave_to_paint_us", &d.first_paint),
+                ("retained_geometry_bytes", &d.geometry_bytes),
+                ("last_entry", &d.entry),
+                ("last_chapter_ms", &d.chapter_ms),
+                ("last_disc_ms", &d.disc_ms),
+            ];
+            let mut out = std::io::BufWriter::new(&mut out);
+            write!(out, "ms")?;
+            for (name, _) in columns {
+                write!(out, ",{name}")?;
+            }
+            writeln!(out)?;
+            for _ in 0..1800 {
+                std::thread::sleep(Duration::from_secs(1));
+                write!(out, "{}", start.elapsed().as_millis())?;
+                for (_, value) in columns {
+                    write!(out, ",{}", value.swap(0, Relaxed))?;
+                }
+                writeln!(out)?;
+                out.flush()?;
+            }
+            std::io::Result::Ok(())
+        });
 }
 pub struct Timer(Instant, &'static AtomicU64);
 impl Timer {

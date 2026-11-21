@@ -83,7 +83,9 @@ impl Reader {
     fn open(s: &Source) -> Result<Self> {
         let decoder = Recording::open(&Track::file(s.path.clone()), None)?;
         ensure!(
-            decoder.sample_rate() == s.rate && decoder.num_frames() == s.frames,
+            decoder.stamp.as_ref() == Some(&s.stamp)
+                && decoder.sample_rate() == s.rate
+                && decoder.num_frames() == s.frames,
             "Recording changed"
         );
         Ok(Self {
@@ -189,11 +191,17 @@ pub fn load(
             m.bytes(&mut bytes);
         }
         if let Ok(tx) = c.0.unchecked_transaction() {
-            let stored=tx.execute("INSERT OR REPLACE INTO wave_pages_v1(path,bytes,modified,page,data) VALUES(?,?,?,?,?)",params![key,s.stamp.bytes,s.stamp.modified,number as i64,bytes]);
+            let stored = tx.execute(
+                "INSERT OR REPLACE INTO wave_pages_v1(path,bytes,modified,page,data) VALUES(?,?,?,?,?)",
+                params![key, s.stamp.bytes, s.stamp.modified, number as i64, bytes],
+            );
             // Prune in batches. Each full page is 28,800 bytes.
             if stored.is_ok() {
                 if tx.last_insert_rowid() % 64 == 0 {
-                    let _=tx.execute("DELETE FROM wave_pages_v1 WHERE rowid <= (SELECT rowid FROM wave_pages_v1 ORDER BY rowid DESC LIMIT 1 OFFSET 4096)",[]);
+                    let _ = tx.execute(
+                        "DELETE FROM wave_pages_v1 WHERE rowid <= (SELECT rowid FROM wave_pages_v1 ORDER BY rowid DESC LIMIT 1 OFFSET 4096)",
+                        [],
+                    );
                 }
                 let _ = tx.commit();
             }
