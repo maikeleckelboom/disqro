@@ -6,9 +6,9 @@
 
 ## Locations
 
-Music, Downloads, the drives and your own Places are the roots of one tree. The arrow opens a branch; the name opens the folder. Opening a folder from the address bar, Back, Forward or Parent opens the way down to it under the Place it belongs to, and nothing else. Library and Locations are separate panels, tabbed together by default, and each scrolls on its own. [Controls and menus](listening-workspace.md#library-and-locations)
+C:, Downloads, Music, other available drives and your own Places are roots of one tree. The arrow opens a branch and the name opens its folder. The address bar and Parent reveal the ancestors of the destination. Back and Forward preserve the tree's manual expansion. Library and Locations share a tab group by default and can stack vertically in the same sidebar. [Controls and menus](listening-workspace.md#library-and-locations)
 
-Add Music Folder moved out of the list into the Library heading's menu, the collection menus and the empty All Music view. With one registered collection, its row stands in for All Music.
+**Add Music Folder** is available from the Library menu, the collection menus and the empty All Music view. **All Music** shows the complete index. Each registered collection has its own row.
 
 ## What counts as a release
 

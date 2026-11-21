@@ -2,13 +2,15 @@
 
 Disqro opens a folder or a CUE album directly. Browsing never changes what is playing: the queue retains the tracks independently of the browser, so you can open other folders, sort tables or rearrange panels while an album continues.
 
-![Default Windows workspace with an album playing](evidence/modular-workspace/final/default.webp)
+![Default Windows workspace with an album playing](evidence/modular-workspace/corrections/tabbed-1240.webp)
 
 ## Workspace
 
 Every view in the window is a panel in one dock: **Music Browser**, **Library**, **Locations**, **Queue** and **History**. The default workspace puts Library and Locations together on the left, a Music Browser in the middle, and Queue and History together on the right. The player along the bottom of the window is not a panel: no arrangement of panels closes it or changes what is playing.
 
 - **Tabs.** A single Music Browser uses its address row and icon. Browsers sharing a group have tabs directly above that row. Library and Locations share a connected header, as do Queue and History. The title bar uses only the app icon for branding and holds the panel picker and workspace menu.
+- **Show both sidebar panels.** Choose **Stack Vertically** from the tab you want on top, or from its **···** menu. Drag the horizontal divider to share the sidebar height. **Group as Tabs** reconnects the two headers in their current order. Both commands work while the layout is locked.
+- **Narrow headers.** Utility tabs keep a single row. When their names no longer fit beside the menu, each tab shows its icon and offers its name on hover or through assistive technology. Use Left and Right on a focused utility tab to switch. If the whole set of icons cannot fit, the panel menu lists the tabs and marks the current one.
 - **Arranging.** The layout starts locked every time you open Disqro. You can switch tabs, drag music and resize a boundary while listening. Choose **Customize Layout** in the workspace menu to drag a tab onto another group, change tab order, or drop at a group edge to split it. The tab menu also offers **Split Right** and **Split Down** during editing. Choose **Done** in the title bar to lock the arrangement.
 - **Opening and closing.** **+** lists every panel type and offers **Reopen Closed Panel**. Immediately after a close, reopening restores the exact arrangement. The picker remembers the most recently closed instance of each type across restarts and uses surviving tab companions when available. Closing every panel leaves **Open a Panel** above the player.
 - **Recovery.** **Undo Layout Change** in the workspace menu restores the preceding panel arrangement during this session. **Restore Default Layout** returns to the three columns with your active browser. Undo can bring the preceding layout back. Both commands leave the queue, library and playlists alone.
@@ -46,11 +48,13 @@ Every view in the window is a panel in one dock: **Music Browser**, **Library**,
 
 ### Address bar
 
-The current folder appears as breadcrumbs. Click a crumb to open that folder. Click the empty part of the bar, or press Ctrl+L, to edit the full path with everything selected. Type or paste a drive path such as `C:\Music\Albums`, a UNC path such as `\\server\share\Music`, a path in quotes, or one with `%VARIABLES%`. Enter opens it; Escape restores the breadcrumbs. A path that does not exist shows a short message in the bar and leaves the current folder as it was. Paths are checked off the interface thread, so a sleeping network share cannot stall the window. A path to an audio file or CUE sheet opens its folder with that track selected. Right-click the bar to copy the address.
+In a folder, click an ancestor to navigate there. Click the empty part of the bar or press Ctrl+L to edit the selected absolute path. The context menu offers **Copy Address**. Library and CD pages show their own hierarchy, such as **Playlists › Techno**. Ctrl+L opens an empty **Go to folder or file** field from these views.
+
+Enter accepts a drive path such as `C:\Music\Albums`, a UNC path such as `\\server\share\Music`, a quoted path or a path containing `%VARIABLES%`. A valid audio file or CUE sheet opens its folder with the recording selected. Validation runs off the interface thread. An invalid entry leaves the current view and history intact. Escape returns to the same browser's breadcrumbs.
 
 ### Library and Locations
 
-**Library** holds the indexed collections, Liked Tracks and playlists. **Locations** holds the Places, and each Place opens in place to show its own folders: Music expands to the folders inside Music, so Locations never shows Music twice. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine. Library and Locations are separate panels. Each keeps its own scroll position and selection, and switching between them leaves the browser as it was.
+**Library** aligns All Music, registered collections, Liked Tracks and individual playlists in one list. **Locations** shows the filesystem hierarchy under each Place. New profiles and **Reset Places to Defaults** start with C: under its Windows display name, then Downloads, Music and additional available drives. Saved Places retain their order and labels. Library and Locations each keep their own scroll position and selection.
 
 - Click a Place or folder name to open it. Click the arrow to open or close a branch without leaving the current folder.
 - The Place menu offers **Open**, **Open in New Tab**, **Open Beside**, **Add to Library**, **Rename Shortcut** and **Remove from Places**.
@@ -66,8 +70,8 @@ A registered collection and a Place can point at the same folder. The Library en
 ### Folders in Locations
 
 - The open folder is shown under one Place: the one you chose it from while you stay inside it, otherwise the outermost Place other than a drive that holds it, then its drive. A folder outside every Place appears under a dimmed entry for its drive or share until you return to a Place.
-- Opening a folder expands the way down to it and the folder itself, never its neighbours or the discs inside a large collection. Nothing collapses because you navigated; the rest of the tree, its scroll position and the row under the pointer stay where they were.
-- Back, Forward, Parent, breadcrumbs and typed paths keep the highlighted folder, the breadcrumbs and the list in agreement. While a library view is shown, the tree keeps the last folder in view without highlighting it. The tree follows the active browser.
+- Opening a folder reveals the ancestors needed to show its row. The row and Enter navigate. Its chevron and the Right and Left keys control expansion.
+- Back, Forward, browser switching and restart preserve the branches you opened or closed. A folder under a manually collapsed ancestor can stay hidden while its content is open in the browser.
 - Each Place keeps its own open folders, and they are remembered across restarts. Folders are listed off the interface thread, one listing task per Place, so a sleeping network drive holds up only its own branch.
 - Folders whose names start with a dot, such as `.git` or `.cache`, and hidden or system folders are left out of the tree and of subfolder discovery. Typing the path of one in the address bar still opens it, and the tree shows the way to it.
 - Folders and files are ordered as Explorer orders them, so `CD 2` comes before `CD 10`.
@@ -115,9 +119,33 @@ On a normal close, and shortly after any change to the queue or Places, Disqro s
 - The tray icon lives on a hidden window owned by the interface thread, created with the Win32 API from the `windows` crate that GPUI already depends on. No second UI toolkit is involved. The media session uses `ISystemMediaTransportControlsInterop` on the same window.
 - The read-only Dekzer review covered its playback crate, native player integration, CUE handling, player qualification, and waveform research. Disqro adopted source-frame addressing, decoder preroll, a buffered boundary between decoding and output, and sample-oracle checks. It has its own implementation and no Dekzer source or runtime dependency.
 
+## Approved next mission — shared navigation and music search
+
+Place a shared navigation row directly below the title bar, with Back, Forward, Up, editable address or semantic breadcrumbs, and **Search Library**. The active Music Browser owns the location and history shown in that row. Switching browsers updates the controls to reflect that browser's context.
+
+**Search Library** (Ctrl+K) opens an immediate results overlay for tracks, albums/CDs, artists and playlists across the indexed library. Query the index asynchronously and preserve recording and CUE chapter identities. Searching keeps the existing tabs and dock arrangement. **Filter This View** (Ctrl+F) stays in each browser's contextual toolbar and retains that browser's query.
+
+Carry forward the app-icon title bar, Scope-inspired content tabs, connected utility tabs, lightweight view controls, persistent player and Disqro Dark styling. The shared controls and global search are scheduled for the dedicated navigation mission.
+
+## Sidebar and navigation qualification
+
+The optimized Windows player was exercised at 150% display scaling with Win32 input and Windows UI Automation. The address and local search fields share the original 28-logical-pixel height. Local search uses a borderless field. [Default workspace at 1240 × 780](evidence/modular-workspace/corrections/tabbed-1240.webp) · [Compact workspace at 720 × 460](evidence/modular-workspace/corrections/tabbed-720.webp)
+
+| Check | Observed result |
+| --- | --- |
+| Sidebar geometry | At 720 × 460, 900 × 600, 1240 × 780 and 1540 × 940, the central table measured 640, 790, 1098 and 1370 device pixels wide in both arrangements. At 1240 × 780 its position and height also matched exactly after stacking both sidebars. |
+| Sidebar recovery | Both stack orders worked while locked. Each divider resized and restored across restart within three logical pixels. Dragging a tab onto its sibling header reconnected the pair. Dragging to a pane edge reordered it. Close, reopen, Undo and Restore Default Layout preserved the sibling and the player. [Library and Queue above](evidence/modular-workspace/corrections/stacked-library-queue.webp) · [Locations and History above](evidence/modular-workspace/corrections/stacked-locations-history.webp) · [Compact stacked panes](evidence/modular-workspace/corrections/stacked-720.webp) |
+| Utility headers | Continuous window and sidebar-divider sweeps kept each header 34 logical pixels tall. Compact icons retained their accessible names and Left/Right selection. After grouping four utilities in a narrow sidebar, the menu exposed all four and switched to a hidden tab. [Overflow menu](evidence/modular-workspace/corrections/overflow-menu.webp) |
+| Folder tree and Places | Row clicks and Enter opened folders. Chevron and Left/Right changed disclosure independently. Nested navigation revealed ancestors. History, tab switching and restart preserved manual disclosure. Fresh and reset Places used the Windows name for C:, then Downloads and Music. Restoring a removed default appended it. Scrolling through 60 folders left the adjacent 47-playlist Library pane in place, and vice versa. |
+| Addresses | Physical folders supplied their selected absolute path. All Music, Liked Tracks, a playlist, an indexed collection, a release, an indexed CD and a folder-backed CUE page supplied semantic breadcrumbs and an empty Ctrl+L field. Invalid entries and Escape preserved the view. Switching between two side-by-side browsers selected each browser’s own address context. [Playlist breadcrumbs](evidence/modular-workspace/corrections/playlist-breadcrumb.webp) |
+| Empty playlists | The playlist uses the Library music-note icon. The instruction names the **Add to Playlist** menu and centers each line inside its own browser pane. [Compact split with an empty playlist](evidence/modular-workspace/corrections/empty-playlist-compact.webp) |
+| Playlists and playback | Create, rename, delete, copying three separate CUE chapters, copying into a populated playlist and repeating an occurrence all passed. The source files, likes, ratings and queue retained their values. During sidebar layout changes the muted player issued 3,468 audio callbacks with zero device or decode errors. |
+
+The locked release suite passed all 117 tests, including FFmpeg fixtures and the six-figure collection test. Formatting, warnings-denied Clippy, the standard debug tests and the Windows build script also passed. The captured release executable has SHA-256 `b3ad7244f6106cff150ceb18d578ceb5879197602d73fc3c184d63921fac7e54`. Audio qualification used transport telemetry. [Release test output](evidence/modular-workspace/corrections/release-tests.txt) · [Native check results](evidence/modular-workspace/corrections/windows-checks.txt)
+
 ## Final Mission 10 Windows qualification
 
-The final optimized Windows executable has SHA-256 `6f76a31e1dc6e8d8386b372634fa31cdd1e7d1193330a01c3175342b698daecd`. The locked release suite passed all 111 tests, including the Windows junction fixture, missing-source playlist copies, browser history persistence, FFmpeg fixtures and the six-figure collection test. Formatting, warnings-denied Clippy and the locked release build passed. [Release test output](evidence/modular-workspace/final/test-suite.txt)
+The previously reviewed optimized Windows executable has SHA-256 `6f76a31e1dc6e8d8386b372634fa31cdd1e7d1193330a01c3175342b698daecd`. The locked release suite passed all 111 tests, including the Windows junction fixture, missing-source playlist copies, browser history persistence, FFmpeg fixtures and the six-figure collection test. Formatting, warnings-denied Clippy and the locked release build passed. [Release test output](evidence/modular-workspace/final/test-suite.txt)
 
 Native input and accessibility checks ran at 150% Windows scaling against an isolated copy of a 126-track collection. The following captures show the application during that run. [Default listening view](evidence/modular-workspace/final/default.webp) · [Three selected tracks over an empty Techno playlist](evidence/modular-workspace/final/playlist-transfer.webp) · [Customize Layout with Done visible](evidence/modular-workspace/final/customize-layout.webp)
 
