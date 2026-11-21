@@ -8,7 +8,7 @@ use crate::{
     player::{Player, PlayerEvent},
     store::{PlaylistId, RootId, Scope, Term, Ticket},
     table::{
-        Field, LayoutColumn, MusicTable, RowKey, Sections, reselect, scroll_to_top,
+        ContextKind, Field, Layouts, MusicTable, RowKey, Sections, reselect, scroll_to_top,
         set_rows_in_place,
     },
 };
@@ -111,7 +111,7 @@ pub struct Browser {
     pub membership: Option<Arc<Membership>>,
     pub count: usize,
     pub duration: Option<f64>,
-    covers: std::collections::HashMap<PathBuf, crate::artwork::CoverFile>,
+    covers: Arc<std::collections::HashMap<PathBuf, crate::artwork::CoverFile>>,
     unreadable: Arc<std::collections::HashSet<PathBuf>>,
     equivalent_sheets: std::collections::HashMap<PathBuf, PathBuf>,
     scanner: Scanner,
@@ -130,7 +130,7 @@ impl Browser {
     pub fn new(
         player: Entity<Player>,
         catalog: Entity<Catalog>,
-        columns: Vec<LayoutColumn>,
+        columns: Layouts,
         prefs: ViewPrefs,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -145,6 +145,8 @@ impl Browser {
             )
             .select_on_modifier_click(false)
             .col_selectable(false)
+            // The heading resizes its own columns, refitting them live.
+            .col_resizable(false)
             .sortable(false)
         });
         let discs = cx.new(|cx| {
@@ -166,7 +168,7 @@ impl Browser {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find tracks"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             b.table.update(cx, |t, cx| match ev {
-                PlayerEvent::TrackChanged => cx.notify(),
+                PlayerEvent::TrackChanged | PlayerEvent::StateChanged => cx.notify(),
                 PlayerEvent::PlaySelection => t.delegate().play(
                     t.selected_row()
                         .filter(|&i| t.delegate().header(i).is_none())
@@ -196,9 +198,7 @@ impl Browser {
             |b: &mut Self, t, event, w, cx| match event {
                 TableEvent::SelectRow(_) => t.update(cx, |t, _| t.delegate_mut().clear_marks()),
                 TableEvent::DoubleClickedRow(i) => b.activate(*i, w, cx),
-                TableEvent::ColumnWidthsChanged(widths) => {
-                    t.update(cx, |t, _| t.delegate_mut().resize(widths))
-                }
+                TableEvent::MoveColumn(_, _) => cx.emit(ViewChanged),
                 _ => {}
             },
         )
@@ -505,6 +505,11 @@ impl Browser {
     fn filter_folder(&mut self, discovered: bool, cx: &mut App) {
         let terms = Term::parse(&self.query);
         let catalog = self.catalog.read(cx);
+        let single_disc = self.programs.len() == 1
+            && self.programs[0]
+                .tracks
+                .first()
+                .is_some_and(|track| track.has_disc_context());
         let grouped = match &self.page {
             None => self.can_list_discs(),
             Some(Page::Release(_)) => true,
@@ -515,7 +520,7 @@ impl Browser {
         let matches =
             |t: &&Arc<Track>| crate::collection::matches(t, &terms, || catalog.mark_of(t));
         let discs: Vec<Arc<Disc>> = match &self.page {
-            None if !grouped => vec![],
+            None if !grouped && !single_disc => vec![],
             None => self.programs.to_vec(),
             Some(Page::Disc(id)) => self
                 .programs
@@ -525,7 +530,7 @@ impl Browser {
                 .collect(),
             Some(Page::Release(key)) => crate::collection::release_discs(&self.programs, key),
         };
-        if !grouped && self.page.is_none() {
+        if !grouped && !single_disc && self.page.is_none() {
             rows.extend(self.raw.iter().flatten().filter(matches).cloned());
         } else {
             for disc in &discs {
@@ -597,6 +602,14 @@ impl Browser {
                     cx.notify();
                 }
             });
+            let context = if grouped || self.page.is_some() || single_disc {
+                ContextKind::Disc
+            } else {
+                ContextKind::Mixed
+            };
+            MusicTable::set_context(t, context, cx);
+            t.delegate_mut().artwork_revision = self.generation;
+            t.delegate_mut().folder_covers = self.covers.clone();
             t.delegate_mut().programs = self.programs.clone();
             t.delegate_mut().folder_cd = self.page.is_some();
             t.delegate_mut().empty = empty;
@@ -658,8 +671,14 @@ impl Browser {
             self.load_albums(cx);
         }
         let grouped =
-            matches!(scope, Scope::Library(_) | Scope::Release(_)) && !self.listing_discs();
+            matches!(scope, Scope::Library(Some(_)) | Scope::Release(_)) && !self.listing_discs();
         self.table.update(cx, |t, cx| {
+            let context = match scope {
+                Scope::Playlist(_) => ContextKind::Playlist,
+                Scope::Album(_) | Scope::Release(_) | Scope::Library(Some(_)) => ContextKind::Disc,
+                _ => ContextKind::Mixed,
+            };
+            MusicTable::set_context(t, context, cx);
             t.delegate_mut().show_library(scope, search, grouped, cx)
         });
     }
@@ -884,7 +903,7 @@ impl Browser {
         }
         self.raw.clear();
         self.programs = Arc::default();
-        self.covers.clear();
+        self.covers = Default::default();
         self.unreadable = Default::default();
         self.equivalent_sheets.clear();
         self.notice = None;
@@ -923,7 +942,7 @@ impl Browser {
                             b.folders
                                 .update(cx, |f, cx| f.listed(&path, &root.dirs, cx));
                         }
-                        b.covers.extend(batch.covers);
+                        if !batch.covers.is_empty() { Arc::make_mut(&mut b.covers).extend(batch.covers); }
                         if !batch.unreadable.is_empty() {
                             Arc::make_mut(&mut b.unreadable).extend(batch.unreadable);
                         }

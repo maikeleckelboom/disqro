@@ -682,8 +682,19 @@ impl Sidebar {
                     }
                 };
                 content
-                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_ellipsis_middle()
+                            .child(label.clone()),
+                    )
                     .on_click(open)
+                    .when(available && !temporary, |d| {
+                        let tip = path.display().to_string();
+                        d.tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx))
+                    })
                     .when(!available, |d| {
                         let tip = format!("{} is not available", path.display());
                         d.tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx))

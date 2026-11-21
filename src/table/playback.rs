@@ -37,15 +37,29 @@ impl MusicTable {
                 let catalog = self.catalog.clone();
                 let player = self.player.clone();
                 let scope = p.scope;
-                let playlist = scope.keys_are_entries().then(|| p.keys.clone());
+                let search = p.search.clone();
                 let request = player.read(cx).play_request.clone();
                 let generation = request.next();
                 cx.spawn(async move |cx| {
                     let result: anyhow::Result<Command> = async {
-                        if let Some(keys) = playlist {
+                        if scope.keys_are_entries() {
+                            let store = catalog
+                                .read_with(cx, |c, _| c.handle())
+                                .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
+                            let keys = store
+                                .query(&request, generation, move |store| {
+                                    Ok(store
+                                        .listing(&store::Query {
+                                            scope,
+                                            search,
+                                            order: None,
+                                        })?
+                                        .keys)
+                                })
+                                .await?;
                             let rows = catalog
                                 .read_with(cx, |c, cx| {
-                                    c.rows(scope, keys.to_vec(), &request, generation, cx)
+                                    c.rows(scope, keys, &request, generation, cx)
                                 })
                                 .await?;
                             let mut start = None;

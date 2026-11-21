@@ -424,3 +424,26 @@ fn restoring_a_final_chapter_without_tag_duration_keeps_saved_position() {
     assert_eq!(e.status.position, 12.25);
     assert!(!e.status.playing && e.voice.is_none());
 }
+
+#[test]
+fn queue_heading_tracks_pause_finish_stop_and_restoration() {
+    let mut s = Status {
+        duration: 5.,
+        playing: true,
+        ..Default::default()
+    };
+    assert_eq!(s.playback_state(), TransportState::Playing);
+    s.playing = false;
+    s.source_revision = Some(crate::cache::Stamp {
+        bytes: 20,
+        modified: 1,
+    });
+    assert_eq!(s.playback_state(), TransportState::Paused);
+    s.source_revision = None;
+    s.position = 2.;
+    assert_eq!(s.playback_state(), TransportState::Paused);
+    s.position = s.duration;
+    assert_eq!(s.playback_state(), TransportState::Finished);
+    s.position = 0.;
+    assert_eq!(s.playback_state(), TransportState::Stopped);
+}

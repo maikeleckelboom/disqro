@@ -40,7 +40,6 @@ pub enum Order {
     Year,
     Path,
     Rating,
-    Liked,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,7 +148,6 @@ fn order_sql(order: Order) -> &'static str {
         Order::Year => "t.year",
         Order::Path => "s.path_key",
         Order::Rating => "coalesce(r.stars, 0)",
-        Order::Liked => "(l.track_id IS NOT NULL)",
     }
 }
 
@@ -367,8 +365,9 @@ impl Store {
                 "SELECT {key}, t.id, s.path, a.path, a.kind, t.part, t.first_tick, t.last_tick,
                     t.title, t.artist, t.album, t.number, t.disc_number, t.year, t.duration,
                     t.present AND s.present AND (a.present OR a.id = s.id), t.root_id, s.root_id,
-                    s.size, s.modified, s.volume, s.file_index, s.digest, s.sample
+                    s.size, s.modified, s.volume, s.file_index, s.digest, s.sample, al.cover
                  FROM {from} JOIN files s ON s.id = t.source JOIN files a ON a.id = t.anchor
+                 LEFT JOIN albums al ON al.id = t.album_id
                  WHERE {key} IN ({marks}) {scope_filter}"
             );
             let mut stmt = self.db.prepare_cached(&sql)?;
@@ -398,6 +397,7 @@ impl Store {
                     id: r.get(1)?,
                     track: Arc::new(track),
                     available: r.get(15)?,
+                    cover: r.get::<_, Option<String>>(24)?.map(PathBuf::from),
                     root: r.get(16)?,
                     source_root: r.get(17)?,
                     revision: super::identity::Revision::columns(r, 18)?,

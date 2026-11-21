@@ -1,6 +1,6 @@
 //! The Queue panel: Now Playing, Up Next, and what played before.
 use crate::{
-    audio::Command,
+    audio::{Command, TransportState},
     browser::Destination,
     library::clock,
     player::{Player, PlayerEvent},
@@ -85,7 +85,10 @@ pub struct QueueView {
 impl QueueView {
     pub fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
         cx.subscribe(&player, |_, _, e, cx| {
-            if matches!(e, PlayerEvent::QueueChanged | PlayerEvent::TrackChanged) {
+            if matches!(
+                e,
+                PlayerEvent::QueueChanged | PlayerEvent::TrackChanged | PlayerEvent::StateChanged
+            ) {
                 cx.notify();
             }
         })
@@ -121,8 +124,8 @@ impl QueueView {
             rows.push(Row::Entry(c));
         }
         let start = q.current.map_or(0, |c| c + 1);
-        rows.push(Row::Header(Section::UpNext));
         if start < q.entries.len() {
+            rows.push(Row::Header(Section::UpNext));
             rows.extend((start..q.entries.len()).map(Row::Entry));
         } else {
             rows.push(Row::Empty);
@@ -261,7 +264,15 @@ impl QueueView {
             Row::Header(section) => {
                 let (label, count) = match section {
                     Section::History => ("History", Some(q.history().len())),
-                    Section::NowPlaying => ("Now Playing", None),
+                    Section::NowPlaying => (
+                        match self.player.read(cx).status.playback_state() {
+                            TransportState::Playing => "Now Playing",
+                            TransportState::Paused => "Paused",
+                            TransportState::Finished => "Finished",
+                            TransportState::Stopped => "Stopped",
+                        },
+                        None,
+                    ),
                     Section::UpNext => ("Up Next", None),
                 };
                 h_flex()
@@ -305,7 +316,12 @@ impl QueueView {
                 let title: SharedString = t.title.clone().into();
                 let artist = t.artist.clone();
                 let duration = t.duration.map(clock).unwrap_or_default();
-                let playing = is_current && self.player.read(cx).status.playing;
+                let status = &self.player.read(cx).status;
+                let current_icon = match status.playback_state() {
+                    TransportState::Playing => IconName::AudioLines,
+                    TransportState::Paused => IconName::Pause,
+                    _ => IconName::Square,
+                };
                 let next_slot = q.current.map_or(0, |c| c + 1);
                 let this = cx.weak_entity();
                 let menu_entry = entry.clone();
@@ -328,15 +344,7 @@ impl QueueView {
                             .flex()
                             .justify_center()
                             .when(is_current, |d| {
-                                d.child(
-                                    Icon::new(if playing {
-                                        IconName::AudioLines
-                                    } else {
-                                        IconName::Pause
-                                    })
-                                    .size(px(14.))
-                                    .text_color(m.accent),
-                                )
+                                d.child(Icon::new(current_icon).size(px(14.)).text_color(m.accent))
                             }),
                     )
                     .child(
@@ -437,12 +445,6 @@ impl Render for QueueView {
                         .text_size(px(13.))
                         .text_color(m.text_muted)
                         .child("The queue is empty"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(m.text_faint)
-                        .child("Play a track, or right-click one and choose Add to Queue."),
                 )
                 .into_any_element()
         } else {

@@ -43,6 +43,44 @@ fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
     assert_eq!(p.locate(p.duration), None);
 }
 #[test]
+fn only_tracks_from_a_cd_offer_full_cd() {
+    let dir = tempfile::tempdir().unwrap();
+    let resolve = |track: &Arc<crate::library::Track>| {
+        Program::resolve(track, DiscContext::Selected, None).unwrap()
+    };
+    // A lone recording, even when chosen from a CD context, and a one-track
+    // album both play as themselves.
+    let lone = dir.path().join("lone");
+    fs::create_dir(&lone).unwrap();
+    fixture(&lone.join("single.wav"), 32000, 32000);
+    let single = Arc::new(crate::library::Track::file(lone.join("single.wav")));
+    let p = resolve(&single);
+    assert!(!p.full_cd && p.limitation.is_some());
+    assert!(!from_cd(&single, Some(&p)));
+    let album = dir.path().join("CD1");
+    fs::create_dir(&album).unwrap();
+    fixture(&album.join("only.wav"), 32000, 32000);
+    let only = Arc::new(crate::library::Track::file(album.join("only.wav")));
+    let p = Program::resolve(&only, DiscContext::Inferred, None).unwrap();
+    assert!(p.full_cd && p.segments.len() == 1);
+    assert!(!from_cd(&only, Some(&p)));
+    // Several tracks of one CD do, and so does a CUE chapter before its
+    // program resolves.
+    fixture(&album.join("two.wav"), 32000, 32000);
+    let p = Program::resolve(&only, DiscContext::Inferred, None).unwrap();
+    assert_eq!(p.segments.len(), 2);
+    assert!(from_cd(&only, Some(&p)));
+    fs::write(
+        dir.path().join("set.cue"),
+        "FILE lone/single.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00",
+    )
+    .unwrap();
+    let chapter = crate::cue::read(&dir.path().join("set.cue"))
+        .unwrap()
+        .remove(0);
+    assert!(from_cd(&chapter, None));
+}
+#[test]
 fn missing_recording_requires_a_verified_duration_for_this_sheet_revision() {
     let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.wav");

@@ -39,6 +39,29 @@ pub struct Status {
     pub queue_revision: u64,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum TransportState {
+    Playing,
+    Paused,
+    Finished,
+    Stopped,
+}
+impl Status {
+    pub fn playback_state(&self) -> TransportState {
+        if self.playing {
+            TransportState::Playing
+        } else if self.error.is_some() {
+            TransportState::Stopped
+        } else if self.duration > 0. && self.position >= self.duration {
+            TransportState::Finished
+        } else if self.source_revision.is_some() || self.position > 0. {
+            TransportState::Paused
+        } else {
+            TransportState::Stopped
+        }
+    }
+}
+
 /// Every control path — the window, the tray, media keys — sends these to
 /// the one transport, so they can never disagree about what is playing.
 pub enum Command {
