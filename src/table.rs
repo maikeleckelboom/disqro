@@ -11,7 +11,9 @@ use crate::{
     player::Player,
     store::{self, Mark, PlaylistId, Row, Scope, Ticket},
     theme::materials,
-    workspace::{ClearRating, RateFive, RateFour, RateOne, RateThree, RateTwo, ToggleLike},
+    workspace::{
+        ActivateTrackLike, ClearRating, RateFive, RateFour, RateOne, RateThree, RateTwo, ToggleLike,
+    },
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::{
@@ -1115,8 +1117,13 @@ impl MusicTable {
         let catalog = self.catalog.clone();
         let target = self.single_target(row);
         let liked = mark.liked;
+        let toggle = move |cx: &mut App| {
+            catalog.update(cx, |c, cx| c.set_liked(target.clone(), !liked, cx));
+        };
+        let toggle_from_key = toggle.clone();
         div()
             .id(("like", self.cell_id(row)))
+            .key_context("TrackLike")
             .role(Role::Button)
             .focusable()
             .tab_stop(true)
@@ -1152,10 +1159,13 @@ impl MusicTable {
                 w.prevent_default();
                 cx.stop_propagation();
             })
+            .on_action(move |_: &ActivateTrackLike, _, cx| {
+                cx.stop_propagation();
+                toggle_from_key(cx);
+            })
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
-                let target = target.clone();
-                catalog.update(cx, |c, cx| c.set_liked(target, !liked, cx));
+                toggle(cx);
             })
             .into_any_element()
     }
