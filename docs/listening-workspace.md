@@ -9,7 +9,7 @@ Disqro opens a folder or a CUE album directly. Browsing never changes what is pl
 | Action | Control |
 | --- | --- |
 | Edit the folder path | Ctrl+L, Alt+D or F4, or click the address bar |
-| Open a folder | Ctrl+O, a Place, the folder tree, or a breadcrumb |
+| Open a folder | Ctrl+O, a Place or folder in Locations, or a breadcrumb |
 | Back, Forward, Parent folder | Alt+Left (or Backspace), Alt+Right, Alt+Up, or the mouse's back and forward buttons |
 | Find tracks in the current collection | Ctrl+F |
 | Play from a track | Double-click, Enter, or **Play** in its context menu |
@@ -27,22 +27,27 @@ Disqro opens a folder or a CUE album directly. Browsing never changes what is pl
 
 The current folder appears as breadcrumbs. Click a crumb to open that folder. Click the empty part of the bar, or press Ctrl+L, to edit the full path with everything selected. Type or paste a drive path such as `C:\Music\Albums`, a UNC path such as `\\server\share\Music`, a path in quotes, or one with `%VARIABLES%`. Enter opens it; Escape restores the breadcrumbs. A path that does not exist shows a short message in the bar and leaves the current folder as it was. Paths are checked off the interface thread, so a sleeping network share cannot stall the window. A path to an audio file or CUE sheet opens its folder with that track selected. Right-click the bar to copy the address.
 
-### Places
+### Library and Locations
 
-Places are shortcuts; the folder tree below them shows the current folder within the Place it belongs to. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine.
+The sidebar has two parts. **Library** holds the indexed collections, Liked Tracks and playlists. **Locations** holds the Places, and each Place opens in place to show its own folders: Music expands to the folders inside Music, so the sidebar never shows Music twice. Disqro starts with Music and Downloads, resolved through Windows Known Folders, and the drives present on the machine.
 
-- Right-click a Place: **Open**, **Rename Shortcut**, **Remove from Places**.
-- Right-click the Places heading or the space around the list: **Add Folder to Places…**, **Restore Missing Default Places**, **Reset Places to Defaults…**.
-- Right-click a folder in the tree: **Add to Places**.
-- Drag a Place to reorder it.
+- Click a Place or folder name to open it. Click the arrow to open or close a branch without leaving the current folder.
+- Right-click a Place: **Open**, **Add to Library**, **Rename Shortcut**, **Remove from Places**.
+- Right-click the Locations heading or the space below the Places: **Add Folder to Places…**, **Restore Missing Default Places**, **Reset Places to Defaults…**.
+- Right-click a folder: **Open**, **Add to Places**, **Add to Library**.
+- Drag a Place onto another to move it there, onto the heading to move it to the top, or below the last row to move it to the end.
+- Right-click the Library heading, or a collection, for **Add Music Folder…** and **New Playlist**. The **+** on Playlists creates a playlist; the arrow beside it closes a long list.
 
 Removing a shortcut never touches its folder. Restoring adds back only the defaults you removed, at the end, and leaves your own shortcuts, names and order alone. Reset replaces the whole list after a confirmation. A drive that is not attached disappears until it returns; a custom Place whose folder is missing stays, dimmed. Opening a Place in a new tab is not available yet: the workspace has one folder view.
 
-### Folder tree
+A registered collection and a Place can point at the same folder. The Library entry opens the index; the Location opens the folder on disk.
 
-- The tree is rooted at the outermost Place or library collection that holds the current folder. Opening Music shows Music and its folders, not the rest of the home folder. A folder outside every Place is shown from its drive. Choosing a Place roots the tree at it.
-- The arrow opens or closes a branch without leaving the current folder. The name opens the folder, which expands it; the rest of the tree, its scroll position and the row under the pointer stay where they were.
+### Folders in Locations
+
+- The open folder is shown under one Place: the one you chose it from while you stay inside it, otherwise the outermost Place other than a drive that holds it, then its drive. A folder outside every Place appears under a dimmed entry for its drive or share until you return to a Place.
+- Opening a folder expands the way down to it and the folder itself, never its neighbours or the discs inside a large collection. Nothing collapses because you navigated; the rest of the tree, its scroll position and the row under the pointer stay where they were.
 - Back, Forward, Parent, breadcrumbs and typed paths keep the highlighted folder, the breadcrumbs and the list in agreement. While a library view is shown, the tree keeps the last folder in view without highlighting it.
+- Each Place keeps its own open folders, and they are remembered across restarts with whether Playlists is open. Folders are listed off the interface thread, one listing task per Place, so a sleeping network drive holds up only its own branch.
 - Folders whose names start with a dot, such as `.git` or `.cache`, and hidden or system folders are left out of the tree and of subfolder discovery. Typing the path of one in the address bar still opens it, and the tree shows the way to it.
 - Folders and files are ordered as Explorer orders them, so `CD 2` comes before `CD 10`.
 

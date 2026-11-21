@@ -42,6 +42,16 @@ pub struct LocationBar {
 struct Crumb {
     label: SharedString,
     path: PathBuf,
+    step: Step,
+}
+/// Where a crumb leads.
+#[derive(Clone, PartialEq)]
+enum Step {
+    Folder,
+    /// The collection a CD or release page belongs to.
+    Collection,
+    Release(crate::collection::DiscId, String),
+    Current,
 }
 
 fn crumbs(path: &Path) -> Vec<Crumb> {
@@ -62,6 +72,7 @@ fn crumbs(path: &Path) -> Vec<Crumb> {
                 out.push(Crumb {
                     label: label.into(),
                     path: PathBuf::new(),
+                    step: Step::Folder,
                 });
             }
             Component::RootDir => match out.last_mut() {
@@ -69,11 +80,13 @@ fn crumbs(path: &Path) -> Vec<Crumb> {
                 None => out.push(Crumb {
                     label: "\\".into(),
                     path: acc.clone(),
+                    step: Step::Folder,
                 }),
             },
             Component::Normal(n) => out.push(Crumb {
                 label: n.to_string_lossy().into_owned().into(),
                 path: acc.clone(),
+                step: Step::Folder,
             }),
             _ => {}
         }
@@ -268,20 +281,26 @@ impl LocationBar {
             Location::Playlist(_) => (IconName::ListMusic, "Playlists"),
             _ => (IconName::Library, "Library"),
         };
-        let parent = if let Location::Album { root, .. } = b.location {
-            Some((
-                root,
-                root.and_then(|r| b.catalog.read(cx).collection(r))
-                    .map_or_else(|| "All Music".to_owned(), |r| r.root.name.clone()),
-            ))
-        } else {
-            None
-        };
+        let parent =
+            if let Location::Album { root, .. } | Location::Release { root, .. } = b.location {
+                Some((
+                    root,
+                    root.and_then(|r| b.catalog.read(cx).collection(r))
+                        .map_or_else(|| "All Music".to_owned(), |r| r.root.name.clone()),
+                ))
+            } else {
+                None
+            };
+        // A CD of a release names the release between its collection and itself.
+        let release = matches!(b.location, Location::Album { .. })
+            .then(|| b.release())
+            .flatten();
         let library = self.browser.clone();
         let album_browser = self.browser.clone();
+        let release_browser = self.browser.clone();
         let name = match b.location {
             Location::Library(None) => None,
-            _ => Some(b.title(cx)),
+            _ => Some(b.crumb_title(cx)),
         };
         h_flex()
             .h_full()
@@ -323,6 +342,26 @@ impl LocationBar {
                         }),
                 )
             })
+            .when_some(release, |d, (key, title)| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(m.text_faint),
+                )
+                .child(
+                    div()
+                        .id("album-release")
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .child(title.clone())
+                        .on_click(move |_, w, cx| {
+                            cx.stop_propagation();
+                            release_browser
+                                .update(cx, |b, cx| b.open_release(&key, title.clone(), w, cx));
+                        }),
+                )
+            })
             .when_some(name, |d, name| {
                 d.child(
                     Icon::new(IconName::ChevronRight)
@@ -341,12 +380,26 @@ impl LocationBar {
         }
         let path = self.browser.read(cx).path.clone();
         let browser = self.browser.read(cx);
-        let disc = browser.disc.is_some();
         let mut all = crumbs(&path);
-        if disc {
+        // A page names its collection's folder, then the release a CD
+        // belongs to, then itself.
+        if let Some(page) = &browser.page {
+            if let Some(folder) = all.last_mut() {
+                folder.step = Step::Collection;
+            }
+            if let (crate::collection::Page::Disc(_), Some((key, title))) =
+                (page, browser.release())
+            {
+                all.push(Crumb {
+                    label: title.clone().into(),
+                    path: path.clone(),
+                    step: Step::Release(key, title),
+                });
+            }
             all.push(Crumb {
-                label: browser.title(cx).into(),
+                label: browser.crumb_title(cx).into(),
                 path: path.clone(),
+                step: Step::Current,
             });
         }
         // Collapse leading folders into a menu when the path does not fit.
@@ -440,6 +493,7 @@ impl LocationBar {
             }
             let browser = browser.clone();
             let target = c.path.clone();
+            let step = c.step.clone();
             row = row.child(
                 div()
                     .id(("crumb", i))
@@ -458,11 +512,12 @@ impl LocationBar {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |_, w, cx| {
                         cx.stop_propagation();
-                        if disc && i + 1 == last {
-                            browser.update(cx, |b, cx| b.up(w, cx));
-                        } else if !disc || i != last {
-                            browser.update(cx, |b, cx| b.open(target.clone(), w, cx));
-                        }
+                        browser.update(cx, |b, cx| match &step {
+                            Step::Folder => b.open(target.clone(), w, cx),
+                            Step::Collection => b.show_collection(w, cx),
+                            Step::Release(key, title) => b.open_release(key, title.clone(), w, cx),
+                            Step::Current => {}
+                        });
                     }),
             );
         }

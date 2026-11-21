@@ -345,3 +345,42 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
     .unwrap();
     assert_eq!(e.queue.current, Some(2));
 }
+
+#[test]
+fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
+    let chapter = |disc: &str, n: u8, start: u64, end: Option<u64>| {
+        let mut t = Track::file(format!("{disc}.flac").into());
+        t.disc = Some(DiscTrack {
+            sheet: format!("{disc}.cue").into(),
+            number: n,
+            start,
+            end,
+        });
+        Arc::new(t)
+    };
+    // CD 1 ends where its image ends; CD 2 has a recorded lead-in.
+    let release: crate::library::TrackList = [
+        chapter("cd1", 1, 0, Some(75)),
+        chapter("cd1", 2, 75, None),
+        chapter("cd2", 0, 0, Some(33)),
+        chapter("cd2", 1, 33, Some(150)),
+        chapter("cd2", 2, 150, None),
+    ]
+    .into();
+    // Chapters of one disc share a decoder; the next disc opens its own.
+    assert!(contiguous(&release[0], &release[1]));
+    assert!(!contiguous(&release[1], &release[2]));
+    assert!(contiguous(&release[2], &release[3]));
+    let mut q = Queue::default();
+    q.replace(&release, 0);
+    q.set_current(Some(1));
+    assert_eq!(q.next_index(true), Some(2), "CD 2 follows CD 1");
+    q.set_current(Some(4));
+    assert_eq!(q.next_index(true), None, "nothing follows the release");
+    let ids: std::collections::HashSet<_> = q.entries.iter().map(|e| e.id).collect();
+    assert_eq!(
+        ids.len(),
+        release.len(),
+        "each chapter is its own occurrence"
+    );
+}

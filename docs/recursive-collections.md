@@ -1,6 +1,6 @@
 # Browsing a music collection
 
-Open the collection root from Places, the folder tree, the address bar or the folder picker, then choose **Include Subfolders**. A folder that holds only subfolders offers it in the list; the Recordings panel menu always has it. Disqro remembers the choice for that folder and every folder inside it, and starts showing discs and tracks as it finds them. Its parent and neighbouring folders keep showing only their own recordings. Choosing it again inside a collection turns it off for that branch alone.
+Open the collection root from Locations, the address bar or the folder picker, then choose **Include Subfolders**. A folder that holds only subfolders offers it in the list; the Recordings panel menu always has it. Disqro remembers the choice for that folder and every folder inside it, and starts showing discs and tracks as it finds them. Its parent and neighbouring folders keep showing only their own recordings. Choosing it again inside a collection turns it off for that branch alone.
 
 - **Albums / CDs** shows the artwork, title, year, track count, duration, format and relative folder for each disc. Double-click a disc or press Enter to see its tracks. The button above the table returns to the discs.
 - **All Tracks** groups the customizable table by CD. Double-click a CD header to open its page. Click a column heading to sort across the collection. Ctrl+F searches titles, artists, albums and paths. Combine terms such as `artist:gizmo format:flac` or `album:thunderdome`.

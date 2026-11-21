@@ -174,6 +174,7 @@ impl Workspace {
                 browser.clone(),
                 catalog.clone(),
                 saved.places.take(),
+                std::mem::take(&mut saved.sidebar),
                 window,
                 cx,
             )
@@ -205,9 +206,7 @@ impl Workspace {
                     }
                 });
                 let factory = pane.clone();
-                register_panel(cx, kind.name(), move |_, _, _| {
-                    panel_handle(factory.clone())
-                });
+                register_panel(cx, kind.key(), move |_, _, _| panel_handle(factory.clone()));
                 pane
             })
             .collect::<Vec<_>>();
@@ -364,6 +363,7 @@ impl Workspace {
             columns: b.table.read(cx).delegate().columns.clone(),
             layout: Some(self.dock.read(cx).dump(cx)),
             places: Some(self.sidebar.read(cx).places.state()),
+            sidebar: self.sidebar.read(cx).state(cx),
             queue: (!queue.entries.is_empty()).then(|| SavedQueue {
                 queue: (**queue).clone(),
                 position: p.status.position,
@@ -897,14 +897,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &OpenDirectory, w, cx| {
                 let b = s.browser.read(cx);
                 let folders = b.folders.read(cx);
-                if let Some(path) = folders
+                let shown = folders.current().map(|(r, p)| (r.to_owned(), p.to_owned()));
+                if let Some((root, path)) = folders
                     .state
                     .read(cx)
                     .selected_item()
-                    .and_then(|i| folders.path(&i.id))
-                    && (!crate::places::same_path(&path, &b.path) || !b.location.is_folder())
+                    .and_then(|i| folders.entry(&i.id))
+                    && (shown.as_ref() != Some(&(root.clone(), path.clone()))
+                        || !b.location.is_folder())
                 {
-                    s.browser.update(cx, |b, cx| b.open(path, w, cx));
+                    s.browser.update(cx, |b, cx| b.open_in(path, root, w, cx));
                 }
             }))
             .on_mouse_down(

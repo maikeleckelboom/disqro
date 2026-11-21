@@ -34,10 +34,18 @@ impl Kind {
     pub const ALL: [Self; 4] = [Self::Folders, Self::Tracks, Self::Queue, Self::Player];
     pub fn name(self) -> &'static str {
         match self {
-            Self::Folders => "Folders",
+            Self::Folders => "Sidebar",
             Self::Tracks => "Recordings",
             Self::Player => "Now Playing",
             Self::Queue => "Queue",
+        }
+    }
+    /// The name saved dock layouts know a panel by. The sidebar keeps the
+    /// name it had when it held only the folder tree.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Folders => "Folders",
+            kind => kind.name(),
         }
     }
     pub fn index(self) -> usize {
@@ -64,7 +72,7 @@ impl Focusable for Pane {
 }
 impl BasePanel for Pane {
     fn panel_name(&self) -> &'static str {
-        self.kind.name()
+        self.kind.key()
     }
 }
 impl Panel for Pane {
@@ -108,7 +116,7 @@ impl Panel for Pane {
                     Some(status) => format!("{detail} · {status}"),
                     None => detail,
                 };
-                let subfolders = b.location.is_folder() && b.subfolders && b.disc.is_none();
+                let subfolders = b.location.is_folder() && b.subfolders && b.page.is_none();
                 (
                     b.title(cx),
                     if subfolders {
@@ -170,18 +178,21 @@ impl Panel for Pane {
             return None;
         }
         let b = self.browser.read(cx);
-        let indexed_album = matches!(b.location, Location::Album { .. });
-        if !b.can_list_discs() && b.disc.is_none() && !indexed_album {
+        let back = b.is_page();
+        if !b.can_list_discs() && !back {
             return None;
         }
         let albums = b.prefs.albums;
         let browser = self.browser.clone();
-        let back = b.disc.is_some() || indexed_album;
+        // A CD of a release goes back to the release.
+        let release = back && b.membership.is_some();
         Some(vec![
             Button::new("collection-view")
                 .ghost()
                 .xsmall()
-                .label(if back {
+                .label(if release {
+                    "‹ Release"
+                } else if back {
                     "‹ Collection"
                 } else if albums {
                     "All Tracks"
@@ -255,20 +266,35 @@ impl Panel for Pane {
                         .separator(),
                     _ => menu,
                 };
-                let cd = match &b.location {
-                    Location::Album { id, .. } => Some(crate::collection::DiscId::Library(*id)),
-                    _ => b.disc.clone(),
+                use crate::collection::{DiscId, Page};
+                // The page shown: a CD, or every CD of a release.
+                let page = match &b.location {
+                    Location::Album { id, .. } => Some(Page::Disc(DiscId::Library(*id))),
+                    Location::Release { id, .. } => Some(Page::Release(DiscId::Library(*id))),
+                    _ => b.page.clone(),
+                };
+                let release = match &page {
+                    Some(Page::Release(_)) => None,
+                    _ => b.release().map(|(key, _)| Page::Release(key)),
                 };
                 let playing = self
                     .player
                     .read(cx)
                     .playing_entry()
-                    .filter(|e| {
-                        cd.as_ref()
-                            .is_some_and(|id| table.page_contains(id, &e.track))
+                    .filter(|e| match &page {
+                        Some(Page::Disc(id)) => table.page_contains(id, &e.track),
+                        Some(Page::Release(_)) => table.lists(&e.track),
+                        None => false,
                     })
                     .cloned();
                 let cd_table = b.table.clone();
+                let release_table = b.table.clone();
+                let play_label = match &page {
+                    Some(Page::Disc(_)) => "Play CD",
+                    Some(Page::Release(_)) => "Play Release",
+                    None if b.can_list_discs() => "Play Collection",
+                    None => "Play All",
+                };
                 let menu = menu.when_some(playing, |menu, mut entry| {
                     entry.disc_context = crate::library::DiscContext::Selected;
                     let player = self.player.clone();
@@ -282,16 +308,24 @@ impl Panel for Pane {
                 });
                 let menu = menu
                     .item(
-                        PopupMenuItem::new(if cd.is_some() { "Play CD" } else { "Play All" })
+                        PopupMenuItem::new(play_label)
                             .icon(IconName::Play)
-                            .disabled(empty && cd.is_none())
-                            .on_click(move |_, _, cx| match &cd {
-                                Some(id) => {
-                                    cd_table.update(cx, |t, cx| t.delegate().play_disc(id, cx))
+                            .disabled(empty && page.is_none())
+                            .on_click(move |_, _, cx| match &page {
+                                Some(page) => {
+                                    cd_table.update(cx, |t, cx| t.delegate().play_page(page, cx))
                                 }
                                 None => s1(t1.clone(), Some(false), cx),
                             }),
                     )
+                    .when_some(release, |menu, release| {
+                        menu.item(
+                            PopupMenuItem::new("Play Release").on_click(move |_, _, cx| {
+                                release_table
+                                    .update(cx, |t, cx| t.delegate().play_page(&release, cx))
+                            }),
+                        )
+                    })
                     .item(
                         PopupMenuItem::new("Shuffle All")
                             .icon(IconName::Shuffle)
@@ -323,7 +357,9 @@ impl Panel for Pane {
                                     browser.update(cx, |b, cx| b.reload(w, cx))
                                 }),
                         ),
-                    Location::Library(root) | Location::Album { root, .. } => menu.item(
+                    Location::Library(root)
+                    | Location::Album { root, .. }
+                    | Location::Release { root, .. } => menu.item(
                         PopupMenuItem::new(if root.is_some() {
                             "Rescan Collection"
                         } else {
@@ -361,7 +397,7 @@ impl Pane {
             );
         }
         if b.listing_discs()
-            && (!b.location.is_folder() || !b.discs.read(cx).delegate().items.is_empty())
+            && (!b.location.is_folder() || !b.discs.read(cx).delegate().rows.is_empty())
         {
             return view.child(
                 div().flex_1().min_h_0().child(

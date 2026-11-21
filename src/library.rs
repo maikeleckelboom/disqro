@@ -121,15 +121,10 @@ impl Track {
     }
 }
 
-/// A numbered CD directory supplies context when ordinary files have no tags.
+/// A numbered CD directory, such as `CD1` or `Disc 2 - Live`, supplies
+/// context when ordinary files have no tags.
 pub fn folder_disc_number(file: &Path) -> Option<u32> {
-    let name = file.parent()?.file_name()?.to_str()?.to_ascii_lowercase();
-    name.strip_prefix("disc")
-        .or_else(|| name.strip_prefix("cd"))?
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|n| *n > 0)
+    crate::release::disc_folder(file.parent()?.file_name()?.to_str()?).map(|(n, _)| n)
 }
 
 pub fn name(path: &Path) -> String {

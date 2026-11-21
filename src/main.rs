@@ -21,6 +21,7 @@ mod profile;
 mod queue;
 mod queue_view;
 mod recording;
+mod release;
 mod sidebar;
 mod store;
 mod system;
