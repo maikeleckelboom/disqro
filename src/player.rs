@@ -30,6 +30,11 @@ use std::{
 #[path = "player_wave.rs"]
 mod wave;
 
+/// The perspective tabs above the timeline lane.
+const PERSPECTIVE_HEIGHT: f32 = 20.;
+/// The row holding the recording, transport and listening controls.
+const CONTROL_ROW: f32 = 40.;
+
 pub enum PlayerEvent {
     Locate(Arc<crate::library::Track>, crate::browser::Destination),
     ContinueCd(crate::queue::Entry),
@@ -93,6 +98,9 @@ pub struct Player {
     scrub_entry: Option<(u64, u64)>,
     visible: bool,
     drawn_position: f64,
+    /// Whether the trailing sidebar, home of Queue and History, is shown.
+    /// The workspace keeps it current for the player's Queue button.
+    pub queue_shown: bool,
 }
 impl Player {
     pub fn new(volume: f32, full_cd: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -147,6 +155,7 @@ impl Player {
             scrub_entry: None,
             visible: true,
             drawn_position: 0.,
+            queue_shown: true,
         }
     }
     pub fn command(&mut self, c: Command, cx: &mut Context<Self>) {
@@ -411,12 +420,10 @@ impl Render for Player {
         let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
 
         let mut art = div()
-            .h(relative(0.9))
-            .max_h(px(72.))
-            .aspect_square()
+            .size(px(CONTROL_ROW))
             .flex_shrink_0()
             .overflow_hidden()
-            .rounded(px(6.))
+            .rounded(px(4.))
             .bg(m.control)
             .flex()
             .justify_center()
@@ -426,7 +433,7 @@ impl Render for Player {
         } else {
             art.child(
                 Icon::new(IconName::Disc3)
-                    .size(px(28.))
+                    .size(px(20.))
                     .text_color(m.text_faint),
             )
         };
@@ -672,6 +679,26 @@ impl Render for Player {
                 .text_color(m.text_faint)
                 .child(clock(t))
         };
+        let queue_shown = self.queue_shown;
+        let queue_label = if queue_shown {
+            "Hide Queue · Ctrl+Alt+Right"
+        } else {
+            "Show Queue · Ctrl+Alt+Right"
+        };
+        let queue = Button::new("toggle-queue")
+            .ghost()
+            .xsmall()
+            .icon(
+                Icon::new(IconName::ListMusic)
+                    .size(px(16.))
+                    .text_color(if queue_shown { m.accent } else { m.text_muted }),
+            )
+            .accessibility_label(queue_label)
+            .tooltip(queue_label)
+            .toggled(queue_shown)
+            .on_click(|_, w, cx| {
+                w.dispatch_action(Box::new(crate::workspace::ToggleRightSidebar), cx)
+            });
 
         let height = self.panel_height.clone();
         let player = cx.entity_id();
@@ -688,72 +715,87 @@ impl Render for Player {
         )
         .absolute()
         .size_full();
-        let content = h_flex()
-            .w_full()
-            .h(self.panel_height.get().unwrap_or(px(100.)))
-            .bg(m.raised)
-            .px(px(16.))
-            .gap(px(14.))
+        // Three zones of equal flexibility keep the transport centred in the
+        // window: the recording on the left, playback in the middle, and the
+        // listening controls on the right. The timeline runs the full width
+        // below them and takes whatever height the player is given.
+        let identity = h_flex()
+            .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
+            .gap(px(10.))
             .items_center()
             .child(art)
             .child(
                 v_flex()
-                    .flex_1()
                     .min_w_0()
-                    .h_full()
-                    .max_h(px(80.))
-                    .justify_center()
-                    .gap(px(4.))
+                    .gap(px(1.))
                     .child(
-                        h_flex()
-                            .w_full()
-                            .gap(px(12.))
-                            .flex_shrink_0()
-                            .items_center()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(1.))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(m.text)
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(12.5))
-                                            .text_color(if s.error.is_some() {
-                                                m.danger
-                                            } else {
-                                                m.text_muted
-                                            })
-                                            .child(subtitle),
-                                    ),
-                            )
-                            .when_some(self.overview(), |row, overview| {
-                                row.child(self.perspectives(overview, &m, cx))
-                            })
-                            .child(transport)
-                            .child(volume),
+                        div()
+                            .truncate()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(m.text)
+                            .child(title),
                     )
                     .child(
-                        h_flex()
-                            .w_full()
-                            .gap(px(8.))
-                            .flex_1()
-                            .min_h_0()
-                            .max_h(px(34.))
-                            .items_center()
-                            .child(time(shown_position).text_color(m.text_muted))
-                            .child(seek)
-                            .child(time(duration).text_right()),
+                        div()
+                            .truncate()
+                            .text_size(px(crate::theme::size::TEXT_SMALL))
+                            .text_color(if s.error.is_some() {
+                                m.danger
+                            } else {
+                                m.text_muted
+                            })
+                            .child(subtitle),
                     ),
             );
+        let listening = h_flex()
+            .flex_1()
+            .flex_basis(px(0.))
+            .min_w_0()
+            .gap(px(6.))
+            .items_center()
+            .justify_end()
+            .child(queue)
+            .child(volume);
+        let lane = h_flex()
+            .w_full()
+            .flex_1()
+            .min_h(px(22.))
+            .px(px(10.))
+            .gap(px(8.))
+            .items_center()
+            .bg(m.canvas)
+            .rounded(px(6.))
+            .rounded_tl(px(0.))
+            .child(time(shown_position).text_color(m.text_muted))
+            .child(seek)
+            .child(time(duration).text_right());
+        let content = v_flex()
+            .w_full()
+            .h(self.panel_height.get().unwrap_or(px(100.)))
+            .bg(m.raised)
+            .px(px(12.))
+            .pt(px(6.))
+            .pb(px(8.))
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(CONTROL_ROW))
+                    .flex_shrink_0()
+                    .gap(px(16.))
+                    .items_center()
+                    .child(identity)
+                    .child(transport)
+                    .child(listening),
+            )
+            .child(div().mt(px(4.)).flex_shrink_0().child(self.perspectives(
+                self.overview(),
+                &m,
+                cx,
+            )))
+            .child(lane);
         div()
             .id("player")
             .relative()

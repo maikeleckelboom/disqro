@@ -201,36 +201,53 @@ impl Player {
         self.scrub_entry = None;
         cx.notify();
     }
+    /// Tabs on the timeline lane's upper edge name what the lane shows. The
+    /// selected perspective shares the lane's surface and opens into it. A
+    /// recording without a CD context offers only Track.
     pub(super) fn perspectives(
         &self,
-        overview: Overview,
+        overview: Option<Overview>,
         m: &Materials,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let enabled = overview.enabled;
         let reason = self
             .unavailable
             .as_deref()
             .or_else(|| self.program.as_ref()?.limitation.as_deref());
-        let mut row = h_flex().items_center().rounded(px(4.)).bg(m.control);
-        for (id, label, full) in [
-            ("wave-track", "Track", false),
-            ("wave-disc", overview.label, true),
-        ] {
+        let mut row = h_flex()
+            .id("wave-perspectives")
+            .role(Role::TabList)
+            .aria_label("Waveform perspective")
+            .h(px(PERSPECTIVE_HEIGHT))
+            .items_end();
+        let choices = match &overview {
+            Some(overview) => vec![
+                ("wave-track", "Track", false),
+                ("wave-disc", overview.label, true),
+            ],
+            None => vec![("wave-track", "Track", false)],
+        };
+        for (id, label, full) in choices {
+            let enabled = !full || overview.as_ref().is_some_and(|o| o.enabled);
             let selected = self.disc_view() == full;
-            let tip = if full && !enabled {
-                overview.unavailable_tip(reason, self.program.is_none())
-            } else {
-                format!("{label} waveform · Alt+W")
+            let tip = match &overview {
+                Some(o) if full && !enabled => o.unavailable_tip(reason, self.program.is_none()),
+                Some(_) => format!("{label} waveform · Alt+W"),
+                None => "The waveform of this recording".into(),
             };
             row = row.child(
                 Button::new(id)
                     .ghost()
                     .xsmall()
+                    .h_full()
+                    .px(px(10.))
+                    .rounded(px(0.))
+                    .rounded_t(px(5.))
                     .label(label)
-                    .text_color(if selected { m.text } else { m.text_muted })
-                    .when(selected, |b| b.bg(m.control_hover))
-                    .disabled(full && !enabled)
+                    .text_size(px(crate::theme::size::TEXT_SMALL))
+                    .text_color(if selected { m.text } else { m.text_faint })
+                    .when(selected, |b| b.bg(m.canvas).hover(|b| b.bg(m.canvas)))
+                    .disabled(!enabled)
                     .tooltip(tip)
                     .on_click(cx.listener(move |p, _, _, cx| p.set_perspective(full, cx))),
             );
