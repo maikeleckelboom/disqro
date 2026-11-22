@@ -191,7 +191,6 @@ pub struct Workspace {
     address: Option<Entity<crate::location::LocationBar>>,
     search: Entity<search::LibrarySearch>,
     search_visible: bool,
-    search_expanded: bool,
     left_hidden: bool,
     right_hidden: bool,
     player_height: f32,
@@ -373,7 +372,6 @@ impl Workspace {
             address: None,
             search,
             search_visible: false,
-            search_expanded: false,
             left_hidden: workspace.left_hidden,
             right_hidden: workspace.right_hidden,
             closed: workspace.closed,
@@ -579,12 +577,6 @@ impl Workspace {
             );
         }
         self.panes.retain(|id, _| ids.contains(id));
-        self.skin.browser_count.set(
-            self.panes
-                .values()
-                .filter(|t| t.pane.read(cx).ty == &panels::browser::TYPE)
-                .count(),
-        );
         self.sync_panel_display(cx);
         // An identity appears once, even in a layout edited by hand.
         let mut seen = Vec::new();
@@ -960,8 +952,10 @@ impl Workspace {
     /// The pane holding keyboard focus.
     fn focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
         self.ordered(cx).into_iter().find(|p| {
-            p.read(cx).focus_handle(cx).contains_focused(window, cx)
-                || p.read(cx).focus_handle(cx).is_focused(window)
+            let p = p.read(cx);
+            p.focus_handle(cx).contains_focused(window, cx)
+                || p.tab_focus.contains_focused(window, cx)
+                || p.controls_focus.contains_focused(window, cx)
         })
     }
 
@@ -1366,6 +1360,7 @@ impl Workspace {
             .tooltip("Workspace")
             .dropdown_menu(move |mut menu, _, cx| {
                 menu = menu
+                    .menu("Go to Folder or File…", Box::new(FocusLocation))
                     .menu("Open Folder…", Box::new(OpenFolder))
                     .menu("Add Music Folder to Library…", Box::new(AddMusicFolder))
                     .menu("New Playlist", Box::new(NewPlaylist))
@@ -1452,46 +1447,35 @@ impl Workspace {
         }
     }
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let address = self
-            .address
-            .clone()
-            .map(|bar| {
-                div()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .child(bar)
+        let navigation = self.address.as_ref().map_or_else(
+            || {
+                Button::new("open-browser-nav")
+                    .ghost()
+                    .small()
+                    .label("Open Music Browser")
+                    .on_click(cx.listener(|s, _, w, cx| {
+                        s.ensure_browser(w, cx);
+                    }))
                     .into_any_element()
-            })
-            .unwrap_or_else(|| {
-                div()
-                    .flex_1()
-                    .occlude()
-                    .child(
-                        Button::new("open-browser-nav")
-                            .ghost()
-                            .small()
-                            .label("Open Music Browser")
-                            .on_click(cx.listener(|s, _, w, cx| {
-                                s.ensure_browser(w, cx);
-                            })),
-                    )
-                    .into_any_element()
-            });
-        // Each sidebar toggle sits at the side it shows; navigation, address
-        // and search read left to right; workspace commands close the row.
-        let controls = h_flex()
-            .flex_1()
+            },
+            |bar| bar.clone().into_any_element(),
+        );
+        // Kit marks its underlying title bar as native caption. Occlude only
+        // the client controls, leaving the flexible space between them draggable.
+        let client = || {
+            h_flex()
+                .h_full()
+                .items_center()
+                .gap(px(4.))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
+        let leading = client()
             .min_w_0()
-            .h_full()
-            .gap(px(6.))
-            .items_center()
-            // Shield the entire client strip from the Kit bar's native Drag
-            // area and its bubbling mouse-down handler, including field insets.
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(self.sidebar_button(Home::Leading, cx))
-            .child(address)
+            .child(navigation);
+        let trailing = client()
+            .flex_shrink_0()
             .child(self.search_field(window, cx))
             .child(self.sidebar_button(Home::Trailing, cx))
             .when(!self.dock.read(cx).is_locked(), |d| {
@@ -1508,9 +1492,6 @@ impl Workspace {
             })
             .child(div().occlude().child(self.workspace_menu(cx)));
 
-        // The brand occupies a full-height portion of the Kit's native
-        // caption. Keep a grip even at the minimum width with search open.
-        let caption_width = (f32::from(window.viewport_size().width) * 0.085).clamp(64., 108.);
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1518,13 +1499,15 @@ impl Workspace {
             .px(px(6.))
             .child(
                 h_flex()
-                    .w(px(caption_width))
+                    .w(px(42.))
                     .h_full()
                     .flex_shrink_0()
                     .items_center()
                     .child(img("brand/compact.png").size(px(18.))),
             )
-            .child(controls)
+            .child(leading)
+            .child(div().h_full().flex_1().min_w(px(24.)))
+            .child(trailing)
             .into_any_element()
     }
     /// Recovery when the center contains no visible panels.
@@ -1619,7 +1602,21 @@ fn tab_menu(
         .and_then(|w| w.read(cx).sidebar_action(id, cx));
     let sidebar = workspace.clone();
     let instance = pane.read(cx).ty.instances == Instances::Multiple;
+    let address = browser_of(pane, cx).and_then(|b| {
+        let b = b.read(cx);
+        crate::location::physical_address(&b.location, b.page.as_ref())
+            .map(|p| p.display().to_string())
+    });
     Pane::menu(pane, menu, cx)
+        .when_some(address, |menu, path| {
+            menu.item(
+                PopupMenuItem::new("Copy Address")
+                    .icon(IconName::Copy)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
+                    }),
+            )
+        })
         .when(instance, |menu| menu.separator())
         .when_some(arrangement, |menu, action| {
             menu.item(
@@ -1682,16 +1679,19 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|s, _: &GoBack, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.back(w, cx))
                 }
             }))
             .on_action(cx.listener(|s, _: &GoForward, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.forward(w, cx))
                 }
             }))
             .on_action(cx.listener(|s, _: &GoUp, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.up(w, cx))
                 }
             }))

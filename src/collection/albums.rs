@@ -108,13 +108,24 @@ impl AlbumView {
             return *width;
         }
         if field == Field::Title && viewport > 0. {
-            let remaining: f32 = self
-                .columns
-                .iter()
-                .filter(|f| **f != field)
-                .map(|f| self.widths.get(f).copied().unwrap_or_else(|| f.width()))
+            // Leave space for columns before Title in their saved order.
+            // After Title, fit whole columns so a sliver of the next heading
+            // gives its space to the title. Other columns remain scrollable.
+            let width = |f: &Field| self.widths.get(f).copied().unwrap_or_else(|| f.width());
+            let mut columns = self.columns.iter();
+            let before: f32 = columns
+                .by_ref()
+                .take_while(|f| **f != Field::Title)
+                .map(width)
                 .sum();
-            return (viewport - remaining - 2.).clamp(178., 1200.);
+            let mut title = viewport - before - 2.;
+            for next in columns.map(width) {
+                if title - next < 178. {
+                    break;
+                }
+                title -= next;
+            }
+            return title.clamp(178., 1200.);
         }
         field.width()
     }
@@ -530,6 +541,19 @@ impl TableDelegate for Discs {
 mod tests {
     use super::{AlbumView, Discs, Field, Shelf, Track};
     use std::{path::Path, sync::Arc};
+
+    #[test]
+    fn narrow_album_titles_use_space_left_by_whole_columns() {
+        let mut view = AlbumView {
+            columns: vec![Field::Cover, Field::Title, Field::Year],
+            ..Default::default()
+        };
+        let cover = view.width(Field::Cover, 0.);
+        assert_eq!(view.width(Field::Title, cover + 224.), 222.);
+        assert_eq!(view.width(Field::Title, cover + 250.), 188.);
+        view.widths.insert(Field::Title, 201.);
+        assert_eq!(view.width(Field::Title, cover + 224.), 201.);
+    }
 
     #[test]
     fn legacy_artwork_moves_with_the_title_and_a_hidden_cover_stays_hidden() {

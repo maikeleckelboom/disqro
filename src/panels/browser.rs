@@ -237,67 +237,139 @@ impl PaneContent for BrowserPane {
 }
 
 impl Browser {
-    /// The bar above every browser's table: how its music is shown, what it
-    /// holds, and a filter for its rows. Every browser has the same bar, so
-    /// view switching and filtering are always in the same place.
-    fn bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let m = *materials(cx);
-        let switch = !self.is_page() && self.can_list_discs();
-        let albums = self.prefs.albums;
-        let subfolders =
-            (self.location.is_folder() && self.page.is_none()).then_some(self.subfolders);
-        let summary: Option<SharedString> = status(self, cx)
-            .or_else(|| summary(self, cx))
-            .map(Into::into);
+    /// Only release and disc pages need context beyond their own tab title.
+    fn parent_trail(&self, cx: &Context<Self>) -> AnyElement {
+        let (parent, library) = match &self.location {
+            Location::Album { root, .. } | Location::Release { root, .. } => (
+                root.and_then(|r| self.catalog.read(cx).collection(r))
+                    .map_or_else(|| "All Music".into(), |r| r.root.name.clone()),
+                Some(Location::Library(*root)),
+            ),
+            _ => (crate::library::display_name(&self.path), None),
+        };
         let browser = cx.entity();
-        let leading = container_query(move |space, w, _| {
-            let compact = space.width < px(250.) || w.viewport_size().width < px(800.);
-            // The count is the first thing to give way.
-            let room = if switch || subfolders.is_some() {
-                330.
-            } else {
-                120.
-            };
-            h_flex()
-                .size_full()
-                .gap(px(10.))
-                .items_center()
-                .when(switch, |d| d.child(view_switch(&browser, albums, compact)))
-                .when_some(subfolders, |d, include| {
-                    d.child(subfolder_toggle(&browser, include))
-                })
-                .when_some(
-                    summary.clone().filter(|_| space.width >= px(room)),
-                    |d, text| {
-                        d.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(size::TEXT_SMALL))
-                                .text_color(m.text_faint)
-                                .child(text),
-                        )
-                    },
-                )
-        })
-        .flex_1()
-        .min_w_0()
-        .h_full();
+        let release = self.release().filter(|(key, _)| !self.shows_release(key));
+        // The tab supplies the leaf title. Add a short disc number only when
+        // release membership supplies a more specific identity.
+        let disc = self.membership.as_ref().map(|_| self.crumb_title(cx));
+        let m = *materials(cx);
         h_flex()
-            .id("browser-bar")
-            .h(px(size::HEADER))
+            .id("browser-parents")
+            .role(Role::Group)
+            .aria_label("Parent locations")
+            .w_full()
+            .min_w_0()
+            .h(px(24.))
             .flex_shrink_0()
-            .pl(px(8.))
-            .pr(px(6.))
-            .gap(px(8.))
+            .px(px(4.))
+            .gap(px(2.))
+            .overflow_x_scroll()
+            .child(
+                Button::new("collection-parent")
+                    .ghost()
+                    .xsmall()
+                    .tab_stop(true)
+                    .label(parent)
+                    .on_click(cx.listener(move |b, _, w, cx| {
+                        if let Some(location) = &library {
+                            b.show(location.clone(), w, cx)
+                        } else {
+                            b.show_collection(w, cx)
+                        }
+                    })),
+            )
+            .when_some(release, |d, (key, title)| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(m.text_faint),
+                )
+                .child(
+                    Button::new("release-parent")
+                        .ghost()
+                        .xsmall()
+                        .tab_stop(true)
+                        .label(title.clone())
+                        .on_click(move |_, w, cx| {
+                            browser.update(cx, |b, cx| b.open_release(&key, title.clone(), w, cx))
+                        }),
+                )
+            })
+            .when_some(disc, |d, label| {
+                d.child(
+                    Icon::new(IconName::ChevronRight)
+                        .size(px(12.))
+                        .text_color(m.text_faint),
+                )
+                .child(
+                    div()
+                        .whitespace_nowrap()
+                        .text_size(px(size::TEXT_SMALL))
+                        .text_color(m.text_muted)
+                        .child(label),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Width reserved before the dock decides which sibling tabs fit.
+    pub(crate) fn compact_controls_width(&self, cx: &App) -> f32 {
+        let view = !self.is_page() && self.can_list_discs();
+        let folders = self.location.is_folder() && self.page.is_none();
+        // Compact view menu, subfolder button, filter button or editable text.
+        12. + if view { 100. } else { 0. }
+            + if folders { 30. } else { 0. }
+            + if self.filter_open || !self.search.read(cx).value().is_empty() {
+                114.
+            } else {
+                28.
+            }
+    }
+
+    pub(crate) fn header_controls(
+        &self,
+        width: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let browser = cx.entity();
+        let minimum = px(self.compact_controls_width(cx));
+        let compact = width < minimum + px(170.);
+        let folders = self.location.is_folder() && self.page.is_none();
+        let m = *materials(cx);
+        h_flex()
+            .id("browser-controls")
+            .when(width < minimum, |d| d.overflow_x_scroll())
+            .min_w_0()
+            .max_w(width)
+            .h(px(size::HEADER))
+            .pr(px(4.))
+            .gap(px(3.))
             .items_center()
-            .child(leading)
-            .child(self.filter_control(window, cx))
+            .when(!self.is_page() && self.can_list_discs(), |d| {
+                d.child(view_switch(&browser, self.prefs.albums, compact))
+            })
+            .when(folders, |d| {
+                d.child(subfolder_toggle(&browser, self.subfolders, compact))
+            })
+            .when(width >= minimum + px(310.), |d| {
+                d.when_some(status(self, cx).or_else(|| summary(self, cx)), |d, text| {
+                    d.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(size::TEXT_SMALL))
+                            .text_color(m.text_faint)
+                            .child(text),
+                    )
+                })
+            })
+            .child(self.filter_control(compact, window, cx))
             .into_any_element()
     }
 
     /// The filter button, or the field once it is open or holds a query.
-    fn filter_control(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn filter_control(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let input = self.search.clone();
         let empty = input.read(cx).value().is_empty();
@@ -310,7 +382,8 @@ impl Browser {
                         .size(px(14.))
                         .text_color(m.text_muted),
                 )
-                .label("Filter")
+                .when(!compact, |b| b.label("Filter"))
+                .tab_stop(true)
                 .text_color(m.text_muted)
                 .accessibility_label("Filter this view")
                 .tooltip("Filter this view · Ctrl+F")
@@ -321,8 +394,8 @@ impl Browser {
         h_flex()
             .id("browser-filter")
             .flex_shrink(1.)
-            .min_w(px(110.))
-            .w(px(220.))
+            .min_w(px(48.))
+            .w(px(if compact { 108. } else { 175. }))
             .h(px(24.))
             .pl(px(7.))
             .pr(px(2.))
@@ -377,7 +450,12 @@ fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyEle
             .xsmall()
             .label(if albums { "Albums / CDs" } else { "All Tracks" })
             .dropdown_caret(true)
-            .accessibility_label("View")
+            .tab_stop(true)
+            .accessibility_label(if albums {
+                "View: Albums / CDs"
+            } else {
+                "View: All Tracks"
+            })
             .tooltip("Choose how this view is shown")
             .dropdown_menu(move |mut menu, _, _| {
                 for (name, value) in choices {
@@ -403,18 +481,21 @@ fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyEle
                 .xsmall()
                 .label(name)
                 .selected(albums == value)
+                .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
         }))
         .into_any_element()
 }
 
-fn subfolder_toggle(browser: &Entity<Browser>, include: bool) -> AnyElement {
+fn subfolder_toggle(browser: &Entity<Browser>, include: bool, compact: bool) -> AnyElement {
     let browser = browser.clone();
     Button::new("view-subfolders")
         .ghost()
         .xsmall()
         .icon(Icon::new(IconName::FolderTree).size(px(14.)))
-        .label("Subfolders")
+        .when(!compact, |b| b.label("Subfolders"))
+        .accessibility_label("Include subfolders")
+        .tab_stop(true)
         .selected(include)
         .tooltip(if include {
             "Showing subfolders · click to show this folder only"
@@ -488,7 +569,9 @@ impl Render for Browser {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|b, _, w, cx| b.forward(w, cx)),
             );
-        view = view.child(self.bar(window, cx));
+        if self.is_page() {
+            view = view.child(self.parent_trail(cx));
+        }
         if let Some(notice) = &self.notice {
             view = view.child(
                 gpui_kit::component::h_flex()

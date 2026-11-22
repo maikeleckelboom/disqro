@@ -446,7 +446,7 @@ impl Browser {
             _ => false,
         }
     }
-    /// What a CD page is called beneath its release in the address bar:
+    /// What a CD page is called beneath its release in the local trail:
     /// `CD 2` rather than the full title the panel already shows.
     pub fn crumb_title(&self, cx: &App) -> String {
         match &self.membership {

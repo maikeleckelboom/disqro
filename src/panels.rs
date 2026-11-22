@@ -204,6 +204,7 @@ pub struct Pane {
     /// The tab's name field while the listener renames it.
     pub renaming: Option<Entity<InputState>>,
     pub tab_focus: FocusHandle,
+    pub controls_focus: FocusHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -222,9 +223,13 @@ impl Pane {
         let content = (ty.build)(services, record, window, cx);
         let focus = cx.focus_handle();
         let mut subscriptions = content.watch(cx);
-        subscriptions.push(cx.on_focus_in(&focus, window, |pane: &mut Self, w, cx| {
-            pane.content.focused(w, cx)
-        }));
+        let controls_focus = cx.focus_handle();
+        let tab_focus = cx.focus_handle();
+        for handle in [&focus, &controls_focus, &tab_focus] {
+            subscriptions.push(cx.on_focus_in(handle, window, |pane: &mut Self, w, cx| {
+                pane.content.focused(w, cx)
+            }));
+        }
         Self {
             ty,
             id,
@@ -235,7 +240,8 @@ impl Pane {
             content,
             group: None,
             renaming: None,
-            tab_focus: cx.focus_handle(),
+            tab_focus,
+            controls_focus,
             focus,
             _subscriptions: subscriptions,
         }
@@ -293,7 +299,7 @@ impl Pane {
                     pane.content.focus_handle(cx).focus(window, cx);
                 }
                 cx.emit(PaneEvent::Changed);
-                cx.notify();
+                pane.refresh(cx);
             }
             _ => {}
         })
@@ -303,18 +309,18 @@ impl Pane {
             s.select_all(window, cx);
         });
         self.renaming = Some(input);
-        cx.notify();
+        self.refresh(cx);
     }
     pub fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.take().is_some() {
             self.content.focus_handle(cx).focus(window, cx);
-            cx.notify();
+            self.refresh(cx);
         }
     }
     pub fn reset_name(&mut self, cx: &mut Context<Self>) {
         if self.name.take().is_some() {
             cx.emit(PaneEvent::Changed);
-            cx.notify();
+            self.refresh(cx);
         }
     }
     /// Instance operations shared by tab menus.

@@ -23,6 +23,8 @@ pub enum Appearance {
 pub struct Materials {
     /// Title bar, navigation and sidebars: the frame around the content.
     pub chrome: Hsla,
+    /// Recess behind dock tabs. Selected tabs take their panel surface.
+    pub tab_well: Hsla,
     /// The main workspace behind tables and lists.
     pub canvas: Hsla,
     /// Surfaces that sit above the canvas, such as the player.
@@ -75,6 +77,7 @@ impl Materials {
     pub fn dark() -> Self {
         Self {
             chrome: hex(0x141416),
+            tab_well: hex(0x101012),
             canvas: hex(0x1b1b1e),
             raised: hex(0x202024),
             overlay: hex(0x242428),
@@ -130,6 +133,7 @@ pub mod size {
     /// Every panel header: tab strips, the browser bar and table headings
     /// share one height, so their edges line up across the window.
     pub const HEADER: f32 = 30.;
+    pub const TAB_RADIUS: f32 = 4.;
     /// Rows, tab labels and menus.
     pub const TEXT: f32 = 13.;
     /// Secondary text: artists beside titles, durations, counts and status.
@@ -233,7 +237,7 @@ pub fn install(appearance: Appearance, cx: &mut App) {
         c.sidebar_primary = m.accent;
         c.sidebar_primary_foreground = m.on_accent;
 
-        c.tab_bar = m.chrome;
+        c.tab_bar = m.tab_well;
         c.tab_bar_segmented = m.chrome;
         c.tab = hexa(0x000000, 0.);
         c.tab_active = m.canvas;

@@ -33,7 +33,6 @@ impl Drop for LibrarySearch {
 impl Workspace {
     pub(super) fn open_search(&mut self, w: &mut Window, cx: &mut Context<Self>) {
         self.search_visible = true;
-        self.search_expanded = true;
         self.search.update(cx, |s, cx| {
             s.input.update(cx, |i, cx| {
                 i.focus(w, cx);
@@ -52,7 +51,6 @@ impl Workspace {
     }
     pub(super) fn hide_suggestions(&mut self, cx: &mut Context<Self>) {
         self.search_visible = false;
-        self.search_expanded = false;
         self.search.update(cx, |s, _| {
             s.ticket.next();
             s.page = None;
@@ -64,20 +62,6 @@ impl Workspace {
     pub(super) fn search_field(&self, w: &Window, cx: &Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let narrow = w.viewport_size().width < px(860.);
-        if narrow && !self.search_expanded {
-            return div()
-                .occlude()
-                .child(
-                    Button::new("find-music")
-                        .ghost()
-                        .small()
-                        .icon(Icon::new(IconName::Search).text_color(m.text_muted))
-                        .accessibility_label("Search library")
-                        .tooltip("Search library · Ctrl+K")
-                        .on_click(cx.listener(|s, _, w, cx| s.open_search(w, cx))),
-                )
-                .into_any_element();
-        }
         let input = self.search.read(cx).input.clone();
         let focused = input.read(cx).focus_handle(cx).is_focused(w);
         let empty = input.read(cx).value().is_empty();
@@ -87,7 +71,7 @@ impl Workspace {
             .occlude()
             .relative()
             .flex_shrink_0()
-            .w(px(if narrow { 200. } else { 280. }))
+            .w(px(if narrow { 156. } else { 280. }))
             .h(px(crate::location::NAV_FIELD_HEIGHT))
             .pl(px(9.))
             .pr(px(4.))
@@ -178,7 +162,7 @@ impl Workspace {
                     .get()
                     .is_some_and(|b| s.search_visible && b.contains(&e.position))
                     && !s.search.read(cx).full_results()
-                    && (s.search_visible || s.search_expanded)
+                    && s.search_visible
                 {
                     s.hide_suggestions(cx);
                 }
@@ -198,7 +182,6 @@ impl LibrarySearch {
             InputEvent::Focus | InputEvent::Change => {
                 let _ = s.workspace.update(cx, |ws, cx| {
                     ws.search_visible = true;
-                    ws.search_expanded = true;
                     cx.notify();
                 });
                 s.page = None;
@@ -323,7 +306,6 @@ impl LibrarySearch {
         self.ticket.next();
         let _ = self.workspace.update(cx, |ws, cx| {
             ws.search_visible = false;
-            ws.search_expanded = false;
             if let Some(b) = ws.browser(cx) {
                 b.read(cx).list_focus(cx).focus(w, cx);
             }
@@ -346,7 +328,6 @@ impl LibrarySearch {
         self.page = None;
         workspace.update(cx, |ws, cx| {
             ws.search_visible = false;
-            ws.search_expanded = false;
             ws.reveal_active_browser(w, cx);
             cx.notify();
         });
