@@ -237,28 +237,29 @@ impl PaneContent for BrowserPane {
 }
 
 const HEADER_INSET: f32 = 8.;
-const VIEW_INSET: f32 = 8.;
-const SEGMENT_INSET: f32 = 2.;
 const COUNT_GAP: f32 = 10.;
-const ICON_BUTTON: f32 = 24.;
+const VIEW_TAB: f32 = 36.;
+const ICON_BUTTON: f32 = 28.;
+const SCOPE_GAP: f32 = 3.;
 const FILTER_COMPACT: f32 = 100.;
 const FILTER_FULL: f32 = 175.;
+const VIEW_CHOICES: [(bool, &str, IconName); 2] = [
+    (false, "All Tracks", IconName::ListMusic),
+    (true, "Albums / CDs", IconName::Disc3),
+];
+const SCOPE_CHOICES: [(bool, &str, IconName); 2] = [
+    (false, "This folder only", IconName::Folder),
+    (true, "Include subfolders", IconName::Folders),
+];
 
 #[derive(Clone, Copy)]
 pub(crate) struct BrowserHeaderWidths {
-    /// Compact menu and the current filter control, including the drop target.
+    /// Inline view tabs, scope and the current filter, including the drop target.
     pub minimum: Pixels,
     /// Room to edit a filter without moving tab identities.
     pub editable: Pixels,
-    /// Labeled controls and the preferred filter width, before metadata.
+    /// The preferred filter width with the other controls, before metadata.
     pub full: Pixels,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeaderDensity {
-    Labeled,
-    Compact,
-    Minimal,
 }
 
 #[derive(Clone, Copy)]
@@ -270,38 +271,18 @@ struct BrowserViews {
 }
 
 impl BrowserViews {
-    /// Compact and full widths of just the view controls. A compact folder
-    /// shares its view trigger with the scope choices in the same popup.
-    fn widths(self, text: impl Fn(&'static str) -> Pixels, decoration: Pixels) -> (Pixels, Pixels) {
+    fn widths(self, editing: bool) -> BrowserHeaderWidths {
+        let mut fixed = 2. * HEADER_INSET + size::TAB_DROP;
         if self.albums.is_some() {
-            let tracks = text("All Tracks");
-            let albums = text("Albums / CDs");
-            let caret = if self.subfolders.is_some() {
-                ICON_BUTTON
-            } else {
-                0.
-            };
-            (
-                tracks.max(albums) + decoration,
-                tracks + albums + px(4. * VIEW_INSET + 2. * SEGMENT_INSET + caret),
-            )
-        } else if self.subfolders.is_some() {
-            let trigger = text("View") + decoration;
-            (trigger, trigger)
-        } else {
-            (px(0.), px(0.))
+            fixed += 2. * VIEW_TAB;
         }
-    }
-
-    fn segmented(self, density: HeaderDensity) -> bool {
-        self.albums.is_some() && density == HeaderDensity::Labeled
-    }
-
-    fn menu_label(self, density: HeaderDensity) -> &'static str {
-        match (density, self.albums) {
-            (HeaderDensity::Minimal, _) | (_, None) => "View",
-            (_, Some(true)) => "Albums / CDs",
-            (_, Some(false)) => "All Tracks",
+        if self.subfolders.is_some() {
+            fixed += ICON_BUTTON + SCOPE_GAP;
+        }
+        BrowserHeaderWidths {
+            minimum: px(fixed + if editing { FILTER_COMPACT } else { ICON_BUTTON }),
+            editable: px(fixed + FILTER_COMPACT),
+            full: px(fixed + if editing { FILTER_FULL } else { ICON_BUTTON }),
         }
     }
 }
@@ -320,16 +301,6 @@ impl ViewFocus {
 }
 
 impl BrowserHeaderWidths {
-    fn density(self, width: Pixels) -> HeaderDensity {
-        if width < self.minimum {
-            HeaderDensity::Minimal
-        } else if width < self.full {
-            HeaderDensity::Compact
-        } else {
-            HeaderDensity::Labeled
-        }
-    }
-
     fn fits_summary(self, available: Pixels, text: Pixels) -> bool {
         available >= self.full + px(COUNT_GAP) + text
     }
@@ -419,27 +390,9 @@ impl Browser {
         }
     }
 
-    pub(crate) fn header_widths(&self, window: &Window, cx: &App) -> BrowserHeaderWidths {
-        let views = self.header_views();
-        let text = |label: &'static str| {
-            crate::theme::label_width(label.into(), window.rem_size() * 0.75, window)
-        };
-        let insets = px(HEADER_INSET * 2. + size::TAB_DROP);
-        // Kit's xsmall text buttons use a quarter-rem inset and icon gap.
-        let decorated = window.rem_size() * 0.75 + px(16.);
-        let (compact, full) = views.widths(text, decorated);
+    pub(crate) fn header_widths(&self, cx: &App) -> BrowserHeaderWidths {
         let editing = self.filter_open || !self.search.read(cx).value().is_empty();
-        BrowserHeaderWidths {
-            minimum: insets + compact + px(if editing { FILTER_COMPACT } else { ICON_BUTTON }),
-            editable: insets + compact + px(FILTER_COMPACT),
-            full: insets
-                + full
-                + if editing {
-                    px(FILTER_FULL)
-                } else {
-                    text("Filter") + decorated
-                },
-        }
+        self.header_views().widths(editing)
     }
 
     pub(crate) fn header_controls(
@@ -451,11 +404,50 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let browser = cx.entity();
-        let density = widths.density(width);
-        let compact = density != HeaderDensity::Labeled;
-        let tight = density == HeaderDensity::Minimal;
+        let compact = width < widths.full;
+        let tight = width < widths.minimum;
         let views = self.header_views();
-        let has_views = views.albums.is_some() || views.subfolders.is_some();
+        let focus = (views.albums.is_some() || views.subfolders.is_some()).then(|| {
+            window
+                .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
+                    albums: cx.focus_handle(),
+                    tracks: cx.focus_handle(),
+                    folders: cx.focus_handle(),
+                })
+                .read(cx)
+                .clone()
+        });
+        let m = *materials(cx);
+        let folded = tight && views.albums.is_some();
+        let mode = views.albums.zip(focus.as_ref()).map(|(albums, focus)| {
+            if folded {
+                // Keep the focused control's handle when the tabs and scope
+                // collapse into one menu in a narrow split.
+                let handle = [&focus.tracks, &focus.albums]
+                    .into_iter()
+                    .chain(views.subfolders.map(|_| &focus.folders))
+                    .find(|handle| handle.is_focused(window))
+                    .unwrap_or_else(|| focus.choice(albums));
+                view_menu(&browser, views, handle, m)
+            } else {
+                view_tabs(&browser, albums, focus, m)
+            }
+        });
+        let scope = views
+            .subfolders
+            .zip(focus.as_ref())
+            .filter(|_| !folded)
+            .map(|(include, focus)| {
+                h_flex().mr(px(SCOPE_GAP)).flex_shrink_0().child(view_menu(
+                    &browser,
+                    BrowserViews {
+                        albums: None,
+                        subfolders: Some(include),
+                    },
+                    &focus.folders,
+                    m,
+                ))
+            });
         let count = (!compact)
             .then(|| status(self, cx).or_else(|| summary(self, cx)))
             .flatten()
@@ -467,38 +459,18 @@ impl Browser {
                 );
                 widths.fits_summary(width, text)
             });
-        let m = *materials(cx);
+        let has_mode = mode.is_some();
         h_flex()
             .id("browser-controls")
             .w_full()
             .h(px(size::HEADER))
             .px(px(if tight { 2. } else { HEADER_INSET }))
             .items_center()
-            .when(has_views, |d| {
-                // A focused choice keeps its handle when it folds into a menu.
-                let focus = window
-                    .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
-                        albums: cx.focus_handle(),
-                        tracks: cx.focus_handle(),
-                        folders: cx.focus_handle(),
-                    })
-                    .read(cx)
-                    .clone();
-                let menu_focus = [&focus.tracks, &focus.albums]
-                    .into_iter()
-                    .chain(views.subfolders.map(|_| &focus.folders))
-                    .find(|handle| handle.is_focused(window))
-                    .unwrap_or_else(|| {
-                        views
-                            .albums
-                            .map_or(&focus.folders, |albums| focus.choice(albums))
-                    });
-                d.child(view_switch(&browser, views, density, &focus, menu_focus, m))
-            })
+            .children(mode)
             .when_some(count, |d, text| {
                 d.child(
                     div()
-                        .when(has_views, |d| d.ml(px(COUNT_GAP)))
+                        .when(has_mode, |d| d.ml(px(COUNT_GAP)))
                         .whitespace_nowrap()
                         .text_xs()
                         .text_color(m.text_muted)
@@ -506,6 +478,7 @@ impl Browser {
                 )
             })
             .child(drop_space)
+            .children(scope)
             .child(self.filter_control(compact, tight, window, cx))
             .into_any_element()
     }
@@ -530,8 +503,8 @@ impl Browser {
                         .size(px(14.))
                         .text_color(m.text_muted),
                 )
-                .when(!compact, |b| b.label("Filter"))
-                .when(compact, |b| b.w(px(ICON_BUTTON)))
+                .w(px(ICON_BUTTON))
+                .h(px(24.))
                 .tab_stop(true)
                 .text_color(m.text_muted)
                 .accessibility_label("Filter this view")
@@ -590,110 +563,136 @@ impl Browser {
     }
 }
 
-/// At desktop width the scope menu ends the segmented view selector. At
-/// smaller widths the same menu also takes the two presentation choices.
-fn view_switch(
+fn view_tabs(
     browser: &Entity<Browser>,
-    views: BrowserViews,
-    density: HeaderDensity,
+    albums: bool,
     focus: &ViewFocus,
-    menu_focus: &FocusHandle,
     m: crate::theme::Materials,
 ) -> AnyElement {
-    let choices = [("All Tracks", false), ("Albums / CDs", true)];
-    let segmented = views.segmented(density);
-    let menu_button = |handle: &FocusHandle| {
-        let browser = browser.clone();
-        let description = match (views.albums, views.subfolders) {
-            (Some(_), Some(_)) if !segmented => "Choose view or folder scope",
-            (_, Some(_)) => "Choose folder scope",
-            _ => "Choose view",
-        };
-        Button::new("browser-view-menu")
-            .ghost()
-            .xsmall()
-            .map(|b| {
-                if segmented {
-                    b.w(px(ICON_BUTTON)).icon(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .text_color(m.text_muted),
-                    )
-                } else {
-                    b.label(views.menu_label(density)).dropdown_caret(true)
-                }
-            })
-            .track_focus(handle)
-            .tab_stop(true)
-            .accessibility_label(if segmented {
-                description.to_string()
-            } else {
-                format!("{}, {description}", views.menu_label(density))
-            })
-            .tooltip(description)
-            .dropdown_menu(move |mut menu, _, _| {
-                if !segmented && let Some(albums) = views.albums {
-                    for (name, value) in choices {
-                        let browser = browser.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new(name).checked(albums == value).on_click(
-                                move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)),
-                            ));
-                    }
-                    if views.subfolders.is_some() {
-                        menu = menu.separator();
-                    }
-                }
-                if let Some(include) = views.subfolders {
-                    menu = menu.label("Folder scope");
-                    for (name, value) in [("This folder only", false), ("Include subfolders", true)]
-                    {
-                        let browser = browser.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new(name).checked(include == value).on_click(
-                                move |_, w, cx| {
-                                    browser.update(cx, |b, cx| {
-                                        // Reapplying a scope would clear overrides for descendant folders.
-                                        if b.subfolders != value {
-                                            b.set_subfolders(value, w, cx);
-                                        }
-                                    })
-                                },
-                            ));
-                    }
-                }
-                menu
-            })
-    };
-    if !segmented {
-        return menu_button(menu_focus).into_any_element();
-    }
     h_flex()
         .id("browser-views")
+        .h_full()
         .flex_shrink_0()
-        .p(px(SEGMENT_INSET))
-        .rounded(px(5.))
-        .bg(m.raised)
         .role(Role::Group)
         .aria_label("View")
-        .children(choices.map(|(name, value)| {
+        .children(VIEW_CHOICES.map(|(value, name, icon)| {
             let browser = browser.clone();
-            let selected = views.albums == Some(value);
+            let selected = albums == value;
             Button::new(name)
                 .ghost()
                 .xsmall()
-                .rounded(px(3.))
-                .px(px(VIEW_INSET))
-                .label(name)
+                .w(px(VIEW_TAB))
+                .h(px(size::HEADER))
+                .rounded(px(0.))
+                .px(px(0.))
                 .selected(selected)
                 .toggled(selected)
-                .text_color(if selected { m.text } else { m.text_muted })
+                .child(Icon::new(icon).size(px(16.)).text_color(if selected {
+                    m.accent
+                } else {
+                    m.text_muted
+                }))
+                .when(selected, |b| {
+                    b.bg(m.control).child(
+                        div()
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(2.))
+                            .bg(m.accent),
+                    )
+                })
+                .accessibility_label(name)
+                .tooltip(name)
                 .track_focus(focus.choice(value))
                 .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
         }))
-        .when(views.subfolders.is_some(), |d| {
-            d.child(menu_button(&focus.folders))
+        .into_any_element()
+}
+
+/// A standalone folder scope menu, or a shared picker when the view tabs
+/// cannot fit beside the scope and filter.
+fn view_menu(
+    browser: &Entity<Browser>,
+    views: BrowserViews,
+    focus: &FocusHandle,
+    m: crate::theme::Materials,
+) -> AnyElement {
+    let browser = browser.clone();
+    let (id, icon, description, anchor, width) = if let Some(albums) = views.albums {
+        let (_, name, icon) = VIEW_CHOICES[usize::from(albums)];
+        let action = if views.subfolders.is_some() {
+            "Choose view or folder scope"
+        } else {
+            "Choose view"
+        };
+        (
+            "browser-view-menu",
+            icon,
+            format!("{action} · {name}"),
+            Anchor::TopLeft,
+            VIEW_TAB,
+        )
+    } else {
+        let include = views.subfolders.unwrap_or_default();
+        let (_, name, icon) = SCOPE_CHOICES[usize::from(include)];
+        (
+            "browser-folder-scope",
+            icon,
+            format!("Folder scope · {name}"),
+            Anchor::TopRight,
+            ICON_BUTTON,
+        )
+    };
+    Button::new(id)
+        .ghost()
+        .small()
+        .w(px(width))
+        .dropdown_caret(views.albums.is_some())
+        .icon(Icon::new(icon).text_color(m.text_muted))
+        .track_focus(focus)
+        .tab_stop(true)
+        .accessibility_label(description.clone())
+        .tooltip(description)
+        .dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
+            if let Some(albums) = views.albums {
+                for (value, name, icon) in VIEW_CHOICES {
+                    let browser = browser.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(name)
+                            .icon(Icon::new(icon))
+                            .checked(albums == value)
+                            .on_click(move |_, w, cx| {
+                                browser.update(cx, |b, cx| b.view(value, w, cx))
+                            }),
+                    );
+                }
+                if views.subfolders.is_some() {
+                    menu = menu.separator();
+                }
+            }
+            if let Some(include) = views.subfolders {
+                menu = menu.label("Folder scope");
+                for (value, name, icon) in SCOPE_CHOICES {
+                    let browser = browser.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(name)
+                            .icon(Icon::new(icon))
+                            .checked(include == value)
+                            .on_click(move |_, w, cx| {
+                                browser.update(cx, |b, cx| {
+                                    // Reapplying a scope would clear descendant overrides.
+                                    if b.subfolders != value {
+                                        b.set_subfolders(value, w, cx);
+                                    }
+                                })
+                            }),
+                    );
+                }
+            }
+            menu
         })
         .into_any_element()
 }
@@ -893,14 +892,14 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserHeaderWidths, BrowserState, BrowserViews, HeaderDensity, ICON_BUTTON, grouped, px,
-        span,
+        BrowserState, BrowserViews, FILTER_COMPACT, FILTER_FULL, ICON_BUTTON, SCOPE_GAP, VIEW_TAB,
+        grouped, px, span,
     };
     use crate::browser::Location;
     use std::path::PathBuf;
 
     #[test]
-    fn physical_folder_scope_shares_the_compact_menu_and_survives_without_album_views() {
+    fn header_widths_budget_the_two_view_tabs_and_folder_scope_independently() {
         let library = BrowserViews {
             albums: Some(false),
             subfolders: None,
@@ -909,41 +908,48 @@ mod tests {
             subfolders: Some(true),
             ..library
         };
-        let widths = |view: BrowserViews| view.widths(|s| px(s.len() as f32 * 6.), px(24.));
-        let (compact, full) = widths(library);
-        assert_eq!(widths(folder), (compact, full + px(ICON_BUTTON)));
-        assert!(folder.segmented(HeaderDensity::Labeled));
-        assert!(!folder.segmented(HeaderDensity::Compact));
         let direct = BrowserViews {
             albums: None,
             subfolders: Some(false),
         };
-        assert!(!direct.segmented(HeaderDensity::Labeled));
-        assert_eq!(direct.menu_label(HeaderDensity::Labeled), "View");
-        assert_eq!(widths(direct), (px(48.), px(48.)));
-        assert_eq!(
-            widths(BrowserViews {
-                albums: None,
-                subfolders: None
-            }),
-            (px(0.), px(0.))
-        );
+        let flat = BrowserViews {
+            albums: None,
+            subfolders: None,
+        };
+        for editing in [false, true] {
+            let flat = flat.widths(editing);
+            let library = library.widths(editing);
+            let folder = folder.widths(editing);
+            let direct = direct.widths(editing);
+            assert_eq!(library.minimum - flat.minimum, px(2. * VIEW_TAB));
+            assert_eq!(
+                folder.minimum - library.minimum,
+                px(ICON_BUTTON + SCOPE_GAP)
+            );
+            assert_eq!(direct.minimum - flat.minimum, px(ICON_BUTTON + SCOPE_GAP));
+            assert_eq!(folder.minimum - direct.minimum, px(2. * VIEW_TAB));
+        }
     }
 
     #[test]
-    fn browser_header_drops_metadata_before_compacting_essential_controls() {
-        let widths = BrowserHeaderWidths {
-            minimum: px(144.),
-            editable: px(220.),
-            full: px(245.),
+    fn header_reserves_filter_editing_room_and_only_shows_a_whole_summary() {
+        let folder = BrowserViews {
+            albums: Some(true),
+            subfolders: Some(true),
         };
-        assert!(widths.fits_summary(px(306.), px(51.)));
-        assert!(!widths.fits_summary(px(305.), px(51.)));
-        assert_eq!(widths.density(px(305.)), HeaderDensity::Labeled);
-        assert_eq!(widths.density(px(245.)), HeaderDensity::Labeled);
-        assert_eq!(widths.density(px(244.)), HeaderDensity::Compact);
-        assert_eq!(widths.density(px(144.)), HeaderDensity::Compact);
-        assert_eq!(widths.density(px(143.)), HeaderDensity::Minimal);
+        let closed = folder.widths(false);
+        let open = folder.widths(true);
+        assert_eq!(closed.editable, open.minimum);
+        assert_eq!(closed.editable, open.editable);
+        assert_eq!(
+            open.minimum - closed.minimum,
+            px(FILTER_COMPACT - ICON_BUTTON)
+        );
+        assert_eq!(open.full - open.minimum, px(FILTER_FULL - FILTER_COMPACT));
+        for widths in [closed, open] {
+            assert!(widths.fits_summary(widths.full + px(61.), px(51.)));
+            assert!(!widths.fits_summary(widths.full + px(60.), px(51.)));
+        }
     }
 
     #[test]

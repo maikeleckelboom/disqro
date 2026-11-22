@@ -246,9 +246,7 @@ impl TabGroupRenderer for Tabs {
         let node = group.node();
         let pane = group.active_panel().and_then(pane_of);
         let browser = pane.as_ref().and_then(|p| super::browser_of(p, cx));
-        let controls_widths = browser
-            .as_ref()
-            .map(|b| b.read(cx).header_widths(window, cx));
+        let controls_widths = browser.as_ref().map(|b| b.read(cx).header_widths(cx));
         let several = tabs.len() > 1;
         let editing = tabs.iter().copied().find(|&ix| {
             pane_of(&group.panels()[ix]).is_some_and(|p| p.read(cx).renaming.is_some())
