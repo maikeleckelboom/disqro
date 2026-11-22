@@ -385,6 +385,8 @@ fn sustained_output_observation() {
     })
     .unwrap();
     let reader = signal.subscribe();
+    let analyzer = crate::spectrum_worker::Hub::new(signal.pcm());
+    let (_spectrum, readings) = analyzer.subscribe(Default::default()).unwrap();
     let mut engine = Engine {
         signal,
         device: Some(device),
@@ -395,6 +397,8 @@ fn sustained_output_observation() {
     engine.command(Command::Play(tracks, 0)).unwrap();
     let epoch = reader.epoch();
     let mut audible = 0;
+    let mut spectra = 0;
+    let mut last_spectrum = Instant::now();
     let mut peak = [0f32; 2];
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(600) {
@@ -406,6 +410,26 @@ fn sustained_output_observation() {
             epoch,
             "the source must be one continuous voice"
         );
+        if let Ok(Some(r)) = readings.try_recv() {
+            assert_eq!(r.epoch, analyzer.capture.epoch());
+            assert!(r.levels.iter().all(|level| level.is_finite()));
+            if r.stereo.energy.iter().any(|power| *power > 0.) {
+                spectra += 1;
+            }
+            last_spectrum = Instant::now();
+        }
+        // Settled silence intentionally suppresses publication.
+        if reader
+            .latest()
+            .is_some_and(|l| l.rms[0].max(l.rms[1]) > 0.001)
+        {
+            assert!(
+                last_spectrum.elapsed() < Duration::from_secs(2),
+                "stale spectrum during playback"
+            );
+        } else {
+            last_spectrum = Instant::now();
+        }
         if let Some(levels) = reader.latest() {
             audible += usize::from(levels.rms.iter().all(|v| *v > 0.));
             for (maximum, level) in peak.iter_mut().zip(levels.peak) {
@@ -414,8 +438,9 @@ fn sustained_output_observation() {
         }
     }
     assert!(audible > 0, "no stereo signal observed");
+    assert!(spectra > 0, "no spectrum observed");
     println!(
-        "Elapsed {:.3}s, non-silent reads {audible}, sample peaks {peak:?}, chapter {}",
+        "Elapsed {:.3}s, non-silent reads {audible}, spectra {spectra}, sample peaks {peak:?}, chapter {}",
         started.elapsed().as_secs_f64(),
         engine.chapter + 1
     );
