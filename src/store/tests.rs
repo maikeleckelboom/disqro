@@ -381,6 +381,25 @@ fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
         (sections.len(), sections[0].count, listing.keys.len()),
         (1, 1, 1)
     );
+    // Filtering down to one file of a multi-file CUE does not turn its
+    // embedded art into the section's cover.
+    assert!(sections[0].cue_image.is_none());
+    let (_, image_section) = s
+        .table_listing(
+            &Query {
+                search: "title:two".into(),
+                ..query.clone()
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(image_section.len(), 1);
+    assert_eq!(image_section[0].count, 1);
+    assert!(image_section[0].cover.is_none());
+    assert_eq!(
+        image_section[0].cue_image,
+        Some(root.join("Album A/a.flac"))
+    );
     let selected = s.rows(query.scope, &listing.keys).unwrap().pop().unwrap();
     let disc = s.registered_disc(&selected.track).unwrap().unwrap();
     assert_eq!(

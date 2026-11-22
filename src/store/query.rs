@@ -167,6 +167,8 @@ pub struct AlbumRow {
     /// The folder, relative to its collection.
     pub folder: PathBuf,
     pub cover: Option<PathBuf>,
+    /// A CUE program whose chapters all use the same audio image.
+    pub cue_image: Option<PathBuf>,
     pub count: usize,
     pub duration: f64,
     pub complete: bool,
@@ -529,11 +531,18 @@ impl Store {
             ),
         }];
         filter.extend(Term::parse(search).iter().map(|t| t.sql(&mut args)));
+        // Section artwork belongs to the complete CUE, independent of
+        // which chapters pass the outer query's filter.
         let sql = format!(
             "SELECT al.id, al.title, al.year, al.folder, al.cover, count(t.id),
                 total(t.duration), count(t.duration) = count(t.id),
                 CASE WHEN min(t.format) = max(t.format) THEN min(t.format) ELSE 'Mixed' END,
-                ro.path, min(t.disc_number)
+                ro.path, min(t.disc_number),
+                CASE WHEN min(t.first_tick) IS NOT NULL THEN (
+                    SELECT CASE WHEN min(ch.source) = max(ch.source) THEN min(audio.path) END
+                    FROM tracks ch JOIN files audio ON audio.id = ch.source
+                    WHERE ch.album_id = al.id AND ch.present = 1
+                ) END
              FROM tracks t JOIN albums al ON al.id = t.album_id
              JOIN files s ON s.id = t.source
              LEFT JOIN roots ro ON ro.id = t.root_id
@@ -557,6 +566,7 @@ impl Store {
                 folder,
                 disc_number: r.get(10)?,
                 cover: r.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                cue_image: r.get::<_, Option<String>>(11)?.map(PathBuf::from),
                 count: r.get::<_, i64>(5)? as usize,
                 duration: r.get(6)?,
                 complete: r.get(7)?,

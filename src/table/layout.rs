@@ -81,6 +81,16 @@ impl Layout {
         self.columns.iter().any(|c| c.field == field)
     }
 
+    /// Title has room within its minimum width for hierarchy even when pinned
+    /// or when Cover and Number are hidden.
+    pub(super) fn content_inset(&self, col: usize, grouped: bool) -> f32 {
+        if grouped && self.columns[col].field == Field::Title {
+            28.
+        } else {
+            0.
+        }
+    }
+
     fn show_cover(&mut self, shown: bool) {
         if self.has(Field::Cover) != shown {
             self.toggle(Field::Cover);
@@ -710,6 +720,42 @@ mod tests {
                 Field::Favorite
             ]
         );
+    }
+    #[test]
+    fn grouped_title_inset_stays_inside_its_own_column() {
+        let mut layout = Layout::new(ContextKind::Disc);
+        let check = |layout: &Layout, viewport: f32| {
+            let widths = layout.widths(viewport);
+            for (i, col) in layout.columns.iter().enumerate() {
+                assert_eq!(layout.content_inset(i, false), 0.);
+                let inset = layout.content_inset(i, true);
+                if col.field == Field::Title {
+                    assert_eq!(inset, 28.);
+                    assert!(widths[i] - 2. * col.field.padding() - inset >= 94.);
+                } else {
+                    assert_eq!(inset, 0.);
+                }
+            }
+            widths
+        };
+        check(&layout, 310.);
+        layout.show_cover(true);
+        assert!(layout.move_column(2, 1));
+        layout.set_pin(Field::Title, Pin::Left);
+        layout.set_pin(Field::Cover, Pin::Right);
+        let title = 0;
+        let cover = layout.columns.len() - 1;
+        layout.columns[title].width = Field::Title.min_width();
+        layout.columns[cover].width = Field::Cover.max_width();
+        let narrow = check(&layout, 240.);
+        assert_eq!(narrow[title], Field::Title.min_width());
+        assert_eq!(narrow[cover], Field::Cover.max_width());
+        assert!(layout.scrolling(&narrow, 240.).contains(&title));
+        let wide = check(&layout, 1040.);
+        let scrolling = layout.scrolling(&wide, 1040.);
+        assert!(!scrolling.contains(&title) && !scrolling.contains(&cover));
+        layout.show_cover(false);
+        check(&layout, 240.);
     }
     #[test]
     fn each_context_keeps_its_own_cover_size() {

@@ -2,6 +2,7 @@
 //! Two identically titled rips in different folders remain distinct.
 mod albums;
 use crate::{
+    artwork::{CoverFile, CoverThumbnail, TrackCover},
     library::{self, Track},
     store::{AlbumId, AlbumRow, Mark, Term},
     theme::materials,
@@ -127,7 +128,8 @@ pub struct Disc {
     pub id: DiscId,
     pub title: String,
     pub folder: PathBuf,
-    pub cover: Option<crate::artwork::CoverFile>,
+    pub cover: Option<CoverFile>,
+    cue_image: Option<PathBuf>,
     year: Option<u32>,
     number: Option<u32>,
     format: String,
@@ -292,6 +294,7 @@ impl Discs {
                     title,
                     folder: folder.strip_prefix(root).unwrap_or(folder).into(),
                     cover: covers.get(folder).cloned(),
+                    cue_image: None,
                     year: t.year,
                     number: t.disc_number,
                     format: t.format(),
@@ -335,6 +338,10 @@ impl Discs {
             .map(|mut disc| {
                 if matches!(disc.id, DiscId::Album(..)) {
                     disc.tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
+                } else if let Some(first) = disc.tracks.first()
+                    && disc.tracks.iter().all(|t| t.source == first.source)
+                {
+                    disc.cue_image = Some(first.source.clone());
                 }
                 Arc::new(disc)
             })
@@ -364,7 +371,8 @@ impl Disc {
             id: DiscId::Library(a.id),
             title: a.title,
             folder: a.folder,
-            cover: a.cover.and_then(crate::artwork::CoverFile::new),
+            cover: a.cover.and_then(CoverFile::new),
+            cue_image: a.cue_image,
             year: a.year,
             number: a.disc_number,
             format: a.format,
@@ -381,15 +389,45 @@ impl Disc {
             }),
         }
     }
-    /// The header of a CD within a track table. Its cover follows the row
-    /// height, which grows with the table's Cover column.
-    pub fn section(&self, row_height: f32, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    /// Artwork owned by the group: a shared CUE image or the group's sidecar.
+    pub(crate) fn section_cover(
+        &self,
+        settled_cover: f32,
+        listing: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(CoverFile, Arc<RenderImage>)> {
+        let size = section_cover_edge(settled_cover);
+        if let Some(source) = &self.cue_image {
+            return TrackCover {
+                source: source.clone(),
+                authored_folder: match &self.id {
+                    DiscId::Cue(sheet) => sheet.parent().map(Path::to_owned),
+                    _ => None,
+                },
+                disc_cover: self.cover.as_ref().map(|file| file.path().to_owned()),
+                listing,
+            }
+            .image(size, window, cx);
+        }
+        let file = self.cover.as_ref()?;
+        CoverThumbnail::get(file, size, window, cx)
+            .flatten()
+            .map(|image| (file.clone(), image))
+    }
+
+    /// The album or disc heading spans the visible table. Its title anchors
+    /// the left edge even if the Title column moves or Cover is hidden.
+    pub fn section(
+        &self,
+        cover_edge: f32,
+        settled_cover: f32,
+        listing: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
         let m = *materials(cx);
-        let size = row_height - 6.;
-        let cover = self
-            .cover
-            .as_ref()
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, size, window, cx).flatten());
+        let cover = self.section_cover(settled_cover, listing, window, cx);
         let mut detail = Vec::new();
         if let Some(year) = self.year {
             detail.push(year.to_string());
@@ -400,7 +438,7 @@ impl Disc {
             if !normalized.contains(&format!("cd{number}"))
                 && !normalized.contains(&format!("disc{number}"))
             {
-                detail.insert(0, format!("CD {number}"));
+                detail.insert(0, format!("Disc {number}"));
             }
         }
         if let Some(member) = &self.release
@@ -418,43 +456,51 @@ impl Disc {
             .flex_shrink_0()
             .min_w_0()
             .gap(px(8.))
-            .px(px(9.))
+            .px(px(10.))
+            .py(px(2.))
             .border_t_1()
-            .border_color(m.control_line)
+            .border_color(m.line)
             .child(
-                div()
-                    .size(px(size))
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .rounded(px(2.))
-                    .when_some(cover, |d, cover| {
-                        d.child(img(cover).size_full().object_fit(ObjectFit::Cover))
-                    }),
-            )
-            .child(
-                div()
+                h_flex()
                     .min_w_0()
-                    .truncate()
-                    .text_ellipsis_middle()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(crate::theme::size::TEXT))
-                    .text_color(m.text)
-                    .child(self.title.clone()),
+                    .flex_1()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_ellipsis_middle()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(14.))
+                            .text_color(m.text)
+                            .child(self.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_w(relative(0.33))
+                            .truncate()
+                            .text_ellipsis_middle()
+                            .text_size(px(11.))
+                            .text_color(m.text_muted)
+                            .child(detail.join("  ·  ")),
+                    ),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_ellipsis_middle()
-                    .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(m.text_faint)
-                    .child(detail.join("  ·  ")),
-            )
+            .when_some(cover, |d, (_, image)| {
+                d.child(crate::table::cover_tile(
+                    section_cover_edge(cover_edge),
+                    Some(image),
+                    cx,
+                ))
+            })
     }
     pub fn duration(&self) -> f64 {
         self.duration
     }
+}
+
+fn section_cover_edge(edge: f32) -> f32 {
+    (edge - 4.).clamp(20., 36.)
 }
 
 /// Whether a folder track matches every search term. The same terms filter

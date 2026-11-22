@@ -274,7 +274,12 @@ enum Contents {
 }
 /// Section offsets are in the displayed table; track keys and pages stay dense.
 #[derive(Clone, Default)]
-pub struct Sections(Arc<[(usize, Arc<Disc>)]>);
+pub struct Sections(Arc<[Section]>);
+struct Section {
+    header: usize,
+    end: usize,
+    disc: Arc<Disc>,
+}
 impl Sections {
     pub fn new(groups: impl IntoIterator<Item = (Arc<Disc>, usize)>) -> Self {
         let mut row = 0;
@@ -285,25 +290,31 @@ impl Sections {
                 .map(|(disc, count)| {
                     let header = row;
                     row += 1 + count;
-                    (header, disc)
+                    Section {
+                        header,
+                        end: row,
+                        disc,
+                    }
                 })
                 .collect(),
         )
     }
     fn header(&self, row: usize) -> Option<&Arc<Disc>> {
-        self.0
-            .binary_search_by_key(&row, |(ix, _)| *ix)
-            .ok()
-            .map(|i| &self.0[i].1)
+        let section = self.0.get(self.preceding(row))?;
+        (section.header == row).then_some(&section.disc)
+    }
+    fn parent(&self, row: usize) -> Option<&Disc> {
+        let section = self.0.get(self.preceding(row).checked_sub(1)?)?;
+        (row < section.end).then_some(&section.disc)
     }
     fn preceding(&self, row: usize) -> usize {
-        self.0.partition_point(|(ix, _)| *ix < row)
+        self.0.partition_point(|section| section.header < row)
     }
     fn data_index(&self, row: usize) -> Option<usize> {
         let count = self.preceding(row);
         self.0
             .get(count)
-            .is_none_or(|(ix, _)| *ix != row)
+            .is_none_or(|section| section.header != row)
             .then(|| row - count)
     }
     fn display_index(&self, index: usize) -> usize {
@@ -311,7 +322,7 @@ impl Sections {
         let mut hi = self.0.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if self.0[mid].0 - mid <= index {
+            if self.0[mid].header - mid <= index {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -348,8 +359,8 @@ impl Rows {
                 .sections
                 .0
                 .iter()
-                .find(|(_, d)| d.id == *id)
-                .map(|(i, _)| *i);
+                .find(|section| section.disc.id == *id)
+                .map(|section| section.header);
         }
         let ix = match (&self.data, k) {
             (Contents::Folder { sorted, .. }, RowKey::Track(source, disc)) => sorted
@@ -1229,17 +1240,15 @@ impl MusicTable {
     fn cell_id(&self, ix: usize) -> u64 {
         stable_element_key(self.rows.key(ix))
     }
-    /// A painted Cover cell. A missing or pending image keeps a faint tile
-    /// in the same place, so the column stays aligned without repeating an
-    /// icon on every row. The texture is decoded for the settled size, so
-    /// dragging the column boundary scales it without decoding again.
+    /// Flat rows use the regular placeholder. In a section, only a track
+    /// image that adds to the header's artwork needs a tile of its own.
     fn render_cover(
         &self,
         row: usize,
         t: &Track,
         window: &mut Window,
         cx: &mut App,
-    ) -> impl IntoElement {
+    ) -> Option<Div> {
         let folder = t.disc.as_ref().and_then(|d| d.sheet.parent());
         let fallback = match &self.rows.data {
             Contents::Library(_) => self.rows.row(row).and_then(|r| r.cover.as_ref()).cloned(),
@@ -1252,7 +1261,7 @@ impl MusicTable {
                 )
                 .map(|cover| cover.path().to_owned()),
         };
-        let image = crate::artwork::TrackCover {
+        let cover = crate::artwork::TrackCover {
             source: t.source.clone(),
             authored_folder: folder
                 .filter(|f| Some(*f) != t.source.parent())
@@ -1261,7 +1270,17 @@ impl MusicTable {
             listing: self.artwork_revision,
         }
         .image(self.settled_cover, window, cx);
-        cover_tile(self.cover, image, cx)
+        if let Some(disc) = self.rows.sections.parent(row) {
+            let (file, image) = cover?;
+            if disc
+                .section_cover(self.settled_cover, self.artwork_revision, window, cx)
+                .is_some_and(|(shared, _)| shared == file)
+            {
+                return None;
+            }
+            return Some(cover_tile(self.cover, Some(image), cx));
+        }
+        Some(cover_tile(self.cover, cover.map(|(_, image)| image), cx))
     }
     fn render_like(
         &self,
@@ -1705,13 +1724,17 @@ impl TableDelegate for MusicTable {
                 .into_any_element(),
             Field::Cover => cell
                 .justify_center()
-                .child(self.render_cover(row, &t, window, cx))
+                .children(self.render_cover(row, &t, window, cx))
                 .into_any_element(),
             Field::Favorite => cell
                 .justify_center()
                 .child(self.render_like(row, mark, cx))
                 .into_any_element(),
             Field::Title => cell
+                .pl(px(self.layout().content_inset(
+                    col,
+                    self.rows.sections.parent(row).is_some(),
+                )))
                 .text_color(if playing { m.accent } else { m.text })
                 .child(
                     div()
@@ -1749,9 +1772,15 @@ impl TableDelegate for MusicTable {
             return div()
                 .id(("cd-section", row))
                 .overflow_hidden()
-                .bg(m.raised)
+                .bg(m.overlay)
                 .cursor_pointer()
-                .child(d.section(self.row_height, window, cx))
+                .child(d.section(
+                    self.cover,
+                    self.settled_cover,
+                    self.artwork_revision,
+                    window,
+                    cx,
+                ))
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(format!(
                         "{}  ·  {}",
@@ -2092,7 +2121,7 @@ impl TableDelegate for MusicTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Contents, Rows, Sections, Selection, Track, key};
+    use super::{Arc, Contents, RowKey, Rows, Sections, Selection, Track, key};
     #[test]
     fn section_indices_map_only_tracks_into_actions() {
         use crate::collection::Discs;
@@ -2131,6 +2160,136 @@ mod tests {
         assert_eq!(rows.adjacent_track(Some(1), -1), Some(1));
         assert_eq!(rows.adjacent_track(Some(2), 1), Some(4));
         assert_eq!(rows.adjacent_track(Some(4), -1), Some(2));
+        for (row, disc) in [(1, &discs[0]), (2, &discs[0]), (4, &discs[1])] {
+            assert_eq!(rows.sections.parent(row).unwrap().id, disc.id);
+        }
+        for (row, disc) in [(0, &discs[0]), (3, &discs[1])] {
+            assert!(rows.sections.parent(row).is_none());
+            assert_eq!(rows.key(row), Some(RowKey::Disc(disc.id.clone())));
+            assert_eq!(rows.position(&RowKey::Disc(disc.id.clone())), Some(row));
+            assert!(rows.track(row).is_none());
+        }
+    }
+    #[test]
+    fn filtering_preserves_chapter_keys_and_indents_only_visible_children() {
+        use crate::collection::{Discs, matches};
+        use crate::store::Term;
+        use std::{fs, path::Path};
+        let dir = tempfile::tempdir().unwrap();
+        let sheet = dir.path().join("Set.cue");
+        fs::write(
+            &sheet,
+            "FILE image.wav WAVE\nTRACK 01 AUDIO\nTITLE One\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE Two\nINDEX 01 00:01:00",
+        )
+        .unwrap();
+        let chapters: Vec<_> = crate::cue::read(&sheet)
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let discs = Discs::group(&chapters, &Default::default(), dir.path());
+        let disc = &discs[0];
+        assert!(disc.cover.is_none());
+        let standalone = Arc::new(Track::file(Path::new("Unattached.wav").into()));
+        let project = |tracks: Vec<Arc<Track>>| {
+            let sections = Sections::new([(disc.clone(), tracks.len())]);
+            Rows {
+                sections,
+                data: Contents::Folder {
+                    original: Arc::default(),
+                    sorted: tracks.into_iter().chain([standalone.clone()]).collect(),
+                },
+            }
+        };
+        let all = project(chapters.clone());
+        assert_eq!(all.sections.parent(2).unwrap().id, disc.id);
+        assert!(all.sections.parent(3).is_none());
+        let mut selection = Selection::default();
+        selection.modify(&all, None, 2, false, true);
+        let selected = all.key(2).unwrap();
+        let terms = Term::parse("title:two");
+        let visible = project(
+            chapters
+                .into_iter()
+                .filter(|t| matches(t, &terms, Default::default))
+                .collect(),
+        );
+        assert_eq!(visible.key(0), all.key(0));
+        assert_eq!(visible.position(&selected), Some(1));
+        assert!(selection.marked.contains(&visible.key(1).unwrap()));
+        assert_eq!(visible.track(1).unwrap().display_number(), Some(2));
+        assert_eq!(visible.sections.parent(1).unwrap().id, disc.id);
+        assert_eq!(visible.adjacent_track(Some(1), 1), Some(2));
+        assert_eq!(visible.key(2), Some(key(&standalone)));
+        assert!(visible.sections.parent(2).is_none());
+        let no_matches = project(vec![]);
+        assert_eq!(no_matches.len(), 1);
+        assert_eq!(no_matches.key(0), Some(key(&standalone)));
+        assert!(no_matches.sections.parent(0).is_none());
+    }
+    #[test]
+    fn indexed_tagged_album_projects_the_same_track_keys_with_or_without_a_header() {
+        use crate::store::{Order, Query, Scope, Store, index_root};
+        use lofty::{
+            config::WriteOptions,
+            prelude::*,
+            tag::{Tag, TagType},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for (name, title, number) in [("a.wav", "Second", 2), ("b.wav", "First", 1)] {
+            let path = dir.path().join(name);
+            crate::audio::tests::fixture(&path, 44100, 441);
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.set_album("Scratch Beats".into());
+            tag.set_title(title.into());
+            tag.set_track(number);
+            tag.save_to_path(path, WriteOptions::default()).unwrap();
+        }
+        let mut store = Store::memory();
+        let root = store.add_root(dir.path()).unwrap();
+        index_root(&mut store, root, None, &|| true, &mut |_| {}).unwrap();
+        let project = |search: &str, order| {
+            let scope = Scope::Library(Some(root));
+            let query = Query {
+                scope,
+                search: search.into(),
+                order,
+            };
+            let (listing, albums) = store.table_listing(&query, order.is_none()).unwrap();
+            let sections = Sections::new(albums.into_iter().map(|a| {
+                let count = a.count;
+                (Arc::new(super::Disc::from_album(a)), count)
+            }));
+            let cache = store
+                .rows(scope, &listing.keys)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.key, row))
+                .collect();
+            Rows {
+                sections,
+                data: Contents::Library(super::Paged {
+                    scope,
+                    search: query.search,
+                    keys: listing.keys.into(),
+                    cache,
+                    loaded: true,
+                    grouped: order.is_none(),
+                }),
+            }
+        };
+        let grouped = project("", None);
+        assert_eq!(grouped.track(1).unwrap().title, "First");
+        assert_eq!(grouped.track(2).unwrap().title, "Second");
+        assert_eq!(grouped.sections.parent(2).unwrap().title, "Scratch Beats");
+        let filtered = project("title:second", None);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.key(0), grouped.key(0));
+        assert_eq!(filtered.key(1), grouped.key(2));
+        assert!(filtered.sections.parent(1).unwrap().cover.is_none());
+        let sorted = project("", Some((Order::Title, false)));
+        assert_eq!(sorted.key(1), grouped.key(2));
+        assert!(sorted.sections.parent(1).is_none());
     }
     #[test]
     fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {

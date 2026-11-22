@@ -177,8 +177,14 @@ impl Covers {
     }
 }
 impl TrackCover {
-    /// The best available image for a cover drawn at `size` logical pixels.
-    pub fn image(self, size: f32, window: &mut Window, cx: &mut App) -> Option<Arc<RenderImage>> {
+    /// Return the chosen source with its image so a section can share artwork
+    /// without suppressing a different, track-specific cover.
+    pub fn image(
+        self,
+        size: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(CoverFile, Arc<RenderImage>)> {
         if let Some(old) = touch(&mut cx.default_global::<Covers>().locations, &self) {
             cx.remove_asset::<Self>(&old);
         }
@@ -186,7 +192,7 @@ impl TrackCover {
         for file in sources.iter() {
             // Wait for the preferred source before requesting its fallback.
             if let Some(image) = CoverThumbnail::get(file, size, window, cx)? {
-                return Some(image);
+                return Some((file.clone(), image));
             }
         }
         None
