@@ -14,6 +14,7 @@ use crate::{
 };
 use gpui_kit::{
     assets::IconName,
+    base::{Checkbox, CheckboxState},
     component::{
         ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -21,6 +22,7 @@ use gpui_kit::{
         input::Input,
         menu::{DropdownMenu, PopupMenuItem},
         table::DataTable,
+        tooltip::Tooltip,
         v_flex,
     },
     prelude::*,
@@ -236,9 +238,13 @@ impl PaneContent for BrowserPane {
     }
 }
 
-const HEADER_INSET: f32 = 6.;
-const VIEW_INSET: f32 = 7.;
-const VIEW_GAP: f32 = 3.;
+const HEADER_INSET: f32 = 8.;
+const VIEW_INSET: f32 = 8.;
+const SEGMENT_INSET: f32 = 2.;
+const SCOPE_GAP: f32 = 10.;
+const CHECK_SIZE: f32 = 12.;
+const CHECK_GAP: f32 = 5.;
+const CHECK_INSET: f32 = 3.;
 const COUNT_GAP: f32 = 10.;
 const ICON_BUTTON: f32 = 24.;
 const FILTER_COMPACT: f32 = 100.;
@@ -378,14 +384,16 @@ impl Browser {
         let decorated = window.rem_size() * 0.75 + px(16.);
         if view {
             compact += text("Albums / CDs").max(text("All Tracks")) + decorated;
-            full += text("All Tracks") + text("Albums / CDs") + px(4. * VIEW_INSET + VIEW_GAP);
+            full += text("All Tracks")
+                + text("Albums / CDs")
+                + px(4. * VIEW_INSET + 2. * SEGMENT_INSET);
         }
         if folders {
             compact += px(ICON_BUTTON);
-            full += text("Subfolders") + decorated;
+            full += text("Subfolders") + px(CHECK_SIZE + CHECK_GAP + 2. * (CHECK_INSET + 1.));
             if view {
-                compact += px(VIEW_GAP);
-                full += px(VIEW_GAP);
+                compact += px(SCOPE_GAP);
+                full += px(SCOPE_GAP);
             }
         }
         let editing = self.filter_open || !self.search.read(cx).value().is_empty();
@@ -419,8 +427,11 @@ impl Browser {
             .then(|| status(self, cx).or_else(|| summary(self, cx)))
             .flatten()
             .filter(|text| {
-                let text =
-                    crate::theme::label_width(text.clone().into(), px(size::TEXT_SMALL), window);
+                let text = crate::theme::label_width(
+                    text.clone().into(),
+                    window.rem_size() * 0.75,
+                    window,
+                );
                 widths.fits_summary(width, text)
             });
         let m = *materials(cx);
@@ -448,7 +459,7 @@ impl Browser {
                 d.child(
                     h_flex()
                         .flex_shrink_0()
-                        .gap(px(VIEW_GAP))
+                        .gap(px(SCOPE_GAP))
                         .when(view, |d| {
                             d.child(view_switch(
                                 &browser,
@@ -457,6 +468,7 @@ impl Browser {
                                 (tight && folders).then_some(self.subfolders),
                                 &focus,
                                 menu_focus,
+                                m,
                             ))
                         })
                         .when(folders && !(view && tight), |d| {
@@ -465,6 +477,7 @@ impl Browser {
                                 self.subfolders,
                                 compact,
                                 &focus.folders,
+                                m,
                             ))
                         }),
                 )
@@ -474,8 +487,8 @@ impl Browser {
                     div()
                         .when(view || folders, |d| d.ml(px(COUNT_GAP)))
                         .whitespace_nowrap()
-                        .text_size(px(size::TEXT_SMALL))
-                        .text_color(m.text_faint)
+                        .text_xs()
+                        .text_color(m.text_muted)
                         .child(text),
                 )
             })
@@ -573,6 +586,7 @@ fn view_switch(
     subfolders: Option<bool>,
     focus: &ViewFocus,
     menu_focus: &FocusHandle,
+    m: crate::theme::Materials,
 ) -> AnyElement {
     let choices = [("All Tracks", false), ("Albums / CDs", true)];
     if density != HeaderDensity::Labeled {
@@ -620,7 +634,9 @@ fn view_switch(
     h_flex()
         .id("browser-views")
         .flex_shrink_0()
-        .gap(px(VIEW_GAP))
+        .p(px(SEGMENT_INSET))
+        .rounded(px(5.))
+        .bg(m.raised)
         .role(Role::Group)
         .aria_label("View")
         .children(choices.map(|(name, value)| {
@@ -628,9 +644,16 @@ fn view_switch(
             Button::new(name)
                 .ghost()
                 .xsmall()
+                .rounded(px(3.))
                 .px(px(VIEW_INSET))
                 .label(name)
                 .selected(albums == value)
+                .toggled(albums == value)
+                .text_color(if albums == value {
+                    m.text
+                } else {
+                    m.text_muted
+                })
                 .track_focus(focus.choice(value))
                 .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
@@ -643,24 +666,64 @@ fn subfolder_toggle(
     include: bool,
     compact: bool,
     focus: &FocusHandle,
+    m: crate::theme::Materials,
 ) -> AnyElement {
     let browser = browser.clone();
-    Button::new("view-subfolders")
-        .ghost()
-        .xsmall()
-        .icon(Icon::new(IconName::FolderTree).size(px(14.)))
-        .when(!compact, |b| b.label("Subfolders"))
-        .when(compact, |b| b.w(px(ICON_BUTTON)))
+    Checkbox::new("view-subfolders")
         .accessibility_label("Include subfolders")
         .track_focus(focus)
-        .tab_stop(true)
-        .selected(include)
-        .tooltip(if include {
-            "Showing subfolders · click to show this folder only"
-        } else {
-            "Include subfolders"
+        .checked(include)
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .h(px(22.))
+        .px(px(CHECK_INSET))
+        .gap(px(CHECK_GAP))
+        .rounded(px(3.))
+        .border_1()
+        .border_color(transparent_black())
+        .focus_visible(move |s| s.border_color(m.focus_line()))
+        .hover(move |s| s.bg(m.hover))
+        .text_xs()
+        .text_color(m.text_muted)
+        .when(compact, |c| {
+            c.w(px(ICON_BUTTON))
+                .justify_center()
+                .when(include, |c| c.bg(m.control))
+                .child(Icon::new(IconName::FolderTree).size(px(14.)))
         })
-        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.set_subfolders(!include, w, cx)))
+        .when(!compact, |c| {
+            c.child(
+                h_flex()
+                    .size(px(CHECK_SIZE))
+                    .flex_shrink_0()
+                    .justify_center()
+                    .rounded(px(2.))
+                    .border_1()
+                    .border_color(if include { m.text_muted } else { m.text_faint })
+                    .when(include, |d| {
+                        d.bg(m.control).child(
+                            Icon::new(IconName::Check)
+                                .size(px(CHECK_SIZE - 2.))
+                                .text_color(m.text),
+                        )
+                    }),
+            )
+            .child("Subfolders")
+        })
+        .tooltip(move |w, cx| {
+            Tooltip::new(if include {
+                "Showing subfolders · click to show this folder only"
+            } else {
+                "Include subfolders"
+            })
+            .build(w, cx)
+        })
+        .on_change(move |state, _, w, cx| {
+            browser.update(cx, |b, cx| {
+                b.set_subfolders(state == CheckboxState::Checked, w, cx)
+            })
+        })
         .into_any_element()
 }
 

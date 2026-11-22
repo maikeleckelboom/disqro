@@ -39,6 +39,10 @@ const PREVIEW_HEIGHT: f32 = 24.;
 pub const STRIP_HEIGHT: f32 = crate::theme::size::HEADER;
 /// The text inset on either side of a tab label.
 pub const TAB_X: f32 = 10.;
+const TAB_ICON: f32 = 14.;
+const TAB_GAP: f32 = 6.;
+const TAB_CLOSE: f32 = 18.;
+const TAB_END: f32 = 4.;
 
 /// Shared panel commands and hover activation for all dock groups.
 pub struct SkinState {
@@ -290,7 +294,8 @@ impl TabGroupRenderer for Tabs {
             }
             let widths = labels.fit(size.width, controls_widths, stacked);
             let overflow = widths.overflow;
-            let compact = widths.tabs < if overflow { current } else { labels.all };
+            let compact_width =
+                (widths.tabs < if overflow { current } else { labels.all }).then_some(widths.tabs);
             let controls = browser
                 .as_ref()
                 .zip(pane.as_ref())
@@ -376,7 +381,7 @@ impl TabGroupRenderer for Tabs {
                         .children(
                             tabs.into_iter()
                                 .filter(|&ix| (!overflow && editing.is_none()) || ix == shown)
-                                .map(|ix| tab(&group, ix, &state, compact, cx)),
+                                .map(|ix| tab(&group, ix, &state, compact_width, cx)),
                         ),
                 )
                 .children(switcher)
@@ -530,7 +535,7 @@ fn tab(
     group: &TabGroupContext,
     ix: usize,
     state: &Rc<SkinState>,
-    compact: bool,
+    compact_width: Option<Pixels>,
     cx: &mut App,
 ) -> AnyElement {
     let m = *materials(cx);
@@ -576,6 +581,10 @@ fn tab(
     };
     let close_click = close.clone();
     let editing = renaming.is_some();
+    let compact = compact_width.is_some();
+    // Keep at least three ems for the name when the strip compresses a tab.
+    let fits_close = compact_width
+        .is_none_or(|width| width >= tabs::tab_width(px(3. * crate::theme::size::TEXT), false));
     let label_element = match renaming {
         Some(input) => {
             let pane = pane.clone();
@@ -623,8 +632,9 @@ fn tab(
         .h(px(STRIP_HEIGHT))
         .min_w(px(40.))
         .max_w(px(220.))
-        .px(px(TAB_X))
-        .gap(px(6.))
+        .pl(px(TAB_X))
+        .pr(px(if utility { TAB_X } else { TAB_END }))
+        .gap(px(TAB_GAP))
         .flex_shrink_0()
         .rounded_t(px(crate::theme::size::TAB_RADIUS))
         // Reserved for the keyboard focus outline.
@@ -632,14 +642,14 @@ fn tab(
         .border_color(transparent_black())
         .items_center()
         .text_size(px(crate::theme::size::TEXT))
-        .when(compact, |d| d.min_w_0().flex_shrink(1.))
+        .when(compact, |d| d.min_w_0().flex_1())
         .when(editing, |d| d.flex_1().min_w_0())
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(surface))
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
         .when(!utility, |d| {
             d.child(
-                icon.size(px(14.))
+                icon.size(px(TAB_ICON))
                     .flex_shrink_0()
                     .text_color(if active_browser {
                         m.accent
@@ -651,26 +661,18 @@ fn tab(
             )
         })
         .child(label_element)
-        // The close button covers the end of the label while the pointer is
-        // over the tab, so no tab gives up width to a button it is not showing.
-        .when(!utility && !editing, |d| {
+        // Keep hover geometry stable. In overflow the tab menu and middle
+        // click still close the panel when its label needs this space.
+        .when(!utility && !editing && fits_close, |d| {
             d.child(
                 div()
                     .id(("tab-close", id.as_u64()))
-                    .absolute()
-                    // Inside the reserved focus border.
-                    .top(px((STRIP_HEIGHT - 2. - 18.) / 2.))
-                    .right(px(3.))
-                    .size(px(18.))
+                    .size(px(TAB_CLOSE))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded(px(4.))
-                    .bg(if selected {
-                        surface
-                    } else {
-                        m.tab_well.blend(m.hover)
-                    })
                     .hover(|d| d.bg(m.chrome.blend(m.control_hover)))
                     .invisible()
                     .group_hover(hover_group, |s| s.visible())

@@ -1,7 +1,15 @@
 use super::*;
 
-/// Natural tab widths, including the icon on content panels and both
-/// reserved focus edges. The same limits are applied by the tab renderer.
+pub(super) fn tab_width(text: Pixels, utility: bool) -> Pixels {
+    let end = if utility {
+        TAB_X
+    } else {
+        TAB_ICON + TAB_CLOSE + 2. * TAB_GAP + TAB_END
+    };
+    (text + px(2. + TAB_X + end)).clamp(px(40.), px(220.))
+}
+
+/// Natural widths include both focus edges and the in-flow hover target.
 pub(super) fn labels_width(
     group: &TabGroupContext,
     tabs: &[usize],
@@ -12,10 +20,8 @@ pub(super) fn labels_width(
         .map(|&ix| {
             let panel = &group.panels()[ix];
             let label = tab_label(panel, cx);
-            let icon = if is_utility(panel, cx) { 0. } else { 20. };
             let text = crate::theme::label_width(label, px(crate::theme::size::TEXT), window);
-            // Two text insets and the focus border, matching the tab frame.
-            (text + px(2. * (TAB_X + 1.) + icon)).clamp(px(40.), px(220.))
+            tab_width(text, is_utility(panel, cx))
         })
         .sum()
 }
@@ -123,7 +129,28 @@ impl TabLabels {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserHeaderWidths, SWITCHER, TabLabels, px};
+    use super::{BrowserHeaderWidths, SWITCHER, TabLabels, px, tab_width};
+
+    #[test]
+    fn music_tab_fits_its_name_and_close_slot_at_the_last_inline_pixel() {
+        let music = tab_width(px(35.), false);
+        // Text plus focus edges, insets, folder icon, two gaps and close target.
+        assert_eq!(music, px(95.));
+        let library = tab_width(px(35.), true);
+        assert_eq!(library, px(57.));
+        let labels = TabLabels {
+            current: music,
+            all: music + library,
+            several: true,
+        };
+        let needed = labels.all + collection(true).editable;
+        assert!(!labels.fit(needed, Some(collection(true)), false).overflow);
+        assert!(
+            labels
+                .fit(needed - px(1.), Some(collection(true)), false)
+                .overflow
+        );
+    }
 
     fn collection(editing: bool) -> BrowserHeaderWidths {
         BrowserHeaderWidths {
