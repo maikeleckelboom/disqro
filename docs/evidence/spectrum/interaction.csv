@@ -1,0 +1,2 @@
+build,phase,seconds,process_cpu,ui_cpu,private_start_mib,private_max_mib,private_end_mib,resizes,callbacks,commands,opens,voices,device_errors,decode_errors,discarded_device_errors,unchanged_ticks,capture_frames,capture_drops,fft_pairs,spectrum_paints,spectrum_updates,callback_max_permille,fft_max_us,spectrum_paint_max_us,publish_to_paint_max_us,position_delta_error_max_us,median_callback_max_permille
+interactive,interactive,148.13,27.67,23.14,181.34,181.55,134.11,0,14811,8,8,8,0,0,0,3,6884480,0,4256,6075,5904,552,4787,909,23989,26533,4.0
