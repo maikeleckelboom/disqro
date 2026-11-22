@@ -51,6 +51,9 @@ const LARGE_THUMBNAIL: f32 = 96.;
 const COVER_Y: f32 = 2.;
 pub(crate) const COVER_WIDTH: f32 = THUMBNAIL + 2. * COVER_X;
 pub(crate) const COVER_MAX_WIDTH: f32 = LARGE_THUMBNAIL + 2. * COVER_X;
+/// The like control is a 14-pixel glyph; its column needs no more than a
+/// comfortable hit target. The heading draws the same glyph.
+pub(crate) const FAVORITE_WIDTH: f32 = 36.;
 
 pub(crate) fn cover_edge(width: f32) -> f32 {
     (width - 2. * COVER_X)
@@ -76,15 +79,28 @@ pub(crate) fn cover_row_height<D: TableDelegate>(
     new
 }
 
+/// A cover thumbnail, or the one fallback every artwork slot shares: a quiet
+/// tile with a disc glyph. A slot is never left blank, whether the release has
+/// no artwork or its image is still loading.
 pub(crate) fn cover_tile(edge: f32, image: Option<Arc<RenderImage>>, cx: &App) -> Div {
+    let m = materials(cx);
     div()
         .size(px(edge))
         .flex_shrink_0()
-        .rounded(px(2.))
+        .rounded(px(if edge > 40. { 4. } else { 2. }))
         .overflow_hidden()
         .map(|d| match image {
             Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
-            None => d.bg(materials(cx).hover.opacity(0.4)),
+            None => d
+                .bg(m.control)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Disc3)
+                        .size(px((edge * 0.5).clamp(12., 40.).round()))
+                        .text_color(m.text_faint),
+                ),
         })
 }
 /// Library rows kept in memory beyond the visible range.
@@ -142,7 +158,7 @@ impl Field {
     }
     fn heading(self) -> &'static str {
         match self {
-            Self::Cover => "",
+            Self::Cover | Self::Favorite => "",
             f => f.label(),
         }
     }
@@ -157,7 +173,7 @@ impl Field {
         match self {
             Self::Cover => COVER_WIDTH,
             Self::Number => 40.,
-            Self::Favorite => 88.,
+            Self::Favorite => FAVORITE_WIDTH,
             Self::Title => 200.,
             Self::Artist => 135.,
             Self::Album => 148.,
@@ -170,6 +186,7 @@ impl Field {
     fn min_width(self) -> f32 {
         match self {
             Self::Cover => self.width(),
+            Self::Favorite => FAVORITE_WIDTH,
             Self::Number => 36.,
             Self::Title => 142.,
             Self::Year | Self::Disc => 48.,
@@ -827,18 +844,29 @@ impl MusicTable {
     }
     fn end_resize(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
         if table.delegate_mut().resizing.take().is_some() {
+            let d = table.delegate();
+            let shown = d.layout().widths(d.viewport);
+            table.delegate_mut().layout_mut().settle(&shown);
+            table.refresh(cx);
             table.delegate().save_layout(cx);
             cx.notify();
         }
     }
-    pub fn fit(table: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
-        if table.delegate().viewport != width {
-            let scroll = table.horizontal_scroll_handle.clone();
-            table.delegate_mut().horizontal_scroll = Some(scroll);
-            table.delegate_mut().viewport = width;
-            table.refresh(cx);
-            cx.notify();
+    /// Lays the columns out for the table's width; `true` when it changed.
+    pub fn fit(
+        table: &mut TableState<Self>,
+        width: f32,
+        cx: &mut Context<TableState<Self>>,
+    ) -> bool {
+        if table.delegate().viewport == width {
+            return false;
         }
+        let scroll = table.horizontal_scroll_handle.clone();
+        table.delegate_mut().horizontal_scroll = Some(scroll);
+        table.delegate_mut().viewport = width;
+        table.refresh(cx);
+        cx.notify();
+        true
     }
     fn save_layout(&self, cx: &mut App) {
         let _ = self
@@ -1393,6 +1421,7 @@ impl MusicTable {
                         (scrolling.end < widths.len() && ix + 1 >= scrolling.end && gap >= -1.)
                             .then(|| gap.clamp(0., scroll_tail(&scrolling, widths.len())));
                     let width = t.col_width(ix).map(f32::from);
+                    t.delegate_mut().layout_mut().holding = width.map(|_| ix);
                     t.delegate_mut().resizing = width.map(|width| Resize {
                         ix,
                         x: e.position.x,
@@ -1578,6 +1607,13 @@ impl TableDelegate for MusicTable {
         // technology and the column menu, without printing it.
         sort_heading(col_ix, field.heading(), field.right_aligned(), sorted, cx)
             .aria_label(field.label())
+            .when(field == Field::Favorite, |d| {
+                d.justify_center().child(
+                    Icon::new(IconName::Heart)
+                        .size(px(13.))
+                        .text_color(m.text_faint),
+                )
+            })
             .children(trailing)
             .children(leading)
             .when(field.sortable(), |d| {
@@ -1769,13 +1805,16 @@ impl TableDelegate for MusicTable {
         let m = *materials(cx);
         if let Some(d) = self.header(row) {
             let disc = d.clone();
+            let layout = self.layout();
+            let lead = layout.header_lead(&layout.widths(self.viewport));
             return div()
                 .id(("cd-section", row))
                 .overflow_hidden()
-                .bg(m.overlay)
+                .bg(m.raised)
                 .cursor_pointer()
                 .child(d.section(
                     self.cover,
+                    lead,
                     self.settled_cover,
                     self.artwork_revision,
                     window,

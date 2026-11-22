@@ -314,6 +314,10 @@ impl Store {
                 let discs = self.release_discs(first)?;
                 self.album_rows(Albums::Ids(&discs), &query.search)?
             }
+            // A single disc is one group, so its artwork heads it once.
+            Scope::Album(album) if grouped => {
+                self.album_rows(Albums::Ids(&[album]), &query.search)?
+            }
             _ => vec![],
         };
         snapshot.commit()?;

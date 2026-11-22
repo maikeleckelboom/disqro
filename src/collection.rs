@@ -416,29 +416,32 @@ impl Disc {
             .map(|image| (file.clone(), image))
     }
 
-    /// The album or disc heading spans the visible table. Its title anchors
-    /// the left edge even if the Title column moves or Cover is hidden.
+    /// The album or disc heading spans the visible table. Its artwork sits in
+    /// the Cover column, above the tracks it describes, and its title lines
+    /// up with theirs. Without a Cover column both lead the row.
+    ///
+    /// `lead` is the left edge and width of the Cover column and the left
+    /// edge of Title; `cover_edge` is the size tracks draw covers at.
     pub fn section(
         &self,
         cover_edge: f32,
+        lead: Option<(f32, f32, f32)>,
         settled_cover: f32,
         listing: u64,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
         let m = *materials(cx);
-        let cover = self.section_cover(settled_cover, listing, window, cx);
+        let cover = self
+            .section_cover(settled_cover, listing, window, cx)
+            .map(|(_, image)| image);
         let mut detail = Vec::new();
-        if let Some(year) = self.year {
-            detail.push(year.to_string());
-        }
-        detail.push(self.format.clone());
         if let Some(number) = self.release.as_ref().map(|m| m.number).or(self.number) {
             let normalized = self.title.replace(' ', "").to_lowercase();
             if !normalized.contains(&format!("cd{number}"))
                 && !normalized.contains(&format!("disc{number}"))
             {
-                detail.insert(0, format!("Disc {number}"));
+                detail.push(format!("Disc {number}"));
             }
         }
         if let Some(member) = &self.release
@@ -450,49 +453,77 @@ impl Disc {
         {
             detail.push(member.subtitle.clone());
         }
+        if let Some(year) = self.year {
+            detail.push(year.to_string());
+        }
+        if self.count > 0 {
+            detail.push(format!(
+                "{} {}",
+                self.count,
+                if self.count == 1 { "track" } else { "tracks" }
+            ));
+        }
+        if self.complete && self.duration > 0. {
+            detail.push(crate::library::clock(self.duration));
+        }
+        detail.push(self.format.clone());
+        let (edge, tile_x, title_x) = match lead {
+            Some((cover_x, cover_w, title_x)) => {
+                let edge = cover_edge.min(cover_w - 2. * crate::table::COVER_X);
+                (
+                    edge,
+                    cover_x + ((cover_w - edge) / 2.).floor(),
+                    title_x + 10.,
+                )
+            }
+            None => {
+                let edge = section_cover_edge(cover_edge);
+                (edge, 10., 10. + edge + 10.)
+            }
+        };
         h_flex()
             .w_full()
             .h_full()
             .flex_shrink_0()
             .min_w_0()
-            .gap(px(8.))
-            .px(px(10.))
-            .py(px(2.))
+            .relative()
+            .items_center()
+            .pl(px(title_x))
+            .pr(px(10.))
+            .gap(px(10.))
             .border_t_1()
             .border_color(m.line)
             .child(
-                h_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_ellipsis_middle()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(14.))
-                            .text_color(m.text)
-                            .child(self.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .max_w(relative(0.33))
-                            .truncate()
-                            .text_ellipsis_middle()
-                            .text_size(px(11.))
-                            .text_color(m.text_muted)
-                            .child(detail.join("  ·  ")),
-                    ),
+                div()
+                    .absolute()
+                    .left(px(tile_x))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(crate::table::cover_tile(edge, cover, cx)),
             )
-            .when_some(cover, |d, (_, image)| {
-                d.child(crate::table::cover_tile(
-                    section_cover_edge(cover_edge),
-                    Some(image),
-                    cx,
-                ))
-            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .truncate()
+                    .text_ellipsis_middle()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(13.))
+                    .text_color(m.text)
+                    .child(self.title.clone()),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .max_w(relative(0.45))
+                    .truncate()
+                    .text_size(px(crate::theme::size::TEXT_SMALL))
+                    .text_color(m.text_faint)
+                    .child(detail.join("  ·  ")),
+            )
     }
     pub fn duration(&self) -> f64 {
         self.duration
