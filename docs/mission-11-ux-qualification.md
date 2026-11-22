@@ -1,5 +1,7 @@
 # Mission 11 UX corrections on Windows
 
+The [design review](mission-11-design-review.md) follows these corrections and refines the shell, docking chrome, browsers, sidebars, Queue and tables. This record and its evidence describe the build before that review.
+
 ## Sidebar spacing
 
 All Music and Liked Tracks use 30 logical pixels per row, down from 36 in the first correction. Medium-weight type distinguishes these destinations from the 27-pixel collection and playlist rows. Section headings are 23 pixels high with 8 pixels above them. The chevron follows the heading as in the supplied sidebar reference. The add action occupies the far edge and appears on hover or keyboard focus. Selection, keyboard focus and playlist drop targets still use the whole row.
