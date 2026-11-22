@@ -238,7 +238,7 @@ impl PaneContent for BrowserPane {
 
 const HEADER_INSET: f32 = 8.;
 const COUNT_GAP: f32 = 10.;
-const VIEW_TAB: f32 = 36.;
+const VIEW_RAIL: f32 = 42.;
 const ICON_BUTTON: f32 = 28.;
 const SCOPE_GAP: f32 = 3.;
 const FILTER_COMPACT: f32 = 100.;
@@ -254,7 +254,7 @@ const SCOPE_CHOICES: [(bool, &str, IconName); 2] = [
 
 #[derive(Clone, Copy)]
 pub(crate) struct BrowserHeaderWidths {
-    /// Inline view tabs, scope and the current filter, including the drop target.
+    /// Folder scope and the current filter, including the drop target.
     pub minimum: Pixels,
     /// Room to edit a filter without moving tab identities.
     pub editable: Pixels,
@@ -262,45 +262,18 @@ pub(crate) struct BrowserHeaderWidths {
     pub full: Pixels,
 }
 
-#[derive(Clone, Copy)]
-struct BrowserViews {
-    /// The selected presentation, when both presentations are available.
-    albums: Option<bool>,
-    /// The current scope of a physical folder.
-    subfolders: Option<bool>,
-}
-
-impl BrowserViews {
-    fn widths(self, editing: bool) -> BrowserHeaderWidths {
+impl BrowserHeaderWidths {
+    fn new(has_scope: bool, editing: bool) -> Self {
         let mut fixed = 2. * HEADER_INSET + size::TAB_DROP;
-        if self.albums.is_some() {
-            fixed += 2. * VIEW_TAB;
-        }
-        if self.subfolders.is_some() {
+        if has_scope {
             fixed += ICON_BUTTON + SCOPE_GAP;
         }
-        BrowserHeaderWidths {
+        Self {
             minimum: px(fixed + if editing { FILTER_COMPACT } else { ICON_BUTTON }),
             editable: px(fixed + FILTER_COMPACT),
             full: px(fixed + if editing { FILTER_FULL } else { ICON_BUTTON }),
         }
     }
-}
-
-#[derive(Clone)]
-struct ViewFocus {
-    tracks: FocusHandle,
-    albums: FocusHandle,
-    folders: FocusHandle,
-}
-
-impl ViewFocus {
-    fn choice(&self, albums: bool) -> &FocusHandle {
-        if albums { &self.albums } else { &self.tracks }
-    }
-}
-
-impl BrowserHeaderWidths {
     fn fits_summary(self, available: Pixels, text: Pixels) -> bool {
         available >= self.full + px(COUNT_GAP) + text
     }
@@ -382,17 +355,13 @@ impl Browser {
             .into_any_element()
     }
 
-    fn header_views(&self) -> BrowserViews {
-        BrowserViews {
-            albums: (!self.is_page() && self.can_list_discs()).then_some(self.prefs.albums),
-            subfolders: (self.location.is_folder() && self.page.is_none())
-                .then_some(self.subfolders),
-        }
+    fn folder_scope(&self) -> Option<bool> {
+        (self.location.is_folder() && self.page.is_none()).then_some(self.subfolders)
     }
 
     pub(crate) fn header_widths(&self, cx: &App) -> BrowserHeaderWidths {
         let editing = self.filter_open || !self.search.read(cx).value().is_empty();
-        self.header_views().widths(editing)
+        BrowserHeaderWidths::new(self.folder_scope().is_some(), editing)
     }
 
     pub(crate) fn header_controls(
@@ -403,51 +372,9 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let browser = cx.entity();
         let compact = width < widths.full;
         let tight = width < widths.minimum;
-        let views = self.header_views();
-        let focus = (views.albums.is_some() || views.subfolders.is_some()).then(|| {
-            window
-                .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
-                    albums: cx.focus_handle(),
-                    tracks: cx.focus_handle(),
-                    folders: cx.focus_handle(),
-                })
-                .read(cx)
-                .clone()
-        });
         let m = *materials(cx);
-        let folded = tight && views.albums.is_some();
-        let mode = views.albums.zip(focus.as_ref()).map(|(albums, focus)| {
-            if folded {
-                // Keep the focused control's handle when the tabs and scope
-                // collapse into one menu in a narrow split.
-                let handle = [&focus.tracks, &focus.albums]
-                    .into_iter()
-                    .chain(views.subfolders.map(|_| &focus.folders))
-                    .find(|handle| handle.is_focused(window))
-                    .unwrap_or_else(|| focus.choice(albums));
-                view_menu(&browser, views, handle, m)
-            } else {
-                view_tabs(&browser, albums, focus, m)
-            }
-        });
-        let scope = views
-            .subfolders
-            .zip(focus.as_ref())
-            .filter(|_| !folded)
-            .map(|(include, focus)| {
-                h_flex().mr(px(SCOPE_GAP)).flex_shrink_0().child(view_menu(
-                    &browser,
-                    BrowserViews {
-                        albums: None,
-                        subfolders: Some(include),
-                    },
-                    &focus.folders,
-                    m,
-                ))
-            });
         let count = (!compact)
             .then(|| status(self, cx).or_else(|| summary(self, cx)))
             .flatten()
@@ -459,18 +386,16 @@ impl Browser {
                 );
                 widths.fits_summary(width, text)
             });
-        let has_mode = mode.is_some();
         h_flex()
             .id("browser-controls")
             .w_full()
             .h(px(size::HEADER))
             .px(px(if tight { 2. } else { HEADER_INSET }))
             .items_center()
-            .children(mode)
             .when_some(count, |d, text| {
                 d.child(
                     div()
-                        .when(has_mode, |d| d.ml(px(COUNT_GAP)))
+                        .mr(px(COUNT_GAP))
                         .whitespace_nowrap()
                         .text_xs()
                         .text_color(m.text_muted)
@@ -478,7 +403,14 @@ impl Browser {
                 )
             })
             .child(drop_space)
-            .children(scope)
+            .when_some(self.folder_scope(), |d, include| {
+                d.child(
+                    h_flex()
+                        .mr(px(SCOPE_GAP))
+                        .flex_shrink_0()
+                        .child(folder_scope_menu(cx.entity(), include, m)),
+                )
+            })
             .child(self.filter_control(compact, tight, window, cx))
             .into_any_element()
     }
@@ -563,16 +495,17 @@ impl Browser {
     }
 }
 
-fn view_tabs(
-    browser: &Entity<Browser>,
-    albums: bool,
-    focus: &ViewFocus,
-    m: crate::theme::Materials,
-) -> AnyElement {
-    h_flex()
-        .id("browser-views")
-        .h_full()
+fn view_rail(browser: &Entity<Browser>, albums: bool, m: crate::theme::Materials) -> AnyElement {
+    v_flex()
+        .id("browser-view-rail")
+        .w(px(VIEW_RAIL))
         .flex_shrink_0()
+        .px(px(4.))
+        .py(px(5.))
+        .gap(px(4.))
+        .bg(m.chrome)
+        .border_r_1()
+        .border_color(m.line)
         .role(Role::Group)
         .aria_label("View")
         .children(VIEW_CHOICES.map(|(value, name, icon)| {
@@ -581,9 +514,9 @@ fn view_tabs(
             Button::new(name)
                 .ghost()
                 .xsmall()
-                .w(px(VIEW_TAB))
+                .w_full()
                 .h(px(size::HEADER))
-                .rounded(px(0.))
+                .rounded(px(4.))
                 .px(px(0.))
                 .selected(selected)
                 .toggled(selected)
@@ -593,108 +526,61 @@ fn view_tabs(
                     m.text_muted
                 }))
                 .when(selected, |b| {
-                    b.bg(m.control).child(
+                    b.bg(m.selected).child(
                         div()
                             .absolute()
-                            .bottom_0()
                             .left_0()
-                            .right_0()
-                            .h(px(2.))
+                            .top(px(3.))
+                            .bottom(px(3.))
+                            .w(px(2.))
+                            .rounded(px(1.))
                             .bg(m.accent),
                     )
                 })
                 .accessibility_label(name)
                 .tooltip(name)
-                .track_focus(focus.choice(value))
+                .tooltip_placement(gpui_kit::component::Placement::Right)
                 .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
         }))
         .into_any_element()
 }
 
-/// A standalone folder scope menu, or a shared picker when the view tabs
-/// cannot fit beside the scope and filter.
-fn view_menu(
-    browser: &Entity<Browser>,
-    views: BrowserViews,
-    focus: &FocusHandle,
+fn folder_scope_menu(
+    browser: Entity<Browser>,
+    include: bool,
     m: crate::theme::Materials,
-) -> AnyElement {
-    let browser = browser.clone();
-    let (id, icon, description, anchor, width) = if let Some(albums) = views.albums {
-        let (_, name, icon) = VIEW_CHOICES[usize::from(albums)];
-        let action = if views.subfolders.is_some() {
-            "Choose view or folder scope"
-        } else {
-            "Choose view"
-        };
-        (
-            "browser-view-menu",
-            icon,
-            format!("{action} · {name}"),
-            Anchor::TopLeft,
-            VIEW_TAB,
-        )
-    } else {
-        let include = views.subfolders.unwrap_or_default();
-        let (_, name, icon) = SCOPE_CHOICES[usize::from(include)];
-        (
-            "browser-folder-scope",
-            icon,
-            format!("Folder scope · {name}"),
-            Anchor::TopRight,
-            ICON_BUTTON,
-        )
-    };
-    Button::new(id)
+) -> impl IntoElement {
+    let (_, name, icon) = SCOPE_CHOICES[usize::from(include)];
+    let description = format!("Folder scope · {name}");
+    Button::new("browser-folder-scope")
         .ghost()
         .small()
-        .w(px(width))
-        .dropdown_caret(views.albums.is_some())
+        .w(px(ICON_BUTTON))
         .icon(Icon::new(icon).text_color(m.text_muted))
-        .track_focus(focus)
         .tab_stop(true)
         .accessibility_label(description.clone())
         .tooltip(description)
-        .dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
-            if let Some(albums) = views.albums {
-                for (value, name, icon) in VIEW_CHOICES {
-                    let browser = browser.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name)
-                            .icon(Icon::new(icon))
-                            .checked(albums == value)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| b.view(value, w, cx))
-                            }),
-                    );
-                }
-                if views.subfolders.is_some() {
-                    menu = menu.separator();
-                }
-            }
-            if let Some(include) = views.subfolders {
-                menu = menu.label("Folder scope");
-                for (value, name, icon) in SCOPE_CHOICES {
-                    let browser = browser.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name)
-                            .icon(Icon::new(icon))
-                            .checked(include == value)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| {
-                                    // Reapplying a scope would clear descendant overrides.
-                                    if b.subfolders != value {
-                                        b.set_subfolders(value, w, cx);
-                                    }
-                                })
-                            }),
-                    );
-                }
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+            menu = menu.label("Folder scope");
+            for (value, name, icon) in SCOPE_CHOICES {
+                let browser = browser.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(name)
+                        .icon(Icon::new(icon))
+                        .checked(include == value)
+                        .on_click(move |_, w, cx| {
+                            browser.update(cx, |b, cx| {
+                                // Reapplying a scope would clear descendant overrides.
+                                if b.subfolders != value {
+                                    b.set_subfolders(value, w, cx);
+                                }
+                            })
+                        }),
+                );
             }
             menu
         })
-        .into_any_element()
 }
 
 /// What the view holds once it is ready: its albums, or its tracks and their
@@ -779,6 +665,14 @@ impl Render for Browser {
                     .child(div().truncate().child(notice.clone())),
             );
         }
+        let body = h_flex()
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .items_stretch()
+            .when(!self.is_page() && self.can_list_discs(), |d| {
+                d.child(view_rail(&cx.entity(), self.prefs.albums, m))
+            });
         if self.listing_discs()
             && (!self.location.is_folder() || !self.discs.read(cx).delegate().rows.is_empty())
         {
@@ -786,87 +680,97 @@ impl Render for Browser {
             let row_height = albums.update(cx, |t, _| crate::collection::Discs::sync_rows(t));
             let focused = keyboard_focus(self.discs.read(cx).focus_handle(cx), window);
             return view.child(
+                body.child(
+                    div()
+                        .id("album-viewport")
+                        .relative()
+                        .mx(px(4.))
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .on_prepaint(move |b, w, cx| {
+                            let width = f32::from(b.size.width).floor();
+                            let changed = albums
+                                .update(cx, |t, cx| crate::collection::Discs::fit(t, width, cx));
+                            // The headings were laid out with the old widths: draw
+                            // the table again once the new ones are known.
+                            if changed {
+                                let albums = albums.clone();
+                                w.on_next_frame(move |_, cx| {
+                                    albums.update(cx, |t, cx| {
+                                        t.refresh(cx);
+                                        cx.notify();
+                                    })
+                                });
+                            }
+                        })
+                        .child(
+                            DataTable::new(&self.discs)
+                                .accessibility_label("Albums and CDs")
+                                .focus_ring(false)
+                                .bordered(false)
+                                .stripe(false)
+                                .header_row_height(px(size::HEADER))
+                                .with_size(gpui_kit::component::Size::Size(px(row_height))),
+                        )
+                        .children(focus_outline(focused, &m)),
+                ),
+            );
+        }
+        let fit = table.clone();
+        let focused = keyboard_focus(self.table.read(cx).focus_handle(cx), window);
+        view.child(
+            body.child(
                 div()
-                    .id("album-viewport")
+                    .id("tracks-viewport")
                     .relative()
+                    .when_some(
+                        match self.location {
+                            Location::Playlist(id) => self
+                                .catalog
+                                .read(cx)
+                                .playlist(id)
+                                .map(|p| (id, p.name.clone())),
+                            _ => None,
+                        },
+                        |d, (id, name)| {
+                            crate::table::playlist_target(
+                                d.border_1().border_color(m.canvas),
+                                id,
+                                name.into(),
+                                self.catalog.clone(),
+                                cx,
+                            )
+                        },
+                    )
+                    // Keep the outermost header grips clear of the dock splitters.
                     .mx(px(4.))
-                    .flex_1()
-                    .min_h_0()
-                    .on_prepaint(move |b, w, cx| {
-                        let width = f32::from(b.size.width).floor();
-                        let changed =
-                            albums.update(cx, |t, cx| crate::collection::Discs::fit(t, width, cx));
-                        // The headings were laid out with the old widths: draw
-                        // the table again once the new ones are known.
-                        if changed {
-                            let albums = albums.clone();
-                            w.on_next_frame(move |_, cx| {
-                                albums.update(cx, |t, cx| {
-                                    t.refresh(cx);
-                                    cx.notify();
-                                })
-                            });
-                        }
+                    .on_prepaint(move |bounds, _, cx| {
+                        fit.update(cx, |t, cx| {
+                            crate::table::MusicTable::fit(
+                                t,
+                                f32::from(bounds.size.width).floor(),
+                                cx,
+                            )
+                        });
                     })
+                    .key_context("MusicTracks")
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .text_size(px(13.))
                     .child(
-                        DataTable::new(&self.discs)
-                            .accessibility_label("Albums and CDs")
+                        DataTable::new(&self.table)
+                            .accessibility_label("Recordings")
                             .focus_ring(false)
+                            .fixed_cols_border(false)
                             .bordered(false)
                             .stripe(false)
                             .header_row_height(px(size::HEADER))
                             .with_size(gpui_kit::component::Size::Size(px(row_height))),
                     )
                     .children(focus_outline(focused, &m)),
-            );
-        }
-        let fit = table.clone();
-        let focused = keyboard_focus(self.table.read(cx).focus_handle(cx), window);
-        view.child(
-            div()
-                .id("tracks-viewport")
-                .relative()
-                .when_some(
-                    match self.location {
-                        Location::Playlist(id) => self
-                            .catalog
-                            .read(cx)
-                            .playlist(id)
-                            .map(|p| (id, p.name.clone())),
-                        _ => None,
-                    },
-                    |d, (id, name)| {
-                        crate::table::playlist_target(
-                            d.border_1().border_color(m.canvas),
-                            id,
-                            name.into(),
-                            self.catalog.clone(),
-                            cx,
-                        )
-                    },
-                )
-                // Keep the outermost header grips clear of the dock splitters.
-                .mx(px(4.))
-                .on_prepaint(move |bounds, _, cx| {
-                    fit.update(cx, |t, cx| {
-                        crate::table::MusicTable::fit(t, f32::from(bounds.size.width).floor(), cx)
-                    });
-                })
-                .key_context("MusicTracks")
-                .flex_1()
-                .min_h_0()
-                .text_size(px(13.))
-                .child(
-                    DataTable::new(&self.table)
-                        .accessibility_label("Recordings")
-                        .focus_ring(false)
-                        .fixed_cols_border(false)
-                        .bordered(false)
-                        .stripe(false)
-                        .header_row_height(px(size::HEADER))
-                        .with_size(gpui_kit::component::Size::Size(px(row_height))),
-                )
-                .children(focus_outline(focused, &m)),
+            ),
         )
     }
 }
@@ -892,53 +796,30 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserState, BrowserViews, FILTER_COMPACT, FILTER_FULL, ICON_BUTTON, SCOPE_GAP, VIEW_TAB,
-        grouped, px, span,
+        BrowserHeaderWidths, BrowserState, FILTER_COMPACT, FILTER_FULL, HEADER_INSET, ICON_BUTTON,
+        SCOPE_GAP, grouped, px, size, span,
     };
     use crate::browser::Location;
     use std::path::PathBuf;
 
     #[test]
-    fn header_widths_budget_the_two_view_tabs_and_folder_scope_independently() {
-        let library = BrowserViews {
-            albums: Some(false),
-            subfolders: None,
-        };
-        let folder = BrowserViews {
-            subfolders: Some(true),
-            ..library
-        };
-        let direct = BrowserViews {
-            albums: None,
-            subfolders: Some(false),
-        };
-        let flat = BrowserViews {
-            albums: None,
-            subfolders: None,
-        };
-        for editing in [false, true] {
-            let flat = flat.widths(editing);
-            let library = library.widths(editing);
-            let folder = folder.widths(editing);
-            let direct = direct.widths(editing);
-            assert_eq!(library.minimum - flat.minimum, px(2. * VIEW_TAB));
+    fn browser_header_budgets_scope_and_filter_without_reserving_rail_space() {
+        let insets = 2. * HEADER_INSET + size::TAB_DROP;
+        for (editing, filter) in [(false, ICON_BUTTON), (true, FILTER_COMPACT)] {
+            let library = BrowserHeaderWidths::new(false, editing);
+            let folder = BrowserHeaderWidths::new(true, editing);
+            assert_eq!(library.minimum, px(insets + filter));
             assert_eq!(
-                folder.minimum - library.minimum,
-                px(ICON_BUTTON + SCOPE_GAP)
+                folder.minimum,
+                px(insets + filter + ICON_BUTTON + SCOPE_GAP)
             );
-            assert_eq!(direct.minimum - flat.minimum, px(ICON_BUTTON + SCOPE_GAP));
-            assert_eq!(folder.minimum - direct.minimum, px(2. * VIEW_TAB));
         }
     }
 
     #[test]
     fn header_reserves_filter_editing_room_and_only_shows_a_whole_summary() {
-        let folder = BrowserViews {
-            albums: Some(true),
-            subfolders: Some(true),
-        };
-        let closed = folder.widths(false);
-        let open = folder.widths(true);
+        let closed = BrowserHeaderWidths::new(true, false);
+        let open = BrowserHeaderWidths::new(true, true);
         assert_eq!(closed.editable, open.minimum);
         assert_eq!(closed.editable, open.editable);
         assert_eq!(
