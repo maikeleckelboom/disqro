@@ -38,7 +38,6 @@ pub static TYPE: PanelType = PanelType {
     icon: IconName::FolderOpen,
     instances: super::Instances::Single,
     home: super::Home::Leading,
-    toolbar: false,
     build: |services, _, window, cx| {
         let panel = cx.new(|cx| LocationsPanel::new(services, window, cx));
         Rc::new(panel)
@@ -685,10 +684,6 @@ impl PaneContent for Entity<LocationsPanel> {
     }
     fn title(&self, _: &App) -> SharedString {
         TYPE.title.into()
-    }
-    fn menu(&self, menu: PopupMenu, _: &mut Window, cx: &mut App) -> PopupMenu {
-        let missing = self.read(cx).model.read(cx).places.missing_defaults();
-        LocationsPanel::panel_menu(self.downgrade(), menu, missing)
     }
     fn focused(&self, window: &mut Window, cx: &mut App) {
         // Arrow keys move through the folders once the panel has focus.

@@ -173,20 +173,22 @@ impl Browser {
             .sortable(false)
         });
         let discs = cx.new(|cx| {
-            let discs = Discs {
-                browser: Some(this.clone()),
-                tracks: Some(table.downgrade()),
-                ..Default::default()
-            };
-            TableState::new(discs, window, cx)
-                .col_selectable(false)
-                .sortable(false)
+            let discs = Discs::new(this.clone(), table.downgrade());
+            TableState::new(discs, window, cx).col_selectable(false)
         });
-        cx.subscribe_in(&discs, window, |b: &mut Self, _, event, window, cx| {
-            if let TableEvent::DoubleClickedRow(i) = event {
-                b.show_disc(*i, window, cx);
-            }
-        })
+        cx.subscribe_in(
+            &discs,
+            window,
+            |b: &mut Self, table, event, window, cx| match event {
+                TableEvent::DoubleClickedRow(i) => b.show_disc(*i, window, cx),
+                TableEvent::ColumnWidthsChanged(widths) => {
+                    table.update(cx, |t, _| t.delegate_mut().resized(widths));
+                    cx.emit(ViewChanged);
+                }
+                TableEvent::MoveColumn(_, _) | TableEvent::SelectRow(_) => cx.emit(ViewChanged),
+                _ => {}
+            },
+        )
         .detach();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this view…"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
@@ -709,17 +711,8 @@ impl Browser {
         });
     }
     fn set_discs(&mut self, items: Vec<Arc<Disc>>, cx: &mut App) {
-        let rows = Discs::shelve(items);
-        self.discs.update(cx, |table, cx| {
-            let selected = table
-                .selected_row()
-                .and_then(|i| table.delegate().rows.get(i))
-                .map(Shelf::key);
-            table.delegate_mut().rows = rows;
-            let ix = selected.and_then(|k| table.delegate().rows.iter().position(|r| r.key() == k));
-            reselect(table, ix, cx);
-            cx.notify();
-        });
+        self.discs
+            .update(cx, |t, cx| Discs::set_items(t, items, cx));
     }
     fn filter_library(&mut self, scope: Scope, cx: &mut Context<Self>) {
         self.album = None;
@@ -771,6 +764,10 @@ impl Browser {
             return;
         };
         let search = self.query.clone();
+        self.discs.update(cx, |t, cx| {
+            t.delegate_mut().loading = true;
+            cx.notify();
+        });
         let generation = self.albums.next();
         let albums = store.query(&self.albums, generation, move |s| s.albums(root, &search));
         let ticket = self.albums.clone();

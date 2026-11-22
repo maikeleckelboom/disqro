@@ -178,22 +178,4 @@ impl MusicTable {
             });
         }
     }
-    /// Whether the rows in memory include `track`, as the rows of a short
-    /// page such as a release do.
-    pub fn lists(&self, track: &Track) -> bool {
-        match &self.rows.data {
-            Contents::Folder { original, .. } => original.iter().any(|t| t.same_item(track)),
-            Contents::Library(p) => p.cache.values().any(|r| r.track.same_item(track)),
-        }
-    }
-    pub fn page_contains(&self, disc: &DiscId, track: &Track) -> bool {
-        match (&self.rows.data, disc) {
-            (Contents::Library(p), DiscId::Library(_)) => p
-                .cache
-                .values()
-                .next()
-                .is_some_and(|r| DiscId::of(&r.track).contains(track)),
-            _ => disc.contains(track),
-        }
-    }
 }

@@ -94,10 +94,13 @@ impl Browser {
         self.filter(cx);
     }
     /// Scrolls a restored view back to where it was, once it has listed.
-    pub fn restore_scroll(&mut self, offset: f32) {
-        if offset > 0. {
+    pub fn restore_scroll(&mut self, offset: f32, album: Option<Page>) {
+        if offset > 0. || album.is_some() {
             self.bookmark = Some(Bookmark {
-                selected: None,
+                selected: album.map(|page| match page {
+                    Page::Disc(id) => RowKey::Disc(id),
+                    Page::Release(id) => RowKey::Release(id),
+                }),
                 marked: None,
                 offset: point(px(0.), px(-offset)),
             });
@@ -235,7 +238,10 @@ impl Browser {
                     self.search.update(cx, |s, cx| s.set_value("", window, cx));
                     self.query.clear();
                     self.table.update(cx, |t, _| scroll_to_top(t));
-                    self.discs.update(cx, |t, _| scroll_to_top(t));
+                    self.discs.update(cx, |t, cx| {
+                        Discs::set_items(t, Vec::new(), cx);
+                        scroll_to_top(t);
+                    });
                 }
                 self.task.take();
                 self.generation += 1;

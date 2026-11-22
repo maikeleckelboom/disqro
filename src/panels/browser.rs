@@ -7,14 +7,9 @@
 use super::{Pane, PaneContent, PanelType, Router, Services};
 use crate::{
     assets::FileIcon,
-    audio::Command,
     browser::{Browser, Location, SavedVisit, music_home},
-    catalog::Targets,
     collection::Page,
-    library::TrackList,
-    location::NAV_FIELD_HEIGHT,
-    player::Player,
-    table::{Layouts, queue_targets},
+    table::Layouts,
     theme::materials,
 };
 use gpui_kit::{
@@ -23,8 +18,7 @@ use gpui_kit::{
         ElementExt, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::Input,
-        menu::{PopupMenu, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenuItem},
         table::DataTable,
         v_flex,
     },
@@ -40,7 +34,6 @@ pub static TYPE: PanelType = PanelType {
     icon: IconName::Library,
     instances: super::Instances::Multiple,
     home: super::Home::Main,
-    toolbar: true,
     build: |services, record, window, cx| {
         let state: BrowserState = record.state();
         Rc::new(BrowserPane::new(services, state, window, cx))
@@ -71,6 +64,10 @@ pub struct BrowserState {
     pub albums: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_view: Option<crate::collection::AlbumView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_selection: Option<Page>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub search: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -85,7 +82,6 @@ fn is_zero(v: &f32) -> bool {
 pub struct BrowserPane {
     pub browser: Entity<Browser>,
     router: Entity<Router>,
-    player: Entity<Player>,
 }
 
 impl BrowserPane {
@@ -102,6 +98,12 @@ impl BrowserPane {
         let (player, catalog) = (services.player.clone(), services.catalog.clone());
         let browser = cx.new(|cx| {
             let mut b = Browser::new(player, catalog, folders, layouts, prefs, window, cx);
+            if let Some(view) = state.album_view {
+                b.discs.update(cx, |t, cx| {
+                    t.delegate_mut().view = view.validate();
+                    t.refresh(cx);
+                });
+            }
             let folder = state.folder.clone().unwrap_or_else(music_home);
             match state.location.clone() {
                 Some(Location::Folder(path)) => {
@@ -121,13 +123,12 @@ impl BrowserPane {
                 b.restore_search(state.search, window, cx);
             }
             b.filter_open = state.filter_open;
-            b.restore_scroll(state.scroll);
+            b.restore_scroll(state.scroll, state.album_selection);
             b
         });
         Self {
             browser,
             router: services.router.clone(),
-            player: services.player.clone(),
         }
     }
     /// What this instance saves, and what a new instance opened from it
@@ -138,6 +139,20 @@ impl BrowserPane {
             back,
             forward,
             scroll: browser.scroll_offset(cx),
+            album_selection: browser
+                .listing_discs()
+                .then(|| {
+                    let table = browser.discs.read(cx);
+                    table
+                        .delegate()
+                        .rows
+                        .get(table.selected_row()?)
+                        .map(|r| match r {
+                            crate::collection::Shelf::Disc(d) => Page::Disc(d.id.clone()),
+                            crate::collection::Shelf::Release(r) => Page::Release(r.key.clone()),
+                        })
+                })
+                .flatten(),
             ..Self::new_tab_state(browser, cx)
         }
     }
@@ -148,150 +163,12 @@ impl BrowserPane {
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
             albums: Some(browser.prefs.albums),
+            album_view: Some(browser.discs.read(cx).delegate().view.clone()),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
             search: browser.search.read(cx).value().to_string(),
             filter_open: browser.filter_open,
             ..Default::default()
         }
-    }
-}
-
-/// The panel menu: play or queue what the browser shows, and act on its view.
-fn browser_menu(
-    browser: &Entity<Browser>,
-    player: &Entity<Player>,
-    menu: PopupMenu,
-    cx: &App,
-) -> PopupMenu {
-    use crate::collection::{DiscId, Page};
-    let b = browser.read(cx);
-    let table = b.table.read(cx).delegate();
-    let all = table.all_targets();
-    let empty = all.is_empty();
-    let location = b.location.clone();
-    let catalog = b.catalog.clone();
-    let in_library = catalog
-        .read(cx)
-        .collections
-        .iter()
-        .any(|c| b.path.starts_with(&c.root.path));
-    let send = {
-        let (catalog, player) = (catalog.clone(), player.clone());
-        move |targets: Targets, shuffle: Option<bool>, cx: &mut App| {
-            let command: Box<dyn FnOnce(TrackList) -> Command> = match shuffle {
-                None => Box::new(Command::Enqueue),
-                Some(false) => Box::new(|t| Command::Play(t, 0)),
-                Some(true) => Box::new(|t: TrackList| {
-                    let start = fastrand::usize(..t.len());
-                    Command::Play(t, start)
-                }),
-            };
-            if let Some(on) = shuffle {
-                player.update(cx, |p, cx| p.command(Command::Shuffle(on), cx));
-            }
-            queue_targets(&catalog, &player, targets, command, cx);
-        }
-    };
-    let (s1, s2, s3) = (send.clone(), send.clone(), send);
-    let (t1, t2, t3) = (all.clone(), all.clone(), all);
-    let refresh = browser.clone();
-    let folder = b.path.clone();
-    // The page shown: a CD, or every CD of a release.
-    let page = match &b.location {
-        Location::Album { id, .. } => Some(Page::Disc(DiscId::Library(*id))),
-        Location::Release { id, .. } => Some(Page::Release(DiscId::Library(*id))),
-        _ => b.page.clone(),
-    };
-    let release = match &page {
-        Some(Page::Release(_)) => None,
-        _ => b.release().map(|(key, _)| Page::Release(key)),
-    };
-    let playing = player
-        .read(cx)
-        .playing_entry()
-        .filter(|e| match &page {
-            Some(Page::Disc(id)) => table.page_contains(id, &e.track),
-            Some(Page::Release(_)) => table.lists(&e.track),
-            None => false,
-        })
-        .cloned();
-    let cd_table = b.table.clone();
-    let release_table = b.table.clone();
-    let play_label = match &page {
-        Some(Page::Disc(_)) => "Play CD",
-        Some(Page::Release(_)) => "Play Release",
-        None if b.can_list_discs() => "Play Collection",
-        None => "Play All",
-    };
-    let menu = menu.when_some(playing, |menu, mut entry| {
-        entry.disc_context = crate::library::DiscContext::Selected;
-        let player = player.clone();
-        menu.item(
-            PopupMenuItem::new("Continue This CD").on_click(move |_, _, cx| {
-                player.update(cx, |_, cx| {
-                    cx.emit(crate::player::PlayerEvent::ContinueCd(entry.clone()))
-                })
-            }),
-        )
-    });
-    let menu = menu
-        .item(
-            PopupMenuItem::new(play_label)
-                .icon(IconName::Play)
-                .disabled(empty && page.is_none())
-                .on_click(move |_, _, cx| match &page {
-                    Some(page) => cd_table.update(cx, |t, cx| t.delegate().play_page(page, cx)),
-                    None => s1(t1.clone(), Some(false), cx),
-                }),
-        )
-        .when_some(release, |menu, release| {
-            menu.item(
-                PopupMenuItem::new("Play Release").on_click(move |_, _, cx| {
-                    release_table.update(cx, |t, cx| t.delegate().play_page(&release, cx))
-                }),
-            )
-        })
-        .item(
-            PopupMenuItem::new("Shuffle All")
-                .icon(IconName::Shuffle)
-                .disabled(empty)
-                .on_click(move |_, _, cx| s2(t2.clone(), Some(true), cx)),
-        )
-        .item(
-            PopupMenuItem::new("Add All to Queue")
-                .icon(IconName::ListEnd)
-                .disabled(empty)
-                .on_click(move |_, _, cx| s3(t3.clone(), None, cx)),
-        )
-        .separator();
-    match location {
-        Location::Folder(_) => menu
-            .when(!in_library, |menu| {
-                menu.item(
-                    PopupMenuItem::new("Add Folder to Library")
-                        .icon(IconName::Library)
-                        .on_click(move |_, _, cx| {
-                            catalog.update(cx, |c, cx| c.add_root(folder.clone(), cx))
-                        }),
-                )
-            })
-            .item(
-                PopupMenuItem::new("Refresh")
-                    .icon(IconName::RefreshCw)
-                    .on_click(move |_, w, cx| refresh.update(cx, |b, cx| b.reload(w, cx))),
-            ),
-        Location::Library(root) | Location::Album { root, .. } | Location::Release { root, .. } => {
-            menu.item(
-                PopupMenuItem::new(if root.is_some() {
-                    "Rescan Collection"
-                } else {
-                    "Rescan Collections"
-                })
-                .icon(IconName::RefreshCw)
-                .on_click(move |_, w, cx| refresh.update(cx, |b, cx| b.reload(w, cx))),
-            )
-        }
-        Location::Liked | Location::Playlist(_) => menu,
     }
 }
 
@@ -342,31 +219,82 @@ impl PaneContent for BrowserPane {
     fn save(&self, cx: &App) -> serde_json::Value {
         serde_json::to_value(BrowserPane::state(self.browser.read(cx), cx)).unwrap_or_default()
     }
-    fn toolbar(&self, _: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    fn focused(&self, _: &mut Window, cx: &mut App) {
+        let browser = self.browser.clone();
+        self.router
+            .update(cx, |r, cx| r.set_active(Some(&browser), cx));
+    }
+    fn watch(&self, cx: &mut Context<Pane>) -> Vec<Subscription> {
+        vec![
+            cx.observe(&self.browser, |pane, _, cx| pane.refresh(cx)),
+            cx.subscribe(
+                &self.browser,
+                |_, _, _: &crate::browser::ViewChanged, cx| cx.emit(super::PaneEvent::Changed),
+            ),
+        ]
+    }
+}
+
+impl Browser {
+    fn controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = *materials(cx);
-        let b = self.browser.read(cx);
+        let b = self;
         let mut items = Vec::new();
         if !b.is_page() && b.can_list_discs() {
             let albums = b.prefs.albums;
-            for (id, label, value) in [
-                ("view-tracks", "All Tracks", false),
-                ("view-albums", "Albums / CDs", true),
-            ] {
-                let browser = self.browser.clone();
-                items.push(
-                    Button::new(id)
-                        .ghost()
-                        .xsmall()
-                        .label(label)
-                        .selected(albums == value)
-                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
-                        .into_any_element(),
-                );
-            }
+            let browser = cx.entity();
+            items.push(
+                container_query(move |size, w, _| {
+                    let choices = [("All Tracks", false), ("Albums / CDs", true)];
+                    if size.width < px(290.) || w.viewport_size().width < px(800.) {
+                        let browser = browser.clone();
+                        Button::new("browser-view")
+                            .ghost()
+                            .xsmall()
+                            .label(if albums {
+                                "View: Albums / CDs"
+                            } else {
+                                "View: All Tracks"
+                            })
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for (name, value) in choices {
+                                    let browser = browser.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(name).checked(albums == value).on_click(
+                                            move |_, w, cx| {
+                                                browser.update(cx, |b, cx| b.view(value, w, cx))
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu
+                            })
+                            .into_any_element()
+                    } else {
+                        h_flex()
+                            .gap(px(3.))
+                            .children(choices.map(|(name, value)| {
+                                let browser = browser.clone();
+                                Button::new(name)
+                                    .ghost()
+                                    .xsmall()
+                                    .label(name)
+                                    .selected(albums == value)
+                                    .on_click(move |_, w, cx| {
+                                        browser.update(cx, |b, cx| b.view(value, w, cx))
+                                    })
+                            }))
+                            .into_any_element()
+                    }
+                })
+                .flex_1()
+                .h(px(25.))
+                .into_any_element(),
+            );
         }
         if b.location.is_folder() && b.page.is_none() {
             let include = b.subfolders;
-            let browser = self.browser.clone();
+            let browser = cx.entity();
             items.push(
                 Button::new("view-subfolders")
                     .ghost()
@@ -399,23 +327,6 @@ impl PaneContent for BrowserPane {
         }
         items
     }
-    fn menu(&self, menu: PopupMenu, _: &mut Window, cx: &mut App) -> PopupMenu {
-        browser_menu(&self.browser, &self.player, menu, cx)
-    }
-    fn focused(&self, _: &mut Window, cx: &mut App) {
-        let browser = self.browser.clone();
-        self.router
-            .update(cx, |r, cx| r.set_active(Some(&browser), cx));
-    }
-    fn watch(&self, cx: &mut Context<Pane>) -> Vec<Subscription> {
-        vec![
-            cx.observe(&self.browser, |pane, _, cx| pane.refresh(cx)),
-            cx.subscribe(
-                &self.browser,
-                |_, _, _: &crate::browser::ViewChanged, cx| cx.emit(super::PaneEvent::Changed),
-            ),
-        ]
-    }
 }
 
 /// The table of recordings, or of albums and CDs.
@@ -437,26 +348,16 @@ impl Render for Browser {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|b, _, w, cx| b.forward(w, cx)),
             );
-        if self.filter_open {
+        let controls = self.controls(cx);
+        if !controls.is_empty() {
             view = view.child(
                 h_flex()
-                    .h(px(crate::workspace::STRIP_HEIGHT))
-                    .px(px(6.))
+                    .px(px(8.))
+                    .gap(px(4.))
+                    .h(px(29.))
                     .items_center()
-                    .child(
-                        Styled::h(Input::new(&self.search).small(), px(NAV_FIELD_HEIGHT))
-                            .cleanable(true)
-                            .aria_label("Filter this view"),
-                    )
-                    .child(
-                        Button::new("hide-filter")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .tooltip("Hide filter")
-                            .accessibility_label("Hide filter")
-                            .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(false, w, cx))),
-                    ),
+                    .flex_shrink_0()
+                    .children(controls),
             );
         }
         if let Some(notice) = &self.notice {
@@ -478,15 +379,26 @@ impl Render for Browser {
         if self.listing_discs()
             && (!self.location.is_folder() || !self.discs.read(cx).delegate().rows.is_empty())
         {
+            let albums = self.discs.clone();
             return view.child(
-                div().flex_1().min_h_0().child(
-                    DataTable::new(&self.discs)
-                        .accessibility_label("Albums and CDs")
-                        .bordered(false)
-                        .stripe(false)
-                        .header_row_height(px(30.))
-                        .with_size(gpui_kit::component::Size::Size(px(42.))),
-                ),
+                div()
+                    .id("album-viewport")
+                    .mx(px(4.))
+                    .flex_1()
+                    .min_h_0()
+                    .on_prepaint(move |b, _, cx| {
+                        albums.update(cx, |t, cx| {
+                            crate::collection::Discs::fit(t, f32::from(b.size.width).floor(), cx)
+                        });
+                    })
+                    .child(
+                        DataTable::new(&self.discs)
+                            .accessibility_label("Albums and CDs")
+                            .bordered(false)
+                            .stripe(false)
+                            .header_row_height(px(30.))
+                            .with_size(gpui_kit::component::Size::Size(px(42.))),
+                    ),
             );
         }
         let fit = table.clone();

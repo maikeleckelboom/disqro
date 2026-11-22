@@ -31,6 +31,7 @@ pub struct Hit {
     pub target: Target,
     pub title: String,
     pub detail: String,
+    pub context: String,
 }
 #[derive(Default)]
 pub struct Matches {
@@ -74,7 +75,17 @@ impl Store {
                 || t.source.display().to_string(),
                 |d| format!("Chapter {} · {}", d.number, d.sheet.display()),
             );
+            let chapter = t
+                .disc
+                .as_ref()
+                .map(|disc| format!("Ch. {}", disc.number))
+                .unwrap_or_default();
             result.hits.push(Hit {
+                context: [t.artist.as_str(), &chapter, t.album.as_str()]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
                 target: Target::Track(row.id),
                 title: t.title.clone(),
                 detail: [t.artist.as_str(), t.album.as_str(), &source]
@@ -100,6 +111,7 @@ impl Store {
                 target: Target::Artist(name.clone()),
                 title: name,
                 detail: String::new(),
+                context: String::new(),
             }));
         let album_sql = "SELECT a.root_id, a.id, a.title, a.folder
             FROM albums_fts(?1) JOIN albums a ON a.id = albums_fts.rowid
@@ -134,12 +146,14 @@ impl Store {
                     target: Target::Release(root, release.first),
                     title: release.title.clone(),
                     detail: String::new(),
+                    context: String::new(),
                 });
             }
             result.hits.push(Hit {
                 target: Target::Album(root, id),
                 title,
                 detail,
+                context: String::new(),
             });
         }
         result.hits.extend(releases);
@@ -163,6 +177,7 @@ impl Store {
                     },
                     title,
                     detail: String::new(),
+                    context: String::new(),
                 }));
         }
         snapshot.commit()?;

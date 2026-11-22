@@ -1,10 +1,12 @@
 //! A disc has an authored CUE program, or a tagged album in one folder.
 //! Two identically titled rips in different folders remain distinct.
+mod albums;
 use crate::{
     library::{self, Track},
     store::{AlbumId, AlbumRow, Mark, Term},
     theme::materials,
 };
+pub use albums::AlbumView;
 use gpui_kit::{
     assets::IconName,
     component::{
@@ -68,7 +70,7 @@ impl ViewPrefs {
         self.subfolders.drain(..excess);
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
@@ -179,14 +181,26 @@ pub struct Release {
 #[derive(Default)]
 pub struct Discs {
     pub rows: Vec<Shelf>,
+    parents: Vec<Shelf>,
+    pub view: AlbumView,
+    viewport: f32,
+    pub loading: bool,
     /// Where the commands of the rows' menus go.
     pub browser: Option<WeakEntity<crate::browser::Browser>>,
     pub tracks: Option<WeakEntity<TableState<crate::table::MusicTable>>>,
 }
 impl Discs {
-    /// The discs, with each release's discs placed beneath it, where its
-    /// lowest-numbered disc would be. A year that differs between the sheets
-    /// of one release then cannot move the release.
+    pub fn new(
+        browser: WeakEntity<crate::browser::Browser>,
+        tracks: WeakEntity<TableState<crate::table::MusicTable>>,
+    ) -> Self {
+        Self {
+            browser: Some(browser),
+            tracks: Some(tracks),
+            ..Default::default()
+        }
+    }
+    /// Top-level albums and releases. Each release owns its numbered discs.
     pub fn shelve(discs: Vec<Arc<Disc>>) -> Vec<Shelf> {
         let mut members: HashMap<DiscId, Vec<Arc<Disc>>> = HashMap::new();
         for d in &discs {
@@ -197,7 +211,7 @@ impl Discs {
         for found in members.values_mut() {
             found.sort_by_key(|d| d.release.as_ref().map(|m| m.number));
         }
-        let mut rows = Vec::with_capacity(discs.len() + members.len());
+        let mut rows = Vec::with_capacity(discs.len());
         for d in discs {
             let Some(m) = &d.release else {
                 rows.push(Shelf::Disc(d));
@@ -218,11 +232,14 @@ impl Discs {
                 title: m.title.clone(),
                 folder: first
                     .folder
-                    .parent()
-                    .map(Path::to_owned)
-                    .unwrap_or_default(),
+                    .ancestors()
+                    .find(|dir| found.iter().all(|d| d.folder.starts_with(dir)))
+                    .unwrap_or(Path::new(""))
+                    .to_owned(),
                 cover: found.iter().find_map(|d| d.cover.clone()),
-                year: first.year,
+                year: first
+                    .year
+                    .filter(|y| found.iter().all(|disc| disc.year == Some(*y))),
                 format: if found.iter().all(|d| d.format == first.format) {
                     first.format.clone()
                 } else {
@@ -231,9 +248,8 @@ impl Discs {
                 count: found.iter().map(|d| d.count).sum(),
                 duration: found.iter().map(|d| d.duration).sum(),
                 complete: found.iter().all(|d| d.complete),
-                discs: found.clone(),
+                discs: found,
             })));
-            rows.extend(found.into_iter().map(Shelf::Disc));
         }
         rows
     }
@@ -435,177 +451,6 @@ impl Disc {
     pub fn duration(&self) -> f64 {
         self.duration
     }
-    fn label(&self, col: usize) -> String {
-        let member = self.member_label();
-        match col {
-            0 => match &member {
-                Some((number, sub)) if !sub.is_empty() => format!("{number} · {sub}"),
-                Some((number, _)) => number.clone(),
-                None => self.title.clone(),
-            },
-            // A release names its year once, above its discs.
-            1 if member.is_none() => self.year.map(|v| v.to_string()).unwrap_or_default(),
-            2 => self.count.to_string(),
-            3 if self.complete => library::clock(self.duration),
-            4 => self.format.clone(),
-            5 if member.is_some() => self
-                .folder
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            5 => self.folder.display().to_string(),
-            _ => String::new(),
-        }
-    }
-}
-impl Release {
-    fn label(&self, col: usize) -> String {
-        match col {
-            0 => self.title.clone(),
-            1 => self.year.map(|v| v.to_string()).unwrap_or_default(),
-            2 => self.count.to_string(),
-            3 if self.complete => library::clock(self.duration),
-            4 => self.format.clone(),
-            5 => self.folder.display().to_string(),
-            _ => String::new(),
-        }
-    }
-}
-impl Shelf {
-    fn label(&self, col: usize) -> String {
-        match self {
-            Self::Disc(d) => d.label(col),
-            Self::Release(r) => r.label(col),
-        }
-    }
-}
-impl TableDelegate for Discs {
-    fn columns_count(&self, _: &App) -> usize {
-        6
-    }
-    fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
-    }
-    fn column(&self, i: usize, _: &App) -> Column {
-        let (label, w) = [
-            ("Album / Disc", 340.),
-            ("Year", 56.),
-            ("Tracks", 60.),
-            ("Time", 76.),
-            ("Format", 68.),
-            ("Folder", 300.),
-        ][i];
-        Column::new(label, label).width(w)
-    }
-    fn cell_label(&self, r: usize, c: usize, _: &App) -> Option<SharedString> {
-        Some(self.rows.get(r)?.label(c).into())
-    }
-    fn render_td(
-        &mut self,
-        r: usize,
-        c: usize,
-        window: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
-        let m = *materials(cx);
-        let row = &self.rows[r];
-        let cell = h_flex()
-            .size_full()
-            .min_w_0()
-            .gap(px(10.))
-            .text_size(px(13.))
-            .text_color(if c == 0 { m.text } else { m.text_muted });
-        let (cover, member, discs) = match row {
-            Shelf::Disc(d) => (d.cover.as_ref(), d.member_label(), None),
-            Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
-        };
-        if c != 0 {
-            return cell.child(div().truncate().text_ellipsis_middle().child(row.label(c)));
-        }
-        // A disc of a release sits beneath the release's cover, without one
-        // of its own.
-        if let Some((number, subtitle)) = member {
-            return cell
-                .pl(px(42.))
-                .child(div().flex_shrink_0().text_color(m.text_muted).child(number))
-                .when(!subtitle.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_ellipsis_middle()
-                            .text_color(m.text_faint)
-                            .child(subtitle.to_owned()),
-                    )
-                });
-        }
-        let cover = cover
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
-        cell.child(
-            div()
-                .size(px(32.))
-                .flex_shrink_0()
-                .rounded(px(2.))
-                .overflow_hidden()
-                .bg(m.control)
-                .flex()
-                .items_center()
-                .justify_center()
-                .map(|d| match cover {
-                    Some(path) => d.child(img(path).size_full().object_fit(ObjectFit::Cover)),
-                    None => d.child(
-                        Icon::new(IconName::Disc3)
-                            .size(px(16.))
-                            .text_color(m.text_faint),
-                    ),
-                }),
-        )
-        .child({
-            let label = row.label(0);
-            div()
-                .id(("disc-title", r))
-                .min_w_0()
-                .truncate()
-                .text_ellipsis_middle()
-                .child(label.clone())
-                .tooltip(move |w, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
-                })
-        })
-        .when_some(discs, |d, n| {
-            d.child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(11.5))
-                    .text_color(m.text_faint)
-                    .child(format!("{n} CDs")),
-            )
-        })
-    }
-    fn context_menu(
-        &mut self,
-        ix: usize,
-        menu: gpui_kit::component::menu::PopupMenu,
-        _: &mut Window,
-        cx: &mut Context<TableState<Self>>,
-    ) -> gpui_kit::component::menu::PopupMenu {
-        let (Some(browser), Some(tracks), Some(row)) =
-            (self.browser.clone(), self.tracks.clone(), self.rows.get(ix))
-        else {
-            return menu;
-        };
-        match row {
-            Shelf::Disc(d) => crate::table::disc_menu(menu, d, browser, tracks, cx),
-            Shelf::Release(r) => crate::table::release_items(
-                menu,
-                r.key.clone(),
-                r.title.clone(),
-                browser,
-                tracks,
-                cx,
-            ),
-        }
-    }
 }
 
 /// Whether a folder track matches every search term. The same terms filter
@@ -674,7 +519,18 @@ mod release_tests {
         ];
         let discs = Discs::group(&rows, &Default::default(), Path::new(r"M:\"));
         assert_eq!(discs.len(), 3);
-        let shelf = Discs::shelve(discs);
+        let mut table = Discs {
+            parents: Discs::shelve(discs),
+            ..Default::default()
+        };
+        table.project();
+        assert_eq!(table.rows.len(), 2);
+        let Shelf::Release(release) = &table.rows[1] else {
+            panic!("missing release")
+        };
+        table.view.expanded.insert(release.key.clone());
+        table.project();
+        let shelf = table.rows;
         let labels: Vec<String> = shelf
             .iter()
             .map(|r| match r {

@@ -14,7 +14,6 @@ const PAGE: usize = 20;
 pub(super) struct LibrarySearch {
     workspace: WeakEntity<Workspace>,
     catalog: Entity<Catalog>,
-    previous: Option<FocusHandle>,
     input: Entity<InputState>,
     ticket: Ticket,
     rows: Matches,
@@ -22,6 +21,7 @@ pub(super) struct LibrarySearch {
     page: Option<usize>,
     status: String,
     scroll: ScrollHandle,
+    bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 
 impl Drop for LibrarySearch {
@@ -32,30 +32,213 @@ impl Drop for LibrarySearch {
 
 impl Workspace {
     pub(super) fn open_search(&mut self, w: &mut Window, cx: &mut Context<Self>) {
-        if let Some(search) = &self.search {
-            search.read(cx).input.read(cx).focus_handle(cx).focus(w, cx);
-            return;
+        if let Some(browser) = self.browser(cx)
+            && browser.read(cx).filter_open
+        {
+            browser.update(cx, |b, cx| b.set_filter_open(false, w, cx));
         }
-        let workspace = cx.weak_entity();
-        let catalog = self.services.catalog.clone();
-        self.search = Some(cx.new(|cx| LibrarySearch::new(workspace, catalog, w, cx)));
+        self.search_visible = true;
+        self.search_expanded = true;
+        self.search.update(cx, |s, cx| {
+            s.input.update(cx, |i, cx| {
+                i.focus(w, cx);
+                i.select_all(w, cx);
+            });
+            s.query(true, cx);
+        });
         cx.notify();
     }
+    pub(super) fn open_filter(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        let browser = self.ensure_browser(w, cx);
+        self.reveal_active_browser(w, cx);
+        self.hide_suggestions(cx);
+        self.search_expanded = true;
+        browser.update(cx, |b, cx| b.set_filter_open(true, w, cx));
+        cx.notify();
+    }
+    pub(super) fn hide_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.search_visible = false;
+        self.search_expanded = false;
+        self.search.update(cx, |s, _| {
+            s.ticket.next();
+            s.page = None;
+        });
+        cx.notify();
+    }
+    pub(super) fn search_field(&self, w: &Window, cx: &Context<Self>) -> AnyElement {
+        let browser = self.browser(cx);
+        let local = browser.as_ref().filter(|b| b.read(cx).filter_open);
+        let filtered = browser
+            .as_ref()
+            .is_some_and(|b| !b.read(cx).search.read(cx).value().is_empty());
+        let narrow = w.viewport_size().width < px(860.);
+        let local_scope = local.is_some();
+        if narrow && !self.search_expanded {
+            return div()
+                .occlude()
+                .child(
+                    Button::new("find-music")
+                        .ghost()
+                        .small()
+                        .icon(if filtered {
+                            IconName::ListFilter
+                        } else {
+                            IconName::Search
+                        })
+                        .accessibility_label("Find music")
+                        .tooltip(if filtered {
+                            "Find music · View filtered"
+                        } else {
+                            "Find music"
+                        })
+                        .on_click(cx.listener(move |s, _, w, cx| {
+                            if local_scope {
+                                s.open_filter(w, cx)
+                            } else {
+                                s.open_search(w, cx)
+                            }
+                        })),
+                )
+                .into_any_element();
+        }
+        let input = local
+            .map(|b| b.read(cx).search.clone())
+            .unwrap_or_else(|| self.search.read(cx).input.clone());
+        let menu_owner = cx.weak_entity();
+        let m = *materials(cx);
+        let popup = self.search_visible
+            && !self.search.read(cx).full_results()
+            && !input.read(cx).value().is_empty();
+        h_flex()
+            .id("shell-search")
+            .occlude()
+            .relative()
+            .flex_shrink_0()
+            .w(px(if narrow { 185. } else { 260. }))
+            .h(px(27.))
+            .items_center()
+            .rounded(px(4.))
+            .bg(m.chrome)
+            .child(
+                Button::new("search-scope")
+                    .ghost()
+                    .xsmall()
+                    .label(if local_scope { "This View" } else { "Library" })
+                    .icon(if filtered {
+                        IconName::ListFilter
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .accessibility_label("Search scope")
+                    .tooltip(if filtered {
+                        "Search scope · This view is filtered"
+                    } else {
+                        "Search scope"
+                    })
+                    .dropdown_menu(move |menu, _, _| {
+                        let a = menu_owner.clone();
+                        let b = a.clone();
+                        menu.item(
+                            PopupMenuItem::new("Library")
+                                .checked(!local_scope)
+                                .on_click(move |_, w, cx| {
+                                    let _ = a.update(cx, |s, cx| s.open_search(w, cx));
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("This View")
+                                .checked(local_scope)
+                                .on_click(move |_, w, cx| {
+                                    let _ = b.update(cx, |s, cx| s.open_filter(w, cx));
+                                }),
+                        )
+                    }),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(&input)
+                        .small()
+                        .appearance(false)
+                        .cleanable(true)
+                        .aria_label(if local_scope {
+                            "Filter this view"
+                        } else {
+                            "Search library"
+                        }),
+                ),
+            )
+            .capture_key_down(cx.listener(move |s, e: &KeyDownEvent, w, cx| {
+                if e.keystroke.modifiers.modified() {
+                    return;
+                }
+                match e.keystroke.key.as_str() {
+                    "escape" => {
+                        s.hide_suggestions(cx);
+                        if let Some(b) = s.browser(cx) {
+                            b.read(cx).list_focus(cx).focus(w, cx);
+                        }
+                    }
+                    key @ ("up" | "down") if s.search_visible => {
+                        s.search.update(cx, |search, cx| {
+                            if key == "up" {
+                                search.selected = search.selected.saturating_sub(1);
+                            } else {
+                                search.selected = (search.selected + 1)
+                                    .min(search.rows.hits.len().saturating_sub(1));
+                            }
+                            search.scroll.scroll_to_item(search.selected);
+                            cx.notify();
+                        })
+                    }
+                    _ => return,
+                }
+                w.prevent_default();
+                cx.stop_propagation();
+            }))
+            .when(popup, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .top(px(29.))
+                            .right_0()
+                            .w(px(360.))
+                            .child(self.search.clone()),
+                    )
+                    .with_priority(2),
+                )
+            })
+            .on_mouse_down_out(cx.listener(|s, e: &MouseDownEvent, _, cx| {
+                if !s
+                    .search
+                    .read(cx)
+                    .bounds
+                    .get()
+                    .is_some_and(|b| s.search_visible && b.contains(&e.position))
+                    && !s.search.read(cx).full_results()
+                    && (s.search_visible || s.search_expanded)
+                {
+                    s.hide_suggestions(cx);
+                }
+            }))
+            .into_any_element()
+    }
 }
-
 impl LibrarySearch {
-    fn new(
+    pub(super) fn new(
         workspace: WeakEntity<Workspace>,
         catalog: Entity<Catalog>,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let previous = w.focused(cx);
-        let input = cx.new(|cx| {
-            InputState::new(w, cx).placeholder("Search tracks, artists, albums, playlists…")
-        });
+        let input = cx.new(|cx| InputState::new(w, cx).placeholder("Find music"));
         cx.subscribe_in(&input, w, |s: &mut Self, _, event, w, cx| match event {
-            InputEvent::Change => {
+            InputEvent::Focus | InputEvent::Change => {
+                let _ = s.workspace.update(cx, |ws, cx| {
+                    ws.search_visible = true;
+                    ws.search_expanded = true;
+                    cx.notify();
+                });
                 s.page = None;
                 s.query(false, cx);
             }
@@ -64,16 +247,18 @@ impl LibrarySearch {
         })
         .detach();
         cx.subscribe(&catalog, |s: &mut Self, _, event, cx| {
-            if matches!(event, CatalogEvent::Changed | CatalogEvent::Content) {
+            if matches!(event, CatalogEvent::Changed | CatalogEvent::Content)
+                && s.workspace
+                    .upgrade()
+                    .is_some_and(|w| w.read(cx).search_visible)
+            {
                 s.query(true, cx);
             }
         })
         .detach();
-        input.read(cx).focus_handle(cx).focus(w, cx);
         Self {
             workspace,
             catalog,
-            previous,
             input,
             ticket: Ticket::default(),
             rows: Matches::default(),
@@ -81,6 +266,7 @@ impl LibrarySearch {
             page: None,
             status: String::new(),
             scroll: ScrollHandle::new(),
+            bounds: Default::default(),
         }
     }
     fn query(&mut self, preserve: bool, cx: &mut Context<Self>) {
@@ -125,7 +311,28 @@ impl LibrarySearch {
                     return;
                 }
                 match result {
-                    Ok(rows) => {
+                    Ok(mut rows) => {
+                        if s.page.is_none() && rows.hits.len() > PREVIEW {
+                            let mut groups = std::collections::HashSet::new();
+                            let mut keep = vec![false; rows.hits.len()];
+                            let mut available = PREVIEW;
+                            for (hit, slot) in rows.hits.iter().zip(&mut keep) {
+                                if available > 0 && groups.insert(hit.target.group()) {
+                                    *slot = true;
+                                    available -= 1;
+                                }
+                            }
+                            for slot in keep.iter_mut().filter(|v| !**v).take(available) {
+                                *slot = true;
+                            }
+                            rows.hits = rows
+                                .hits
+                                .into_iter()
+                                .zip(keep)
+                                .filter_map(|(h, keep)| keep.then_some(h))
+                                .collect();
+                            rows.more = true;
+                        }
                         s.status = if rows.hits.is_empty() {
                             "No results".into()
                         } else {
@@ -146,14 +353,20 @@ impl LibrarySearch {
         })
         .detach();
     }
-    fn dismiss(&self, w: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.workspace.update(cx, |s, cx| {
-            s.search = None;
-            cx.notify()
+    pub(super) fn full_results(&self) -> bool {
+        self.page.is_some()
+    }
+    fn close(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        self.page = None;
+        self.ticket.next();
+        let _ = self.workspace.update(cx, |ws, cx| {
+            ws.search_visible = false;
+            ws.search_expanded = false;
+            if let Some(b) = ws.browser(cx) {
+                b.read(cx).list_focus(cx).focus(w, cx);
+            }
+            cx.notify();
         });
-        if let Some(previous) = &self.previous {
-            previous.focus(w, cx);
-        }
     }
     fn open(&mut self, index: usize, w: &mut Window, cx: &mut Context<Self>) {
         let Some(Hit { target, title, .. }) = self.rows.hits.get(index).cloned() else {
@@ -167,8 +380,14 @@ impl LibrarySearch {
             cx.notify();
             return;
         };
-        self.dismiss(w, cx);
-        workspace.update(cx, |s, cx| s.reveal_active_browser(w, cx));
+        self.ticket.next();
+        self.page = None;
+        workspace.update(cx, |ws, cx| {
+            ws.search_visible = false;
+            ws.search_expanded = false;
+            ws.reveal_active_browser(w, cx);
+            cx.notify();
+        });
         browser.update(cx, |b, cx| match target {
             Target::Track(id) => b.show_search_track(id, w, cx),
             Target::Artist(name) => {
@@ -202,7 +421,8 @@ impl LibrarySearch {
     fn row(&self, index: usize, hit: &Hit, cx: &Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let group = hit.target.group();
-        let header = index == 0 || self.rows.hits[index - 1].target.group() != group;
+        let header = self.full_results()
+            && (index == 0 || self.rows.hits[index - 1].target.group() != group);
         let icon = match hit.target {
             Target::Track(_) => IconName::Music,
             Target::Artist(_) => IconName::User,
@@ -266,13 +486,13 @@ impl LibrarySearch {
                                             .text_size(px(13.))
                                             .child(hit.title.clone()),
                                     )
-                                    .when(!hit.detail.is_empty(), |d| {
+                                    .when(!hit.context.is_empty(), |d| {
                                         d.child(
                                             div()
                                                 .truncate()
                                                 .text_size(px(11.))
                                                 .text_color(m.text_muted)
-                                                .child(hit.detail.clone()),
+                                                .child(hit.context.clone()),
                                         )
                                     }),
                             ),
@@ -318,123 +538,109 @@ impl Render for LibrarySearch {
             .workspace
             .upgrade()
             .is_some_and(|s| s.read(cx).browser(cx).is_none());
-        div()
-            .id("library-search-overlay")
-            .absolute()
-            .inset_0()
+        let full = self.full_results();
+        let bounds = self.bounds.clone();
+        v_flex()
+            .id("library-results")
+            .on_prepaint(move |b, _, _| bounds.set(Some(b)))
+            .capture_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {
+                if e.keystroke.key == "escape" && !e.keystroke.modifiers.modified() {
+                    s.close(w, cx);
+                    w.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
             .occlude()
-            .bg(gpui_kit::black().opacity(0.36))
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(46.))
-            .on_click(cx.listener(|s, _, w, cx| s.dismiss(w, cx)))
-            .child(
-                v_flex()
-                    .id("library-search")
-                    .occlude()
-                    .role(Role::Dialog)
-                    .aria_label("Search library")
-                    .w((size.width - px(24.)).min(px(640.)))
-                    .max_h(size.height - px(58.))
-                    .rounded(px(7.))
+            .when(full, |d| {
+                d.size_full().px(px(18.)).pt(px(10.)).child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child("Library search results")
+                        .child(
+                            Button::new("close-results")
+                                .ghost()
+                                .small()
+                                .label("Done")
+                                .on_click(cx.listener(|s, _, w, cx| s.close(w, cx))),
+                        ),
+                )
+            })
+            .when(!full, |d| {
+                d.w_full()
+                    .max_h((size.height - px(70.)).min(px(315.)))
+                    .rounded(px(5.))
                     .border_1()
                     .border_color(m.control_line)
                     .bg(m.overlay)
-                    .p(px(7.))
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .capture_key_down(cx.listener(|s, e: &KeyDownEvent, w, cx| {
-                        match e.keystroke.key.as_str() {
-                            "escape" => s.dismiss(w, cx),
-                            "up" | "down" if !s.rows.hits.is_empty() => {
-                                let last = s.rows.hits.len() - 1;
-                                s.selected = if e.keystroke.key == "up" {
-                                    s.selected.saturating_sub(1)
-                                } else {
-                                    (s.selected + 1).min(last)
-                                };
-                                s.scroll.scroll_to_item(s.selected);
-                                s.input.read(cx).focus_handle(cx).focus(w, cx);
-                                cx.notify();
-                            }
-                            _ => return,
-                        }
-                        cx.stop_propagation();
-                        w.prevent_default();
-                    }))
-                    .child(
-                        Input::new(&self.input)
-                            .small()
-                            .prefix(Icon::new(IconName::Search).size(px(16.)))
-                            .aria_label("Search library"),
-                    )
-                    .when(!self.status.is_empty(), |d| {
+                    .p(px(4.))
+            })
+            .when(!self.status.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px(px(8.))
+                        .py(px(10.))
+                        .text_size(px(12.))
+                        .text_color(m.text_muted)
+                        .child(self.status.clone()),
+                )
+            })
+            .when(no_browser, |d| {
+                d.child(
+                    Button::new("search-open-browser")
+                        .ghost()
+                        .small()
+                        .label("Open Music Browser")
+                        .on_click(cx.listener(|s, _, w, cx| {
+                            let _ = s.workspace.update(cx, |ws, cx| {
+                                ws.ensure_browser(w, cx);
+                            });
+                            s.input.read(cx).focus_handle(cx).focus(w, cx);
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                v_flex()
+                    .id("search-results")
+                    .role(Role::ListBox)
+                    .aria_label("Library results")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(rows.iter().enumerate().map(|(i, h)| self.row(i, h, cx))),
+            )
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .when(self.page.is_some_and(|p| p > 0), |d| {
                         d.child(
-                            div()
-                                .px(px(8.))
-                                .py(px(10.))
-                                .text_size(px(12.))
-                                .text_color(m.text_muted)
-                                .child(self.status.clone()),
-                        )
-                    })
-                    .when(no_browser, |d| {
-                        d.child(
-                            Button::new("search-open-browser")
-                                .ghost()
+                            Button::new("search-prev")
                                 .small()
-                                .label("Open Music Browser")
-                                .on_click(cx.listener(|s, _, w, cx| {
-                                    let _ = s.workspace.update(cx, |ws, cx| {
-                                        ws.ensure_browser(w, cx);
-                                    });
-                                    s.input.read(cx).focus_handle(cx).focus(w, cx);
-                                    cx.notify();
+                                .ghost()
+                                .label("Previous results")
+                                .on_click(cx.listener(|s, _, _, cx| {
+                                    s.page = s.page.map(|p| p.saturating_sub(1));
+                                    s.query(false, cx);
                                 })),
                         )
                     })
-                    .child(
-                        v_flex()
-                            .id("search-results")
-                            .role(Role::ListBox)
-                            .aria_label("Library results")
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .children(rows.iter().enumerate().map(|(i, h)| self.row(i, h, cx))),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .when(self.page.is_some_and(|p| p > 0), |d| {
-                                d.child(
-                                    Button::new("search-prev")
-                                        .small()
-                                        .ghost()
-                                        .label("Previous results")
-                                        .on_click(cx.listener(|s, _, _, cx| {
-                                            s.page = s.page.map(|p| p.saturating_sub(1));
-                                            s.query(false, cx);
-                                        })),
-                                )
-                            })
-                            .when(self.rows.more, |d| {
-                                d.child(
-                                    Button::new("search-more")
-                                        .small()
-                                        .ghost()
-                                        .label(if self.page.is_none() {
-                                            "View all results"
-                                        } else {
-                                            "Next results"
-                                        })
-                                        .on_click(cx.listener(|s, _, _, cx| {
-                                            s.page = Some(s.page.map_or(0, |p| p + 1));
-                                            s.query(false, cx);
-                                        })),
-                                )
-                            }),
-                    ),
+                    .when(self.rows.more, |d| {
+                        d.child(
+                            Button::new("search-more")
+                                .small()
+                                .ghost()
+                                .label(if self.page.is_none() {
+                                    "View all results"
+                                } else {
+                                    "Next results"
+                                })
+                                .on_click(cx.listener(|s, _, _, cx| {
+                                    s.page = Some(s.page.map_or(0, |p| p + 1));
+                                    s.query(false, cx);
+                                })),
+                        )
+                    }),
             )
     }
 }

@@ -1185,21 +1185,13 @@ impl MusicTable {
             }
         }
     }
-    /// Every row of the view, in display order.
-    pub fn all_targets(&self) -> Targets {
-        match &self.rows.data {
-            Contents::Folder { sorted, .. } => Targets::Tracks(sorted.to_vec()),
-            Contents::Library(p) => Targets::Keys(p.scope, p.keys.to_vec()),
-        }
-    }
     fn is_playing(&self, t: &Track, cx: &App) -> bool {
         let status = &self.player.read(cx).status;
         status.playing && status.track.as_ref().is_some_and(|p| p.same_item(t))
     }
     /// A stable element id for the cells of row `ix`.
     fn cell_id(&self, ix: usize) -> u64 {
-        use std::hash::BuildHasher;
-        FIXED.hash_one(self.rows.key(ix))
+        stable_element_key(self.rows.key(ix))
     }
     /// A painted Cover cell. A missing or pending image keeps a faint tile
     /// in the same place, so the column stays aligned without repeating an
@@ -1416,6 +1408,45 @@ impl MusicTable {
 const FIXED: std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher> =
     std::hash::BuildHasherDefault::new();
 
+pub(crate) fn stable_element_key(key: impl std::hash::Hash) -> u64 {
+    use std::hash::BuildHasher;
+    FIXED.hash_one(key)
+}
+
+pub(crate) fn sort_heading(
+    col_ix: usize,
+    label: &'static str,
+    right_aligned: bool,
+    sorted: Option<ColumnSort>,
+    cx: &App,
+) -> Stateful<Div> {
+    let m = *materials(cx);
+    h_flex()
+        .id(("sort", col_ix))
+        .size_full()
+        .gap_1()
+        .when(right_aligned, |d| d.justify_end())
+        .text_size(px(11.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if sorted.is_some() {
+            m.text_muted
+        } else {
+            m.text_faint
+        })
+        .whitespace_nowrap()
+        .child(label)
+        .when_some(sorted, |d, dir| {
+            d.child(
+                Icon::new(if dir == ColumnSort::Ascending {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(px(12.)),
+            )
+        })
+}
+
 impl TableDelegate for MusicTable {
     fn rows_count(&self, _: &App) -> usize {
         self.rows.len()
@@ -1495,30 +1526,7 @@ impl TableDelegate for MusicTable {
         };
         let leading = grip(true, cx);
         let trailing = grip(false, cx);
-        h_flex()
-            .id(("sort", col_ix))
-            .size_full()
-            .gap_1()
-            .when(field.right_aligned(), |d| d.justify_end())
-            .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(if sorted.is_some() {
-                m.text_muted
-            } else {
-                m.text_faint
-            })
-            .whitespace_nowrap()
-            .child(field.label())
-            .when_some(sorted, |d, dir| {
-                d.child(
-                    Icon::new(if dir == ColumnSort::Ascending {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(px(12.)),
-                )
-            })
+        sort_heading(col_ix, field.label(), field.right_aligned(), sorted, cx)
             .children(trailing)
             .children(leading)
             .when(field.sortable(), |d| {

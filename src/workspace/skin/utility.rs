@@ -1,22 +1,18 @@
 use super::*;
 
-pub(super) const ICON_WIDTH: f32 = 32.;
 // The xsmall menu button and the strip's trailing inset.
 pub(super) const MENU_SPACE: f32 = 24. + 4.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Presentation {
     Labels,
-    Icons,
     Overflow,
 }
 
-fn fit(width: Pixels, labels: Pixels, count: usize) -> Presentation {
+fn fit(width: Pixels, labels: Pixels) -> Presentation {
     let available = width - px(MENU_SPACE);
     if available >= labels {
         Presentation::Labels
-    } else if available >= px(ICON_WIDTH * count as f32) {
-        Presentation::Icons
     } else {
         Presentation::Overflow
     }
@@ -48,11 +44,11 @@ pub(super) fn presentation(
                 }],
                 None,
             );
-            // Two insets, icon, gap and trailing border, matching the tab frame.
-            (line.width.ceil() + px(2. * 8. + 14. + 5. + 1.)).clamp(px(48.), px(220.))
+            // Two text insets, matching the tab frame.
+            (line.width.ceil() + px(2. * 8.)).clamp(px(48.), px(220.))
         })
         .sum();
-    fit(width, labels, tabs.len())
+    fit(width, labels)
 }
 
 pub(super) fn keyboard_tab(
@@ -93,20 +89,14 @@ pub(super) fn keyboard_tab(
 
 #[cfg(test)]
 mod tests {
-    use super::{ICON_WIDTH, MENU_SPACE, Presentation, fit, px};
+    use super::{MENU_SPACE, Presentation, fit, px};
     #[test]
     fn both_boundaries_reserve_the_menu_at_every_tab_count() {
         for count in 1..=4 {
             let labels = px(90. * count as f32);
             let full = labels + px(MENU_SPACE);
-            let compact = px(ICON_WIDTH * count as f32 + MENU_SPACE);
-            assert_eq!(fit(full, labels, count), Presentation::Labels);
-            assert_eq!(fit(full - px(0.5), labels, count), Presentation::Icons);
-            assert_eq!(fit(compact, labels, count), Presentation::Icons);
-            assert_eq!(
-                fit(compact - px(0.5), labels, count),
-                Presentation::Overflow
-            );
+            assert_eq!(fit(full, labels), Presentation::Labels);
+            assert_eq!(fit(full - px(0.5), labels), Presentation::Overflow);
         }
     }
 }

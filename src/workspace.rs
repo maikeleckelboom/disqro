@@ -40,7 +40,6 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-pub(crate) use skin::STRIP_HEIGHT;
 use skin::{Skin, SkinState, pane_of};
 use std::{collections::HashMap, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
 
@@ -99,8 +98,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f4", FocusLocation, Some("Disqro")),
         KeyBinding::new("ctrl-t", NewBrowserTab, Some("Disqro")),
         KeyBinding::new("ctrl-w", CloseTab, Some("Disqro")),
-        KeyBinding::new("space", PlayPause, Some("Disqro && !Input")),
-        KeyBinding::new("enter", PlaySelected, Some("DataTable")),
+        KeyBinding::new(
+            "space",
+            PlayPause,
+            Some("Disqro && !Input && !LibrarySection && !ReleaseDisclosure"),
+        ),
+        KeyBinding::new(
+            "enter",
+            PlaySelected,
+            Some("DataTable && !ReleaseDisclosure"),
+        ),
         KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("space", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("enter", OpenDirectory, Some("Tree")),
@@ -186,7 +193,9 @@ pub struct Workspace {
     /// Recent closed instances, with their former group companions.
     closed: Vec<ClosedPanel>,
     address: Option<Entity<crate::location::LocationBar>>,
-    search: Option<Entity<search::LibrarySearch>>,
+    search: Entity<search::LibrarySearch>,
+    search_visible: bool,
+    search_expanded: bool,
     left_hidden: bool,
     right_hidden: bool,
     player_height: f32,
@@ -355,6 +364,9 @@ impl Workspace {
             }),
         ];
         let workspace = std::mem::take(&mut saved.workspace);
+        let owner = cx.weak_entity();
+        let search = cx.new(|cx| search::LibrarySearch::new(owner, catalog.clone(), window, cx));
+        cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let mut app = Self {
             services,
             dock,
@@ -363,7 +375,9 @@ impl Workspace {
             undo: None,
             drag_checkpoint: None,
             address: None,
-            search: None,
+            search,
+            search_visible: false,
+            search_expanded: false,
             left_hidden: workspace.left_hidden,
             right_hidden: workspace.right_hidden,
             closed: workspace.closed,
@@ -602,6 +616,7 @@ impl Workspace {
                     self.remember_browser(&browser, cx);
                 }
                 self.schedule_save(cx);
+                cx.notify();
             }
             PaneEvent::Close => {
                 self.close_pane(&pane, window, cx);
@@ -642,9 +657,6 @@ impl Workspace {
             .id
             .filter(|id| !taken.contains(id))
             .unwrap_or_else(|| InstanceId::fresh(|id| taken.contains(&id)));
-        if record.id.is_none() && ty.toolbar {
-            record.toolbar_hidden = true;
-        }
         record.id = Some(id);
         let services = self.services.clone();
         cx.new(|cx| Pane::new(ty, id, &record, &services, window, cx))
@@ -1434,7 +1446,7 @@ impl Workspace {
             (None, _) => self.address = None,
         }
     }
-    fn title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let address = self
             .address
             .clone()
@@ -1470,19 +1482,9 @@ impl Workspace {
             .items_center()
             .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
             .child(div().w(px(24.)).h_full().flex_shrink_0())
-            .child(self.sidebar_button(Home::Leading, cx))
             .child(address)
-            .child(
-                div().occlude().child(
-                    Button::new("search-library")
-                        .ghost()
-                        .small()
-                        .icon(IconName::Search)
-                        .tooltip("Search library · Ctrl+K")
-                        .accessibility_label("Search library")
-                        .on_click(cx.listener(|s, _, w, cx| s.open_search(w, cx))),
-                ),
-            )
+            .child(self.search_field(window, cx))
+            .child(self.sidebar_button(Home::Leading, cx))
             .child(self.sidebar_button(Home::Trailing, cx))
             .when(!self.dock.read(cx).is_locked(), |d| {
                 d.child(
@@ -1577,13 +1579,9 @@ fn tab_menu(
     workspace: &WeakEntity<Workspace>,
     pane: &Entity<Pane>,
     menu: PopupMenu,
-    window: &mut Window,
+    _: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    let node = workspace
-        .upgrade()
-        .and_then(|w| w.read(cx).node_of(pane, cx));
-    let picker = workspace.clone();
     let editing = workspace
         .upgrade()
         .is_some_and(|w| !w.read(cx).dock.read(cx).is_locked());
@@ -1592,14 +1590,14 @@ fn tab_menu(
         w.node_of(pane, cx)
             .is_none_or(|node| w.group_members(node, cx).len() < 2)
     });
-    let (a, b, c) = (workspace.clone(), workspace.clone(), workspace.clone());
-    let (p1, p2, p3) = (pane.clone(), pane.clone(), pane.clone());
+    let (a, b) = (workspace.clone(), workspace.clone());
+    let (p1, p2) = (pane.clone(), pane.clone());
     let id = Workspace::panel_id(pane);
     let arrangement = workspace
         .upgrade()
         .and_then(|w| w.read(cx).sidebar_action(id, cx));
     let sidebar = workspace.clone();
-    Pane::menu(pane, menu, window, cx)
+    Pane::menu(pane, menu, cx)
         .separator()
         .when_some(arrangement, |menu, action| {
             menu.item(
@@ -1607,9 +1605,6 @@ fn tab_menu(
                     let _ = sidebar.update(cx, |s, cx| s.arrange_sidebar(id, action, w, cx));
                 }),
             )
-        })
-        .submenu("Open Panel Here", window, cx, move |menu, _, cx| {
-            picker_menu(&picker, node, menu, cx)
         })
         .when(editing, |menu| {
             menu.item(
@@ -1635,32 +1630,13 @@ fn tab_menu(
         })
         .separator()
         .item(Pane::close_item(pane))
-        .item(
-            PopupMenuItem::new("Close Other Tabs")
-                .disabled(alone)
-                .on_click(move |_, w, cx| {
-                    let _ = c.update(cx, |s, cx| {
-                        let others: Vec<_> = s
-                            .node_of(&p3, cx)
-                            .map(|node| s.group_members(node, cx))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|p| *p != p3)
-                            .collect();
-                        s.remember_layout(None, cx);
-                        for pane in others {
-                            s.remove_pane(&pane, w, cx);
-                        }
-                    });
-                }),
-        )
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         let empty = self.dock.read(cx).is_empty(DockPlacement::Center, cx);
-        let title = self.title_bar(cx);
+        let title = self.title_bar(window, cx);
         let player_height = self.player_height;
         let dock = AnyView::from(self.dock.clone());
         // Cached drawing omits descendants from subsequent accessibility trees.
@@ -1709,6 +1685,7 @@ impl Render for Workspace {
                 s.toggle_sidebar(Home::Trailing, w, cx)
             }))
             .on_action(cx.listener(|s, _: &FocusLocation, w, cx| {
+                s.hide_suggestions(cx);
                 s.ensure_browser(w, cx);
                 s.reveal_active_browser(w, cx);
                 s.bind_address(w, cx);
@@ -1718,9 +1695,7 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|s, _: &SearchLibrary, w, cx| s.open_search(w, cx)))
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
-                let browser = s.ensure_browser(w, cx);
-                s.reveal_active_browser(w, cx);
-                browser.update(cx, |b, cx| b.set_filter_open(true, w, cx));
+                s.open_filter(w, cx);
             }))
             .on_action(cx.listener(|s, _: &NewBrowserTab, w, cx| {
                 let state = s
@@ -1823,6 +1798,19 @@ impl Render for Workspace {
                     .min_h_0()
                     .relative()
                     .child(dock)
+                    .when(
+                        self.search_visible && self.search.read(cx).full_results(),
+                        |d| {
+                            d.child(
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .occlude()
+                                    .bg(m.canvas)
+                                    .child(self.search.clone()),
+                            )
+                        },
+                    )
                     .when(empty, |d| d.child(self.empty_state(cx))),
             )
             .child(
@@ -1847,7 +1835,6 @@ impl Render for Workspace {
                             .on_drag(PlayerResize, |_, _, _, cx| cx.new(|_| PlayerResize)),
                     ),
             )
-            .children(self.search.clone())
     }
 }
 

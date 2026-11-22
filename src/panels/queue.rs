@@ -50,7 +50,6 @@ pub static QUEUE: PanelType = PanelType {
     icon: IconName::ListMusic,
     instances: super::Instances::Single,
     home: super::Home::Trailing,
-    toolbar: false,
     build: |services, _, _, cx| Rc::new(cx.new(|cx| Entries::new(Mode::Queue, services, cx))),
 };
 
@@ -60,7 +59,6 @@ pub static HISTORY: PanelType = PanelType {
     icon: IconName::Clock,
     instances: super::Instances::Single,
     home: super::Home::Trailing,
-    toolbar: false,
     build: |services, _, _, cx| Rc::new(cx.new(|cx| Entries::new(Mode::History, services, cx))),
 };
 
@@ -419,6 +417,7 @@ impl Render for Entries {
                 )
                 .into_any_element()
         };
+        let panel = cx.entity();
         v_flex()
             .id("entries")
             .key_context("Queue")
@@ -458,6 +457,7 @@ impl Render for Entries {
                         .on_drop(end_drop),
                 )
             })
+            .context_menu(move |menu, _, cx| panel.read(cx).panel_menu(menu, cx))
     }
 }
 
@@ -484,9 +484,6 @@ impl PaneContent for Entity<Entries> {
             Mode::Queue => QUEUE.title.into(),
             Mode::History => HISTORY.title.into(),
         }
-    }
-    fn menu(&self, menu: PopupMenu, _: &mut Window, cx: &mut App) -> PopupMenu {
-        self.read(cx).panel_menu(menu, cx)
     }
     fn watch(&self, _: &mut Context<Pane>) -> Vec<Subscription> {
         Vec::new()

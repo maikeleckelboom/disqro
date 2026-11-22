@@ -6,7 +6,7 @@
 //! dropped on a playlist are added to it as new entries.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, ROW, nav_row},
+    nav::{DraggedFolder, nav_row},
 };
 use crate::{
     audio::Command,
@@ -20,9 +20,7 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable, WindowExt,
-        button::{Button, ButtonVariants},
-        h_flex,
+        Icon, Sizable, WindowExt, h_flex,
         input::{Input, InputEvent, InputState},
         menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
         tooltip::Tooltip,
@@ -34,13 +32,17 @@ use gpui_kit::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, rc::Rc, sync::Arc};
 
+// Library groups share one baseline grid. Weight distinguishes the two
+// primary destinations without giving them oversized selection backgrounds.
+const PRIMARY_ROW: f32 = 30.;
+const ITEM_ROW: f32 = 27.;
+
 pub static TYPE: PanelType = PanelType {
     key: "disqro.library",
     title: "Library",
     icon: IconName::Library,
     instances: super::Instances::Single,
     home: super::Home::Leading,
-    toolbar: false,
     build: |services, record, window, cx| {
         let state: LibraryState = record.state();
         let panel = cx.new(|cx| LibraryPanel::new(services, state, window, cx));
@@ -54,6 +56,8 @@ pub static TYPE: PanelType = PanelType {
 pub struct LibraryState {
     #[serde(skip_serializing_if = "is_zero")]
     pub scroll: f32,
+    pub collections_closed: bool,
+    pub playlists_closed: bool,
 }
 fn is_zero(v: &f32) -> bool {
     *v == 0.
@@ -64,11 +68,15 @@ pub struct LibraryPanel {
     router: Entity<Router>,
     player: Entity<Player>,
     renaming: Option<(PlaylistId, Entity<InputState>)>,
+    sections: LibraryState,
     scroll: ScrollHandle,
     focus: FocusHandle,
     /// Follows the active browser, whose view the rows mark.
     browser: Option<Subscription>,
 }
+
+struct SectionsChanged;
+impl EventEmitter<SectionsChanged> for LibraryPanel {}
 
 impl LibraryPanel {
     fn new(
@@ -96,6 +104,7 @@ impl LibraryPanel {
             catalog: services.catalog.clone(),
             router: services.router.clone(),
             player: services.player.clone(),
+            sections: state,
             renaming: None,
             scroll,
             focus: cx.focus_handle(),
@@ -114,6 +123,7 @@ impl LibraryPanel {
     fn state(&self) -> LibraryState {
         LibraryState {
             scroll: -f32::from(self.scroll.offset().y),
+            ..self.sections.clone()
         }
     }
     /// The view the active browser shows.
@@ -158,6 +168,8 @@ impl LibraryPanel {
             s.focus(window, cx);
             s.select_all(window, cx);
         });
+        self.sections.playlists_closed = false;
+        cx.emit(SectionsChanged);
         self.renaming = Some((id, input));
         cx.notify();
     }
@@ -278,7 +290,9 @@ impl LibraryPanel {
                             )
                         ),
                         &m,
-                    ),
+                    )
+                    .h(px(PRIMARY_ROW))
+                    .font_weight(FontWeight::MEDIUM),
                     &self.router,
                     all.clone(),
                 )
@@ -299,7 +313,9 @@ impl LibraryPanel {
                     "Liked Tracks".into(),
                     location == Some(Location::Liked),
                     &m,
-                ),
+                )
+                .h(px(PRIMARY_ROW))
+                .font_weight(FontWeight::MEDIUM),
                 &self.router,
                 Location::Liked,
             )
@@ -308,102 +324,94 @@ impl LibraryPanel {
             })
             .into_any_element(),
         );
-        rows.push(
-            section("Collections", &m)
-                .child(
-                    Button::new("add-collection")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Plus)
-                        .tooltip("Add music folder")
-                        .accessibility_label("Add music folder")
-                        .on_click(|_, w, cx| {
-                            w.dispatch_action(Box::new(crate::workspace::AddMusicFolder), cx)
-                        }),
+        rows.push(self.section(true, cx));
+        if !self.sections.collections_closed {
+            for c in &catalog.collections {
+                let id = c.root.id;
+                let path = c.root.path.clone();
+                let status = c.status.clone();
+                let tip = if c.online {
+                    c.root.name.clone()
+                } else {
+                    format!("{} is not available", path.display())
+                };
+                let this = cx.weak_entity();
+                let router = self.router.clone();
+                let scanning = catalog.is_scanning(id);
+                let selected = match location {
+                    Some(
+                        Location::Library(Some(r))
+                        | Location::Album { root: Some(r), .. }
+                        | Location::Release { root: Some(r), .. },
+                    ) => r == id,
+                    _ => false,
+                };
+                let view = Location::Library(Some(id));
+                let row = nav_row(
+                    ("collection", id as usize).into(),
+                    Icon::new(IconName::Disc3),
+                    c.root.name.clone().into(),
+                    selected,
+                    &m,
                 )
-                .into_any_element(),
-        );
-        for c in &catalog.collections {
-            let id = c.root.id;
-            let path = c.root.path.clone();
-            let status = c.status.clone();
-            let tip = (!c.online).then(|| format!("{} is not available", path.display()));
-            let this = cx.weak_entity();
-            let router = self.router.clone();
-            let scanning = catalog.is_scanning(id);
-            let selected = match location {
-                Some(
-                    Location::Library(Some(r))
-                    | Location::Album { root: Some(r), .. }
-                    | Location::Release { root: Some(r), .. },
-                ) => r == id,
-                _ => false,
-            };
-            let view = Location::Library(Some(id));
-            let row = nav_row(
-                ("collection", id as usize).into(),
-                Icon::new(IconName::Disc3),
-                c.root.name.clone().into(),
-                selected,
-                &m,
-            )
-            .when(!c.online, |d| d.opacity(0.45))
-            .when_some(status.filter(|_| scanning), |d, status| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(11.))
-                        .text_color(m.text_faint)
-                        .child(if status.starts_with("Reading") {
-                            "Reading"
-                        } else {
-                            "Scanning"
-                        }),
-                )
-            })
-            .when_some(tip, |d, tip| {
-                d.tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx))
-            });
-            let row =
-                Self::opens(row, &self.router, view.clone()).context_menu(move |menu, _, _| {
-                    let (b, c) = (this.clone(), this.clone());
-                    let folder = path.clone();
-                    let r = router.clone();
-                    let menu =
-                        Self::open_items(menu, router.clone(), view.clone(), IconName::Library)
-                            .item(
-                                PopupMenuItem::new("Browse Folder")
-                                    .icon(IconName::FolderOpen)
-                                    .on_click(move |_, w, cx| {
-                                        let destination = Destination::Folder {
-                                            path: folder.clone(),
-                                            root: None,
-                                        };
-                                        Router::open(&r, destination, false, w, cx)
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Rescan")
-                                    .icon(IconName::RefreshCw)
-                                    .disabled(scanning)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = b.update(cx, |s, cx| {
-                                            s.catalog.update(cx, |c, cx| c.rescan(id, cx))
-                                        });
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("Remove from Library…")
-                                    .icon(IconName::X)
-                                    .on_click(move |_, w, cx| {
-                                        let _ =
-                                            c.update(cx, |s, cx| s.confirm_remove_root(id, w, cx));
-                                    }),
-                            )
-                            .separator();
-                    Self::library_menu(menu)
-                });
-            rows.push(row.into_any_element());
+                .h(px(ITEM_ROW))
+                .when(!c.online, |d| d.opacity(0.45))
+                .when_some(status.filter(|_| scanning), |d, status| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(m.text_faint)
+                            .child(if status.starts_with("Reading") {
+                                "Reading"
+                            } else {
+                                "Scanning"
+                            }),
+                    )
+                })
+                .tooltip(move |w, cx| Tooltip::new(tip.clone()).build(w, cx));
+                let row =
+                    Self::opens(row, &self.router, view.clone()).context_menu(move |menu, _, _| {
+                        let (b, c) = (this.clone(), this.clone());
+                        let folder = path.clone();
+                        let r = router.clone();
+                        let menu =
+                            Self::open_items(menu, router.clone(), view.clone(), IconName::Library)
+                                .item(
+                                    PopupMenuItem::new("Browse Folder")
+                                        .icon(IconName::FolderOpen)
+                                        .on_click(move |_, w, cx| {
+                                            let destination = Destination::Folder {
+                                                path: folder.clone(),
+                                                root: None,
+                                            };
+                                            Router::open(&r, destination, false, w, cx)
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Rescan Collection")
+                                        .icon(IconName::RefreshCw)
+                                        .disabled(scanning)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = b.update(cx, |s, cx| {
+                                                s.catalog.update(cx, |c, cx| c.rescan(id, cx))
+                                            });
+                                        }),
+                                )
+                                .item(
+                                    PopupMenuItem::new("Remove from Library…")
+                                        .icon(IconName::X)
+                                        .on_click(move |_, w, cx| {
+                                            let _ = c.update(cx, |s, cx| {
+                                                s.confirm_remove_root(id, w, cx)
+                                            });
+                                        }),
+                                )
+                                .separator();
+                        Self::library_menu(menu)
+                    });
+                rows.push(row.into_any_element());
+            }
         }
         rows.extend(self.render_playlists(location, cx));
         rows
@@ -415,32 +423,10 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
-        let header = section("Playlists", &m)
-            .child(
-                Button::new("new-playlist")
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(IconName::Plus)
-                            .size(px(14.))
-                            .text_color(m.text_faint),
-                    )
-                    .accessibility_label("New Playlist")
-                    .tooltip("New Playlist · Ctrl+N")
-                    .on_click(|_, w, cx| {
-                        cx.stop_propagation();
-                        w.dispatch_action(Box::new(crate::workspace::NewPlaylist), cx)
-                    }),
-            )
-            .context_menu(|menu, _, _| {
-                menu.item(
-                    PopupMenuItem::new("New Playlist")
-                        .icon(IconName::Plus)
-                        .action(Box::new(crate::workspace::NewPlaylist)),
-                )
-            })
-            .into_any_element();
-        let mut rows = vec![header];
+        let mut rows = vec![self.section(false, cx)];
+        if self.sections.playlists_closed {
+            return rows;
+        }
         for p in playlists {
             let id = p.id;
             let selected = location == Some(Location::Playlist(id));
@@ -448,7 +434,7 @@ impl LibraryPanel {
                 // The label gives way to the name field.
                 rows.push(
                     h_flex()
-                        .h(px(ROW))
+                        .h(px(ITEM_ROW))
                         .mx(px(6.))
                         .pl(px(8.))
                         .pr(px(8.))
@@ -484,7 +470,8 @@ impl LibraryPanel {
                 p.name.clone().into(),
                 selected,
                 &m,
-            );
+            )
+            .h(px(ITEM_ROW));
             let (player, catalog, router) = (
                 self.player.clone(),
                 self.catalog.clone(),
@@ -514,21 +501,95 @@ impl LibraryPanel {
         }
         rows
     }
-}
-
-fn section(name: &'static str, m: &crate::theme::Materials) -> Stateful<Div> {
-    h_flex()
-        .id(name)
-        .h(px(ROW))
-        .mx(px(6.))
-        .pl(px(8.))
-        .pr(px(2.))
-        .mt(px(10.))
-        .items_center()
-        .flex_shrink_0()
-        .text_size(px(12.))
-        .text_color(m.text_muted)
-        .child(div().flex_1().min_w_0().truncate().child(name))
+    fn section(&self, collections: bool, cx: &Context<Self>) -> AnyElement {
+        let m = *materials(cx);
+        let (name, action_name, closed, action): (_, _, _, Box<dyn Action>) = if collections {
+            (
+                "Collections",
+                "Add music folder",
+                self.sections.collections_closed,
+                Box::new(crate::workspace::AddMusicFolder),
+            )
+        } else {
+            (
+                "Playlists",
+                "New Playlist",
+                self.sections.playlists_closed,
+                Box::new(crate::workspace::NewPlaylist),
+            )
+        };
+        let add = action.boxed_clone();
+        h_flex()
+            .id(name)
+            .group(name)
+            .key_context("LibrarySection")
+            .mt(px(8.))
+            .mx(px(6.))
+            .h(px(23.))
+            .flex_shrink_0()
+            .items_center()
+            .child(
+                h_flex()
+                    .id(("disclosure", collections as usize))
+                    .role(Role::Button)
+                    .aria_label(name)
+                    .aria_expanded(!closed)
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .flex_1()
+                    .h_full()
+                    .items_center()
+                    .px(px(8.))
+                    .gap(px(5.))
+                    .text_size(px(12.))
+                    .text_color(m.text_muted)
+                    .hover(|d| d.text_color(m.text))
+                    .focus_visible(|d| d.bg(m.hover).text_color(m.text))
+                    .child(name)
+                    .child(
+                        Icon::new(if closed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .size(px(12.)),
+                    )
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        let closed = if collections {
+                            &mut s.sections.collections_closed
+                        } else {
+                            &mut s.sections.playlists_closed
+                        };
+                        *closed = !*closed;
+                        cx.emit(SectionsChanged);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id(("section-add", collections as usize))
+                    .role(Role::Button)
+                    .aria_label(action_name)
+                    .tab_index(0)
+                    .size(px(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .opacity(0.)
+                    .group_hover(name, |d| d.opacity(1.))
+                    .focus_visible(|d| d.opacity(1.).bg(m.hover))
+                    .text_color(m.text_muted)
+                    .child(Icon::new(IconName::Plus).size(px(13.)))
+                    .tooltip(move |w, cx| Tooltip::new(action_name).build(w, cx))
+                    .on_click(move |_, w, cx| w.dispatch_action(add.boxed_clone(), cx)),
+            )
+            .context_menu(move |menu, _, _| {
+                menu.item(PopupMenuItem::new(action_name).action(action.boxed_clone()))
+            })
+            .into_any_element()
+    }
 }
 
 /// Play, queue, rename, duplicate or delete a playlist.
@@ -685,8 +746,10 @@ impl PaneContent for Entity<LibraryPanel> {
     fn save(&self, cx: &App) -> serde_json::Value {
         serde_json::to_value(self.read(cx).state()).unwrap_or_default()
     }
-    fn menu(&self, menu: PopupMenu, _: &mut Window, _: &mut App) -> PopupMenu {
-        LibraryPanel::library_menu(menu)
+    fn watch(&self, cx: &mut Context<super::Pane>) -> Vec<Subscription> {
+        vec![cx.subscribe(self, |_, _, _: &SectionsChanged, cx| {
+            cx.emit(super::PaneEvent::Changed)
+        })]
     }
     fn accepts_folder(&self) -> bool {
         true
@@ -703,14 +766,14 @@ mod tests {
     use crate::{catalog::Targets, store::Scope};
 
     #[test]
-    fn the_old_playlist_disclosure_is_ignored_and_scroll_is_kept() {
+    fn disclosures_restore_independently_with_legacy_scroll() {
         let state: LibraryState = serde_json::from_value(serde_json::json!({
             "playlists_closed": true, "scroll": 114.
         }))
         .unwrap();
         assert_eq!(
             serde_json::to_value(state).unwrap(),
-            serde_json::json!({"scroll": 114.})
+            serde_json::json!({"scroll": 114., "collections_closed":false, "playlists_closed":true})
         );
     }
 

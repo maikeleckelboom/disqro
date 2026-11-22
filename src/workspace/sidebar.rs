@@ -41,7 +41,11 @@ impl SidebarAction {
 
 /// Only offer a shortcut for a pair already sharing a group or vertical
 /// divider. Other placements remain under the user's normal dock controls.
-fn arrangement(tree: &PaneTree, selected: PanelId, peer: PanelId) -> Option<SidebarAction> {
+pub(super) fn arrangement(
+    tree: &PaneTree,
+    selected: PanelId,
+    peer: PanelId,
+) -> Option<SidebarAction> {
     let group = tree.find_panel_node(selected)?;
     let node = tree.find_node(group)?;
     let PaneRef::Tabs { panels, .. } = node.kind() else {
@@ -154,9 +158,8 @@ impl Workspace {
         div().occlude().child(
             Button::new(id)
                 .ghost()
-                .small()
+                .xsmall()
                 .icon(icon)
-                .selected(!self.sidebar_hidden(side))
                 .accessibility_label(label)
                 .tooltip(tip)
                 .on_click(cx.listener(move |s, _, w, cx| s.toggle_sidebar(side, w, cx))),
