@@ -1,0 +1,28 @@
+[
+  {
+    "build": "tapped",
+    "resizes": 250,
+    "frames_analyzed": 1102560,
+    "capture": "packets=2497 discontinuities=0 silent=0",
+    "capture_flags": "",
+    "amplitude_0": 2359.312,
+    "max_residual_0": 2.172,
+    "rms_residual_0": 0.511,
+    "amplitude_1": 1179.676,
+    "max_residual_1": 2.144,
+    "rms_residual_1": 0.513
+  },
+  {
+    "build": "untapped",
+    "resizes": 250,
+    "frames_analyzed": 1102560,
+    "capture": "packets=2497 discontinuities=0 silent=0",
+    "capture_flags": "",
+    "amplitude_0": 2359.312,
+    "max_residual_0": 2.172,
+    "rms_residual_0": 0.511,
+    "amplitude_1": 1179.676,
+    "max_residual_1": 2.144,
+    "rms_residual_1": 0.513
+  }
+]
