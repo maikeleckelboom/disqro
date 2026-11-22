@@ -1,9 +1,11 @@
-//! Paired PCM occupancy in a fixed square. Sample time controls phosphor
+//! Paired PCM occupancy independent of viewport size. Sample time controls phosphor
 //! decay, including during digital silence. Neither coordinate is synthesized.
 use crate::spectrum::{Speed, Stereo, choices};
 use kira::Frame;
 use serde::{Deserialize, Serialize};
-pub const SIDE: usize = 256;
+const DENSITY_SIDE: usize = 2048;
+const TRACE_SIDE: usize = 1024;
+const HALF_INTENSITY: f32 = 2.5;
 
 choices!(Axes { MidSide => "Mid / side", XY => "Left / right (XY)" });
 choices!(Ink { Density => "Point density", Trace => "Vector trace" });
@@ -52,14 +54,53 @@ impl Axes {
     }
 }
 pub struct Reading {
-    pub bounds: Option<[usize; 4]>,
-    pub intensity: Vec<u8>,
+    pub side: usize,
+    // Inclusive bounds of the visible cells in the analysis grid.
+    bounds: [usize; 4],
+    occupied: Vec<(u32, u8)>,
     pub stereo: Stereo,
 }
+
+pub struct Raster {
+    pub bounds: [usize; 4],
+    pub intensity: Vec<u8>,
+}
+
+impl Reading {
+    pub fn raster(&self, side: usize) -> Option<Raster> {
+        if self.occupied.is_empty() {
+            return None;
+        }
+
+        // Map cell centers into display pixels. Retain the peak where several
+        // cells share one pixel so thin traces survive in small panes.
+        let shift = self.side.trailing_zeros();
+        let pixel = |cell: usize| ((2 * cell + 1) * side) >> (shift + 1);
+        let [x, y, right, bottom] = self.bounds;
+        let (left, top) = (pixel(x).saturating_sub(1), pixel(y).saturating_sub(1));
+        let (right, bottom) = ((pixel(right) + 2).min(side), (pixel(bottom) + 2).min(side));
+        let width = right - left;
+        let mut intensity = vec![0; width * (bottom - top)];
+        for &(cell, value) in &self.occupied {
+            let cell = cell as usize;
+            let x = pixel(cell & (self.side - 1)) - left;
+            let y = pixel(cell >> shift) - top;
+            let index = y * width + x;
+            intensity[index] = intensity[index].max(value);
+        }
+        Some(Raster {
+            bounds: [left, top, right, bottom],
+            intensity,
+        })
+    }
+}
+
 pub struct Field {
     analysis: Analysis,
     rate: u32,
+    side: usize,
     cells: Vec<f32>,
+    active: Vec<u32>,
     scale: f32,
     previous: Option<(f32, f32)>,
     pub settled: bool,
@@ -67,24 +108,39 @@ pub struct Field {
 }
 impl Field {
     pub fn new(analysis: Analysis, rate: u32) -> Self {
+        let side = match analysis.ink {
+            Ink::Density => DENSITY_SIDE,
+            Ink::Trace => TRACE_SIDE,
+        };
         Self {
             analysis,
             rate,
-            cells: vec![0.; SIDE * SIDE],
+            side,
+            cells: vec![0.; side * side],
+            active: Vec::new(),
             scale: 1.,
             previous: None,
             settled: false,
             silent_frames: 0,
         }
     }
+    fn add(&mut self, cell: usize, weight: f32) {
+        if weight > 0. {
+            if self.cells[cell] == 0. {
+                self.active.push(cell as u32);
+            }
+            self.cells[cell] += weight;
+        }
+    }
+
     fn deposit(&mut self, x: f32, y: f32, weight: f32) {
         let (i, j) = (x as usize, y as usize);
         let (fx, fy) = (x - i as f32, y - j as f32);
-        let cell = j * SIDE + i;
-        self.cells[cell] += weight * (1. - fx) * (1. - fy);
-        self.cells[cell + 1] += weight * fx * (1. - fy);
-        self.cells[cell + SIDE] += weight * (1. - fx) * fy;
-        self.cells[cell + SIDE + 1] += weight * fx * fy;
+        let cell = j * self.side + i;
+        self.add(cell, weight * (1. - fx) * (1. - fy));
+        self.add(cell + 1, weight * fx * (1. - fy));
+        self.add(cell + self.side, weight * (1. - fx) * fy);
+        self.add(cell + self.side + 1, weight * fx * fy);
     }
     pub fn push(&mut self, frames: &[Frame]) {
         if self.settled && frames.iter().all(|f| *f == Frame::ZERO) {
@@ -93,9 +149,15 @@ impl Field {
         let half = self.analysis.persistence.half_life();
         self.scale *= (-((frames.len() as f32) / (self.rate as f32 * half))).exp2();
         if self.scale < 0.125 {
-            for c in &mut self.cells {
-                *c *= self.scale;
-            }
+            // Release cells far below the first visible intensity level.
+            self.active.retain(|&index| {
+                let cell = &mut self.cells[index as usize];
+                *cell *= self.scale;
+                if *cell < 0.0005 {
+                    *cell = 0.;
+                }
+                *cell > 0.
+            });
             self.scale = 1.;
         }
         let gain = match self.analysis.gain {
@@ -104,7 +166,7 @@ impl Field {
             Gain::Quad => 4.,
         };
         let weight = 48000. / self.rate as f32 / self.scale;
-        let k = (SIDE - 2) as f32 * 0.5;
+        let k = (self.side - 2) as f32 * 0.5;
         for &f in frames {
             let (x, y) = self.analysis.axes.coordinates(f);
             if f == Frame::ZERO {
@@ -120,14 +182,15 @@ impl Field {
                 self.previous = None;
                 continue;
             }
-            let (x, y) = ((1. + x) * k, (1. - y) * k);
+            let (x, y) = ((1. + x) * k + 0.5, (1. - y) * k + 0.5);
             if self.analysis.ink == Ink::Trace
                 && let Some((a, b)) = self.previous
             {
                 let steps = ((x - a).abs().max((y - b).abs()).ceil() as usize).clamp(1, 32);
+                let weight = weight / steps as f32;
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
-                    self.deposit(a + (x - a) * t, b + (y - b) * t, weight / steps as f32);
+                    self.deposit(a + (x - a) * t, b + (y - b) * t, weight);
                 }
             } else {
                 self.deposit(x, y, weight);
@@ -136,34 +199,38 @@ impl Field {
         }
         self.settled = self.silent_frames as f32 > self.rate as f32 * half * 18.;
         if self.settled {
-            self.cells.fill(0.);
+            for cell in self.active.drain(..) {
+                self.cells[cell as usize] = 0.;
+            }
         }
     }
     pub fn reading(&self, stereo: Stereo) -> Reading {
         // Bounded monotone density response, normalized for the decay window.
         let scale = self.scale * (0.24 / self.analysis.persistence.half_life());
-        let intensity: Vec<u8> = self
-            .cells
+        let (mut left, mut top, mut right, mut bottom) = (self.side, self.side, 0, 0);
+        let shift = self.side.trailing_zeros();
+        let occupied = self
+            .active
             .iter()
-            .map(|v| {
-                let hits = v * scale;
-                (255. * hits / (hits + 2.5)).round() as u8
+            .filter_map(|&cell| {
+                let hits = self.cells[cell as usize] * scale;
+                if hits < HALF_INTENSITY / 509. {
+                    return None;
+                }
+                let intensity = (255. * hits / (hits + HALF_INTENSITY) + 0.5) as u8;
+                let (x, y) = (cell as usize & (self.side - 1), cell as usize >> shift);
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x);
+                bottom = bottom.max(y);
+                Some((cell, intensity))
             })
             .collect();
-        let (mut x, mut y, mut right, mut bottom) = (SIDE, SIDE, 0, 0);
-        for (row, line) in intensity.as_chunks::<SIDE>().0.iter().enumerate() {
-            if let Some(first) = line.iter().position(|v| *v != 0) {
-                x = x.min(first);
-                right = right.max(1 + line.iter().rposition(|v| *v != 0).unwrap());
-                y = y.min(row);
-                bottom = row + 1;
-            }
-        }
-        let bounds = (right > x).then_some([x, y, right, bottom]);
         Reading {
-            intensity,
+            side: self.side,
+            occupied,
             stereo,
-            bounds,
+            bounds: [left, top, right, bottom],
         }
     }
 }

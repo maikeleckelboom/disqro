@@ -190,25 +190,24 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
         let reading = g.reading(Stereo::measure(&block));
         assert_eq!(reading.stereo.correlation, corr);
         assert_eq!(reading.stereo.mono_retained(), Some(mono));
-        let k = (field::SIDE - 2) as f32 * 0.5;
-        for (i, &v) in reading
-            .intensity
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| **v > 0)
-        {
+        let k = (reading.side - 2) as f32 * 0.5;
+        let raster = reading.raster(reading.side).unwrap();
+        let [left, top, right, _] = raster.bounds;
+        let width = right - left;
+        for (i, _) in raster.intensity.iter().enumerate().filter(|(_, v)| **v > 0) {
+            let column = (left + i % width) as f32;
+            let row = (top + i / width) as f32;
             assert!(
-                v > 0
-                    && ((i % field::SIDE) as f32 - (1. + x) * k).abs() <= 1.
-                    && ((i / field::SIDE) as f32 - (1. - y) * k).abs() <= 1.
+                (column - ((1. + x) * k + 0.5)).abs() <= 1.
+                    && (row - ((1. - y) * k + 0.5)).abs() <= 1.
             );
         }
-        assert!(reading.intensity.iter().any(|v| *v > 0));
+        assert!(raster.intensity.iter().any(|v| *v > 0));
         for _ in 0..2000 {
             g.push(&[Frame::ZERO; BLOCK]);
         }
         let silent = g.reading(Stereo::default());
-        assert!(g.settled && silent.intensity.iter().all(|&v| v == 0));
+        assert!(g.settled && silent.raster(silent.side).is_none());
         assert!(silent.stereo.correlation.is_none() && silent.stereo.mono_retained().is_none());
     }
     let mut g = field::Field::new(Default::default(), 48000);
@@ -223,8 +222,33 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
         g.push(block);
     }
     let reading = g.reading(Stereo::measure(&fixtures));
-    assert!(reading.intensity.iter().filter(|&&v| v > 0).count() > 5000);
+    let raster = reading.raster(reading.side).unwrap();
+    assert!(raster.intensity.iter().filter(|&&v| v > 0).count() > 5000);
     assert!(reading.stereo.correlation.unwrap().abs() < 0.01);
+}
+
+#[test]
+fn stereo_field_resolves_sub_cell_detail_when_the_plot_grows() {
+    let first = Frame::new(0.5, 0.5);
+    let second = Frame::new(0.505, 0.505);
+    let mut field = field::Field::new(Default::default(), 48000);
+    field.push(&[first; BLOCK]);
+    field.push(&[second; BLOCK]);
+    let reading = field.reading(Stereo::default());
+    let occupied_rows = |side| {
+        let raster = reading.raster(side).unwrap();
+        let [left, top, right, _] = raster.bounds;
+        raster
+            .intensity
+            .chunks_exact(right - left)
+            .enumerate()
+            .filter_map(|(row, values)| values.iter().any(|&v| v > 0).then_some(row + top))
+            .collect::<Vec<_>>()
+    };
+    let compact = occupied_rows(256);
+    assert!(compact.windows(2).all(|rows| rows[1] - rows[0] == 1));
+    let full = occupied_rows(1440);
+    assert!(full.windows(2).any(|rows| rows[1] - rows[0] > 1));
 }
 
 #[test]

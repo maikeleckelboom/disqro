@@ -95,13 +95,33 @@ fn bitmap(w: usize, h: usize, pixels: Vec<u8>) -> Arc<RenderImage> {
 fn bgra([r, g, b]: [u8; 3]) -> [u8; 4] {
     [b, g, r, 255]
 }
+
+struct FieldImage {
+    frame: Arc<VisualFrame>,
+    side: usize,
+    image: Option<([usize; 4], Arc<RenderImage>)>,
+}
+
+fn field_palette() -> &'static [[u8; 4]; 256] {
+    static PALETTE: std::sync::LazyLock<[[u8; 4]; 256]> = std::sync::LazyLock::new(|| {
+        std::array::from_fn(|i| {
+            // Give finer cells enough luminance to read against the grid.
+            let density = i as f32 / 255.;
+            let strength = (5. * density / (1. + 4. * density)).sqrt();
+            let [r, g, b] = ramp(&MARINE, strength);
+            [b, g, r, (strength * 255.).round() as u8]
+        })
+    });
+    &PALETTE
+}
+
 #[derive(Default)]
 struct Cache {
     last_painted: Option<std::time::Instant>,
     tiles: HashMap<u64, (usize, Arc<RenderImage>)>,
     waterfall: waterfall::Backdrop,
     paint_key: Option<(u64, u64, spec::Palette, spec::Floor, spec::Ceiling, usize)>,
-    field: Option<(Arc<VisualFrame>, Option<Arc<RenderImage>>)>,
+    field: Option<FieldImage>,
     labels: HashMap<&'static str, ShapedLine>,
     luts: Option<[[u8; 4]; 256]>,
 }
@@ -114,7 +134,7 @@ impl Cache {
             for (_, (_, im)) in images {
                 cx.drop_image(im, None);
             }
-            if let Some((_, Some(im))) = field {
+            if let Some((_, im)) = field.and_then(|field| field.image) {
                 cx.drop_image(im, None);
             }
             if let Some(im) = backdrop {
@@ -246,37 +266,42 @@ impl Cache {
         r: &field::Reading,
         w: &mut Window,
     ) {
+        let side =
+            ((f32::from(area.size.width) * w.scale_factor()).round() as usize).clamp(1, r.side);
         if self
             .field
             .as_ref()
-            .is_none_or(|(f, _)| !Arc::ptr_eq(f, frame))
+            .is_none_or(|cached| cached.side != side || !Arc::ptr_eq(&cached.frame, frame))
         {
-            if let Some((_, Some(im))) = self.field.take() {
+            if let Some((_, im)) = self.field.take().and_then(|field| field.image) {
                 let _ = w.drop_image(im);
             }
-            let image = r.bounds.map(|[x, y, right, bottom]| {
-                let lut: [_; 256] = std::array::from_fn(|i| bgra(ramp(&MARINE, i as f32 / 255.)));
-                let pixels = (y..bottom)
-                    .flat_map(|row| {
-                        r.intensity[row * field::SIDE + x..row * field::SIDE + right]
-                            .iter()
-                            .flat_map(|&v| lut[v as usize])
-                    })
+            let image = r.raster(side).map(|raster| {
+                let [x, y, right, bottom] = raster.bounds;
+                let palette = field_palette();
+                let pixels = raster
+                    .intensity
+                    .into_iter()
+                    .flat_map(|value| palette[value as usize])
                     .collect();
-                bitmap(right - x, bottom - y, pixels)
+                (raster.bounds, bitmap(right - x, bottom - y, pixels))
             });
-            self.field = Some((frame.clone(), image));
+            self.field = Some(FieldImage {
+                frame: frame.clone(),
+                side,
+                image,
+            });
         }
-        if let Some([x, y, right, bottom]) = r.bounds
-            && let Some((_, Some(im))) = &self.field
+        if let Some(([x, y, right, bottom], im)) =
+            self.field.as_ref().and_then(|f| f.image.as_ref())
         {
             let p = |x: usize, y: usize| {
                 point(
-                    area.left() + area.size.width * (x as f32 / field::SIDE as f32),
-                    area.top() + area.size.height * (y as f32 / field::SIDE as f32),
+                    area.left() + area.size.width * (x as f32 / side as f32),
+                    area.top() + area.size.height * (y as f32 / side as f32),
                 )
             };
-            let bounds = Bounds::from_corners(p(x, y), p(right, bottom));
+            let bounds = Bounds::from_corners(p(*x, *y), p(*right, *bottom));
             let _ = w.paint_image(bounds, bounds, Default::default(), im.clone(), 0, false);
         }
     }
