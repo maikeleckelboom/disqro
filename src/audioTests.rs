@@ -45,6 +45,15 @@ fn read_all(dec: &mut Recording) -> Vec<Frame> {
 
 #[test]
 fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
+    check_chapter_render(false);
+}
+
+#[test]
+fn qualification_tap_reads_full_level_while_every_output_sample_is_zero() {
+    check_chapter_render(true);
+}
+
+fn check_chapter_render(silent: bool) {
     use kira::backend::{Backend, Renderer};
     use std::time::Instant;
 
@@ -74,7 +83,7 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
     let monitor = crate::signal::SignalMonitor::default();
     let reader = monitor.subscribe();
     let mut output = AudioManager::<Capture>::new(AudioManagerSettings {
-        main_track_builder: MainTrackBuilder::new().with_effect(monitor),
+        main_track_builder: output_track(monitor, silent),
         ..Default::default()
     })
     .unwrap();
@@ -100,6 +109,10 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
             .iter()
             .all(|peak| *peak > 0.35)
     );
+    if silent {
+        assert!(frames.iter().all(|s| *s == [0., 0.]));
+        return;
+    }
     let start = frames.iter().position(|s| s[0] != 0.).unwrap();
     let boundary = disc_frame(tracks[1].disc.as_ref().unwrap().start, 48000);
     for i in boundary - 512..boundary + 512 {

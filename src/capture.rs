@@ -38,7 +38,11 @@ impl Drop for Demand {
 impl Capture {
     pub fn writer(&self) -> Writer {
         let (producer, reader) = RingBuffer::new(SLOTS);
-        *self.consumer.lock().unwrap() = Some(reader);
+        // A replacement device starts a new frame sequence. A panel can
+        // subscribe after construction and before the first completed block.
+        let mut consumer = self.consumer.lock().unwrap();
+        self.latest_end.store(0, Release);
+        *consumer = Some(reader);
         Writer {
             producer,
             epoch: 0,
@@ -55,6 +59,9 @@ impl Capture {
     }
     pub fn reset(&self) {
         self.epoch.fetch_add(1, AcqRel);
+    }
+    pub fn position(&self) -> u64 {
+        self.latest_end.load(Acquire)
     }
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Acquire)
@@ -163,5 +170,20 @@ mod tests {
         let old = capture.epoch();
         let _new = capture.subscribe();
         assert_ne!(old, capture.epoch());
+    }
+    #[test]
+    fn replacement_writer_exposes_its_origin_before_the_first_block() {
+        let capture = Arc::new(Capture::default());
+        let demand = capture.subscribe();
+        let mut old = capture.writer();
+        old.observe(&capture, 48000, &[Frame::ZERO; BLOCK * 2]);
+        assert_eq!(capture.position(), (BLOCK * 2) as u64);
+        drop(old);
+        let mut new = capture.writer();
+        capture.reset(); // SignalTap::init for the replacement endpoint
+        assert_eq!(capture.position(), 0);
+        new.observe(&capture, 96000, &[Frame::ZERO; BLOCK]);
+        capture.drain(|b| assert_eq!((b.start, b.rate, b.epoch), (0, 96000, capture.epoch())));
+        drop(demand);
     }
 }

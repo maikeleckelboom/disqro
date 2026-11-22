@@ -19,7 +19,7 @@ pub const BANDS: [(f32, f32, &str); 6] = [
 
 macro_rules! choices {
     ($name:ident { $first:ident => $default:literal $(, $variant:ident => $label:literal)* }) => {
-        #[derive(Debug,Clone,Copy,Default,Eq,PartialEq,Serialize,Deserialize)]
+        #[derive(Debug,Clone,Copy,Default,Eq,PartialEq,Hash,Serialize,Deserialize)]
         pub enum $name { #[default] $first, $($variant),* }
         impl $name {
             pub const ALL: &[Self] = &[Self::$first, $(Self::$variant),*];
@@ -29,6 +29,7 @@ macro_rules! choices {
         }
     };
 }
+pub(crate) use choices;
 choices!(Mode { Stereo => "Stereo power", Left => "Left", Right => "Right", Mid => "Mid", Side => "Side" });
 choices!(Style { Trace => "Spectrum trace", Bands => "Band energy" });
 choices!(Resolution { Standard => "Standard · 170 ms", Fast => "Fast · 85 ms", Fine => "Fine · 340 ms" });
@@ -135,7 +136,7 @@ pub struct Transform {
     energy_scale: f64,
     // L, R, M, S squared peak-equivalent amplitudes.
     bins: Vec<[f64; 4]>,
-    pub stereo: Stereo,
+    stereo: Option<Stereo>,
 }
 
 impl Transform {
@@ -159,13 +160,16 @@ impl Transform {
             coherent: 1. / sum.powi(2),
             energy_scale: sum.powi(2) / (n as f64 * squares),
             bins: vec![[0.; 4]; n / 2 + 1],
-            stereo: Stereo::default(),
+            stereo: None,
         }
+    }
+    pub fn stereo(&mut self, frames: &[Frame]) -> Stereo {
+        *self.stereo.get_or_insert_with(|| Stereo::measure(frames))
     }
     pub fn measure(&mut self, frames: &[Frame]) {
         let n = self.input.len();
         assert_eq!(frames.len(), n);
-        self.stereo = Stereo::measure(frames);
+        self.stereo = None;
         for ((x, w), f) in self.input.iter_mut().zip(&self.window).zip(frames) {
             *x = finite(f.left) * w;
         }
@@ -200,7 +204,7 @@ impl Transform {
             ];
         }
     }
-    fn power(&self, k: usize, mode: Mode) -> f64 {
+    pub(crate) fn power(&self, k: usize, mode: Mode) -> f64 {
         let [l, r, m, s] = self.bins[k];
         match mode {
             Mode::Stereo => (l + r) * 0.5,

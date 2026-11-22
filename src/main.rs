@@ -28,9 +28,13 @@ mod queue;
 mod recording;
 mod release;
 mod signal;
+#[path = "spectralHistory.rs"]
+mod spectral_history;
 mod spectrum;
 #[path = "spectrumWorker.rs"]
 mod spectrum_worker;
+#[path = "stereoField.rs"]
+mod stereo_field;
 mod store;
 mod system;
 mod table;
@@ -42,9 +46,17 @@ mod workspace;
 use gpui_kit::{component::TitleBar, prelude::*, *};
 use workspace::*;
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    let mut source = args.next();
+    if source.as_deref() == Some(std::ffi::OsStr::new("--qualify-silent")) {
+        if !cfg!(feature = "qualification") || std::env::var_os("DISQRO_PROFILE_DIR").is_none() {
+            std::process::exit(2);
+        }
+        audio::qualify_silently();
+        source = args.next();
+    }
     diagnostics::start();
-    let arg = std::env::args_os()
-        .nth(1)
+    let arg = source
         .map(std::path::PathBuf::from)
         .and_then(|p| std::path::absolute(p).ok());
     gpui_kit::application()

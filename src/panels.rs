@@ -20,6 +20,7 @@
 //! [`PaneContent`] implementation, plus one line in [`TYPES`]. The workspace
 //! creates, places, closes, saves and restores it without knowing the type.
 pub mod browser;
+mod instruments;
 pub mod library;
 pub mod locations;
 pub mod nav;
@@ -114,6 +115,8 @@ pub static TYPES: &[&PanelType] = &[
     &queue::QUEUE,
     &queue::HISTORY,
     &spectrum::TYPE,
+    &instruments::SPECTROGRAM,
+    &instruments::STEREO_FIELD,
 ];
 
 /// What an instance saves in the layout, under its type's key.
@@ -577,6 +580,8 @@ impl Router {
 /// The state every panel shares, whatever its type or placement.
 #[derive(Clone)]
 pub struct Services {
+    /// Presented Stereo Field instances providing the workspace's stereo readouts.
+    pub field_readouts: Entity<std::collections::HashSet<EntityId>>,
     pub player: Entity<Player>,
     pub catalog: Entity<Catalog>,
     pub locations: Entity<locations::Locations>,

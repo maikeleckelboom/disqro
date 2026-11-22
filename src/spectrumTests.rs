@@ -96,7 +96,9 @@ fn stereo_modes_preserve_phase_and_single_channel_energy() {
         (1., 0., None, Some(0.5)),
         (0., 0., None, None),
     ] {
-        t.measure(&tone(n, 104., l, r));
+        let samples = tone(n, 104., l, r);
+        t.measure(&samples);
+        let stereo = t.stereo(&samples);
         let (l, r) = (f64::from(l), f64::from(r));
         for (mode, expected) in [
             (Mode::Left, l * l),
@@ -107,19 +109,19 @@ fn stereo_modes_preserve_phase_and_single_channel_energy() {
         ] {
             near(t.power(104, mode), expected, 1e-6);
         }
-        let [left, right, mid, side] = t.stereo.energy;
+        let [left, right, mid, side] = stereo.energy;
         near(left, l * l / 2., 1e-6);
         near(right, r * r / 2., 1e-6);
         near(mid + side, (left + right) / 2., 1e-9);
-        assert_eq!(t.stereo.correlation, corr);
-        assert_eq!(t.stereo.mono_retained(), mono);
-        assert_eq!(t.stereo.opposed(), corr == Some(-1.));
+        assert_eq!(stereo.correlation, corr);
+        assert_eq!(stereo.mono_retained(), mono);
+        assert_eq!(stereo.opposed(), corr == Some(-1.));
     }
     let mut input = tone(n, 104., 0., 1.);
     input[0].left = f32::NAN;
     input[1].left = f32::INFINITY;
     t.measure(&input);
-    assert_eq!(t.stereo.correlation, None);
+    assert_eq!(t.stereo(&input).correlation, None);
     assert!(t.bins.iter().all(|b| b.iter().all(|p| p.is_finite())));
 }
 

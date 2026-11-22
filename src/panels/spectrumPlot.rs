@@ -18,6 +18,7 @@ use std::{
 };
 
 pub(super) struct Plot {
+    field_readouts: Entity<std::collections::HashSet<EntityId>>,
     pub(super) failed: bool,
     pub(super) reading: Option<Arc<Reading>>,
     pub(super) settings: Settings,
@@ -31,8 +32,12 @@ struct Labels {
     color: Hsla,
 }
 impl Plot {
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(
+        settings: Settings,
+        field_readouts: Entity<std::collections::HashSet<EntityId>>,
+    ) -> Self {
         Self {
+            field_readouts,
             reading: None,
             failed: false,
             settings,
@@ -168,13 +173,15 @@ impl Render for Plot {
                             .text_color(m.text_muted)
                             .child(format),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(phase_color)
-                            .child(phase),
-                    ),
+                    .when(self.field_readouts.read(cx).is_empty(), |row| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(phase_color)
+                                .child(phase),
+                        )
+                    }),
             )
     }
 }

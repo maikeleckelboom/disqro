@@ -62,7 +62,11 @@ impl Spectrum {
         Self {
             player: s.player.clone(),
             settings,
-            plot: cx.new(|_| Plot::new(settings)),
+            plot: cx.new(|cx| {
+                cx.observe(&s.field_readouts, |_, _, cx| cx.notify())
+                    .detach();
+                Plot::new(settings, s.field_readouts.clone())
+            }),
             focus: cx.focus_handle(),
             tab: false,
             visible: w.visibility() == WindowVisibility::Visible,

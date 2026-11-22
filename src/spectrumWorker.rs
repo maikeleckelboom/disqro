@@ -9,8 +9,8 @@ use async_channel::{Receiver, Sender};
 use kira::Frame;
 use std::{
     cell::RefCell,
-    collections::HashMap,
-    sync::{Arc, atomic::Ordering::Relaxed, mpsc},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, atomic::Ordering::Relaxed, mpsc},
     time::{Duration, Instant},
 };
 
@@ -24,32 +24,65 @@ pub struct Reading {
     pub stereo: Stereo,
     pub published: Instant,
 }
-type Update = Option<Arc<Reading>>;
-enum Control {
-    Add(usize, Settings, Sender<Update>),
-    Remove(usize),
-}
+#[path = "visualStreams.rs"]
+mod visual_streams;
+use visual_streams::Streams;
+pub use visual_streams::{Delivery, Payload, Request, VisualFrame};
 
+type Update = Option<Arc<Reading>>;
+enum Listener {
+    Spectrum(Settings, Sender<Update>),
+    Visual(Request, Delivery, Sender<Option<Arc<VisualFrame>>>, u64),
+}
+type Listeners = Arc<Mutex<HashMap<usize, Listener>>>;
+
+#[derive(Clone)]
+struct Control {
+    // Only UI and worker touch this registry. One slot per live lease and
+    // one pending wake, even if many tabs open and close between drains.
+    listeners: Listeners,
+    wake: mpsc::SyncSender<()>,
+}
+impl Control {
+    fn changed(&self) -> bool {
+        !matches!(
+            self.wake.try_send(()),
+            Err(mpsc::TrySendError::Disconnected(_))
+        )
+    }
+}
 pub struct Hub {
     pub capture: Arc<Capture>,
-    tx: RefCell<Option<mpsc::Sender<Control>>>,
+    control: RefCell<Option<Control>>,
     next: std::cell::Cell<usize>,
 }
 pub struct Subscription {
     _demand: Demand,
     id: usize,
-    tx: mpsc::Sender<Control>,
+    control: Control,
+}
+impl Subscription {
+    pub fn set_delivery(&self, delivery: Delivery) {
+        if let Some(Listener::Visual(_, old, _, _)) =
+            self.control.listeners.lock().unwrap().get_mut(&self.id)
+            && *old != delivery
+        {
+            *old = delivery;
+            self.control.changed();
+        }
+    }
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
-        let _ = self.tx.send(Control::Remove(self.id));
+        self.control.listeners.lock().unwrap().remove(&self.id);
+        self.control.changed();
     }
 }
 impl Hub {
     pub fn new(capture: Arc<Capture>) -> Self {
         Self {
             capture,
-            tx: RefCell::default(),
+            control: RefCell::default(),
             next: 0.into(),
         }
     }
@@ -57,32 +90,51 @@ impl Hub {
         &self,
         settings: Settings,
     ) -> anyhow::Result<(Subscription, Receiver<Update>)> {
-        let mut worker = self.tx.borrow_mut();
+        let (send, recv) = async_channel::bounded(1);
+        Ok((self.attach(Listener::Spectrum(settings, send))?, recv))
+    }
+    pub fn visualize(
+        &self,
+        request: Request,
+        delivery: Delivery,
+    ) -> anyhow::Result<(Subscription, Receiver<Option<Arc<VisualFrame>>>)> {
+        let (send, recv) = async_channel::bounded(1);
+        Ok((
+            self.attach(Listener::Visual(
+                request,
+                delivery,
+                send,
+                self.capture.position(),
+            ))?,
+            recv,
+        ))
+    }
+    fn attach(&self, listener: Listener) -> anyhow::Result<Subscription> {
+        let mut worker = self.control.borrow_mut();
         if worker.is_none() {
-            let (tx, rx) = mpsc::channel();
+            let (wake, rx) = mpsc::sync_channel(1);
+            let listeners = Listeners::default();
+            let registry = listeners.clone();
             let capture = self.capture.clone();
             std::thread::Builder::new()
                 .name("disqro-spectrum".into())
-                .spawn(move || run(capture, rx))?;
-            *worker = Some(tx);
+                .spawn(move || run(capture, registry, rx))?;
+            *worker = Some(Control { listeners, wake });
         }
-        let tx = worker.as_ref().unwrap();
+        let control = worker.as_ref().unwrap();
         let id = self.next.get();
         self.next.set(id.wrapping_add(1));
         let demand = self.capture.subscribe();
-        let (send, recv) = async_channel::bounded(1);
-        if tx.send(Control::Add(id, settings, send)).is_err() {
+        control.listeners.lock().unwrap().insert(id, listener);
+        if !control.changed() {
             *worker = None;
             anyhow::bail!("Spectrum worker stopped");
         }
-        Ok((
-            Subscription {
-                _demand: demand,
-                id,
-                tx: tx.clone(),
-            },
-            recv,
-        ))
+        Ok(Subscription {
+            _demand: demand,
+            id,
+            control: control.clone(),
+        })
     }
 }
 
@@ -186,19 +238,9 @@ impl Client {
         let (stereo, count) = if silent {
             (Stereo::default(), projection.len())
         } else {
-            let (end, transform) = transforms
-                .entry(n)
-                .or_insert_with(|| (u64::MAX, Transform::new(n)));
-            if *end != h.end {
-                let _time = diagnostics::Timer::measure(|d| &d.fft_us);
-                transform.measure(h.tail(n));
-                *end = h.end;
-                if let Some(d) = diagnostics::get() {
-                    d.fft_pairs.fetch_add(1, Relaxed);
-                }
-            }
+            let transform = measured(h, n, transforms);
             (
-                transform.stereo,
+                transform.stereo(h.tail(n)),
                 projection.targets(transform, &mut targets),
             )
         };
@@ -221,8 +263,26 @@ impl Client {
     }
 }
 
-fn run(capture: Arc<Capture>, rx: mpsc::Receiver<Control>) {
+type Transforms = HashMap<usize, (u64, Transform)>;
+fn measured<'a>(h: &History, n: usize, transforms: &'a mut Transforms) -> &'a mut Transform {
+    let (end, transform) = transforms
+        .entry(n)
+        .or_insert_with(|| (u64::MAX, Transform::new(n)));
+    if *end != h.end {
+        let _time = diagnostics::Timer::measure(|d| &d.fft_us);
+        transform.measure(h.tail(n));
+        *end = h.end;
+        if let Some(d) = diagnostics::get() {
+            d.fft_pairs.fetch_add(1, Relaxed);
+        }
+    }
+    transform
+}
+
+fn run(capture: Arc<Capture>, registry: Listeners, rx: mpsc::Receiver<()>) {
+    let mut subscribed = HashSet::new();
     let mut clients = HashMap::<usize, Client>::new();
+    let mut streams = Streams::default();
     let mut transforms = HashMap::new();
     let mut h = History::new();
     let mut tick = 0u64;
@@ -230,7 +290,7 @@ fn run(capture: Arc<Capture>, rx: mpsc::Receiver<Control>) {
     let mut last_input = due;
     loop {
         let now = Instant::now();
-        let message = if clients.is_empty() {
+        let message = if clients.is_empty() && streams.is_empty() {
             match rx.recv() {
                 Ok(c) => Some(c),
                 Err(_) => break,
@@ -243,35 +303,52 @@ fn run(capture: Arc<Capture>, rx: mpsc::Receiver<Control>) {
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
             }
         };
-        if let Some(c) = message {
-            match c {
-                Control::Add(id, s, tx) => {
-                    clients.insert(id, Client::new(s, tx));
-                    due = Instant::now();
-                    tick = 0;
+        if message.is_some() {
+            let live = registry.lock().unwrap();
+            subscribed.retain(|id| {
+                if live.contains_key(id) {
+                    return true;
                 }
-                Control::Remove(id) => {
-                    clients.remove(&id);
+                streams.remove(*id);
+                clients.remove(id);
+                false
+            });
+            for (&id, listener) in live.iter() {
+                let new = subscribed.insert(id);
+                match listener {
+                    Listener::Spectrum(settings, tx) if new => {
+                        clients.insert(id, Client::new(*settings, tx.clone()));
+                    }
+                    Listener::Visual(request, delivery, tx, start) if new => {
+                        streams.add(id, *request, *delivery, tx.clone(), *start)
+                    }
+                    Listener::Visual(_, delivery, _, _) => streams.set_delivery(id, *delivery),
+                    _ => {}
                 }
             }
-            continue;
+            due = Instant::now();
+            tick = 0;
+            if live.is_empty() {
+                continue;
+            }
         }
         let now = Instant::now();
+        let _timer = diagnostics::Timer::measure(|d| &d.worker_tick_us);
         let epoch = capture.epoch();
         let before = h.end;
-        let continuity = h.continuity;
         let head = capture.drain(|b| {
             if b.epoch == epoch {
-                h.push(b)
+                let continuity = h.continuity;
+                h.push(b);
+                if continuity != h.continuity {
+                    for (end, _) in transforms.values_mut() {
+                        *end = u64::MAX;
+                    }
+                    streams.reset();
+                }
+                streams.observe(&h, &mut transforms);
             }
         });
-        // A rebuilt device can restart its frame sequence at zero. Invalidate
-        // timestamps while keeping the immutable plans and their scratch space.
-        if continuity != h.continuity {
-            for (end, _) in transforms.values_mut() {
-                *end = u64::MAX;
-            }
-        }
         if h.end != before {
             last_input = now;
         }
@@ -279,10 +356,12 @@ fn run(capture: Arc<Capture>, rx: mpsc::Receiver<Control>) {
             .values()
             .map(|c| c.settings.speed.hz())
             .max()
-            .unwrap_or(15);
+            .unwrap_or(15)
+            .max(streams.hz());
         let current = h.epoch == epoch
             && head.saturating_sub(h.end) < (h.rate / 20) as u64
             && now - last_input < Duration::from_millis(150);
+        streams.publish(&h, current, tick);
         for client in clients.values_mut() {
             if !current {
                 if client.projection.is_some() {
@@ -370,3 +449,7 @@ mod tests {
         assert!(rx.is_empty(), "settled silence should not wake the panel");
     }
 }
+
+#[cfg(test)]
+#[path = "visualizationTests.rs"]
+mod visualization_tests;

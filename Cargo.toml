@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Native local music player for Windows"
 
+[features]
+qualification = []
+
 [dependencies]
 async-lock = "3.5"
 hashlink = "0.12"

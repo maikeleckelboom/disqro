@@ -242,6 +242,7 @@ impl Workspace {
         let locations = cx
             .new(|cx| Locations::new(saved.places.take(), std::mem::take(&mut saved.expanded), cx));
         let services = Services {
+            field_readouts: cx.new(|_| Default::default()),
             player: player.clone(),
             catalog: catalog.clone(),
             locations: locations.clone(),
@@ -267,7 +268,12 @@ impl Workspace {
             })
         };
         let (events_tx, events_rx) = async_channel::unbounded();
-        let system = System::new(events_tx, player.read(cx).sender());
+        let system = if crate::audio::silent_qualification() {
+            // The private measurement window must not register for the owner's media keys.
+            None
+        } else {
+            System::new(events_tx, player.read(cx).sender())
+        };
         let subscriptions = vec![
             cx.subscribe_in(&dock, window, |s: &mut Self, _, e, w, cx| {
                 if let DockEvent::LayoutChanged = e {
