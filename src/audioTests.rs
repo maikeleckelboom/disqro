@@ -71,7 +71,13 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
     .unwrap();
     let tracks = crate::cue::read(&sheet).unwrap();
     let recording = Recording::open(&tracks[0], tracks[1].disc.as_ref().unwrap().end).unwrap();
-    let mut output = AudioManager::<Capture>::new(Default::default()).unwrap();
+    let monitor = crate::signal::SignalMonitor::default();
+    let reader = monitor.subscribe();
+    let mut output = AudioManager::<Capture>::new(AudioManagerSettings {
+        main_track_builder: MainTrackBuilder::new().with_effect(monitor),
+        ..Default::default()
+    })
+    .unwrap();
     let voice = output
         .play(StreamingSoundData::from_decoder(recording))
         .unwrap();
@@ -86,6 +92,14 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(voice.state(), PlaybackState::Stopped);
+    assert!(
+        reader
+            .latest()
+            .unwrap()
+            .held
+            .iter()
+            .all(|peak| *peak > 0.35)
+    );
     let start = frames.iter().position(|s| s[0] != 0.).unwrap();
     let boundary = disc_frame(tracks[1].disc.as_ref().unwrap().start, 48000);
     for i in boundary - 512..boundary + 512 {
@@ -231,6 +245,81 @@ fn zero_volume_is_digital_silence() {
 }
 
 #[test]
+#[ignore = "requires a Windows output device; exercises the actual CPAL stream"]
+fn output_levels_follow_transport_and_contiguous_chapters() {
+    use crate::levels::Levels;
+    use crate::signal::LevelReader;
+    fn until(e: &mut Engine, reader: &LevelReader, predicate: impl Fn(&Engine, Levels) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            e.tick().unwrap();
+            if reader.latest().is_some_and(|levels| predicate(e, levels)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out at {:?}, levels {:?}",
+                e.status,
+                reader.latest()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    fixture(&path, 48_000, 48_000 * 6);
+    let sheet = dir.path().join("disc.cue");
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:00:45",
+    )
+    .unwrap();
+    let chapters = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let mut e = Engine {
+        volume: 0.125,
+        ..Default::default()
+    };
+    let reader = e.signal.subscribe();
+    e.command(Command::Play(chapters, 0)).unwrap();
+    let audible = |_: &Engine, levels: Levels| levels.rms.iter().all(|v| *v > 0.015);
+    let silent = |_: &Engine, levels: Levels| levels.peak == [0.; 2];
+    until(&mut e, &reader, audible);
+    let epoch = reader.epoch();
+    until(&mut e, &reader, |e, levels| {
+        e.chapter == 1 && audible(e, levels)
+    });
+    assert_eq!(reader.epoch(), epoch, "same decoder/voice across the join");
+    e.command(Command::Volume(0.)).unwrap();
+    until(&mut e, &reader, silent);
+    e.command(Command::Volume(0.125)).unwrap();
+    until(&mut e, &reader, audible);
+    e.command(Command::SetPlaying(false)).unwrap();
+    until(&mut e, &reader, silent);
+    e.command(Command::SetPlaying(true)).unwrap();
+    until(&mut e, &reader, audible);
+    for fraction in [0.7, 0.1, 0.4, 0.2] {
+        e.command(Command::Seek(fraction)).unwrap();
+    }
+    until(&mut e, &reader, audible);
+    assert!(e.status.position >= 0.2 * e.status.duration - 0.01);
+    e.command(Command::Stop).unwrap();
+    until(&mut e, &reader, silent);
+
+    let replacement = dir.path().join("replacement.wav");
+    fixture(&replacement, 96_000, 96_000);
+    let replacement = Arc::new(Track::file(replacement));
+    e.command(Command::Play(vec![replacement.clone()].into(), 0))
+        .unwrap();
+    until(&mut e, &reader, audible);
+    assert_eq!(e.status.track.as_ref(), Some(&replacement));
+    assert_eq!(e.rate, 96_000);
+}
+
+#[test]
 fn seek_bursts_coalesce_without_crossing_transport_actions() {
     use super::{Command, Commands, Shared};
     use std::sync::{Arc, Mutex};
@@ -254,6 +343,72 @@ fn seek_bursts_coalesce_without_crossing_transport_actions() {
     assert!(matches!(take().command, Command::Stop));
     assert!(matches!(take().command, Command::Seek(0.5)));
     assert!(rx.try_recv().is_err());
+}
+
+/// Run against a local long recording or CUE. Only this qualification graph
+/// silences the main fader, downstream of the production observation point.
+#[test]
+#[ignore = "ten-minute CPAL soak; set DISQRO_SOAK_SOURCE to a long audio file or CUE"]
+fn sustained_output_observation() {
+    use std::time::Instant;
+    let source = std::path::PathBuf::from(
+        std::env::var_os("DISQRO_SOAK_SOURCE").expect("set DISQRO_SOAK_SOURCE"),
+    );
+    let tracks = if source
+        .extension()
+        .is_some_and(|v| v.eq_ignore_ascii_case("cue"))
+    {
+        crate::cue::read(&source)
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect()
+    } else {
+        vec![Arc::new(Track::file(source))].into()
+    };
+    let signal = crate::signal::SignalMonitor::default();
+    let device = AudioManager::new(AudioManagerSettings {
+        main_track_builder: MainTrackBuilder::new()
+            .with_effect(signal.clone())
+            .volume(Decibels::SILENCE),
+        ..Default::default()
+    })
+    .unwrap();
+    let reader = signal.subscribe();
+    let mut engine = Engine {
+        signal,
+        device: Some(device),
+        volume: 1.,
+        ..Default::default()
+    };
+    crate::diagnostics::start();
+    engine.command(Command::Play(tracks, 0)).unwrap();
+    let epoch = reader.epoch();
+    let mut audible = 0;
+    let mut peak = [0f32; 2];
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(600) {
+        std::thread::sleep(Duration::from_millis(40));
+        engine.tick().unwrap();
+        assert!(engine.status.playing, "the source must cover ten minutes");
+        assert_eq!(
+            reader.epoch(),
+            epoch,
+            "the source must be one continuous voice"
+        );
+        if let Some(levels) = reader.latest() {
+            audible += usize::from(levels.rms.iter().all(|v| *v > 0.));
+            for (maximum, level) in peak.iter_mut().zip(levels.peak) {
+                *maximum = maximum.max(level);
+            }
+        }
+    }
+    assert!(audible > 0, "no stereo signal observed");
+    println!(
+        "Elapsed {:.3}s, non-silent reads {audible}, sample peaks {peak:?}, chapter {}",
+        started.elapsed().as_secs_f64(),
+        engine.chapter + 1
+    );
 }
 
 #[test]

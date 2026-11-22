@@ -4,11 +4,12 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use kira::{
-    AudioManager, Decibels, DefaultBackend, Tween,
+    AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Tween,
     sound::{
         PlaybackState,
         streaming::{Decoder as StreamDecoder, StreamingSoundData, StreamingSoundHandle},
     },
+    track::MainTrackBuilder,
 };
 
 use std::{
@@ -195,6 +196,7 @@ impl Commands {
     }
 }
 pub struct Transport {
+    pub signal: crate::signal::SignalMonitor,
     tx: Commands,
     latest: Arc<Mutex<Shared>>,
     quiet: Arc<AtomicBool>,
@@ -208,6 +210,8 @@ impl Transport {
         }));
         let (tx, rx) = Commands::channel(latest.clone(), 64);
         let shared = latest.clone();
+        let signal = crate::signal::SignalMonitor::default();
+        let monitor = signal.clone();
         let quiet = Arc::new(AtomicBool::new(false));
         let is_quiet = quiet.clone();
         let (wake, changed) = async_channel::bounded(1);
@@ -216,6 +220,7 @@ impl Transport {
             .spawn(move || {
                 let mut engine = Engine {
                     volume,
+                    signal: monitor,
                     ..Default::default()
                 };
                 let mut published = 0;
@@ -282,6 +287,7 @@ impl Transport {
             .expect("transport thread");
         Self {
             tx,
+            signal,
             latest,
             quiet,
             changed,
@@ -312,6 +318,7 @@ struct Chapter {
 
 #[derive(Default)]
 struct Engine {
+    signal: crate::signal::SignalMonitor,
     device: Option<AudioManager<DefaultBackend>>,
     voice: Option<StreamingSoundHandle<io::Error>>,
     queue: Queue,
@@ -325,6 +332,10 @@ struct Engine {
     length: f64,
     /// Last authored tick opened by this decoder, or EOF.
     decoder_end: Option<u64>,
+    // Only populated while tracing. Compare consecutive ticks on the same
+    // advancing voice, including contiguous CUE chapter boundaries.
+    position_probe: Option<(std::time::Instant, f64)>,
+    discarded_errors: u64,
     volume: f32,
     status: Status,
 }
@@ -348,6 +359,7 @@ fn disc_start(t: &Track) -> u64 {
 }
 impl Engine {
     fn stop_voice(&mut self) {
+        self.position_probe = None;
         if let Some(mut v) = self.voice.take() {
             v.stop(Tween {
                 duration: Duration::ZERO,
@@ -430,10 +442,14 @@ impl Engine {
             .start_position(kira::sound::PlaybackPosition::Samples(start));
         if self.device.is_none() {
             self.device = Some(
-                AudioManager::<DefaultBackend>::new(Default::default())
-                    .context("Windows audio output is unavailable")?,
+                AudioManager::<DefaultBackend>::new(AudioManagerSettings {
+                    main_track_builder: MainTrackBuilder::new().with_effect(self.signal.clone()),
+                    ..Default::default()
+                })
+                .context("Windows audio output is unavailable")?,
             );
         }
+        self.signal.reset();
         self.voice = Some(self.device.as_mut().unwrap().play(data)?);
         if let Some(d) = crate::diagnostics::get() {
             d.voices.fetch_add(1, Ordering::Relaxed);
@@ -561,6 +577,7 @@ impl Engine {
             && self.status.playing
         {
             v.pause(Tween::default());
+            self.position_probe = None;
             self.status.playing = false;
         }
     }
@@ -752,6 +769,22 @@ impl Engine {
                 }
                 while backend.pop_error().is_some() {
                     d.device_errors.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(total) = backend.num_stream_errors_discarded() {
+                    d.discarded_errors.fetch_add(
+                        total.saturating_sub(self.discarded_errors),
+                        Ordering::Relaxed,
+                    );
+                    self.discarded_errors = total;
+                }
+            }
+            if self.status.playing && v.state() == PlaybackState::Playing {
+                let now = std::time::Instant::now();
+                let pos = v.position();
+                if let Some((last, prev)) = self.position_probe.replace((now, pos)) {
+                    let error = ((pos - prev) - (now - last).as_secs_f64()).abs();
+                    d.position_error_us
+                        .fetch_max((error * 1e6) as u64, Ordering::Relaxed);
                 }
             }
             if self.status.playing

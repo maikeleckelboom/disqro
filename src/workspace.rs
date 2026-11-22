@@ -223,7 +223,7 @@ impl Workspace {
             ),
         };
         let volume = saved.volume.clamp(0., 1.);
-        let player = cx.new(|cx| Player::new(volume, saved.full_cd, window, cx));
+        let player = cx.new(|cx| Player::new(volume, saved.full_cd, saved.show_levels, cx));
         let catalog = cx.new(Catalog::new);
         let layouts = saved
             .table_layouts
@@ -1032,6 +1032,7 @@ impl Workspace {
         Profile {
             volume: p.saved_volume(),
             full_cd: p.full_cd,
+            show_levels: p.show_levels,
             layout: Some(self.dock.read(cx).dump(cx)),
             workspace: WorkspaceState {
                 active,
@@ -1337,6 +1338,22 @@ impl Workspace {
                 let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
                 let customize = shell.clone();
                 let undo = shell.clone();
+                let levels = shell.clone();
+                let shown = shell
+                    .upgrade()
+                    .is_some_and(|s| s.read(cx).services.player.read(cx).show_levels);
+                menu = menu.item(
+                    PopupMenuItem::new("Show Stereo Levels")
+                        .checked(shown)
+                        .on_click(move |_, _, cx| {
+                            let _ = levels.update(cx, |s, cx| {
+                                s.services
+                                    .player
+                                    .update(cx, |p, cx| p.set_show_levels(!shown, cx));
+                                s.schedule_save(cx);
+                            });
+                        }),
+                );
                 menu.separator()
                     .item(
                         PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" })

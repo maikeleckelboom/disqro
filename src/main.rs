@@ -12,6 +12,9 @@ mod cue;
 mod diagnostics;
 mod discovery;
 mod folders;
+#[path = "levelMeter.rs"]
+mod level_meter;
+mod levels;
 mod library;
 mod location;
 mod movie;
@@ -23,6 +26,7 @@ mod profile;
 mod queue;
 mod recording;
 mod release;
+mod signal;
 mod store;
 mod system;
 mod table;

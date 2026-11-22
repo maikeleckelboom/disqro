@@ -23,6 +23,8 @@ pub struct Counters {
     pub device_errors: AtomicU64,
     pub decode_errors: AtomicU64,
     pub stalls: AtomicU64,
+    pub position_error_us: AtomicU64,
+    pub discarded_errors: AtomicU64,
     pub frames: AtomicU64,
     pub paint_us: AtomicU64,
     pub ui_us: AtomicU64,
@@ -90,6 +92,8 @@ pub fn start() {
                 ("last_entry", &d.entry),
                 ("last_chapter_ms", &d.chapter_ms),
                 ("last_disc_ms", &d.disc_ms),
+                ("position_delta_error_max_us", &d.position_error_us),
+                ("discarded_device_errors", &d.discarded_errors),
             ];
             let mut out = std::io::BufWriter::new(&mut out);
             write!(out, "ms")?;

@@ -70,6 +70,7 @@ pub struct Profile {
     pub legacy_navigation: LegacyNavigation,
     pub volume: f32,
     pub full_cd: bool,
+    pub show_levels: bool,
     /// The dock layout, with every panel instance's own state. A layout with
     /// another version is replaced by the default layout.
     pub layout: Option<DockAreaState>,
@@ -96,6 +97,7 @@ impl Default for Profile {
             legacy_navigation: LegacyNavigation::default(),
             volume: 0.65,
             full_cd: false,
+            show_levels: true,
             layout: None,
             workspace: WorkspaceState::default(),
             columns: vec![],

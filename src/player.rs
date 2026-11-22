@@ -29,6 +29,7 @@ use std::{
 
 #[path = "player_wave.rs"]
 mod wave;
+use crate::level_meter::LevelMeter;
 
 pub enum PlayerEvent {
     Locate(Arc<crate::library::Track>, crate::browser::Destination),
@@ -69,6 +70,9 @@ pub struct Player {
     pub can_start: bool,
     pub play_request: crate::store::Ticket,
     transport: Transport,
+    meter: Entity<LevelMeter>,
+    wave_strip: Entity<wave::WaveStrip>,
+    pub show_levels: bool,
     pub status: Status,
     queue: Arc<Queue>,
     pub volume: f32,
@@ -95,9 +99,11 @@ pub struct Player {
     drawn_position: f64,
 }
 impl Player {
-    pub fn new(volume: f32, full_cd: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let _ = window;
+    pub fn new(volume: f32, full_cd: bool, show_levels: bool, cx: &mut Context<Self>) -> Self {
         let transport = Transport::new(volume);
+        let meter = cx.new(|_| LevelMeter::new(transport.signal.clone(), Axis::Horizontal));
+        let player = cx.entity();
+        let wave_strip = cx.new(|cx| wave::WaveStrip::new(player, cx));
         let events = transport.changed.clone();
         cx.spawn(async move |this, cx| {
             while events.recv().await.is_ok() {
@@ -123,6 +129,9 @@ impl Player {
             can_start: false,
             play_request: Default::default(),
             transport,
+            meter,
+            wave_strip,
+            show_levels,
             status: Status::default(),
             queue: Arc::default(),
             volume,
@@ -193,6 +202,7 @@ impl Player {
         }
         self.visible = visible;
         self.transport.set_quiet(!visible);
+        self.sync_meter(cx);
         if visible {
             self.sync(cx);
             if self.program.is_none() {
@@ -200,6 +210,16 @@ impl Player {
             }
             cx.notify();
         }
+    }
+    pub fn set_show_levels(&mut self, shown: bool, cx: &mut Context<Self>) {
+        self.show_levels = shown;
+        self.sync_meter(cx);
+        cx.notify();
+    }
+
+    fn sync_meter(&self, cx: &mut Context<Self>) {
+        let active = self.visible && self.show_levels && self.status.playing;
+        self.meter.update(cx, |m, cx| m.sample(active, cx));
     }
     pub fn now_playing(&self) -> Option<NowPlaying> {
         let t = self.status.track.as_deref()?;
@@ -275,6 +295,9 @@ impl Player {
         let _transition =
             track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
         self.status = status;
+        if self.show_levels && self.visible {
+            self.sync_meter(cx);
+        }
         if track_changed {
             self.segment = self
                 .program
@@ -397,17 +420,12 @@ impl Player {
 }
 
 impl Render for Player {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timer = crate::diagnostics::Timer::measure(|d| &d.ui_us);
         let m = *materials(cx);
         let s = &self.status;
         let active = s.track.is_some();
         let (position, duration) = self.wave_time();
-        let progress = self.scrub.unwrap_or(if duration > 0. {
-            (position / duration).clamp(0., 1.) as f32
-        } else {
-            0.
-        });
         let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
 
         let mut art = div()
@@ -663,7 +681,19 @@ impl Render for Player {
                     }))
             });
 
-        let seek = self.waveform(progress, active, &m, cx);
+        let strip = self.wave_strip.clone();
+        let seek = div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(if window.is_a11y_active() {
+                strip.into_any_element()
+            } else {
+                strip
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
+            });
         let time = |t: f64| {
             div()
                 .flex_shrink_0()
@@ -737,7 +767,12 @@ impl Render for Player {
                             )
                             .when(self.on_cd(), |row| row.child(self.perspectives(&m, cx)))
                             .child(transport)
-                            .child(volume),
+                            .child(
+                                v_flex()
+                                    .flex_shrink_0()
+                                    .child(volume)
+                                    .when(self.show_levels, |d| d.child(self.meter.clone())),
+                            ),
                     )
                     .child(
                         h_flex()

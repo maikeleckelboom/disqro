@@ -1,5 +1,34 @@
 use super::*;
 use crate::theme::Materials;
+
+/// Reuse the waveform scene on meter-only redraws. Player notifications still
+/// invalidate it for transport, scrubbing, perspective and analysis updates.
+pub(super) struct WaveStrip(WeakEntity<Player>);
+
+impl WaveStrip {
+    pub(super) fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        Self(player.downgrade())
+    }
+}
+
+impl Render for WaveStrip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0
+            .update(cx, |p, cx| {
+                let (position, duration) = p.wave_time();
+                let progress = p.scrub.unwrap_or(if duration > 0. {
+                    (position / duration).clamp(0., 1.) as f32
+                } else {
+                    0.
+                });
+                p.waveform(progress, p.status.track.is_some(), materials(cx), cx)
+                    .into_any_element()
+            })
+            .unwrap_or_else(|_| Empty.into_any_element())
+    }
+}
+
 impl Player {
     pub(super) fn request_wave(&mut self) {
         self.program = None;
