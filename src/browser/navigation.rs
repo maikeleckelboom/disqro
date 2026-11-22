@@ -159,9 +159,7 @@ impl Browser {
         };
         if self.listing_discs() {
             self.discs.update(cx, |t, cx| {
-                let ix = mark
-                    .selected
-                    .and_then(|k| t.delegate().rows.iter().position(|r| r.key() == k));
+                let ix = mark.selected.and_then(|k| t.delegate().position(&k));
                 reselect(t, ix, cx);
                 t.vertical_scroll_handle
                     .0

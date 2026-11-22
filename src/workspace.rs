@@ -101,13 +101,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             "space",
             PlayPause,
-            Some("Disqro && !Input && !LibrarySection && !ReleaseDisclosure"),
+            Some("Disqro && !Input && !LibrarySection"),
         ),
-        KeyBinding::new(
-            "enter",
-            PlaySelected,
-            Some("DataTable && !ReleaseDisclosure"),
-        ),
+        KeyBinding::new("enter", PlaySelected, Some("DataTable")),
         KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("space", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("enter", OpenDirectory, Some("Tree")),

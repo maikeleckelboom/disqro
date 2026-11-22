@@ -24,13 +24,13 @@ Mission 10 made the current browser’s controls easy to find, but splitting the
 
 ## Albums and CDs
 
-The first two rows in Serato Demo Tracks are independent three-track albums. The indexed titles, track counts, durations and MP3 format are displayed. Their missing years stay blank. In the Thunderdome collection a release is one sortable parent. Disclosure reveals its CDs in authored order. Opening a row browses its content in the current browser. The column-header context menu controls visibility and resets the layout. Title stays available as the row label and disclosure column.
+Serato Demo Tracks has two independent three-track albums. Their missing years stay blank. Each multi-disc Thunderdome release also occupies one row, with artwork, the CD count and aggregate metadata. A single click selects it. Enter, double-click or Open Release takes the listener to the track list grouped by CD. Back returns to the overview. Older workspaces that bookmarked a CD inside the list restore selection to its release.
 
-| Serato Demo Tracks | Thunderdome collapsed | Thunderdome expanded |
+| Previous inline expansion | Current overview | After opening the same release |
 | --- | --- | --- |
-| ![Two individual Serato albums](evidence/mission-11-corrections/serato-albums.webp) | ![Collapsed multi-disc releases](evidence/mission-11-corrections/thunderdome-collapsed.webp) | ![CDs beneath an expanded release](evidence/mission-11-corrections/thunderdome-expanded.webp) |
+| ![Two child CDs inserted among albums](evidence/mission-11-corrections/thunderdome-expanded.webp) | ![One row per release](evidence/mission-11-corrections/release-overview.webp) | ![CD sections in the opened track list](evidence/mission-11-corrections/release-disc-tracks.webp) |
 
-[Custom columns at narrow width](evidence/mission-11-corrections/albums-narrow.webp)
+[Two individual Serato albums](evidence/mission-11-corrections/serato-overview.webp) · [Narrow overview](evidence/mission-11-corrections/release-overview-narrow.webp)
 
 ## Native interaction evidence
 
@@ -42,8 +42,8 @@ Windows UI Automation supplied accessible names and geometry. The driver sent mo
 | Regroup, hide and undo | Both stacked pairs reopened after restart. Hiding and restoring the sidebars kept their layout. Dragging one member onto its sibling’s tab regrouped the pair. A cross-region drop had no effect. Undo restored the previous order. [One sidebar](evidence/mission-11-corrections/one-sidebar.webp) · [Both hidden](evidence/mission-11-corrections/hidden.webp) · [Restored](evidence/mission-11-corrections/restored.webp) |
 | Browser tabs and menus | Opened Liked Tracks in a new tab and dragged it before All Music. Its tab menu offered tab-specific actions. Bulk queue, playback and Close Other Tabs commands were absent. [Browser tab menu](evidence/mission-11-corrections/tab-menu.webp) |
 | Collapse a sidebar section | Collections and Playlists collapsed independently while the browser destination stayed selected. Collapse survived restart. Enter and Space toggled the focused heading. New Playlist could be reached from a collapsed section. [Collections closed](evidence/mission-11-corrections/collections-collapsed.webp) · [Playlists closed](evidence/mission-11-corrections/playlists-collapsed.webp) |
-| Browse an album | Sorted the two Serato titles both ways, opened a selected album with Enter, and returned with Back. Space expanded the focused Thunderdome disclosure and Enter collapsed it. Enter on the parent row opened the release. After returning, expanded it again and double-clicked CD 1. Back returned to the expanded parent. Sorting by duration kept the CDs with their release. |
-| Configure the album table | Showed Folder, hid Year, resized the title column from 429 to 339 physical pixels and dragged Tracks past Time. Column width, visibility, order, sort and expansion survived process restart. Switched back to All Tracks using the narrow view selector. |
+| Browse an album | Sorted the Serato titles in both directions and opened one with Enter. A single click on a Thunderdome release preserved every visible row. Enter and double-click opened the release. Scrolled to the second CD heading and double-clicked it to browse that CD. Back returned through the release to the overview. The queue stayed intact and the saved overview reopened at 720 × 460. |
+| Configure the album table | Showed Folder, hid Year, resized the title column from 429 to 339 physical pixels and dragged Tracks past Time. Column width, visibility, order and sort survived process restart. Switched back to All Tracks using the narrow view selector. |
 | Search and filter | Using the scope menu to switch from This View to Library and back preserved the local query. The compact popup returned several kinds of results. View all results opened a paged browser surface. Escape dismissed suggestions and the active browser kept its query. Two browser filters survived restart independently. [Full results](evidence/mission-11-corrections/all-results.webp) · [Narrow search](evidence/mission-11-corrections/narrow-search.webp) |
 | Playback and playlist transfers | Dragged three CUE recordings into a playlist in order and copied one again as a separate occurrence. Source hashes, source entries and the queue matched. Opening a search hit preserved the queue. Explicit Play resolved its source file, sheet, chapter number and frame range. [Transfer](evidence/mission-11-corrections/transfer.webp) |
 | Six-figure catalog | Opened the Albums / CDs table, sorted and scrolled it with 100,089 indexed tracks, then searched and paged the full results. [Native large-catalog search](evidence/mission-11-corrections/large-search.webp) |

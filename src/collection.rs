@@ -149,7 +149,7 @@ pub fn release_discs(discs: &[Arc<Disc>], key: &DiscId) -> Vec<Arc<Disc>> {
     found
 }
 
-/// A row of the Albums / CDs list: a disc, or a release whose discs follow it.
+/// One standalone album or one multi-disc release in the Albums / CDs overview.
 #[derive(Clone)]
 pub enum Shelf {
     Disc(Arc<Disc>),
@@ -381,11 +381,6 @@ impl Disc {
             }),
         }
     }
-    /// How a disc is named beneath its release: `CD 2`, and its subtitle.
-    pub fn member_label(&self) -> Option<(String, &str)> {
-        let m = self.release.as_ref()?;
-        Some((format!("CD {}", m.number), m.subtitle.as_str()))
-    }
     /// The header of a CD within a track table. Its cover follows the row
     /// height, which grows with the table's Cover column.
     pub fn section(&self, row_height: f32, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -400,13 +395,22 @@ impl Disc {
             detail.push(year.to_string());
         }
         detail.push(self.format.clone());
-        if let Some(number) = self.number {
+        if let Some(number) = self.release.as_ref().map(|m| m.number).or(self.number) {
             let normalized = self.title.replace(' ', "").to_lowercase();
             if !normalized.contains(&format!("cd{number}"))
                 && !normalized.contains(&format!("disc{number}"))
             {
                 detail.insert(0, format!("CD {number}"));
             }
+        }
+        if let Some(member) = &self.release
+            && !member.subtitle.is_empty()
+            && !self
+                .title
+                .to_lowercase()
+                .contains(&member.subtitle.to_lowercase())
+        {
+            detail.push(member.subtitle.clone());
         }
         h_flex()
             .w_full()
@@ -510,7 +514,7 @@ mod release_tests {
     }
 
     #[test]
-    fn a_release_lists_its_discs_beneath_it_at_its_first_disc() {
+    fn overview_keeps_release_order_and_owns_both_discs() {
         // Discovery or a year typo can put the second disc first.
         let rows = [
             track(r"M:\Live\CD2\a.wav", "Live (CD2)"),
@@ -528,21 +532,9 @@ mod release_tests {
         let Shelf::Release(release) = &table.rows[1] else {
             panic!("missing release")
         };
-        table.view.expanded.insert(release.key.clone());
-        table.project();
-        let shelf = table.rows;
-        let labels: Vec<String> = shelf
-            .iter()
-            .map(|r| match r {
-                Shelf::Release(r) => format!("release {} {}", r.title, r.discs.len()),
-                Shelf::Disc(d) => match d.member_label() {
-                    Some((n, _)) => n,
-                    None => d.title.clone(),
-                },
-            })
-            .collect();
-        assert_eq!(labels, ["Single", "release Live 2", "CD 1", "CD 2"]);
-        let discs = shelf.iter().filter(|r| matches!(r, Shelf::Disc(_))).count();
-        assert_eq!(discs, 3);
+        assert!(matches!(&table.rows[0], Shelf::Disc(d) if d.title == "Single"));
+        assert_eq!(release.title, "Live");
+        let titles: Vec<_> = release.discs.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(titles, ["Live (CD1)", "Live (CD2)"]);
     }
 }

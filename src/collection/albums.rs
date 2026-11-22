@@ -1,6 +1,4 @@
-//! The album shelf projects one sorted list of parents into virtual table rows.
-//! Children always use authored disc order. Layout and disclosure belong to
-//! this browser instance and are independent of the catalog query.
+//! The Albums / CDs overview shows one row per release or standalone album.
 use super::*;
 use crate::table::{reselect, sort_heading};
 use gpui_kit::component::{
@@ -60,7 +58,6 @@ pub struct AlbumView {
     columns: Vec<Field>,
     widths: BTreeMap<Field, f32>,
     sort: Option<(Field, bool)>, // true for descending
-    pub(super) expanded: BTreeSet<DiscId>,
 }
 impl Default for AlbumView {
     fn default() -> Self {
@@ -68,7 +65,6 @@ impl Default for AlbumView {
             columns: Field::ALL[..5].to_vec(),
             widths: Default::default(),
             sort: None,
-            expanded: Default::default(),
         }
     }
 }
@@ -101,23 +97,12 @@ impl AlbumView {
 }
 impl Disc {
     fn label(&self, col: Field) -> String {
-        let member = self.member_label();
         match col {
-            Field::Title => match &member {
-                Some((number, sub)) if !sub.is_empty() => format!("{number} · {sub}"),
-                Some((number, _)) => number.clone(),
-                None => self.title.clone(),
-            },
-            // A release names its year once, above its discs.
-            Field::Year if member.is_none() => self.year.map(|v| v.to_string()).unwrap_or_default(),
+            Field::Title => self.title.clone(),
+            Field::Year => self.year.map(|v| v.to_string()).unwrap_or_default(),
             Field::Tracks => self.count.to_string(),
             Field::Time if self.complete => library::clock(self.duration),
             Field::Format => self.format.clone(),
-            Field::Folder if member.is_some() => self
-                .folder
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             Field::Folder => self.folder.display().to_string(),
             _ => String::new(),
         }
@@ -172,31 +157,33 @@ enum SortValue {
 
 impl Discs {
     pub(super) fn project(&mut self) {
-        let mut parents = self.parents.clone();
+        self.rows.clone_from(&self.parents);
         if let Some((field, descending)) = self.view.sort {
             if descending {
-                parents.sort_by_cached_key(|r| {
+                self.rows.sort_by_cached_key(|r| {
                     let v = r.sort_value(field);
                     (v.is_none(), std::cmp::Reverse(v))
                 });
             } else {
-                parents.sort_by_cached_key(|r| {
+                self.rows.sort_by_cached_key(|r| {
                     let v = r.sort_value(field);
                     (v.is_none(), v)
                 });
             }
         }
-        self.rows.clear();
-        for parent in parents {
-            self.rows.push(parent.clone());
-            if let Shelf::Release(group) = parent
-                && self.view.expanded.contains(&group.key)
-            {
-                self.rows
-                    .extend(group.discs.iter().cloned().map(Shelf::Disc));
-            }
-        }
     }
+
+    pub fn position(&self, key: &crate::table::RowKey) -> Option<usize> {
+        use crate::table::RowKey;
+        self.rows.iter().position(|r| match (r, key) {
+            (Shelf::Disc(d), RowKey::Disc(id)) => d.id == *id,
+            (Shelf::Release(r), RowKey::Release(id)) => r.key == *id,
+            // Earlier workspaces could bookmark a CD inside an expanded release.
+            (Shelf::Release(r), RowKey::Disc(id)) => r.discs.iter().any(|d| d.id == *id),
+            _ => false,
+        })
+    }
+
     fn edit_rows(
         t: &mut TableState<Self>,
         cx: &mut Context<TableState<Self>>,
@@ -205,22 +192,11 @@ impl Discs {
         let selected = t
             .selected_row()
             .and_then(|i| t.delegate().rows.get(i))
-            .cloned();
+            .map(Shelf::key);
         let d = t.delegate_mut();
         edit(d);
         d.project();
-        let index = selected.and_then(|row| {
-            let key = row.key();
-            d.rows.iter().position(|r| r.key() == key).or_else(|| {
-                let Shelf::Disc(disc) = row else {
-                    return None;
-                };
-                let parent = &disc.release.as_ref()?.key;
-                d.rows
-                    .iter()
-                    .position(|r| matches!(r,Shelf::Release(group) if &group.key==parent))
-            })
-        });
+        let index = selected.and_then(|key| d.position(&key));
         reselect(t, index, cx);
         cx.notify();
     }
@@ -252,14 +228,6 @@ impl Discs {
         if let Some(browser) = &self.browser {
             let _ = browser.update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
         }
-    }
-    fn disclose(t: &mut TableState<Self>, key: DiscId, cx: &mut Context<TableState<Self>>) {
-        Self::edit_rows(t, cx, |d| {
-            if !d.view.expanded.remove(&key) {
-                d.view.expanded.insert(key);
-            }
-        });
-        t.delegate().changed(cx);
     }
 }
 impl TableDelegate for Discs {
@@ -413,9 +381,9 @@ impl TableDelegate for Discs {
             } else {
                 m.text_muted
             });
-        let (cover, member, discs) = match row {
-            Shelf::Disc(d) => (d.cover.as_ref(), d.member_label(), None),
-            Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
+        let (cover, discs) = match row {
+            Shelf::Disc(d) => (d.cover.as_ref(), None),
+            Shelf::Release(rel) => (rel.cover.as_ref(), Some(rel.discs.len())),
         };
         if field != Field::Title {
             let label = row.label(field);
@@ -430,113 +398,48 @@ impl TableDelegate for Discs {
                     .tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx)),
             );
         }
-        // A disc of a release sits beneath the release's cover, without one
-        // of its own.
-        if let Some((number, subtitle)) = member {
-            return cell
-                .pl(px(62.))
-                .child(div().flex_shrink_0().text_color(m.text_muted).child(number))
-                .when(!subtitle.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_ellipsis_middle()
-                            .text_color(m.text_faint)
-                            .id(("disc-subtitle", crate::table::stable_element_key(row.key())))
-                            .tooltip({
-                                let title = row.label(Field::Title);
-                                move |w, cx| Tooltip::new(title.clone()).build(w, cx)
-                            })
-                            .child(subtitle.to_owned()),
-                    )
-                });
-        }
         let cover = cover
             .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
-        let disclosure = match row {
-            Shelf::Release(group) => {
-                let key = group.key.clone();
-                let open = self.view.expanded.contains(&key);
-                let label = format!(
-                    "{} {}",
-                    if open { "Collapse" } else { "Expand" },
-                    group.title
-                );
+        cell.child(
+            div()
+                .size(px(32.))
+                .flex_shrink_0()
+                .rounded(px(2.))
+                .overflow_hidden()
+                .bg(m.control)
+                .flex()
+                .items_center()
+                .justify_center()
+                .map(|d| match cover {
+                    Some(path) => d.child(img(path).size_full().object_fit(ObjectFit::Cover)),
+                    None => d.child(
+                        Icon::new(IconName::Disc3)
+                            .size(px(16.))
+                            .text_color(m.text_faint),
+                    ),
+                }),
+        )
+        .child({
+            let label = row.label(Field::Title);
+            div()
+                .id(("disc-title", crate::table::stable_element_key(row.key())))
+                .min_w_0()
+                .truncate()
+                .text_ellipsis_middle()
+                .child(label.clone())
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
+                })
+        })
+        .when_some(discs, |d, n| {
+            d.child(
                 div()
-                    .id(("release-disclosure", crate::table::stable_element_key(&key)))
-                    .role(Role::Button)
-                    .aria_label(label.clone())
-                    .aria_expanded(open)
-                    .key_context("ReleaseDisclosure")
-                    .tab_index(0)
-                    .size(px(18.))
                     .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(m.hover))
-                    .focus_visible(|d| d.bg(m.selected))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |t, _, _, cx| {
-                        cx.stop_propagation();
-                        Self::disclose(t, key.clone(), cx);
-                    }))
-                    .child(
-                        Icon::new(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size(px(13.)),
-                    )
-                    .tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx))
-                    .into_any_element()
-            }
-            _ => div().w(px(18.)).flex_shrink_0().into_any_element(),
-        };
-        cell.child(disclosure)
-            .child(
-                div()
-                    .size(px(32.))
-                    .flex_shrink_0()
-                    .rounded(px(2.))
-                    .overflow_hidden()
-                    .bg(m.control)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .map(|d| match cover {
-                        Some(path) => d.child(img(path).size_full().object_fit(ObjectFit::Cover)),
-                        None => d.child(
-                            Icon::new(IconName::Disc3)
-                                .size(px(16.))
-                                .text_color(m.text_faint),
-                        ),
-                    }),
+                    .text_size(px(11.5))
+                    .text_color(m.text_faint)
+                    .child(format!("{n} CDs")),
             )
-            .child({
-                let label = row.label(Field::Title);
-                div()
-                    .id(("disc-title", crate::table::stable_element_key(row.key())))
-                    .min_w_0()
-                    .truncate()
-                    .text_ellipsis_middle()
-                    .child(label.clone())
-                    .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
-                    })
-            })
-            .when_some(discs, |d, n| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(11.5))
-                        .text_color(m.text_faint)
-                        .child(format!("{n} CDs")),
-                )
-            })
+        })
     }
     fn context_menu(
         &mut self,
@@ -570,7 +473,7 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     #[test]
-    fn sorting_moves_whole_releases_and_round_trips_with_their_expansion() {
+    fn sorting_and_legacy_preferences_keep_one_row_per_release() {
         let tracks = [
             ("Single", "Solo"),
             ("Live/CD2", "Live (CD2)"),
@@ -593,14 +496,16 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        table.view.expanded.insert(release.key.clone());
+        let old_child = crate::table::RowKey::Disc(release.discs[1].id.clone());
+        let release_id = release.key.clone();
         table.view.sort = Some((Field::Tracks, true));
         table.view.columns = vec![Field::Tracks, Field::Title];
         table.view.widths.insert(Field::Title, 301.);
-        table.view =
-            serde_json::from_value::<AlbumView>(serde_json::to_value(&table.view).unwrap())
-                .unwrap()
-                .validate();
+        let mut saved = serde_json::to_value(&table.view).unwrap();
+        saved["expanded"] = serde_json::json!([release_id]);
+        table.view = serde_json::from_value::<AlbumView>(saved)
+            .unwrap()
+            .validate();
         table.project();
         let names = |t: &Discs| {
             t.rows
@@ -608,14 +513,12 @@ mod tests {
                 .map(|r| r.label(Field::Title))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(&table), ["Live", "CD 1", "CD 2", "Solo"]);
+        assert_eq!(names(&table), ["Live", "Solo"]);
         assert_eq!(table.view.columns, [Field::Tracks, Field::Title]);
         assert_eq!(table.view.width(Field::Title, 700.), 301.);
         table.view.sort = Some((Field::Tracks, false));
         table.project();
-        assert_eq!(names(&table), ["Solo", "Live", "CD 1", "CD 2"]);
-        table.view.expanded.clear();
-        table.project();
+        assert_eq!(table.position(&old_child), Some(1));
         assert_eq!(names(&table), ["Solo", "Live"]);
         assert!(
             table
