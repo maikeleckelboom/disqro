@@ -1,5 +1,4 @@
 //! Browser history controls and the explicit Go to Folder or File editor.
-use crate::workspace::{GoBack, GoForward, GoUp};
 use crate::{
     browser::{Browser, Location, Reveal},
     theme::materials,
@@ -7,9 +6,7 @@ use crate::{
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
-        Disableable, Icon, Sizable,
-        button::{Button, ButtonVariants},
-        h_flex,
+        Icon, Sizable, h_flex,
         input::{Input, InputEvent, InputState},
         tooltip::Tooltip,
     },
@@ -134,13 +131,8 @@ impl LocationBar {
             _view: view,
         }
     }
-    pub fn bind(&mut self, browser: Entity<Browser>, w: &mut Window, cx: &mut Context<Self>) {
-        if self.browser == browser {
-            return;
-        }
-        self.reset(cx);
-        self._view = Self::follow(&browser, w, cx);
-        self.browser = browser;
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
     }
     fn follow(
         browser: &Entity<Browser>,
@@ -325,77 +317,16 @@ impl LocationBar {
                 )
             })
     }
-
-    fn nav_button(
-        id: &'static str,
-        icon: IconName,
-        label: &'static str,
-        enabled: bool,
-        action: impl Action,
-        cx: &App,
-    ) -> Button {
-        let m = materials(cx);
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
-            .accessibility_label(label)
-            .tooltip(label)
-            .tab_stop(true)
-            .disabled(!enabled)
-            .on_click(move |_, w, cx| w.dispatch_action(action.boxed_clone(), cx))
-    }
 }
 impl Render for LocationBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let editing = self.editing.is_some();
-        let b = self.browser.read(cx);
-        let (can_back, can_forward, has_parent) =
-            (b.can_go_back(), b.can_go_forward(), b.can_go_up());
-        h_flex()
-            .id("navigation")
-            .h_full()
-            .when(editing, |d| {
-                d.w(px(
-                    (f32::from(window.viewport_size().width) * 0.38).clamp(240., 500.)
-                ))
-            })
-            .min_w_0()
-            .overflow_hidden()
-            .occlude()
-            .gap(px(4.))
-            .items_center()
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .gap(px(2.))
-                    .child(Self::nav_button(
-                        "back",
-                        IconName::ArrowLeft,
-                        "Back · Alt+Left",
-                        can_back,
-                        GoBack,
-                        cx,
-                    ))
-                    .child(Self::nav_button(
-                        "forward",
-                        IconName::ArrowRight,
-                        "Forward · Alt+Right",
-                        can_forward,
-                        GoForward,
-                        cx,
-                    ))
-                    .child(Self::nav_button(
-                        "up",
-                        IconName::ArrowUp,
-                        "Up · Alt+Up",
-                        has_parent,
-                        GoUp,
-                        cx,
-                    )),
-            )
-            .when(editing, |d| d.child(self.editor(cx)))
-            .into_any_element()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The browser header shows the editor in place of its location while
+        // a path is being entered.
+        if self.editing.is_some() {
+            self.editor(cx).into_any_element()
+        } else {
+            Empty.into_any_element()
+        }
     }
 }
 

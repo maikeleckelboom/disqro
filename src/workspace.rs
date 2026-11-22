@@ -146,8 +146,8 @@ pub fn bind_keys(cx: &mut App) {
 /// Layouts written with another version are replaced by the default layout;
 /// the rest of the profile is kept.
 const LAYOUT_VERSION: usize = 3;
-const PLAYER_HEIGHT: f32 = 104.;
-const PLAYER_MIN: f32 = 84.;
+const PLAYER_HEIGHT: f32 = 112.;
+const PLAYER_MIN: f32 = 96.;
 const PLAYER_MAX: f32 = 200.;
 const LEADING_WIDTH: f32 = 232.;
 const TRAILING_WIDTH: f32 = 300.;
@@ -188,7 +188,6 @@ pub struct Workspace {
     drag_checkpoint: Option<(PanelId, NodeId, usize, recovery::Checkpoint)>,
     /// Recent closed instances, with their former group companions.
     closed: Vec<ClosedPanel>,
-    address: Option<Entity<crate::location::LocationBar>>,
     search: Entity<search::LibrarySearch>,
     search_visible: bool,
     left_hidden: bool,
@@ -294,8 +293,7 @@ impl Workspace {
             cx.subscribe(&locations, |s: &mut Self, _, _: &LocationsChanged, cx| {
                 s.schedule_save(cx)
             }),
-            cx.observe_in(&router, window, |s: &mut Self, _, w, cx| {
-                s.bind_address(w, cx);
+            cx.observe(&router, |s: &mut Self, _, cx| {
                 s.schedule_save(cx);
                 cx.notify();
             }),
@@ -360,6 +358,13 @@ impl Workspace {
         ];
         let workspace = std::mem::take(&mut saved.workspace);
         let owner = cx.weak_entity();
+        {
+            // Panels shown alone have no tab; their headers offer the same menu.
+            let workspace = owner.clone();
+            cx.set_global(panels::PaneMenus(Rc::new(move |pane, menu, w, cx| {
+                tab_menu(&workspace, pane, menu, w, cx)
+            })));
+        }
         let search = cx.new(|cx| search::LibrarySearch::new(owner, catalog.clone(), window, cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let mut app = Self {
@@ -369,7 +374,6 @@ impl Workspace {
             panes: HashMap::new(),
             undo: None,
             drag_checkpoint: None,
-            address: None,
             search,
             search_visible: false,
             left_hidden: workspace.left_hidden,
@@ -422,8 +426,8 @@ impl Workspace {
             );
         }
         app.set_customizing(false, window, cx);
+        app.sync_queue_button(cx);
         app.sync_active_browser(cx);
-        app.bind_address(window, cx);
         if let Some(saved) = saved.queue.take()
             && !saved.queue.entries.is_empty()
         {
@@ -976,6 +980,7 @@ impl Workspace {
             self.left_hidden = false;
             self.right_hidden = false;
         }
+        self.sync_queue_button(cx);
         let mut initial = initial;
         let mut get = |s: &mut Self, ty: &'static PanelType, cx: &mut Context<Self>| {
             let open = if ty == &browser::TYPE {
@@ -1437,29 +1442,11 @@ impl Workspace {
             })
             .into_any_element()
     }
-    fn bind_address(&mut self, w: &mut Window, cx: &mut Context<Self>) {
-        match (self.browser(cx), &self.address) {
-            (Some(browser), Some(bar)) => bar.update(cx, |bar, cx| bar.bind(browser, w, cx)),
-            (Some(browser), None) => {
-                self.address = Some(cx.new(|cx| crate::location::LocationBar::new(browser, w, cx)))
-            }
-            (None, _) => self.address = None,
-        }
-    }
+    /// The frame holds what belongs to the whole window: the Library
+    /// sidebar, Library search and the workspace menu. Navigation belongs to
+    /// each browser and lives in its header; the queue belongs to playback
+    /// and is shown from the player.
     fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let navigation = self.address.as_ref().map_or_else(
-            || {
-                Button::new("open-browser-nav")
-                    .ghost()
-                    .small()
-                    .label("Open Music Browser")
-                    .on_click(cx.listener(|s, _, w, cx| {
-                        s.ensure_browser(w, cx);
-                    }))
-                    .into_any_element()
-            },
-            |bar| bar.clone().into_any_element(),
-        );
         // Kit marks its underlying title bar as native caption. Occlude only
         // the client controls, leaving the flexible space between them draggable.
         let client = || {
@@ -1471,13 +1458,10 @@ impl Workspace {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         };
         let leading = client()
-            .min_w_0()
-            .child(self.sidebar_button(Home::Leading, cx))
-            .child(navigation);
+            .flex_shrink_0()
+            .child(self.sidebar_button(Home::Leading, cx));
         let trailing = client()
             .flex_shrink_0()
-            .child(self.search_field(window, cx))
-            .child(self.sidebar_button(Home::Trailing, cx))
             .when(!self.dock.read(cx).is_locked(), |d| {
                 d.child(
                     div().occlude().child(
@@ -1491,7 +1475,7 @@ impl Workspace {
                 )
             })
             .child(div().occlude().child(self.workspace_menu(cx)));
-
+        // Equal flexible sides keep the search field centred in the window.
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1499,15 +1483,35 @@ impl Workspace {
             .px(px(6.))
             .child(
                 h_flex()
-                    .w(px(42.))
+                    .flex_1()
+                    .min_w_0()
                     .h_full()
-                    .flex_shrink_0()
                     .items_center()
-                    .child(img("brand/compact.png").size(px(18.))),
+                    .child(
+                        h_flex()
+                            .w(px(38.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .items_center()
+                            .child(img("brand/compact.png").size(px(18.))),
+                    )
+                    .child(leading),
             )
-            .child(leading)
-            .child(div().h_full().flex_1().min_w(px(24.)))
-            .child(trailing)
+            .child(
+                client()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .child(self.search_field(window, cx)),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .items_center()
+                    .justify_end()
+                    .child(trailing),
+            )
             .into_any_element()
     }
     /// Recovery when the center contains no visible panels.
@@ -1712,8 +1716,8 @@ impl Render for Workspace {
                 s.hide_suggestions(cx);
                 s.ensure_browser(w, cx);
                 s.reveal_active_browser(w, cx);
-                s.bind_address(w, cx);
-                if let Some(bar) = &s.address {
+                let address = s.browser(cx).and_then(|b| b.read(cx).address.clone());
+                if let Some(bar) = address {
                     bar.update(cx, |bar, cx| bar.edit(w, cx));
                 }
             }))

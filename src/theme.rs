@@ -133,6 +133,9 @@ pub mod size {
     /// Every panel header: tab strips, the browser bar and table headings
     /// share one height, so their edges line up across the window.
     pub const HEADER: f32 = 30.;
+    /// A content panel's own header, such as the Music Browser's: its
+    /// history, location and view controls in one row.
+    pub const BAR: f32 = 36.;
     /// Minimum usable space for appending a dragged tab to a group.
     pub const TAB_DROP: f32 = 8.;
     pub const TAB_RADIUS: f32 = 4.;

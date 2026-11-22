@@ -3,7 +3,7 @@
 mod tabs;
 use super::Workspace;
 use crate::{
-    panels::{Home, Pane, browser::BrowserHeaderWidths, nav::DraggedFolder},
+    panels::{Home, Pane, nav::DraggedFolder},
     table::DraggedTracks,
     theme::materials,
 };
@@ -49,13 +49,8 @@ pub struct SkinState {
     pub workspace: WeakEntity<Workspace>,
     dwell: RefCell<Dwell<PanelId>>,
     routine_drag: RefCell<Option<(PanelId, WeakEntity<TabPreview>)>>,
-    headers: RefCell<HashMap<NodeId, GroupHeader>>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct GroupHeader {
-    width: Pixels,
-    stacked: bool,
+    /// The width of each group's content, as last painted.
+    widths: RefCell<HashMap<NodeId, Pixels>>,
 }
 
 /// Which tab a dragged item rests over. Each arrival starts a new rest, and
@@ -105,18 +100,18 @@ impl SkinState {
             workspace,
             routine_drag: Default::default(),
             dwell: RefCell::new(Dwell::default()),
-            headers: RefCell::default(),
+            widths: RefCell::default(),
         })
     }
     pub fn can_open_beside(&self, node: NodeId) -> bool {
         // Keep both tables readable when opening a browser beside this group.
-        self.headers
+        self.widths
             .borrow()
             .get(&node)
-            .is_some_and(|header| header.width >= px(2. * 320. + 4.))
+            .is_some_and(|width| *width >= px(2. * 320. + 4.))
     }
     pub fn retain_groups(&self, tree: &gpui_kit::component::dock::PaneTree) {
-        self.headers
+        self.widths
             .borrow_mut()
             .retain(|node, _| tree.find_node(*node).is_some());
     }
@@ -241,16 +236,20 @@ impl TabGroupRenderer for Tabs {
         if tabs.is_empty() {
             return Empty.into_any_element();
         }
-        let utility = tabs.iter().all(|&ix| is_utility(&group.panels()[ix], cx));
-        let m = *materials(cx);
-        let node = group.node();
-        let pane = group.active_panel().and_then(pane_of);
-        let browser = pane.as_ref().and_then(|p| super::browser_of(p, cx));
-        let controls_widths = browser.as_ref().map(|b| b.read(cx).header_widths(cx));
-        let several = tabs.len() > 1;
         let editing = tabs.iter().copied().find(|&ix| {
             pane_of(&group.panels()[ix]).is_some_and(|p| p.read(cx).renaming.is_some())
         });
+        let several = tabs.len() > 1;
+        // A tab names one panel among several. A panel alone in its group
+        // shows its own header instead, so ordinary use has no tab strip.
+        // While the layout is being customized every group shows its tabs,
+        // which are the handles for moving panels.
+        if !several && group.is_locked() && editing.is_none() {
+            return Empty.into_any_element();
+        }
+        let utility = tabs.iter().all(|&ix| is_utility(&group.panels()[ix], cx));
+        let m = *materials(cx);
+        let node = group.node();
         let selected = if tabs.contains(&group.active_ix()) {
             group.active_ix()
         } else {
@@ -267,55 +266,14 @@ impl TabGroupRenderer for Tabs {
             },
             several: several && editing.is_none(),
         };
-        let previous = self.state.headers.borrow().get(&node).copied();
-        let stacked = previous.is_some_and(|h| labels.stacked(h.width, controls_widths, h.stacked));
         let group = group.clone();
         let state = self.state.clone();
         let scroll = self.scroll.clone();
-        container_query(move |size, window, cx| {
-            let needs_stack = labels.stacked(size.width, controls_widths, stacked);
-            state.headers.borrow_mut().insert(
-                node,
-                GroupHeader {
-                    width: size.width,
-                    stacked: needs_stack,
-                },
-            );
-            // Container queries lay out children after their own height has
-            // been assigned. Reflow the group once when crossing the boundary.
-            if stacked != needs_stack
-                && let Some(group) = pane.as_ref().and_then(|p| p.read(cx).group.clone())
-            {
-                window.on_next_frame(move |_, cx| {
-                    let _ = group.update(cx, |_, cx| cx.notify());
-                });
-            }
-            let widths = labels.fit(size.width, controls_widths, stacked);
+        container_query(move |size, _, cx| {
+            let widths = labels.fit(size.width);
             let overflow = widths.overflow;
             let compact_width =
                 (widths.tabs < if overflow { current } else { labels.all }).then_some(widths.tabs);
-            let controls = browser
-                .as_ref()
-                .zip(pane.as_ref())
-                .zip(controls_widths)
-                .map(|((browser, pane), metrics)| {
-                    let p = pane.read(cx);
-                    let content = p.content.clone();
-                    let focus = p.controls_focus.clone();
-                    let id = p.id;
-                    let space = drop_space(&group, ("browser-space", node.as_u64()), cx);
-                    let controls = browser.update(cx, |b, cx| {
-                        b.header_controls(widths.controls, metrics, space, window, cx)
-                    });
-                    h_flex()
-                        .id(("panel-controls", id.0))
-                        .track_focus(&focus)
-                        .capture_any_mouse_down(move |_, w, cx| content.focused(w, cx))
-                        .flex_shrink_0()
-                        .w(widths.controls)
-                        .when(stacked, |d| d.bg(m.canvas))
-                        .child(controls)
-                });
             // Panel commands live on each tab's own context menu, where their
             // scope is the tab. The strip offers a switcher only while it is
             // too narrow to show every tab.
@@ -351,13 +309,9 @@ impl TabGroupRenderer for Tabs {
                         menu
                     })
             });
-            let strip = h_flex()
+            h_flex()
                 .id(("tab-strip", node.as_u64()))
-                .w(if stacked || controls.is_none() {
-                    size.width
-                } else {
-                    size.width - widths.controls
-                })
+                .w(size.width)
                 .h(px(STRIP_HEIGHT))
                 .flex_shrink_0()
                 .items_center()
@@ -377,23 +331,16 @@ impl TabGroupRenderer for Tabs {
                         .overflow_x_scroll()
                         .track_scroll(&scroll)
                         .children(
-                            tabs.into_iter()
+                            tabs.iter()
+                                .copied()
                                 .filter(|&ix| (!overflow && editing.is_none()) || ix == shown)
                                 .map(|ix| tab(&group, ix, &state, compact_width, cx)),
                         ),
                 )
                 .children(switcher)
-                .when(stacked || controls.is_none(), |d| {
-                    d.child(drop_space(&group, ("strip-space", node.as_u64()), cx))
-                });
-            h_flex()
-                .w_full()
-                .when(stacked, |d| d.flex_col())
-                .bg(m.tab_well)
-                .child(strip)
-                .children(controls)
+                .child(drop_space(&group, ("strip-space", node.as_u64()), cx))
         })
-        .h(px(STRIP_HEIGHT * if stacked { 2. } else { 1. }))
+        .h(px(STRIP_HEIGHT))
         .flex_shrink_0()
         .into_any_element()
     }
@@ -404,8 +351,16 @@ impl TabGroupRenderer for Tabs {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
+        // Each group's width decides whether a browser can open beside it,
+        // whether or not the group shows tabs.
+        let (node, headers) = (group.node(), self.state.clone());
         let body = div()
             .id("tab-content")
+            .flex_1()
+            .relative()
+            .on_prepaint(move |bounds, _, _| {
+                headers.widths.borrow_mut().insert(node, bounds.size.width);
+            })
             .flex_1()
             .relative()
             .child(if window.is_a11y_active() {

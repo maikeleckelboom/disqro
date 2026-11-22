@@ -582,3 +582,11 @@ mod tests {
         }
     }
 }
+
+/// The commands a panel offers wherever it is named: its tab, or the header
+/// of a panel shown alone in its group. The workspace installs them.
+pub type PaneMenu =
+    dyn Fn(&Entity<Pane>, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu;
+#[derive(Clone)]
+pub struct PaneMenus(pub Rc<PaneMenu>);
+impl Global for PaneMenus {}

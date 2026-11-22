@@ -124,12 +124,23 @@ impl Workspace {
         });
         self.dock.update(cx, |_, cx| cx.notify());
     }
+    /// The player's Queue button shows whether the trailing sidebar is shown.
+    pub(super) fn sync_queue_button(&self, cx: &mut Context<Self>) {
+        let shown = !self.right_hidden;
+        self.services.player.update(cx, |p, cx| {
+            if p.queue_shown != shown {
+                p.queue_shown = shown;
+                cx.notify();
+            }
+        });
+    }
     pub(super) fn toggle_sidebar(&mut self, side: Home, w: &mut Window, cx: &mut Context<Self>) {
         match side {
             Home::Leading => self.left_hidden = !self.left_hidden,
             Home::Trailing => self.right_hidden = !self.right_hidden,
             Home::Main => return,
         }
+        self.sync_queue_button(cx);
         self.sync_panel_display(cx);
         if self.sidebar_hidden(side)
             && let Some(b) = self.browser(cx)

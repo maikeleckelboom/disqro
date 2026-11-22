@@ -127,6 +127,10 @@ pub struct Browser {
     generation: u64,
     query: String,
     albums: Ticket,
+    /// The path editor Ctrl+L opens in this browser's header.
+    pub address: Option<Entity<crate::location::LocationBar>>,
+    /// The dock panel showing this browser, whose commands its header offers.
+    pub pane: Option<WeakEntity<crate::panels::Pane>>,
 }
 pub fn music_home() -> PathBuf {
     crate::places::known_path(crate::places::Known::Music)
@@ -317,6 +321,8 @@ impl Browser {
             subfolders: false,
             folder_count: 0,
             albums: Ticket::default(),
+            address: None,
+            pane: None,
         }
     }
     pub fn revision(&self) -> u64 {
@@ -613,8 +619,8 @@ impl Browser {
                 .is_some_and(|track| track.has_disc_context());
         let grouped = match &self.page {
             None => self.can_list_discs(),
-            Some(Page::Release(_)) => true,
-            Some(Page::Disc(_)) => false,
+            // A disc page is one group, headed once by its artwork.
+            Some(Page::Release(_) | Page::Disc(_)) => true,
         };
         let mut groups = Vec::new();
         let mut rows = Vec::new();
@@ -765,8 +771,10 @@ impl Browser {
         if self.listing_discs() {
             self.load_albums(cx);
         }
-        let grouped =
-            matches!(scope, Scope::Library(Some(_)) | Scope::Release(_)) && !self.listing_discs();
+        let grouped = matches!(
+            scope,
+            Scope::Library(Some(_)) | Scope::Release(_) | Scope::Album(_)
+        ) && !self.listing_discs();
         self.table.update(cx, |t, cx| {
             let context = match scope {
                 Scope::Playlist(_) => ContextKind::Playlist,

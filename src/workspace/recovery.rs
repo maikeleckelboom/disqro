@@ -79,6 +79,7 @@ impl Workspace {
         if let Some((left, right)) = before.sidebar_visibility {
             self.left_hidden = left;
             self.right_hidden = right;
+            self.sync_queue_button(cx);
         }
         self.closed = before.closed;
         self.services

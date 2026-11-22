@@ -15,11 +15,11 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
+        Disableable, ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         table::DataTable,
         v_flex,
     },
@@ -127,6 +127,12 @@ impl BrowserPane {
             b.restore_scroll(state.scroll, state.album_selection);
             b
         });
+        // Each browser edits its own path, in its own header.
+        let address = cx.new(|cx| crate::location::LocationBar::new(browser.clone(), window, cx));
+        browser.update(cx, |b, cx| {
+            cx.observe(&address, |_, _, cx| cx.notify()).detach();
+            b.address = Some(address);
+        });
         Self {
             browser,
             router: services.router.clone(),
@@ -226,6 +232,8 @@ impl PaneContent for BrowserPane {
             .update(cx, |r, cx| r.set_active(Some(&browser), cx));
     }
     fn watch(&self, cx: &mut Context<Pane>) -> Vec<Subscription> {
+        let pane = cx.weak_entity();
+        self.browser.update(cx, |b, _| b.pane = Some(pane));
         vec![
             cx.observe(&self.browser, |pane, _, cx| pane.refresh(cx)),
             cx.subscribe(
@@ -237,8 +245,25 @@ impl PaneContent for BrowserPane {
 }
 
 const HEADER_INSET: f32 = 8.;
+const BAR_INSET: f32 = 4.;
+const NAV_BUTTON: f32 = 26.;
+const NAV_GAP: f32 = 1.;
+const IDENTITY_ICON: f32 = 15.;
+const IDENTITY_GAP: f32 = 4.;
+/// The location keeps room for a short name before the controls compress.
+const IDENTITY_MIN: f32 = 140.;
+
+/// A parent place in a page's header trail.
+#[derive(Clone)]
+enum Crumb {
+    /// The collection or folder holding the page.
+    Parent(Option<Location>),
+    /// The release a disc belongs to.
+    Release(crate::collection::DiscId, String),
+}
 const COUNT_GAP: f32 = 10.;
 const VIEW_TAB: f32 = 36.;
+const VIEW_TAB_HEIGHT: f32 = 29.;
 const ICON_BUTTON: f32 = 28.;
 const SCOPE_GAP: f32 = 3.;
 const FILTER_COMPACT: f32 = 100.;
@@ -256,8 +281,6 @@ const SCOPE_CHOICES: [(bool, &str, IconName); 2] = [
 pub(crate) struct BrowserHeaderWidths {
     /// Inline view tabs, scope and the current filter, including the drop target.
     pub minimum: Pixels,
-    /// Room to edit a filter without moving tab identities.
-    pub editable: Pixels,
     /// The preferred filter width with the other controls, before metadata.
     pub full: Pixels,
 }
@@ -281,7 +304,6 @@ impl BrowserViews {
         }
         BrowserHeaderWidths {
             minimum: px(fixed + if editing { FILTER_COMPACT } else { ICON_BUTTON }),
-            editable: px(fixed + FILTER_COMPACT),
             full: px(fixed + if editing { FILTER_FULL } else { ICON_BUTTON }),
         }
     }
@@ -300,15 +322,13 @@ impl ViewFocus {
     }
 }
 
-impl BrowserHeaderWidths {
-    fn fits_summary(self, available: Pixels, text: Pixels) -> bool {
-        available >= self.full + px(COUNT_GAP) + text
-    }
-}
-
 impl Browser {
-    /// Only release and disc pages need context beyond their own tab title.
-    fn parent_trail(&self, cx: &Context<Self>) -> AnyElement {
+    /// The places above the one shown, each a button, for release and disc
+    /// pages. The last entry is the page itself.
+    fn trail(&self, cx: &App) -> Vec<(SharedString, Option<Crumb>)> {
+        if !self.is_page() {
+            return vec![(self.title(cx).into(), None)];
+        }
         let (parent, library) = match &self.location {
             Location::Album { root, .. } | Location::Release { root, .. } => (
                 root.and_then(|r| self.catalog.read(cx).collection(r))
@@ -317,69 +337,237 @@ impl Browser {
             ),
             _ => (crate::library::display_name(&self.path), None),
         };
-        let browser = cx.entity();
-        let release = self.release().filter(|(key, _)| !self.shows_release(key));
-        // The tab supplies the leaf title. Add a short disc number only when
-        // release membership supplies a more specific identity.
-        let disc = self.membership.as_ref().map(|_| self.crumb_title(cx));
+        let mut trail = vec![(parent.into(), Some(Crumb::Parent(library)))];
+        if let Some((key, title)) = self.release().filter(|(key, _)| !self.shows_release(key)) {
+            trail.push((title.clone().into(), Some(Crumb::Release(key, title))));
+        }
+        // A disc of a release is named by its number below the release.
+        let leaf = match &self.membership {
+            Some(_) => self.crumb_title(cx),
+            None => self.title(cx),
+        };
+        trail.push((leaf.into(), None));
+        trail
+    }
+
+    /// The browser's header: its history, where it is, what it holds, and
+    /// how it is shown. Every browser has one, whether it is alone in its
+    /// group or one of several tabs, so its controls never move.
+    fn bar(&self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
+        let widths = self.header_widths(cx);
+        let nav = px(3. * NAV_BUTTON + 2. * NAV_GAP + BAR_INSET);
+        // The location keeps a readable minimum; the controls take what they
+        // need up to their comfortable width and give way first.
+        let controls = (width - nav - px(IDENTITY_MIN))
+            .min(widths.full)
+            .max(widths.minimum.min(width - nav))
+            .max(px(0.));
+        let identity = (width - nav - controls).max(px(0.));
+        let editing = self
+            .address
+            .as_ref()
+            .is_some_and(|a| a.read(cx).is_editing());
         h_flex()
-            .id("browser-parents")
-            .role(Role::Group)
-            .aria_label("Parent locations")
-            .w_full()
-            .min_w_0()
-            .h(px(24.))
+            .id("browser-bar")
+            .w(width)
+            .h(px(size::BAR))
             .flex_shrink_0()
-            .px(px(4.))
-            .gap(px(2.))
-            .overflow_x_scroll()
+            .items_center()
+            .pl(px(BAR_INSET))
+            .relative()
+            .bg(m.canvas)
+            // The bottom rule is drawn first, so the selected view tab can
+            // open through it into the table.
             .child(
-                Button::new("collection-parent")
-                    .ghost()
-                    .xsmall()
-                    .tab_stop(true)
-                    .label(parent)
-                    .on_click(cx.listener(move |b, _, w, cx| {
-                        if let Some(location) = &library {
-                            b.show(location.clone(), w, cx)
-                        } else {
-                            b.show_collection(w, cx)
-                        }
-                    })),
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(1.))
+                    .bg(m.line),
             )
-            .when_some(release, |d, (key, title)| {
-                d.child(
-                    Icon::new(IconName::ChevronRight)
-                        .size(px(12.))
-                        .text_color(m.text_faint),
-                )
-                .child(
-                    Button::new("release-parent")
-                        .ghost()
-                        .xsmall()
-                        .tab_stop(true)
-                        .label(title.clone())
-                        .on_click(move |_, w, cx| {
-                            browser.update(cx, |b, cx| b.open_release(&key, title.clone(), w, cx))
-                        }),
-                )
-            })
-            .when_some(disc, |d, label| {
-                d.child(
-                    Icon::new(IconName::ChevronRight)
-                        .size(px(12.))
-                        .text_color(m.text_faint),
-                )
-                .child(
-                    div()
-                        .whitespace_nowrap()
-                        .text_size(px(size::TEXT_SMALL))
-                        .text_color(m.text_muted)
-                        .child(label),
-                )
-            })
+            .child(self.history(cx))
+            .child(
+                h_flex()
+                    .w(identity)
+                    .h_full()
+                    .min_w_0()
+                    .items_center()
+                    .map(|d| match (editing, &self.address) {
+                        (true, Some(address)) => d.pl(px(6.)).pr(px(6.)).child(address.clone()),
+                        _ => d.child(self.identity(identity, window, cx)),
+                    }),
+            )
+            .child(
+                div()
+                    .w(controls)
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(self.header_controls(controls, widths, window, cx)),
+            )
             .into_any_element()
+    }
+
+    fn history(&self, cx: &mut Context<Self>) -> AnyElement {
+        let m = *materials(cx);
+        let button = |id: &'static str, icon: IconName, label: &'static str, enabled: bool| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .w(px(NAV_BUTTON))
+                .h(px(NAV_BUTTON))
+                .icon(Icon::new(icon).size(px(15.)).text_color(m.text_muted))
+                .accessibility_label(label)
+                .tooltip(label)
+                .tab_stop(true)
+                .disabled(!enabled)
+        };
+        h_flex()
+            .id("browser-history")
+            .role(Role::Group)
+            .aria_label("History")
+            .flex_shrink_0()
+            .gap(px(NAV_GAP))
+            .child(
+                button(
+                    "back",
+                    IconName::ArrowLeft,
+                    "Back · Alt+Left",
+                    self.can_go_back(),
+                )
+                .on_click(cx.listener(|b, _, w, cx| b.back(w, cx))),
+            )
+            .child(
+                button(
+                    "forward",
+                    IconName::ArrowRight,
+                    "Forward · Alt+Right",
+                    self.can_go_forward(),
+                )
+                .on_click(cx.listener(|b, _, w, cx| b.forward(w, cx))),
+            )
+            .child(
+                button("up", IconName::ArrowUp, "Up · Alt+Up", self.can_go_up())
+                    .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// Where the browser is: an icon, the places above it, its own name and
+    /// what it holds. The count gives way first, then the parents.
+    fn identity(&self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let m = *materials(cx);
+        let trail = self.trail(cx);
+        let status = status(self, cx).or_else(|| summary(self, cx));
+        let measure = |text: &SharedString, size: f32| {
+            crate::theme::label_width(text.clone(), px(size), window)
+        };
+        let leaf = trail[trail.len() - 1].0.clone();
+        let fixed = px(IDENTITY_ICON + 2. * IDENTITY_GAP + 8.) + measure(&leaf, size::TEXT);
+        let parents: Pixels = trail[..trail.len() - 1]
+            .iter()
+            .map(|(label, _)| measure(label, size::TEXT_SMALL) + px(30.))
+            .sum();
+        let count = status.map(SharedString::from).filter(|text| {
+            fixed + parents + px(COUNT_GAP) + measure(text, size::TEXT_SMALL) <= width
+        });
+        let show_parents = fixed + parents <= width;
+        let browser = cx.entity();
+        let icon = match &self.location {
+            Location::Folder(_) => FileIcon::Folder.icon(),
+            Location::Library(None) => Icon::new(IconName::Library),
+            Location::Library(Some(_)) | Location::Album { .. } | Location::Release { .. } => {
+                Icon::new(IconName::Disc3)
+            }
+            Location::Liked => Icon::default().path(crate::assets::HEART_FILL),
+            Location::Playlist(_) => Icon::new(IconName::ListMusic),
+        };
+        let pane = self.pane.clone();
+        let mut row = h_flex()
+            .id("browser-location")
+            .role(Role::Group)
+            .aria_label("Location")
+            .h_full()
+            .min_w_0()
+            .flex_1()
+            .pl(px(6.))
+            .gap(px(IDENTITY_GAP))
+            .items_center()
+            .child(
+                icon.size(px(IDENTITY_ICON))
+                    .flex_shrink_0()
+                    .text_color(if self.active { m.accent } else { m.text_faint }),
+            );
+        if show_parents {
+            for (ix, (label, crumb)) in trail[..trail.len() - 1].iter().cloned().enumerate() {
+                let Some(crumb) = crumb else { continue };
+                let browser = browser.clone();
+                row = row
+                    .child(
+                        Button::new(("crumb", ix))
+                            .ghost()
+                            .xsmall()
+                            .flex_shrink_0()
+                            .tab_stop(true)
+                            .label(label)
+                            .text_color(m.text_muted)
+                            .on_click(move |_, w, cx| {
+                                browser.update(cx, |b, cx| match &crumb {
+                                    Crumb::Parent(Some(location)) => {
+                                        b.show(location.clone(), w, cx)
+                                    }
+                                    Crumb::Parent(None) => b.show_collection(w, cx),
+                                    Crumb::Release(key, title) => {
+                                        b.open_release(key, title.clone(), w, cx)
+                                    }
+                                })
+                            }),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .size(px(12.))
+                            .flex_shrink_0()
+                            .text_color(m.text_faint),
+                    );
+            }
+        }
+        let tip = leaf.clone();
+        row.child(
+            div()
+                .id("browser-title")
+                .min_w_0()
+                .truncate()
+                .text_size(px(size::TEXT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(m.text)
+                .child(leaf)
+                .tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx)
+                }),
+        )
+        .when_some(count, |d, text| {
+            d.child(
+                div()
+                    .ml(px(COUNT_GAP - IDENTITY_GAP))
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_size(px(size::TEXT_SMALL))
+                    .text_color(m.text_faint)
+                    .child(text),
+            )
+        })
+        // A browser alone in its group has no tab; its header offers the
+        // tab's commands instead.
+        .context_menu(move |menu, w, cx| {
+            let pane = pane.as_ref().and_then(WeakEntity::upgrade);
+            match (pane, cx.try_global::<super::PaneMenus>().cloned()) {
+                (Some(pane), Some(menus)) => (menus.0)(&pane, menu, w, cx),
+                _ => menu,
+            }
+        })
+        .into_any_element()
     }
 
     fn header_views(&self) -> BrowserViews {
@@ -399,7 +587,6 @@ impl Browser {
         &self,
         width: Pixels,
         widths: BrowserHeaderWidths,
-        drop_space: Stateful<Div>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -448,38 +635,19 @@ impl Browser {
                     m,
                 ))
             });
-        let count = (!compact)
-            .then(|| status(self, cx).or_else(|| summary(self, cx)))
-            .flatten()
-            .filter(|text| {
-                let text = crate::theme::label_width(
-                    text.clone().into(),
-                    window.rem_size() * 0.75,
-                    window,
-                );
-                widths.fits_summary(width, text)
-            });
-        let has_mode = mode.is_some();
+        // The filter sits nearest the table it narrows; how the view is
+        // shown closes the row.
         h_flex()
             .id("browser-controls")
             .w_full()
-            .h(px(size::HEADER))
+            .h_full()
             .px(px(if tight { 2. } else { HEADER_INSET }))
+            .gap(px(SCOPE_GAP))
             .items_center()
-            .children(mode)
-            .when_some(count, |d, text| {
-                d.child(
-                    div()
-                        .when(has_mode, |d| d.ml(px(COUNT_GAP)))
-                        .whitespace_nowrap()
-                        .text_xs()
-                        .text_color(m.text_muted)
-                        .child(text),
-                )
-            })
-            .child(drop_space)
-            .children(scope)
+            .justify_end()
             .child(self.filter_control(compact, tight, window, cx))
+            .children(scope)
+            .children(mode)
             .into_any_element()
     }
 
@@ -569,9 +737,12 @@ fn view_tabs(
     focus: &ViewFocus,
     m: crate::theme::Materials,
 ) -> AnyElement {
+    // Connected tabs: the selected view takes the table's surface and opens
+    // into it through the header's bottom rule, like the dock's own tabs.
     h_flex()
         .id("browser-views")
         .h_full()
+        .items_end()
         .flex_shrink_0()
         .role(Role::Group)
         .aria_label("View")
@@ -582,27 +753,26 @@ fn view_tabs(
                 .ghost()
                 .xsmall()
                 .w(px(VIEW_TAB))
-                .h(px(size::HEADER))
+                .h(px(VIEW_TAB_HEIGHT))
                 .rounded(px(0.))
+                .rounded_t(px(size::TAB_RADIUS + 1.))
                 .px(px(0.))
                 .selected(selected)
                 .toggled(selected)
-                .child(Icon::new(icon).size(px(16.)).text_color(if selected {
-                    m.accent
+                .border_t_1()
+                .border_l_1()
+                .border_r_1()
+                .border_color(if selected {
+                    m.line
                 } else {
-                    m.text_muted
-                }))
-                .when(selected, |b| {
-                    b.bg(m.control).child(
-                        div()
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(2.))
-                            .bg(m.accent),
-                    )
+                    transparent_black()
                 })
+                .when(selected, |b| b.bg(m.canvas).hover(|b| b.bg(m.canvas)))
+                .child(Icon::new(icon).size(px(15.)).text_color(if selected {
+                    m.text
+                } else {
+                    m.text_faint
+                }))
                 .accessibility_label(name)
                 .tooltip(name)
                 .track_focus(focus.choice(value))
@@ -760,9 +930,15 @@ impl Render for Browser {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|b, _, w, cx| b.forward(w, cx)),
             );
-        if self.is_page() {
-            view = view.child(self.parent_trail(cx));
-        }
+        let browser = cx.entity();
+        view = view.child(
+            container_query(move |size, window, cx| {
+                browser.update(cx, |b, cx| b.bar(size.width, window, cx))
+            })
+            .w_full()
+            .h(px(size::BAR))
+            .flex_shrink_0(),
+        );
         if let Some(notice) = &self.notice {
             view = view.child(
                 gpui_kit::component::h_flex()
@@ -847,10 +1023,21 @@ impl Render for Browser {
                 )
                 // Keep the outermost header grips clear of the dock splitters.
                 .mx(px(4.))
-                .on_prepaint(move |bounds, _, cx| {
-                    fit.update(cx, |t, cx| {
-                        crate::table::MusicTable::fit(t, f32::from(bounds.size.width).floor(), cx)
-                    });
+                .on_prepaint(move |bounds, w, cx| {
+                    let width = f32::from(bounds.size.width).floor();
+                    let changed =
+                        fit.update(cx, |t, cx| crate::table::MusicTable::fit(t, width, cx));
+                    // Text columns follow the width, so headings laid out
+                    // before it was known are drawn again on the next frame.
+                    if changed {
+                        let fit = fit.clone();
+                        w.on_next_frame(move |_, cx| {
+                            fit.update(cx, |t, cx| {
+                                t.refresh(cx);
+                                cx.notify();
+                            })
+                        });
+                    }
                 })
                 .key_context("MusicTracks")
                 .flex_1()
@@ -932,24 +1119,18 @@ mod tests {
     }
 
     #[test]
-    fn header_reserves_filter_editing_room_and_only_shows_a_whole_summary() {
+    fn header_reserves_filter_editing_room() {
         let folder = BrowserViews {
             albums: Some(true),
             subfolders: Some(true),
         };
         let closed = folder.widths(false);
         let open = folder.widths(true);
-        assert_eq!(closed.editable, open.minimum);
-        assert_eq!(closed.editable, open.editable);
         assert_eq!(
             open.minimum - closed.minimum,
             px(FILTER_COMPACT - ICON_BUTTON)
         );
         assert_eq!(open.full - open.minimum, px(FILTER_FULL - FILTER_COMPACT));
-        for widths in [closed, open] {
-            assert!(widths.fits_summary(widths.full + px(61.), px(51.)));
-            assert!(!widths.fits_summary(widths.full + px(60.), px(51.)));
-        }
     }
 
     #[test]
