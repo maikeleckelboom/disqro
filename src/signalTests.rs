@@ -88,6 +88,8 @@ fn effect_preserves_float_bits_and_resets_on_rate_and_subscription_changes() {
     ];
     let bits = |f: Frame| [f.left.to_bits(), f.right.to_bits()];
     let original = input.map(bits);
+    let pcm = monitor.pcm();
+    let _pcm = pcm.subscribe();
     tap.process(&mut input, 1. / 400., &info);
     assert_eq!(original, input.map(bits));
     let levels = reader.latest().unwrap();
@@ -98,7 +100,9 @@ fn effect_preserves_float_bits_and_resets_on_rate_and_subscription_changes() {
     assert_eq!(other.latest(), Some(levels));
     drop(reader);
     tap.process(&mut input[..5], 1. / 400., &info);
+    let old_pcm_epoch = pcm.epoch();
     tap.on_change_sample_rate(800);
+    assert_ne!(pcm.epoch(), old_pcm_epoch);
     tap.process(&mut [Frame::ZERO; 19], 1. / 800., &info);
     assert_eq!(other.latest(), Some(Levels::default()));
     tap.process(&mut [Frame::new(0.5, 0.); 1], 1. / 800., &info);
@@ -106,7 +110,13 @@ fn effect_preserves_float_bits_and_resets_on_rate_and_subscription_changes() {
     drop(other);
     tap.process(&mut input, 1. / 800., &info);
     assert_eq!(original, input.map(bits));
+    let pcm_epoch = pcm.epoch();
     let reopened = monitor.subscribe();
+    assert_eq!(
+        pcm.epoch(),
+        pcm_epoch,
+        "opening Levels preserves the spectrum window"
+    );
     assert_eq!(reopened.latest(), None);
     tap.process(&mut [Frame::ZERO; 20], 1. / 800., &info);
     assert_eq!(reopened.latest(), Some(Levels::default()));
@@ -165,15 +175,25 @@ fn time_observation() {
     let mut block =
         std::array::from_fn::<_, 128, _>(|i| Frame::new((i as f32).sin(), (i as f32).cos()));
     let info = MockInfoBuilder::new().build();
-    for active in [false, true, false, true] {
-        let _reader = active.then(|| monitor.subscribe());
-        let start = Instant::now();
-        for _ in 0..500_000 {
-            tap.process(black_box(&mut block), 1. / 48000., black_box(&info));
+    let pcm = monitor.pcm();
+    for (levels, capture) in [(false, false), (true, false), (false, true), (true, true)].repeat(2)
+    {
+        let _reader = levels.then(|| monitor.subscribe());
+        let _demand = capture.then(|| pcm.subscribe());
+        let mut nanos = 0;
+        for _ in 0..2000 {
+            let start = Instant::now();
+            for _ in 0..250 {
+                tap.process(black_box(&mut block), 1. / 48000., black_box(&info));
+            }
+            nanos += start.elapsed().as_nanos();
+            pcm.drain(|block| {
+                black_box(block);
+            });
         }
         println!(
-            "active={active} mean {:.1} ns / 128 frames, tap {} B, shared {} B",
-            start.elapsed().as_nanos() as f64 / 500_000.,
+            "levels={levels} pcm={capture} mean {:.1} ns / 128 frames, tap {} B, shared {} B",
+            nanos as f64 / 500_000.,
             size_of::<SignalTap>(),
             size_of::<Shared>()
         );

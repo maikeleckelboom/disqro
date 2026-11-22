@@ -22,6 +22,7 @@ gpui_kit::assets::icon_assets!(
         ListStart,
         ListEnd,
         AudioLines,
+        SlidersHorizontal,
         Volume1,
         VolumeX,
         Download,

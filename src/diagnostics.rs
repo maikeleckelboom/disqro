@@ -44,6 +44,14 @@ pub struct Counters {
     pub cover_load_us: AtomicU64,
     pub page_hits: AtomicU64,
     pub page_misses: AtomicU64,
+    pub capture_frames: AtomicU64,
+    pub capture_drops: AtomicU64,
+    pub fft_pairs: AtomicU64,
+    pub fft_us: AtomicU64,
+    pub spectrum_updates: AtomicU64,
+    pub spectrum_paints: AtomicU64,
+    pub spectrum_paint_us: AtomicU64,
+    pub publish_to_paint_us: AtomicU64,
 }
 static COUNTERS: OnceLock<Counters> = OnceLock::new();
 pub fn get() -> Option<&'static Counters> {
@@ -94,6 +102,14 @@ pub fn start() {
                 ("last_disc_ms", &d.disc_ms),
                 ("position_delta_error_max_us", &d.position_error_us),
                 ("discarded_device_errors", &d.discarded_errors),
+                ("capture_frames", &d.capture_frames),
+                ("capture_drops", &d.capture_drops),
+                ("fft_pairs", &d.fft_pairs),
+                ("fft_max_us", &d.fft_us),
+                ("spectrum_updates", &d.spectrum_updates),
+                ("spectrum_paints", &d.spectrum_paints),
+                ("spectrum_paint_max_us", &d.spectrum_paint_us),
+                ("publish_to_paint_max_us", &d.publish_to_paint_us),
             ];
             let mut out = std::io::BufWriter::new(&mut out);
             write!(out, "ms")?;

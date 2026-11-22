@@ -284,15 +284,24 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
         ..Default::default()
     };
     let reader = e.signal.subscribe();
+    let pcm = e.signal.pcm();
+    let _demand = pcm.subscribe();
     e.command(Command::Play(chapters, 0)).unwrap();
     let audible = |_: &Engine, levels: Levels| levels.rms.iter().all(|v| *v > 0.015);
     let silent = |_: &Engine, levels: Levels| levels.peak == [0.; 2];
     until(&mut e, &reader, audible);
     let epoch = reader.epoch();
+    let pcm_epoch = pcm.epoch();
     until(&mut e, &reader, |e, levels| {
         e.chapter == 1 && audible(e, levels)
     });
     assert_eq!(reader.epoch(), epoch, "same decoder/voice across the join");
+    assert_eq!(pcm.epoch(), pcm_epoch);
+    let mut observed = false;
+    pcm.drain(|b| {
+        observed |= b.epoch == pcm_epoch && b.frames.iter().any(|f| f.left != 0. && f.right != 0.);
+    });
+    assert!(observed);
     e.command(Command::Volume(0.)).unwrap();
     until(&mut e, &reader, silent);
     e.command(Command::Volume(0.125)).unwrap();
@@ -306,6 +315,7 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
     }
     until(&mut e, &reader, audible);
     assert!(e.status.position >= 0.2 * e.status.duration - 0.01);
+    assert_ne!(pcm.epoch(), pcm_epoch);
     e.command(Command::Stop).unwrap();
     until(&mut e, &reader, silent);
 

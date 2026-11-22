@@ -6,6 +6,7 @@ mod assets;
 mod audio;
 mod browser;
 mod cache;
+mod capture;
 mod catalog;
 mod collection;
 mod cue;
@@ -27,6 +28,9 @@ mod queue;
 mod recording;
 mod release;
 mod signal;
+mod spectrum;
+#[path = "spectrumWorker.rs"]
+mod spectrum_worker;
 mod store;
 mod system;
 mod table;
