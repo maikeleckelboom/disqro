@@ -1335,9 +1335,6 @@ impl Workspace {
                             }),
                     );
                 }
-                let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
-                let customize = shell.clone();
-                let undo = shell.clone();
                 let levels = shell.clone();
                 let shown = shell
                     .upgrade()
@@ -1354,6 +1351,9 @@ impl Workspace {
                             });
                         }),
                 );
+                let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
+                let customize = shell.clone();
+                let undo = shell.clone();
                 menu.separator()
                     .item(
                         PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" })

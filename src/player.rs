@@ -681,6 +681,11 @@ impl Render for Player {
                     }))
             });
 
+        let volume = v_flex()
+            .flex_shrink_0()
+            .child(volume)
+            .when(self.show_levels, |d| d.child(self.meter.clone()));
+
         let strip = self.wave_strip.clone();
         let seek = div()
             .flex()
@@ -767,12 +772,7 @@ impl Render for Player {
                             )
                             .when(self.on_cd(), |row| row.child(self.perspectives(&m, cx)))
                             .child(transport)
-                            .child(
-                                v_flex()
-                                    .flex_shrink_0()
-                                    .child(volume)
-                                    .when(self.show_levels, |d| d.child(self.meter.clone())),
-                            ),
+                            .child(volume),
                     )
                     .child(
                         h_flex()
