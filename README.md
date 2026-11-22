@@ -30,6 +30,8 @@ In the bottom player, switch between **Track** and **Full CD** with the waveform
 
 The L/R meter beneath the volume slider shows stereo RMS, sample peak and one-second peak hold during playback. Choose **Show Stereo Levels** in the Workspace menu to hide or restore it. [Signal path and meter reference](docs/playback-signal.md)
 
+Choose **+ → New Spectrum** to analyze the live stereo mix. The sliders button selects a calibrated trace or band RMS, stereo or individual channels, frequency range, resolution and response. Open another instance to compare settings side by side. [Spectrum and stereo measurements](docs/realtime-spectrum.md)
+
 ## Persistent library and personal collections
 
 Open a music folder and choose **Add Folder to Library** in the Music Browser menu, or drag the folder from Locations onto Library. Its indexed albums and tracks appear in Library. Like a CUE chapter, give it up to five stars, or drag it to a playlist. A playlist can mix chapters and individual files from any folder. [Library controls, storage policy and Windows verification](docs/persistent-library.md)
