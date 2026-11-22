@@ -11,12 +11,12 @@ use crate::{
     library::clock,
     player::{Player, PlayerEvent},
     queue::{Entry, Queue, Repeat},
-    theme::materials,
+    theme::{materials, size},
 };
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, h_flex,
+        ElementExt, Icon, h_flex,
         menu::{ContextMenuExt, PopupMenu, PopupMenuItem},
         v_flex,
     },
@@ -108,6 +108,9 @@ pub struct Entries {
     focus: FocusHandle,
     selected: Option<u64>,
     scroll: UniformListScrollHandle,
+    /// Whether rows have room for an artist beside the title, as of the
+    /// panel's last layout.
+    roomy: Rc<std::cell::Cell<bool>>,
 }
 
 impl Entries {
@@ -137,6 +140,7 @@ impl Entries {
             focus: cx.focus_handle(),
             selected: None,
             scroll: UniformListScrollHandle::new(),
+            roomy: Rc::new(std::cell::Cell::new(true)),
         }
     }
     fn queue(&self, cx: &App) -> Arc<Queue> {
@@ -267,13 +271,15 @@ impl Entries {
         let selected = self.selected == Some(id);
         let t = &entry.track;
         let title: SharedString = t.title.clone().into();
-        let artist = t.artist.clone();
+        let artist = Some(SharedString::from(t.artist.clone())).filter(|a| !a.is_empty());
         let duration = t.duration.map(clock).unwrap_or_default();
         let status = &self.player.read(cx).status;
-        let current_icon = match status.playback_state() {
-            TransportState::Playing => IconName::AudioLines,
-            TransportState::Paused => IconName::Pause,
-            _ => IconName::Square,
+        // The current entry is marked, never drawn as a control: the marker
+        // rests while playback is paused or stopped.
+        let marker = if status.playback_state() == TransportState::Playing {
+            m.accent
+        } else {
+            m.text_faint
         };
         let next_slot = q.current.map_or(0, |c| c + 1);
         let this = cx.weak_entity();
@@ -287,49 +293,62 @@ impl Entries {
             .gap(px(10.))
             .rounded(px(5.))
             .items_center()
-            .text_size(px(13.))
+            .text_size(px(size::TEXT))
             .when(selected, |d| d.bg(m.selected))
             .when(!selected, |d| d.hover(|d| d.bg(m.hover)))
-            .child(
-                div()
-                    .w(px(16.))
-                    .flex_shrink_0()
-                    .flex()
-                    .justify_center()
-                    .when(is_current, |d| {
-                        d.child(Icon::new(current_icon).size(px(14.)).text_color(m.accent))
-                    }),
-            )
-            .child(
+            // Only the queue has a current entry to mark. History rows start
+            // at the edge rather than beside an empty column.
+            .when(mode == Mode::Queue, |d| {
+                d.child(
+                    div()
+                        .w(px(16.))
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_center()
+                        .when(is_current, |d| {
+                            d.child(
+                                Icon::new(IconName::AudioLines)
+                                    .size(px(14.))
+                                    .text_color(marker),
+                            )
+                        }),
+                )
+            })
+            .child({
+                // A narrow panel shows whole titles rather than a sliver of
+                // each artist.
+                let artist = artist.filter(|_| self.roomy.get());
                 h_flex()
                     .flex_1()
                     .min_w_0()
                     .gap(px(8.))
+                    .items_center()
                     .child(
-                        // The title keeps most of the row; the artist takes the rest.
                         div()
-                            .flex_shrink_0()
-                            .max_w(relative(0.72))
+                            .when(artist.is_some(), |d| {
+                                d.flex_shrink_0().max_w(relative(0.72))
+                            })
+                            .when(artist.is_none(), |d| d.flex_1().min_w_0())
                             .truncate()
                             .text_color(if is_current { m.accent } else { m.text })
                             .child(title.clone()),
                     )
-                    .when(!artist.is_empty(), |d| {
+                    .when_some(artist, |d, artist| {
                         d.child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.))
+                                .text_size(px(size::TEXT_SMALL))
                                 .text_color(m.text_faint)
                                 .child(artist),
                         )
-                    }),
-            )
+                    })
+            })
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(12.))
+                    .text_size(px(size::TEXT_SMALL))
                     .text_color(m.text_faint)
                     .child(duration),
             )
@@ -418,12 +437,20 @@ impl Render for Entries {
                 .into_any_element()
         };
         let panel = cx.entity();
+        let (roomy, entity) = (self.roomy.clone(), cx.entity_id());
         v_flex()
             .id("entries")
             .key_context("Queue")
             .track_focus(&self.focus)
             .size_full()
             .bg(m.chrome)
+            .on_prepaint(move |bounds, w, _| {
+                // Below this width an artist would shrink to a bare ellipsis.
+                let fits = bounds.size.width >= px(230.);
+                if roomy.replace(fits) != fits {
+                    w.on_next_frame(move |_, cx| cx.notify(entity));
+                }
+            })
             .on_action(cx.listener(|s, _: &PlaySelectedEntry, _, cx| {
                 if let Some(id) = s.selected {
                     s.send(Command::Jump(id), cx);

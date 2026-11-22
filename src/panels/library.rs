@@ -15,7 +15,7 @@ use crate::{
     player::Player,
     store::{PlaylistId, RootId, Scope},
     table::{playlist_target, queue_targets},
-    theme::materials,
+    theme::{materials, size},
 };
 use gpui_kit::{
     assets::IconName,
@@ -523,9 +523,9 @@ impl LibraryPanel {
             .id(name)
             .group(name)
             .key_context("LibrarySection")
-            .mt(px(8.))
+            .mt(px(12.))
             .mx(px(6.))
-            .h(px(23.))
+            .h(px(26.))
             .flex_shrink_0()
             .items_center()
             .child(
@@ -541,10 +541,14 @@ impl LibraryPanel {
                     .items_center()
                     .px(px(8.))
                     .gap(px(5.))
-                    .text_size(px(12.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(transparent_black())
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(m.text_muted)
                     .hover(|d| d.text_color(m.text))
-                    .focus_visible(|d| d.bg(m.hover).text_color(m.text))
+                    .focus_visible(|d| d.text_color(m.text).border_color(m.focus_line()))
                     .child(name)
                     .child(
                         Icon::new(if closed {
@@ -577,9 +581,12 @@ impl LibraryPanel {
                     .justify_center()
                     .rounded(px(4.))
                     .cursor_pointer()
+                    .border_1()
+                    .border_color(transparent_black())
                     .opacity(0.)
                     .group_hover(name, |d| d.opacity(1.))
-                    .focus_visible(|d| d.opacity(1.).bg(m.hover))
+                    .hover(|d| d.bg(m.hover))
+                    .focus_visible(|d| d.opacity(1.).border_color(m.focus_line()))
                     .text_color(m.text_muted)
                     .child(Icon::new(IconName::Plus).size(px(13.)))
                     .tooltip(move |w, cx| Tooltip::new(action_name).build(w, cx))

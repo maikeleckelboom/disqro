@@ -102,6 +102,12 @@ impl Field {
             Self::Favorite => "Favorite",
         }
     }
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Cover => "",
+            f => f.label(),
+        }
+    }
     fn menu_label(self) -> &'static str {
         match self {
             Self::Number => "Track Number",
@@ -192,6 +198,9 @@ impl Field {
         self.order().is_some()
     }
 }
+/// What an empty table says when its filter matched nothing.
+pub const NO_MATCHES: &str = "No matching tracks";
+
 /// A row's identity for selection: a physical file or authored segment in a
 /// folder, or a library view key. Tags and positions are deliberately
 /// absent, so a refresh or sort keeps the same selection.
@@ -1272,7 +1281,9 @@ impl MusicTable {
             .when(!liked, |d| {
                 d.opacity(0.).group_hover("track-row", |s| s.opacity(1.))
             })
-            .focus_visible(|s| s.opacity(1.).bg(m.hover))
+            .border_1()
+            .border_color(transparent_black())
+            .focus_visible(|s| s.opacity(1.).border_color(m.focus_line()))
             .hover(|d| d.bg(m.hover))
             .child(
                 if liked {
@@ -1426,7 +1437,7 @@ pub(crate) fn sort_heading(
         .size_full()
         .gap_1()
         .when(right_aligned, |d| d.justify_end())
-        .text_size(px(11.5))
+        .text_size(px(crate::theme::size::LABEL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if sorted.is_some() {
             m.text_muted
@@ -1526,7 +1537,10 @@ impl TableDelegate for MusicTable {
         };
         let leading = grip(true, cx);
         let trailing = grip(false, cx);
-        sort_heading(col_ix, field.label(), field.right_aligned(), sorted, cx)
+        // Artwork explains itself. Its heading keeps the name for assistive
+        // technology and the column menu, without printing it.
+        sort_heading(col_ix, field.heading(), field.right_aligned(), sorted, cx)
+            .aria_label(field.label())
             .children(trailing)
             .children(leading)
             .when(field.sortable(), |d| {
@@ -1698,7 +1712,9 @@ impl TableDelegate for MusicTable {
                     Field::Number | Field::Format => m.text_faint,
                     _ => m.text_muted,
                 })
-                .when(f == Field::Format, |d| d.text_size(px(11.5)))
+                .when(f == Field::Format, |d| {
+                    d.text_size(px(crate::theme::size::TEXT_SMALL))
+                })
                 .child(div().min_w_0().truncate().child(f.value(&t, mark)))
                 .into_any_element(),
         }
@@ -1807,12 +1823,16 @@ impl TableDelegate for MusicTable {
     ) -> impl IntoElement {
         let m = materials(cx);
         let browser = self.browser.clone();
+        // The icon names what is empty: a filter that matched nothing, or
+        // the kind of place being shown.
         let icon = match &self.rows.data {
+            _ if self.empty.as_ref() == NO_MATCHES => Icon::new(IconName::ListFilter),
             Contents::Library(Paged {
-                scope: Scope::Playlist(_),
+                scope: Scope::Liked,
                 ..
-            }) => IconName::Music2,
-            _ => IconName::FolderOpen,
+            }) => Icon::default().path(crate::assets::HEART_FILL),
+            Contents::Library(_) => Icon::new(IconName::Music2),
+            _ => Icon::new(IconName::FolderOpen),
         };
         gpui_kit::component::v_flex()
             .size_full()
@@ -1821,19 +1841,18 @@ impl TableDelegate for MusicTable {
             .gap(px(8.))
             .px(px(24.))
             .when(!self.empty.is_empty() && !self.is_loading(), |d| {
-                d.child(Icon::new(icon).size(px(24.)).text_color(m.text_faint))
-                    .child(
-                        div()
-                            .id("empty-table-message")
-                            .w_full()
-                            .max_w(px(320.))
-                            .text_center()
-                            .text_size(px(13.))
-                            .text_color(m.text_muted)
-                            .role(Role::Label)
-                            .aria_value(self.empty.clone())
-                            .child(self.empty.clone()),
-                    )
+                d.child(icon.size(px(24.)).text_color(m.text_faint)).child(
+                    div()
+                        .id("empty-table-message")
+                        .w_full()
+                        .max_w(px(320.))
+                        .text_center()
+                        .text_size(px(13.))
+                        .text_color(m.text_muted)
+                        .role(Role::Label)
+                        .aria_value(self.empty.clone())
+                        .child(self.empty.clone()),
+                )
             })
             .when(self.offer_subfolders, |d| {
                 d.child(

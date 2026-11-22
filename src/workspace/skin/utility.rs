@@ -1,7 +1,7 @@
 use super::*;
 
-// The xsmall menu button and the strip's trailing inset.
-pub(super) const MENU_SPACE: f32 = 24. + 4.;
+// The strip's insets on both sides.
+pub(super) const STRIP_INSETS: f32 = 2. * 4.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Presentation {
@@ -10,7 +10,7 @@ pub(super) enum Presentation {
 }
 
 fn fit(width: Pixels, labels: Pixels) -> Presentation {
-    let available = width - px(MENU_SPACE);
+    let available = width - px(STRIP_INSETS);
     if available >= labels {
         Presentation::Labels
     } else {
@@ -33,7 +33,7 @@ pub(super) fn presentation(
             let label = pane.read(cx).label(cx);
             let line = window.text_system().shape_line(
                 label.clone(),
-                px(12.5),
+                px(crate::theme::size::TEXT),
                 &[TextRun {
                     len: label.len(),
                     font: font.clone(),
@@ -44,8 +44,8 @@ pub(super) fn presentation(
                 }],
                 None,
             );
-            // Two text insets, matching the tab frame.
-            (line.width.ceil() + px(2. * 8.)).clamp(px(48.), px(220.))
+            // Two text insets and the focus border, matching the tab frame.
+            (line.width.ceil() + px(2. * (TAB_X + 1.))).clamp(px(40.), px(220.))
         })
         .sum();
     fit(width, labels)
@@ -64,7 +64,7 @@ pub(super) fn keyboard_tab(
     tab.track_focus(&pane.read(cx).tab_focus)
         .tab_index(0)
         .tab_stop(ix == group.active_ix())
-        .focus_visible(|d| d.bg(materials(cx).selected))
+        .focus_visible(|d| d.border_color(materials(cx).focus_line()))
         .on_key_down(move |event, window, cx| {
             if event.keystroke.modifiers.modified() {
                 return;
@@ -89,12 +89,12 @@ pub(super) fn keyboard_tab(
 
 #[cfg(test)]
 mod tests {
-    use super::{MENU_SPACE, Presentation, fit, px};
+    use super::{Presentation, STRIP_INSETS, fit, px};
     #[test]
-    fn both_boundaries_reserve_the_menu_at_every_tab_count() {
+    fn labels_show_exactly_while_they_fit_at_every_tab_count() {
         for count in 1..=4 {
             let labels = px(90. * count as f32);
-            let full = labels + px(MENU_SPACE);
+            let full = labels + px(STRIP_INSETS);
             assert_eq!(fit(full, labels), Presentation::Labels);
             assert_eq!(fit(full - px(0.5), labels), Presentation::Overflow);
         }

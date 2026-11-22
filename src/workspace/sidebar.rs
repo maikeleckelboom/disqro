@@ -140,26 +140,34 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn sidebar_button(&self, side: Home, cx: &mut Context<Self>) -> impl IntoElement {
-        let (id, icon, label, tip) = if side == Home::Leading {
+        // The button says what pressing it will do.
+        let verb = if self.sidebar_hidden(side) {
+            "Show"
+        } else {
+            "Hide"
+        };
+        let (id, icon, label, keys) = if side == Home::Leading {
             (
                 "toggle-left",
                 IconName::PanelLeft,
-                "Toggle left sidebar",
-                "Toggle left sidebar · Ctrl+Alt+Left",
+                "left sidebar",
+                "Ctrl+Alt+Left",
             )
         } else {
             (
                 "toggle-right",
                 IconName::PanelRight,
-                "Toggle right sidebar",
-                "Toggle right sidebar · Ctrl+Alt+Right",
+                "right sidebar",
+                "Ctrl+Alt+Right",
             )
         };
+        let label = format!("{verb} {label}");
+        let tip = format!("{label} · {keys}");
         div().occlude().child(
             Button::new(id)
                 .ghost()
-                .xsmall()
-                .icon(icon)
+                .small()
+                .icon(Icon::new(icon).text_color(materials(cx).text_muted))
                 .accessibility_label(label)
                 .tooltip(tip)
                 .on_click(cx.listener(move |s, _, w, cx| s.toggle_sidebar(side, w, cx))),

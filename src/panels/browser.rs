@@ -10,14 +10,15 @@ use crate::{
     browser::{Browser, Location, SavedVisit, music_home},
     collection::Page,
     table::Layouts,
-    theme::materials,
+    theme::{materials, size},
 };
 use gpui_kit::{
     assets::IconName,
     component::{
-        ElementExt, Icon, Selectable, Sizable,
+        ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
+        input::Input,
         menu::{DropdownMenu, PopupMenuItem},
         table::DataTable,
         v_flex,
@@ -236,102 +237,241 @@ impl PaneContent for BrowserPane {
 }
 
 impl Browser {
-    fn controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The bar above every browser's table: how its music is shown, what it
+    /// holds, and a filter for its rows. Every browser has the same bar, so
+    /// view switching and filtering are always in the same place.
+    fn bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
-        let b = self;
-        let mut items = Vec::new();
-        if !b.is_page() && b.can_list_discs() {
-            let albums = b.prefs.albums;
-            let browser = cx.entity();
-            items.push(
-                container_query(move |size, w, _| {
-                    let choices = [("All Tracks", false), ("Albums / CDs", true)];
-                    if size.width < px(290.) || w.viewport_size().width < px(800.) {
-                        let browser = browser.clone();
-                        Button::new("browser-view")
-                            .ghost()
-                            .xsmall()
-                            .label(if albums {
-                                "View: Albums / CDs"
-                            } else {
-                                "View: All Tracks"
-                            })
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (name, value) in choices {
-                                    let browser = browser.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(name).checked(albums == value).on_click(
-                                            move |_, w, cx| {
-                                                browser.update(cx, |b, cx| b.view(value, w, cx))
-                                            },
-                                        ),
-                                    );
-                                }
-                                menu
-                            })
-                            .into_any_element()
-                    } else {
-                        h_flex()
-                            .gap(px(3.))
-                            .children(choices.map(|(name, value)| {
-                                let browser = browser.clone();
-                                Button::new(name)
-                                    .ghost()
-                                    .xsmall()
-                                    .label(name)
-                                    .selected(albums == value)
-                                    .on_click(move |_, w, cx| {
-                                        browser.update(cx, |b, cx| b.view(value, w, cx))
-                                    })
-                            }))
-                            .into_any_element()
-                    }
+        let switch = !self.is_page() && self.can_list_discs();
+        let albums = self.prefs.albums;
+        let subfolders =
+            (self.location.is_folder() && self.page.is_none()).then_some(self.subfolders);
+        let summary: Option<SharedString> = status(self, cx)
+            .or_else(|| summary(self, cx))
+            .map(Into::into);
+        let browser = cx.entity();
+        let leading = container_query(move |space, w, _| {
+            let compact = space.width < px(250.) || w.viewport_size().width < px(800.);
+            // The count is the first thing to give way.
+            let room = if switch || subfolders.is_some() {
+                330.
+            } else {
+                120.
+            };
+            h_flex()
+                .size_full()
+                .gap(px(10.))
+                .items_center()
+                .when(switch, |d| d.child(view_switch(&browser, albums, compact)))
+                .when_some(subfolders, |d, include| {
+                    d.child(subfolder_toggle(&browser, include))
                 })
-                .flex_1()
-                .h(px(25.))
-                .into_any_element(),
-            );
+                .when_some(
+                    summary.clone().filter(|_| space.width >= px(room)),
+                    |d, text| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(size::TEXT_SMALL))
+                                .text_color(m.text_faint)
+                                .child(text),
+                        )
+                    },
+                )
+        })
+        .flex_1()
+        .min_w_0()
+        .h_full();
+        h_flex()
+            .id("browser-bar")
+            .h(px(size::HEADER))
+            .flex_shrink_0()
+            .pl(px(8.))
+            .pr(px(6.))
+            .gap(px(8.))
+            .items_center()
+            .child(leading)
+            .child(self.filter_control(window, cx))
+            .into_any_element()
+    }
+
+    /// The filter button, or the field once it is open or holds a query.
+    fn filter_control(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let m = *materials(cx);
+        let input = self.search.clone();
+        let empty = input.read(cx).value().is_empty();
+        if !self.filter_open && empty {
+            return Button::new("open-filter")
+                .ghost()
+                .xsmall()
+                .icon(
+                    Icon::new(IconName::ListFilter)
+                        .size(px(14.))
+                        .text_color(m.text_muted),
+                )
+                .label("Filter")
+                .text_color(m.text_muted)
+                .accessibility_label("Filter this view")
+                .tooltip("Filter this view · Ctrl+F")
+                .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(true, w, cx)))
+                .into_any_element();
         }
-        if b.location.is_folder() && b.page.is_none() {
-            let include = b.subfolders;
-            let browser = cx.entity();
-            items.push(
-                Button::new("view-subfolders")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(IconName::FolderTree).size(px(14.)))
-                    .label("Subfolders")
-                    .selected(include)
-                    .tooltip(if include {
-                        "Showing subfolders · click to show this folder only"
-                    } else {
-                        "Include subfolders"
-                    })
-                    .on_click(move |_, w, cx| {
-                        browser.update(cx, |b, cx| b.set_subfolders(!include, w, cx))
-                    })
-                    .into_any_element(),
-            );
+        let focused = input.read(cx).focus_handle(cx).is_focused(window);
+        h_flex()
+            .id("browser-filter")
+            .flex_shrink(1.)
+            .min_w(px(110.))
+            .w(px(220.))
+            .h(px(24.))
+            .pl(px(7.))
+            .pr(px(2.))
+            .gap(px(5.))
+            .items_center()
+            .rounded(px(5.))
+            .border_1()
+            .map(|d| {
+                if focused {
+                    d.bg(m.canvas).border_color(m.accent.opacity(0.6))
+                } else {
+                    d.bg(m.field())
+                        .border_color(transparent_black())
+                        .hover(|d| d.border_color(m.control_line))
+                }
+            })
+            .child(
+                Icon::new(IconName::ListFilter)
+                    .size(px(13.))
+                    .flex_shrink_0()
+                    // A filter that hides rows stays visible, even unfocused.
+                    .text_color(if empty { m.text_faint } else { m.accent }),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(&input)
+                        .xsmall()
+                        .appearance(false)
+                        .cleanable(true)
+                        .aria_label("Filter this view"),
+                ),
+            )
+            .capture_key_down(cx.listener(|b, e: &KeyDownEvent, w, cx| {
+                if e.keystroke.key == "escape" && !e.keystroke.modifiers.modified() {
+                    b.dismiss_filter(w, cx);
+                    w.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .into_any_element()
+    }
+}
+
+/// All Tracks or Albums / CDs: side by side while there is room, otherwise a
+/// menu that names the current view.
+fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyElement {
+    let choices = [("All Tracks", false), ("Albums / CDs", true)];
+    if compact {
+        let browser = browser.clone();
+        return Button::new("browser-view")
+            .ghost()
+            .xsmall()
+            .label(if albums { "Albums / CDs" } else { "All Tracks" })
+            .dropdown_caret(true)
+            .accessibility_label("View")
+            .tooltip("Choose how this view is shown")
+            .dropdown_menu(move |mut menu, _, _| {
+                for (name, value) in choices {
+                    let browser = browser.clone();
+                    menu = menu.item(PopupMenuItem::new(name).checked(albums == value).on_click(
+                        move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)),
+                    ));
+                }
+                menu
+            })
+            .into_any_element();
+    }
+    h_flex()
+        .id("browser-views")
+        .flex_shrink_0()
+        .gap(px(2.))
+        .role(Role::Group)
+        .aria_label("View")
+        .children(choices.map(|(name, value)| {
+            let browser = browser.clone();
+            Button::new(name)
+                .ghost()
+                .xsmall()
+                .label(name)
+                .selected(albums == value)
+                .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
+        }))
+        .into_any_element()
+}
+
+fn subfolder_toggle(browser: &Entity<Browser>, include: bool) -> AnyElement {
+    let browser = browser.clone();
+    Button::new("view-subfolders")
+        .ghost()
+        .xsmall()
+        .icon(Icon::new(IconName::FolderTree).size(px(14.)))
+        .label("Subfolders")
+        .selected(include)
+        .tooltip(if include {
+            "Showing subfolders · click to show this folder only"
+        } else {
+            "Include subfolders"
+        })
+        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.set_subfolders(!include, w, cx)))
+        .into_any_element()
+}
+
+/// What the view holds once it is ready: its albums, or its tracks and their
+/// total time.
+fn summary(b: &Browser, cx: &App) -> Option<String> {
+    let plural = |n: usize, one: &str, many: &str| {
+        format!("{} {}", grouped(n), if n == 1 { one } else { many })
+    };
+    if b.listing_discs() {
+        let n = b.discs.read(cx).delegate().rows.len();
+        return (n > 0).then(|| plural(n, "album", "albums"));
+    }
+    if b.busy || b.count == 0 {
+        return None;
+    }
+    let mut text = plural(b.count, "track", "tracks");
+    if let Some(total) = b.duration.filter(|d| *d > 0.) {
+        text.push_str(" · ");
+        text.push_str(&span(total));
+    }
+    Some(text)
+}
+
+/// A count with thousands grouped: "2,123".
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
         }
-        if let Some(status) = status(b, cx) {
-            items.push(
-                div()
-                    .ml(px(6.))
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(m.text_faint)
-                    .child(status)
-                    .into_any_element(),
-            );
-        }
-        items
+        out.push(c);
+    }
+    out
+}
+
+/// A total listening time as people say it: "31 min", "134 h 5 min".
+fn span(seconds: f64) -> String {
+    let minutes = (seconds / 60.).round().max(1.) as u64;
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m} min"),
+        (h, 0) => format!("{h} h"),
+        (h, m) => format!("{h} h {m} min"),
     }
 }
 
 /// The table of recordings, or of albums and CDs.
 impl Render for Browser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         // Rows follow the Cover column, also while its boundary is dragged:
         // the table's changes re-render this view.
@@ -348,18 +488,7 @@ impl Render for Browser {
                 MouseButton::Navigate(NavigationDirection::Forward),
                 cx.listener(|b, _, w, cx| b.forward(w, cx)),
             );
-        let controls = self.controls(cx);
-        if !controls.is_empty() {
-            view = view.child(
-                h_flex()
-                    .px(px(8.))
-                    .gap(px(4.))
-                    .h(px(29.))
-                    .items_center()
-                    .flex_shrink_0()
-                    .children(controls),
-            );
-        }
+        view = view.child(self.bar(window, cx));
         if let Some(notice) = &self.notice {
             view = view.child(
                 gpui_kit::component::h_flex()
@@ -380,31 +509,48 @@ impl Render for Browser {
             && (!self.location.is_folder() || !self.discs.read(cx).delegate().rows.is_empty())
         {
             let albums = self.discs.clone();
+            let focused = keyboard_focus(self.discs.read(cx).focus_handle(cx), window);
             return view.child(
                 div()
                     .id("album-viewport")
+                    .relative()
                     .mx(px(4.))
                     .flex_1()
                     .min_h_0()
-                    .on_prepaint(move |b, _, cx| {
-                        albums.update(cx, |t, cx| {
-                            crate::collection::Discs::fit(t, f32::from(b.size.width).floor(), cx)
-                        });
+                    .on_prepaint(move |b, w, cx| {
+                        let width = f32::from(b.size.width).floor();
+                        let changed =
+                            albums.update(cx, |t, cx| crate::collection::Discs::fit(t, width, cx));
+                        // The headings were laid out with the old widths: draw
+                        // the table again once the new ones are known.
+                        if changed {
+                            let albums = albums.clone();
+                            w.on_next_frame(move |_, cx| {
+                                albums.update(cx, |t, cx| {
+                                    t.refresh(cx);
+                                    cx.notify();
+                                })
+                            });
+                        }
                     })
                     .child(
                         DataTable::new(&self.discs)
                             .accessibility_label("Albums and CDs")
+                            .focus_ring(false)
                             .bordered(false)
                             .stripe(false)
-                            .header_row_height(px(30.))
+                            .header_row_height(px(size::HEADER))
                             .with_size(gpui_kit::component::Size::Size(px(42.))),
-                    ),
+                    )
+                    .children(focus_outline(focused, &m)),
             );
         }
         let fit = table.clone();
+        let focused = keyboard_focus(self.table.read(cx).focus_handle(cx), window);
         view.child(
             div()
                 .id("tracks-viewport")
+                .relative()
                 .when_some(
                     match self.location {
                         Location::Playlist(id) => self
@@ -438,21 +584,52 @@ impl Render for Browser {
                 .child(
                     DataTable::new(&self.table)
                         .accessibility_label("Recordings")
+                        .focus_ring(false)
                         .fixed_cols_border(false)
                         .bordered(false)
                         .stripe(false)
-                        .header_row_height(px(30.))
+                        .header_row_height(px(size::HEADER))
                         .with_size(gpui_kit::component::Size::Size(px(row_height))),
-                ),
+                )
+                .children(focus_outline(focused, &m)),
         )
     }
 }
 
+/// Whether the keyboard brought focus to a table, as `:focus-visible` would.
+fn keyboard_focus(handle: FocusHandle, window: &Window) -> bool {
+    window.last_input_was_keyboard() && handle.is_focused(window)
+}
+
+/// The shared keyboard-focus outline, drawn inside a table's viewport so it
+/// is never clipped and never moves the rows.
+fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
+    focused.then(|| {
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(px(5.))
+            .border_1()
+            .border_color(m.focus_line())
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BrowserState;
+    use super::{BrowserState, grouped, span};
     use crate::browser::Location;
     use std::path::PathBuf;
+
+    #[test]
+    fn summaries_read_as_people_say_them() {
+        assert_eq!(grouped(7), "7");
+        assert_eq!(grouped(2123), "2,123");
+        assert_eq!(grouped(100_089), "100,089");
+        assert_eq!(span(20.), "1 min");
+        assert_eq!(span(30. * 60. + 55.), "31 min");
+        assert_eq!(span(2. * 3600.), "2 h");
+        assert_eq!(span(134. * 3600. + 4. * 60. + 33.), "134 h 5 min");
+    }
 
     #[test]
     fn a_saved_browser_keeps_its_view_and_a_new_one_starts_fresh() {

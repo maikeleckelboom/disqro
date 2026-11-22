@@ -134,6 +134,15 @@ pub fn music_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 impl Browser {
+    /// Empties the filter, shows every row again and returns to the table.
+    pub fn dismiss_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            self.cancel_reveal();
+            self.clear_search(window, cx);
+            self.filter(cx);
+        }
+        self.set_filter_open(false, window, cx);
+    }
     pub fn set_filter_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.filter_open != open {
             self.filter_open = open;
@@ -190,7 +199,7 @@ impl Browser {
             },
         )
         .detach();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter this view…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             // Only the active browser starts playback from its selection.
             if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
@@ -209,6 +218,13 @@ impl Browser {
         })
         .detach();
         cx.subscribe(&search, |s: &mut Self, e, ev, cx| {
+            // An empty filter folds back into its button when left.
+            if matches!(ev, InputEvent::Blur) && s.filter_open && e.read(cx).value().is_empty() {
+                s.filter_open = false;
+                cx.emit(ViewChanged);
+                cx.notify();
+                return;
+            }
             if matches!(ev, InputEvent::Change) {
                 cx.emit(ViewChanged);
                 let query = e.read(cx).value().trim().to_lowercase();
@@ -658,7 +674,7 @@ impl Browser {
                 SharedString::default()
             }
         } else if !self.query.is_empty() {
-            "No matching tracks".into()
+            crate::table::NO_MATCHES.into()
         } else if self.notice.is_some() && self.raw.is_empty() && self.folder_count == 0 {
             SharedString::default()
         } else if only_folders {
@@ -718,7 +734,7 @@ impl Browser {
         self.album = None;
         self.busy = false;
         let empty: SharedString = if !self.query.is_empty() {
-            "No matching tracks".into()
+            crate::table::NO_MATCHES.into()
         } else {
             match &self.location {
                 Location::Liked => {

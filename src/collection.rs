@@ -437,7 +437,7 @@ impl Disc {
                     .truncate()
                     .text_ellipsis_middle()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(12.5))
+                    .text_size(px(crate::theme::size::TEXT))
                     .text_color(m.text)
                     .child(self.title.clone()),
             )

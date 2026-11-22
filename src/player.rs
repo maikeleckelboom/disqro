@@ -668,7 +668,7 @@ impl Render for Player {
             div()
                 .flex_shrink_0()
                 .w(px(44.))
-                .text_size(px(11.5))
+                .text_size(px(crate::theme::size::TEXT_SMALL))
                 .text_color(m.text_faint)
                 .child(clock(t))
         };

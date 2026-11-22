@@ -495,7 +495,9 @@ impl LocationBar {
                     .text_color(if i == last { m.text } else { m.text_muted })
                     .when(navigates, |d| {
                         d.tab_index(0)
-                            .focus_visible(|d| d.bg(m.hover))
+                            .border_1()
+                            .border_color(transparent_black())
+                            .focus_visible(|d| d.border_color(m.focus_line()))
                             .hover(|d| d.bg(m.hover).text_color(m.text))
                             .cursor_pointer()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

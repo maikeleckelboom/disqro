@@ -105,6 +105,41 @@ impl Materials {
             Appearance::Dark => Self::dark(),
         }
     }
+    /// The outline of whatever holds keyboard focus. Rows and tabs reserve a
+    /// transparent border of the same width, so focus never moves content.
+    pub fn focus_line(&self) -> Hsla {
+        self.accent
+    }
+    /// The resting surface of a text field in the chrome, such as the
+    /// address and Library search.
+    pub fn field(&self) -> Hsla {
+        self.hover
+    }
+    /// Where a dragged tab or panel will land: a translucent ghost of the
+    /// resulting region with a hairline edge, quieter than a selection.
+    pub fn preview_fill(&self) -> Hsla {
+        self.accent.opacity(0.11)
+    }
+    pub fn preview_edge(&self) -> Hsla {
+        self.accent.opacity(0.55)
+    }
+}
+
+/// The geometry and type scale every panel shares.
+pub mod size {
+    /// Every panel header: tab strips, the browser bar and table headings
+    /// share one height, so their edges line up across the window.
+    pub const HEADER: f32 = 30.;
+    /// Rows, tab labels and menus.
+    pub const TEXT: f32 = 13.;
+    /// Secondary text: artists beside titles, durations, counts and status.
+    pub const TEXT_SMALL: f32 = 12.;
+    /// Table column headings.
+    pub const LABEL: f32 = 12.;
+    /// Sidebar section headings, such as Collections and Playlists.
+    pub const HEADING: f32 = 12.5;
+    /// The inset of a drop preview from the region it describes.
+    pub const PREVIEW_INSET: f32 = 4.;
 }
 
 pub fn materials(cx: &App) -> &Materials {

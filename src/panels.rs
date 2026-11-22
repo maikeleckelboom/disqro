@@ -322,16 +322,19 @@ impl Pane {
         use gpui_kit::component::menu::PopupMenuItem;
         let pane = this.read(cx);
         let (ty, named) = (pane.ty, pane.name.is_some());
+        // Only instances of a kind that can be opened several times need
+        // names of their own. A fixed panel such as Queue keeps its title.
+        if ty.instances != Instances::Multiple {
+            return menu;
+        }
         let (b, c, d) = (this.downgrade(), this.downgrade(), this.downgrade());
-        menu.when(ty.instances == Instances::Multiple, |menu| {
-            menu.item(
-                PopupMenuItem::new("Open in New Tab")
-                    .icon(IconName::Copy)
-                    .on_click(move |_, _, cx| {
-                        let _ = b.update(cx, |_, cx| cx.emit(PaneEvent::Duplicate));
-                    }),
-            )
-        })
+        menu.item(
+            PopupMenuItem::new("Open in New Tab")
+                .icon(IconName::Copy)
+                .on_click(move |_, _, cx| {
+                    let _ = b.update(cx, |_, cx| cx.emit(PaneEvent::Duplicate));
+                }),
+        )
         .item(
             PopupMenuItem::new("Rename Tab…")
                 .icon(IconName::Pencil)
@@ -347,9 +350,16 @@ impl Pane {
             )
         })
     }
-    pub fn close_item(this: &Entity<Self>) -> gpui_kit::component::menu::PopupMenuItem {
+    /// Closing a browser tab discards that instance. A fixed panel is only
+    /// hidden: the workspace menu shows it again where it was.
+    pub fn close_item(this: &Entity<Self>, cx: &App) -> gpui_kit::component::menu::PopupMenuItem {
+        let ty = this.read(cx).ty;
+        let label = match ty.instances {
+            Instances::Multiple => "Close Tab".to_string(),
+            Instances::Single => format!("Hide {}", ty.title),
+        };
         let this = this.downgrade();
-        gpui_kit::component::menu::PopupMenuItem::new("Close")
+        gpui_kit::component::menu::PopupMenuItem::new(label)
             .icon(IconName::X)
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |_, cx| cx.emit(PaneEvent::Close));

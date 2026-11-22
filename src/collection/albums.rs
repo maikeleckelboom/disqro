@@ -210,12 +210,16 @@ impl Discs {
             d.loading = false;
         });
     }
-    pub fn fit(t: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
-        if t.delegate().viewport != width {
-            t.delegate_mut().viewport = width;
-            t.refresh(cx);
-            cx.notify();
+    /// Sizes the columns to `width`. Returns whether it changed, since the
+    /// headings that were already drawn this frame need another frame.
+    pub fn fit(t: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) -> bool {
+        if t.delegate().viewport == width {
+            return false;
         }
+        t.delegate_mut().viewport = width;
+        t.refresh(cx);
+        cx.notify();
+        true
     }
     pub fn resized(&mut self, widths: &[Pixels]) {
         if self.view.columns.len() == widths.len() {
@@ -425,7 +429,6 @@ impl TableDelegate for Discs {
                 .id(("disc-title", crate::table::stable_element_key(row.key())))
                 .min_w_0()
                 .truncate()
-                .text_ellipsis_middle()
                 .child(label.clone())
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
@@ -435,7 +438,7 @@ impl TableDelegate for Discs {
             d.child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(11.5))
+                    .text_size(px(crate::theme::size::TEXT_SMALL))
                     .text_color(m.text_faint)
                     .child(format!("{n} CDs")),
             )

@@ -1357,10 +1357,11 @@ impl Workspace {
         let tray = self.tray_available();
         let locked = self.dock.read(cx).is_locked();
         let can_undo = self.undo.is_some();
+        let can_reopen = !self.closed.is_empty();
         Button::new("workspace")
             .ghost()
             .small()
-            .icon(Icon::new(IconName::Ellipsis))
+            .icon(Icon::new(IconName::Ellipsis).text_color(materials(cx).text_muted))
             .accessibility_label("Workspace")
             .tooltip("Workspace")
             .dropdown_menu(move |mut menu, _, cx| {
@@ -1388,48 +1389,56 @@ impl Workspace {
                 let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
                 let customize = shell.clone();
                 let undo = shell.clone();
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" })
-                            .on_click(move |_, w, cx| {
-                                let _ =
-                                    customize.update(cx, |s, cx| s.set_customizing(locked, w, cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Undo Layout Change")
-                            .disabled(!can_undo)
-                            .on_click(move |_, w, cx| {
-                                let _ = undo.update(cx, |s, cx| s.undo_layout(w, cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
-                            let _ = s1.update(cx, |s, cx| s.reset(None, w, cx));
+                let reopen = shell.clone();
+                menu.item(
+                    PopupMenuItem::new("Reopen Closed Panel")
+                        .disabled(!can_reopen)
+                        .on_click(move |_, w, cx| {
+                            let _ = reopen.update(cx, |s, cx| s.reopen_closed(w, cx));
                         }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Close to Tray")
-                            .checked(prefs.close_to_tray)
-                            .disabled(!tray)
-                            .on_click(move |_, _, cx| {
-                                let _ = s3.update(cx, |s, cx| {
-                                    s.prefs.close_to_tray = !s.prefs.close_to_tray;
-                                    s.schedule_save(cx);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .separator()
-                    .item(PopupMenuItem::new("Hide to Tray").disabled(!tray).on_click(
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" }).on_click(
                         move |_, w, cx| {
-                            let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
+                            let _ = customize.update(cx, |s, cx| s.set_customizing(locked, w, cx));
                         },
-                    ))
-                    .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, w, cx| {
-                        let _ = s5.update(cx, |s, cx| s.quit(w, cx));
-                    }))
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new("Undo Layout Change")
+                        .disabled(!can_undo)
+                        .on_click(move |_, w, cx| {
+                            let _ = undo.update(cx, |s, cx| s.undo_layout(w, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
+                        let _ = s1.update(cx, |s, cx| s.reset(None, w, cx));
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Close to Tray")
+                        .checked(prefs.close_to_tray)
+                        .disabled(!tray)
+                        .on_click(move |_, _, cx| {
+                            let _ = s3.update(cx, |s, cx| {
+                                s.prefs.close_to_tray = !s.prefs.close_to_tray;
+                                s.schedule_save(cx);
+                                cx.notify();
+                            });
+                        }),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Hide to Tray").disabled(!tray).on_click(
+                    move |_, w, cx| {
+                        let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
+                    },
+                ))
+                .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, w, cx| {
+                    let _ = s5.update(cx, |s, cx| s.quit(w, cx));
+                }))
             })
             .into_any_element()
     }
@@ -1469,18 +1478,20 @@ impl Workspace {
                     )
                     .into_any_element()
             });
+        // Each sidebar toggle sits at the side it shows; navigation, address
+        // and search read left to right; workspace commands close the row.
         h_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .px(px(6.))
-            .gap(px(7.))
+            .gap(px(6.))
             .items_center()
             .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
-            .child(div().w(px(24.)).h_full().flex_shrink_0())
+            .child(div().w(px(6.)).flex_shrink_0())
+            .child(self.sidebar_button(Home::Leading, cx))
             .child(address)
             .child(self.search_field(window, cx))
-            .child(self.sidebar_button(Home::Leading, cx))
             .child(self.sidebar_button(Home::Trailing, cx))
             .when(!self.dock.read(cx).is_locked(), |d| {
                 d.child(
@@ -1494,11 +1505,6 @@ impl Workspace {
                     ),
                 )
             })
-            .child(
-                div()
-                    .occlude()
-                    .child(skin::add_button(&self.skin, None, cx)),
-            )
             .child(div().occlude().child(self.workspace_menu(cx)))
             .into_any_element()
     }
@@ -1593,8 +1599,9 @@ fn tab_menu(
         .upgrade()
         .and_then(|w| w.read(cx).sidebar_action(id, cx));
     let sidebar = workspace.clone();
+    let instance = pane.read(cx).ty.instances == Instances::Multiple;
     Pane::menu(pane, menu, cx)
-        .separator()
+        .when(instance, |menu| menu.separator())
         .when_some(arrangement, |menu, action| {
             menu.item(
                 PopupMenuItem::new(action.label()).on_click(move |_, w, cx| {
@@ -1624,8 +1631,10 @@ fn tab_menu(
                     }),
             )
         })
-        .separator()
-        .item(Pane::close_item(pane))
+        .when(instance || arrangement.is_some() || editing, |menu| {
+            menu.separator()
+        })
+        .item(Pane::close_item(pane, cx))
 }
 
 impl Render for Workspace {
