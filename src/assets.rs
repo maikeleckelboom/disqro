@@ -38,7 +38,6 @@ gpui_kit::assets::icon_assets!(
         FolderSearch,
         Image,
         Clock,
-        FolderTree,
         LayoutPanelLeft,
         SquareSplitHorizontal,
         SquareSplitVertical,

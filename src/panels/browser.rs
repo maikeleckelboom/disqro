@@ -14,7 +14,6 @@ use crate::{
 };
 use gpui_kit::{
     assets::IconName,
-    base::{Checkbox, CheckboxState},
     component::{
         ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -22,7 +21,6 @@ use gpui_kit::{
         input::Input,
         menu::{DropdownMenu, PopupMenuItem},
         table::DataTable,
-        tooltip::Tooltip,
         v_flex,
     },
     prelude::*,
@@ -241,10 +239,6 @@ impl PaneContent for BrowserPane {
 const HEADER_INSET: f32 = 8.;
 const VIEW_INSET: f32 = 8.;
 const SEGMENT_INSET: f32 = 2.;
-const SCOPE_GAP: f32 = 10.;
-const CHECK_SIZE: f32 = 12.;
-const CHECK_GAP: f32 = 5.;
-const CHECK_INSET: f32 = 3.;
 const COUNT_GAP: f32 = 10.;
 const ICON_BUTTON: f32 = 24.;
 const FILTER_COMPACT: f32 = 100.;
@@ -265,6 +259,51 @@ enum HeaderDensity {
     Labeled,
     Compact,
     Minimal,
+}
+
+#[derive(Clone, Copy)]
+struct BrowserViews {
+    /// The selected presentation, when both presentations are available.
+    albums: Option<bool>,
+    /// The current scope of a physical folder.
+    subfolders: Option<bool>,
+}
+
+impl BrowserViews {
+    /// Compact and full widths of just the view controls. A compact folder
+    /// shares its view trigger with the scope choices in the same popup.
+    fn widths(self, text: impl Fn(&'static str) -> Pixels, decoration: Pixels) -> (Pixels, Pixels) {
+        if self.albums.is_some() {
+            let tracks = text("All Tracks");
+            let albums = text("Albums / CDs");
+            let caret = if self.subfolders.is_some() {
+                ICON_BUTTON
+            } else {
+                0.
+            };
+            (
+                tracks.max(albums) + decoration,
+                tracks + albums + px(4. * VIEW_INSET + 2. * SEGMENT_INSET + caret),
+            )
+        } else if self.subfolders.is_some() {
+            let trigger = text("View") + decoration;
+            (trigger, trigger)
+        } else {
+            (px(0.), px(0.))
+        }
+    }
+
+    fn segmented(self, density: HeaderDensity) -> bool {
+        self.albums.is_some() && density == HeaderDensity::Labeled
+    }
+
+    fn menu_label(self, density: HeaderDensity) -> &'static str {
+        match (density, self.albums) {
+            (HeaderDensity::Minimal, _) | (_, None) => "View",
+            (_, Some(true)) => "Albums / CDs",
+            (_, Some(false)) => "All Tracks",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -372,35 +411,29 @@ impl Browser {
             .into_any_element()
     }
 
+    fn header_views(&self) -> BrowserViews {
+        BrowserViews {
+            albums: (!self.is_page() && self.can_list_discs()).then_some(self.prefs.albums),
+            subfolders: (self.location.is_folder() && self.page.is_none())
+                .then_some(self.subfolders),
+        }
+    }
+
     pub(crate) fn header_widths(&self, window: &Window, cx: &App) -> BrowserHeaderWidths {
-        let view = !self.is_page() && self.can_list_discs();
-        let folders = self.location.is_folder() && self.page.is_none();
+        let views = self.header_views();
         let text = |label: &'static str| {
             crate::theme::label_width(label.into(), window.rem_size() * 0.75, window)
         };
-        let mut compact = px(HEADER_INSET * 2. + size::TAB_DROP);
-        let mut full = compact;
+        let insets = px(HEADER_INSET * 2. + size::TAB_DROP);
         // Kit's xsmall text buttons use a quarter-rem inset and icon gap.
         let decorated = window.rem_size() * 0.75 + px(16.);
-        if view {
-            compact += text("Albums / CDs").max(text("All Tracks")) + decorated;
-            full += text("All Tracks")
-                + text("Albums / CDs")
-                + px(4. * VIEW_INSET + 2. * SEGMENT_INSET);
-        }
-        if folders {
-            compact += px(ICON_BUTTON);
-            full += text("Subfolders") + px(CHECK_SIZE + CHECK_GAP + 2. * (CHECK_INSET + 1.));
-            if view {
-                compact += px(SCOPE_GAP);
-                full += px(SCOPE_GAP);
-            }
-        }
+        let (compact, full) = views.widths(text, decorated);
         let editing = self.filter_open || !self.search.read(cx).value().is_empty();
         BrowserHeaderWidths {
-            minimum: compact + px(if editing { FILTER_COMPACT } else { ICON_BUTTON }),
-            editable: compact + px(FILTER_COMPACT),
-            full: full
+            minimum: insets + compact + px(if editing { FILTER_COMPACT } else { ICON_BUTTON }),
+            editable: insets + compact + px(FILTER_COMPACT),
+            full: insets
+                + full
                 + if editing {
                     px(FILTER_FULL)
                 } else {
@@ -421,8 +454,8 @@ impl Browser {
         let density = widths.density(width);
         let compact = density != HeaderDensity::Labeled;
         let tight = density == HeaderDensity::Minimal;
-        let view = !self.is_page() && self.can_list_discs();
-        let folders = self.location.is_folder() && self.page.is_none();
+        let views = self.header_views();
+        let has_views = views.albums.is_some() || views.subfolders.is_some();
         let count = (!compact)
             .then(|| status(self, cx).or_else(|| summary(self, cx)))
             .flatten()
@@ -441,7 +474,7 @@ impl Browser {
             .h(px(size::HEADER))
             .px(px(if tight { 2. } else { HEADER_INSET }))
             .items_center()
-            .when(view || folders, |d| {
+            .when(has_views, |d| {
                 // A focused choice keeps its handle when it folds into a menu.
                 let focus = window
                     .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
@@ -453,39 +486,19 @@ impl Browser {
                     .clone();
                 let menu_focus = [&focus.tracks, &focus.albums]
                     .into_iter()
-                    .chain((tight && folders).then_some(&focus.folders))
+                    .chain(views.subfolders.map(|_| &focus.folders))
                     .find(|handle| handle.is_focused(window))
-                    .unwrap_or(focus.choice(self.prefs.albums));
-                d.child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap(px(SCOPE_GAP))
-                        .when(view, |d| {
-                            d.child(view_switch(
-                                &browser,
-                                self.prefs.albums,
-                                density,
-                                (tight && folders).then_some(self.subfolders),
-                                &focus,
-                                menu_focus,
-                                m,
-                            ))
-                        })
-                        .when(folders && !(view && tight), |d| {
-                            d.child(subfolder_toggle(
-                                &browser,
-                                self.subfolders,
-                                compact,
-                                &focus.folders,
-                                m,
-                            ))
-                        }),
-                )
+                    .unwrap_or_else(|| {
+                        views
+                            .albums
+                            .map_or(&focus.folders, |albums| focus.choice(albums))
+                    });
+                d.child(view_switch(&browser, views, density, &focus, menu_focus, m))
             })
             .when_some(count, |d, text| {
                 d.child(
                     div()
-                        .when(view || folders, |d| d.ml(px(COUNT_GAP)))
+                        .when(has_views, |d| d.ml(px(COUNT_GAP)))
                         .whitespace_nowrap()
                         .text_xs()
                         .text_color(m.text_muted)
@@ -577,59 +590,83 @@ impl Browser {
     }
 }
 
-/// All Tracks or Albums / CDs: side by side while there is room, otherwise a
-/// menu that names the current view.
+/// At desktop width the scope menu ends the segmented view selector. At
+/// smaller widths the same menu also takes the two presentation choices.
 fn view_switch(
     browser: &Entity<Browser>,
-    albums: bool,
+    views: BrowserViews,
     density: HeaderDensity,
-    subfolders: Option<bool>,
     focus: &ViewFocus,
     menu_focus: &FocusHandle,
     m: crate::theme::Materials,
 ) -> AnyElement {
     let choices = [("All Tracks", false), ("Albums / CDs", true)];
-    if density != HeaderDensity::Labeled {
+    let segmented = views.segmented(density);
+    let menu_button = |handle: &FocusHandle| {
         let browser = browser.clone();
-        return Button::new("browser-view")
+        let description = match (views.albums, views.subfolders) {
+            (Some(_), Some(_)) if !segmented => "Choose view or folder scope",
+            (_, Some(_)) => "Choose folder scope",
+            _ => "Choose view",
+        };
+        Button::new("browser-view-menu")
             .ghost()
             .xsmall()
-            .label(if density == HeaderDensity::Minimal {
-                "View"
-            } else if albums {
-                "Albums / CDs"
-            } else {
-                "All Tracks"
-            })
-            .dropdown_caret(true)
-            .track_focus(menu_focus)
-            .tab_stop(true)
-            .accessibility_label(if albums {
-                "View: Albums / CDs"
-            } else {
-                "View: All Tracks"
-            })
-            .tooltip("Choose how this view is shown")
-            .dropdown_menu(move |mut menu, _, _| {
-                for (name, value) in choices {
-                    let browser = browser.clone();
-                    menu = menu.item(PopupMenuItem::new(name).checked(albums == value).on_click(
-                        move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)),
-                    ));
+            .map(|b| {
+                if segmented {
+                    b.w(px(ICON_BUTTON)).icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(px(12.))
+                            .text_color(m.text_muted),
+                    )
+                } else {
+                    b.label(views.menu_label(density)).dropdown_caret(true)
                 }
-                if let Some(include) = subfolders {
-                    let browser = browser.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new("Include subfolders")
-                            .checked(include)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| b.set_subfolders(!include, w, cx))
-                            }),
-                    );
+            })
+            .track_focus(handle)
+            .tab_stop(true)
+            .accessibility_label(if segmented {
+                description.to_string()
+            } else {
+                format!("{}, {description}", views.menu_label(density))
+            })
+            .tooltip(description)
+            .dropdown_menu(move |mut menu, _, _| {
+                if !segmented && let Some(albums) = views.albums {
+                    for (name, value) in choices {
+                        let browser = browser.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new(name).checked(albums == value).on_click(
+                                move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)),
+                            ));
+                    }
+                    if views.subfolders.is_some() {
+                        menu = menu.separator();
+                    }
+                }
+                if let Some(include) = views.subfolders {
+                    menu = menu.label("Folder scope");
+                    for (name, value) in [("This folder only", false), ("Include subfolders", true)]
+                    {
+                        let browser = browser.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new(name).checked(include == value).on_click(
+                                move |_, w, cx| {
+                                    browser.update(cx, |b, cx| {
+                                        // Reapplying a scope would clear overrides for descendant folders.
+                                        if b.subfolders != value {
+                                            b.set_subfolders(value, w, cx);
+                                        }
+                                    })
+                                },
+                            ));
+                    }
                 }
                 menu
             })
-            .into_any_element();
+    };
+    if !segmented {
+        return menu_button(menu_focus).into_any_element();
     }
     h_flex()
         .id("browser-views")
@@ -641,88 +678,22 @@ fn view_switch(
         .aria_label("View")
         .children(choices.map(|(name, value)| {
             let browser = browser.clone();
+            let selected = views.albums == Some(value);
             Button::new(name)
                 .ghost()
                 .xsmall()
                 .rounded(px(3.))
                 .px(px(VIEW_INSET))
                 .label(name)
-                .selected(albums == value)
-                .toggled(albums == value)
-                .text_color(if albums == value {
-                    m.text
-                } else {
-                    m.text_muted
-                })
+                .selected(selected)
+                .toggled(selected)
+                .text_color(if selected { m.text } else { m.text_muted })
                 .track_focus(focus.choice(value))
                 .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
         }))
-        .into_any_element()
-}
-
-fn subfolder_toggle(
-    browser: &Entity<Browser>,
-    include: bool,
-    compact: bool,
-    focus: &FocusHandle,
-    m: crate::theme::Materials,
-) -> AnyElement {
-    let browser = browser.clone();
-    Checkbox::new("view-subfolders")
-        .accessibility_label("Include subfolders")
-        .track_focus(focus)
-        .checked(include)
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .h(px(22.))
-        .px(px(CHECK_INSET))
-        .gap(px(CHECK_GAP))
-        .rounded(px(3.))
-        .border_1()
-        .border_color(transparent_black())
-        .focus_visible(move |s| s.border_color(m.focus_line()))
-        .hover(move |s| s.bg(m.hover))
-        .text_xs()
-        .text_color(m.text_muted)
-        .when(compact, |c| {
-            c.w(px(ICON_BUTTON))
-                .justify_center()
-                .when(include, |c| c.bg(m.control))
-                .child(Icon::new(IconName::FolderTree).size(px(14.)))
-        })
-        .when(!compact, |c| {
-            c.child(
-                h_flex()
-                    .size(px(CHECK_SIZE))
-                    .flex_shrink_0()
-                    .justify_center()
-                    .rounded(px(2.))
-                    .border_1()
-                    .border_color(if include { m.text_muted } else { m.text_faint })
-                    .when(include, |d| {
-                        d.bg(m.control).child(
-                            Icon::new(IconName::Check)
-                                .size(px(CHECK_SIZE - 2.))
-                                .text_color(m.text),
-                        )
-                    }),
-            )
-            .child("Subfolders")
-        })
-        .tooltip(move |w, cx| {
-            Tooltip::new(if include {
-                "Showing subfolders · click to show this folder only"
-            } else {
-                "Include subfolders"
-            })
-            .build(w, cx)
-        })
-        .on_change(move |state, _, w, cx| {
-            browser.update(cx, |b, cx| {
-                b.set_subfolders(state == CheckboxState::Checked, w, cx)
-            })
+        .when(views.subfolders.is_some(), |d| {
+            d.child(menu_button(&focus.folders))
         })
         .into_any_element()
 }
@@ -921,9 +892,43 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserHeaderWidths, BrowserState, HeaderDensity, grouped, px, span};
+    use super::{
+        BrowserHeaderWidths, BrowserState, BrowserViews, HeaderDensity, ICON_BUTTON, grouped, px,
+        span,
+    };
     use crate::browser::Location;
     use std::path::PathBuf;
+
+    #[test]
+    fn physical_folder_scope_shares_the_compact_menu_and_survives_without_album_views() {
+        let library = BrowserViews {
+            albums: Some(false),
+            subfolders: None,
+        };
+        let folder = BrowserViews {
+            subfolders: Some(true),
+            ..library
+        };
+        let widths = |view: BrowserViews| view.widths(|s| px(s.len() as f32 * 6.), px(24.));
+        let (compact, full) = widths(library);
+        assert_eq!(widths(folder), (compact, full + px(ICON_BUTTON)));
+        assert!(folder.segmented(HeaderDensity::Labeled));
+        assert!(!folder.segmented(HeaderDensity::Compact));
+        let direct = BrowserViews {
+            albums: None,
+            subfolders: Some(false),
+        };
+        assert!(!direct.segmented(HeaderDensity::Labeled));
+        assert_eq!(direct.menu_label(HeaderDensity::Labeled), "View");
+        assert_eq!(widths(direct), (px(48.), px(48.)));
+        assert_eq!(
+            widths(BrowserViews {
+                albums: None,
+                subfolders: None
+            }),
+            (px(0.), px(0.))
+        );
+    }
 
     #[test]
     fn browser_header_drops_metadata_before_compacting_essential_controls() {
