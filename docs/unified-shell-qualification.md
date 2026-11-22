@@ -1,4 +1,6 @@
-# Mission 11 Windows qualification
+# Original Mission 11 Windows qualification
+
+The [final UX correction and Windows evidence](mission-11-ux-qualification.md) cover the current PR. This record describes the original implementation.
 
 The optimized Windows player was exercised with Win32 input, Windows UI Automation and isolated profiles. The listening fixture held 126 catalog tracks, six likes, five ratings and two playlists. The display ran at 144 DPI (150% scaling).
 
