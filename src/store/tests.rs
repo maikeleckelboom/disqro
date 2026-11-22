@@ -726,7 +726,7 @@ fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
     // A release page groups its discs; a search keeps the matching disc.
     let query = Query {
         scope: Scope::Release(one.id),
-        search: "two".into(),
+        search: "title:two".into(),
         order: None,
     };
     let (listing, sections) = s.table_listing(&query, true).unwrap();
