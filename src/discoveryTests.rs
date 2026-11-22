@@ -283,6 +283,7 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
     assert!(
         local_program(dir.path(), first, Inferred, None)
             .unwrap()
+            .tracks
             .is_empty()
     );
 
@@ -294,7 +295,9 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
     assert!(queue.upcoming().is_empty());
     assert_eq!(queue.revision, revision);
 
-    let explicit = local_program(dir.path(), first, Selected, None).unwrap();
+    let explicit = local_program(dir.path(), first, Selected, None)
+        .unwrap()
+        .tracks;
     assert_eq!(&*explicit, tracks);
     let duplicates = queue.add(&[tracks[1].clone(), tracks[1].clone()]);
     assert!(queue.continue_disc(id, &explicit, Selected));
@@ -333,6 +336,8 @@ fn tagged_wavs_continue_in_track_order_within_the_same_album_and_disc() {
     let first = collect(dir.path(), false, None).0.remove(1);
     assert!(Inferred.allows(&first));
     let program = local_program(dir.path(), &first, Inferred, None).unwrap();
+    assert!(program.has_sibling_disc);
+    let program = program.tracks;
     assert_eq!(
         program.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
         ["b", "a"]

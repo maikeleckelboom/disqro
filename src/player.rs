@@ -735,7 +735,9 @@ impl Render for Player {
                                             .child(subtitle),
                                     ),
                             )
-                            .when(self.on_cd(), |row| row.child(self.perspectives(&m, cx)))
+                            .when_some(self.overview(), |row, overview| {
+                                row.child(self.perspectives(overview, &m, cx))
+                            })
                             .child(transport)
                             .child(volume),
                     )

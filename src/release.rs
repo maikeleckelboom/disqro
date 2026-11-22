@@ -78,6 +78,11 @@ pub fn disc_folder(name: &str) -> Option<(u32, &str)> {
     Some((number, trim_separators(&name[range.end..])))
 }
 
+pub(crate) fn names_cd(name: &str) -> bool {
+    marker(name)
+        .is_some_and(|(range, _)| name[range.start..range.start + 2].eq_ignore_ascii_case("cd"))
+}
+
 fn trim_separators(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || "-–—_,.:;".contains(c))
 }

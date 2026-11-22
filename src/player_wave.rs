@@ -1,5 +1,6 @@
 use super::*;
 use crate::theme::Materials;
+use crate::timeline::Overview;
 impl Player {
     pub(super) fn request_wave(&mut self) {
         self.program = None;
@@ -103,16 +104,14 @@ impl Player {
         }
         self.run = left..right;
     }
-    /// Only a track from a CD offers the Track and Full CD perspectives.
-    pub(super) fn on_cd(&self) -> bool {
+    pub(super) fn overview(&self) -> Option<Overview> {
         self.status
             .track
             .as_ref()
-            .is_some_and(|t| crate::timeline::from_cd(t, self.program.as_deref()))
+            .and_then(|t| Overview::for_track(t, self.program.as_deref()))
     }
-    /// Full CD is offered once the CD resolves to more than the track itself.
     fn full_cd_available(&self) -> bool {
-        self.on_cd() && self.program.as_ref().is_some_and(|p| p.full_cd)
+        self.overview().is_some_and(|overview| overview.enabled)
     }
     fn disc_view(&self) -> bool {
         self.full_cd && self.segment.is_some() && self.full_cd_available()
@@ -202,26 +201,25 @@ impl Player {
         self.scrub_entry = None;
         cx.notify();
     }
-    pub(super) fn perspectives(&self, m: &Materials, cx: &Context<Self>) -> impl IntoElement {
-        let enabled = self.full_cd_available();
+    pub(super) fn perspectives(
+        &self,
+        overview: Overview,
+        m: &Materials,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let enabled = overview.enabled;
         let reason = self
             .unavailable
-            .as_ref()
-            .or_else(|| self.program.as_ref()?.limitation.as_ref());
+            .as_deref()
+            .or_else(|| self.program.as_ref()?.limitation.as_deref());
         let mut row = h_flex().items_center().rounded(px(4.)).bg(m.control);
         for (id, label, full) in [
             ("wave-track", "Track", false),
-            ("wave-disc", "Full CD", true),
+            ("wave-disc", overview.label, true),
         ] {
             let selected = self.disc_view() == full;
             let tip = if full && !enabled {
-                reason.cloned().unwrap_or_else(|| {
-                    if self.status.track.is_some() && self.program.is_none() {
-                        "Checking CD availability".into()
-                    } else {
-                        "No authored CD is available".into()
-                    }
-                })
+                overview.unavailable_tip(reason, self.program.is_none())
             } else {
                 format!("{label} waveform · Alt+W")
             };
