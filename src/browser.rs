@@ -191,7 +191,11 @@ impl Browser {
             |b: &mut Self, table, event, window, cx| match event {
                 TableEvent::DoubleClickedRow(i) => b.show_disc(*i, window, cx),
                 TableEvent::ColumnWidthsChanged(widths) => {
-                    table.update(cx, |t, _| t.delegate_mut().resized(widths));
+                    table.update(cx, |t, cx| {
+                        t.delegate_mut().resized(widths);
+                        t.refresh(cx);
+                        cx.notify();
+                    });
                     cx.emit(ViewChanged);
                 }
                 TableEvent::MoveColumn(_, _) | TableEvent::SelectRow(_) => cx.emit(ViewChanged),

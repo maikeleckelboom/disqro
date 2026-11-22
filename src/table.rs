@@ -45,10 +45,48 @@ const ROW_HEIGHT: f32 = 28.;
 const CELL_X: f32 = 10.;
 /// Cover thumbnails fill the column between its padding, from compact to
 /// large. Rows grow to keep a larger cover whole.
-const COVER_X: f32 = 8.;
+pub(crate) const COVER_X: f32 = 8.;
 const THUMBNAIL: f32 = 24.;
 const LARGE_THUMBNAIL: f32 = 96.;
 const COVER_Y: f32 = 2.;
+pub(crate) const COVER_WIDTH: f32 = THUMBNAIL + 2. * COVER_X;
+pub(crate) const COVER_MAX_WIDTH: f32 = LARGE_THUMBNAIL + 2. * COVER_X;
+
+pub(crate) fn cover_edge(width: f32) -> f32 {
+    (width - 2. * COVER_X)
+        .clamp(THUMBNAIL, LARGE_THUMBNAIL)
+        .round()
+}
+
+/// Keep the same top row when a different thumbnail size changes the row pitch.
+pub(crate) fn cover_row_height<D: TableDelegate>(
+    table: &TableState<D>,
+    previous: f32,
+    edge: f32,
+) -> f32 {
+    let height = |edge: f32| (edge + 2. * COVER_Y).max(ROW_HEIGHT);
+    let (old, new) = (height(previous), height(edge));
+    if old != new {
+        let scroll = table.vertical_scroll_handle.0.borrow();
+        let offset = scroll.base_handle.offset();
+        scroll
+            .base_handle
+            .set_offset(point(offset.x, offset.y * (new / old)));
+    }
+    new
+}
+
+pub(crate) fn cover_tile(edge: f32, image: Option<Arc<RenderImage>>, cx: &App) -> Div {
+    div()
+        .size(px(edge))
+        .flex_shrink_0()
+        .rounded(px(2.))
+        .overflow_hidden()
+        .map(|d| match image {
+            Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+            None => d.bg(materials(cx).hover.opacity(0.4)),
+        })
+}
 /// Library rows kept in memory beyond the visible range.
 const ROW_CACHE: usize = 4096;
 const PREFETCH: usize = 64;
@@ -117,7 +155,7 @@ impl Field {
     }
     fn width(self) -> f32 {
         match self {
-            Self::Cover => THUMBNAIL + 2. * COVER_X,
+            Self::Cover => COVER_WIDTH,
             Self::Number => 40.,
             Self::Favorite => 88.,
             Self::Title => 200.,
@@ -142,7 +180,7 @@ impl Field {
     }
     fn max_width(self) -> f32 {
         match self {
-            Self::Cover => LARGE_THUMBNAIL + 2. * COVER_X,
+            Self::Cover => COVER_MAX_WIDTH,
             _ => 1200.,
         }
     }
@@ -733,24 +771,13 @@ impl MusicTable {
             .and_then(|ix| table.col_width(ix))
             .map(f32::from)
             .or(settled);
-        let edge = |width: f32| {
-            (width - 2. * COVER_X)
-                .clamp(THUMBNAIL, LARGE_THUMBNAIL)
-                .round()
-        };
-        let cover = live.map_or(THUMBNAIL, edge);
-        let row = (cover + 2. * COVER_Y).max(ROW_HEIGHT);
-        if row != d.row_height {
-            let scroll = table.vertical_scroll_handle.0.borrow();
-            let offset = scroll.base_handle.offset();
-            let y = offset.y * (row / d.row_height);
-            scroll.base_handle.set_offset(point(offset.x, y));
-        }
+        let cover = live.map_or(THUMBNAIL, cover_edge);
+        let row = cover_row_height(table, d.cover, cover);
         let d = table.delegate_mut();
         d.cover = cover;
         d.row_height = row;
         if d.resizing.is_none() {
-            d.settled_cover = settled.map_or(THUMBNAIL, edge);
+            d.settled_cover = settled.map_or(THUMBNAIL, cover_edge);
         }
         row
     }
@@ -1234,16 +1261,7 @@ impl MusicTable {
             listing: self.artwork_revision,
         }
         .image(self.settled_cover, window, cx);
-        div()
-            .size(px(self.cover))
-            .flex_shrink_0()
-            .rounded(px(2.))
-            .overflow_hidden()
-            .map(|d| match image {
-                Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
-                // Fainter than row hover, so even large empty tiles recede.
-                None => d.bg(materials(cx).hover.opacity(0.4)),
-            })
+        cover_tile(self.cover, image, cx)
     }
     fn render_like(
         &self,

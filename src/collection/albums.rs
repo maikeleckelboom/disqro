@@ -1,6 +1,9 @@
 //! The Albums / CDs overview shows one row per release or standalone album.
 use super::*;
-use crate::table::{reselect, sort_heading};
+use crate::table::{
+    COVER_MAX_WIDTH, COVER_WIDTH, COVER_X, cover_edge, cover_row_height, cover_tile, reselect,
+    sort_heading,
+};
 use gpui_kit::component::{
     menu::{ContextMenuExt, PopupMenuItem},
     table::ColumnSort,
@@ -11,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
 enum Field {
+    Cover,
     Title,
     Year,
     Tracks,
@@ -19,7 +23,8 @@ enum Field {
     Folder,
 }
 impl Field {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
+        Self::Cover,
         Self::Title,
         Self::Year,
         Self::Tracks,
@@ -29,6 +34,7 @@ impl Field {
     ];
     fn label(self) -> &'static str {
         match self {
+            Self::Cover => "Cover",
             Self::Title => "Album / Disc",
             Self::Year => "Year",
             Self::Tracks => "Tracks",
@@ -39,6 +45,7 @@ impl Field {
     }
     fn width(self) -> f32 {
         match self {
+            Self::Cover => COVER_WIDTH,
             Self::Title => 280.,
             Self::Year => 60.,
             Self::Tracks => 62.,
@@ -55,6 +62,9 @@ impl Field {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AlbumView {
+    // Older layouts always showed artwork inside Title, even after a reorder.
+    #[serde(default)]
+    separate_cover: bool,
     columns: Vec<Field>,
     widths: BTreeMap<Field, f32>,
     sort: Option<(Field, bool)>, // true for descending
@@ -62,7 +72,8 @@ pub struct AlbumView {
 impl Default for AlbumView {
     fn default() -> Self {
         Self {
-            columns: Field::ALL[..5].to_vec(),
+            separate_cover: true,
+            columns: Field::ALL[..6].to_vec(),
             widths: Default::default(),
             sort: None,
         }
@@ -75,8 +86,21 @@ impl AlbumView {
         if !seen.contains(&Field::Title) {
             self.columns.insert(0, Field::Title);
         }
+        if !self.separate_cover && !seen.contains(&Field::Cover) {
+            let title = self
+                .columns
+                .iter()
+                .position(|f| *f == Field::Title)
+                .unwrap();
+            self.columns.insert(title, Field::Cover);
+        }
+        self.separate_cover = true;
         self.widths
             .retain(|_, w| w.is_finite() && (40. ..=1200.).contains(w));
+        if let Some(w) = self.widths.get_mut(&Field::Cover) {
+            *w = w.clamp(COVER_WIDTH, COVER_MAX_WIDTH);
+        }
+        self.sort = self.sort.filter(|(f, _)| *f != Field::Cover);
         self
     }
     fn width(&self, field: Field, viewport: f32) -> f32 {
@@ -139,6 +163,7 @@ impl Shelf {
             ),
         };
         match field {
+            Field::Cover => None,
             Field::Title => Some(SortValue::Text(title.to_lowercase())),
             Field::Year => year.map(|v| SortValue::Number(v as u64)),
             Field::Tracks => Some(SortValue::Number(count as u64)),
@@ -221,11 +246,33 @@ impl Discs {
         cx.notify();
         true
     }
+    pub fn sync_rows(t: &mut TableState<Self>) -> f32 {
+        let d = t.delegate();
+        let width = d
+            .view
+            .columns
+            .iter()
+            .position(|f| *f == Field::Cover)
+            .and_then(|ix| t.col_width(ix))
+            .map_or(COVER_WIDTH, f32::from);
+        let edge = cover_edge(width);
+        let height = cover_row_height(t, d.cover_edge, edge);
+        t.delegate_mut().cover_edge = edge;
+        height
+    }
     pub fn resized(&mut self, widths: &[Pixels]) {
         if self.view.columns.len() == widths.len() {
-            for (&field, &width) in self.view.columns.iter().zip(widths) {
-                self.view.widths.insert(field, f32::from(width));
-            }
+            // Compare before applying changes: resizing Cover must leave an
+            // automatically fitted title free to follow the viewport.
+            let changed: Vec<_> = self
+                .view
+                .columns
+                .iter()
+                .zip(widths)
+                .map(|(&f, &w)| (f, f32::from(w)))
+                .filter(|(f, w)| (self.view.width(*f, self.viewport) - w).abs() > 0.01)
+                .collect();
+            self.view.widths.extend(changed);
         }
     }
     fn changed(&self, cx: &mut App) {
@@ -243,14 +290,24 @@ impl TableDelegate for Discs {
     }
     fn column(&self, i: usize, _: &App) -> Column {
         let field = self.view.columns[i];
+        let pad = if field == Field::Cover { COVER_X } else { 10. };
         let col = Column::new(field.label(), field.label())
             .width(self.view.width(field, self.viewport))
-            .min_width(px(if field == Field::Title { 150. } else { 48. }))
+            .min_width(px(match field {
+                Field::Cover => COVER_WIDTH,
+                Field::Title => 150.,
+                _ => 48.,
+            }))
+            .max_width(px(if field == Field::Cover {
+                COVER_MAX_WIDTH
+            } else {
+                1200.
+            }))
             .paddings(Edges {
                 top: px(0.),
                 bottom: px(0.),
-                left: px(10.),
-                right: px(10.),
+                left: px(pad),
+                right: px(pad),
             });
         if field.numeric() {
             col.text_right()
@@ -288,18 +345,25 @@ impl TableDelegate for Discs {
             });
         let table = cx.entity().downgrade();
         let visible = self.view.columns.clone();
-        sort_heading(i, field.label(), field.numeric(), direction, cx)
-            .cursor_pointer()
-            .on_click(cx.listener(move |t, _, _, cx| {
-                Self::edit_rows(t, cx, |d| {
-                    d.view.sort = match d.view.sort {
-                        Some((f, false)) if f == field => Some((field, true)),
-                        Some((f, true)) if f == field => None,
-                        _ => Some((field, false)),
-                    }
-                });
-                t.delegate().changed(cx);
-            }))
+        let heading = if field == Field::Cover {
+            ""
+        } else {
+            field.label()
+        };
+        sort_heading(i, heading, field.numeric(), direction, cx)
+            .aria_label(field.label())
+            .when(field != Field::Cover, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |t, _, _, cx| {
+                    Self::edit_rows(t, cx, |d| {
+                        d.view.sort = match d.view.sort {
+                            Some((f, false)) if f == field => Some((field, true)),
+                            Some((f, true)) if f == field => None,
+                            _ => Some((field, false)),
+                        }
+                    });
+                    t.delegate().changed(cx);
+                }))
+            })
             .context_menu(move |mut menu, _, _| {
                 menu = menu.label("Columns");
                 for f in Field::ALL {
@@ -318,6 +382,8 @@ impl TableDelegate for Discs {
                                             if d.view.sort.is_some_and(|(field, _)| field == f) {
                                                 d.view.sort = None;
                                             }
+                                        } else if f == Field::Cover {
+                                            d.view.columns.insert(0, f);
                                         } else {
                                             d.view.columns.push(f);
                                         }
@@ -363,7 +429,9 @@ impl TableDelegate for Discs {
             })
     }
     fn cell_label(&self, r: usize, c: usize, _: &App) -> Option<SharedString> {
-        Some(self.rows.get(r)?.label(self.view.columns[c]).into())
+        let field = self.view.columns[c];
+        let row = self.rows.get(r)?;
+        (field != Field::Cover).then(|| row.label(field).into())
     }
     fn render_td(
         &mut self,
@@ -389,6 +457,15 @@ impl TableDelegate for Discs {
             Shelf::Disc(d) => (d.cover.as_ref(), None),
             Shelf::Release(rel) => (rel.cover.as_ref(), Some(rel.discs.len())),
         };
+        if field == Field::Cover {
+            let settled = cover_edge(self.view.width(Field::Cover, self.viewport));
+            let image = cover.and_then(|file| {
+                crate::artwork::CoverThumbnail::get(file, settled, window, cx).flatten()
+            });
+            return cell
+                .justify_center()
+                .child(cover_tile(self.cover_edge, image, cx));
+        }
         if field != Field::Title {
             let label = row.label(field);
             return cell.when(field.numeric(), |d| d.justify_end()).child(
@@ -402,28 +479,7 @@ impl TableDelegate for Discs {
                     .tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx)),
             );
         }
-        let cover = cover
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
-        cell.child(
-            div()
-                .size(px(32.))
-                .flex_shrink_0()
-                .rounded(px(2.))
-                .overflow_hidden()
-                .bg(m.control)
-                .flex()
-                .items_center()
-                .justify_center()
-                .map(|d| match cover {
-                    Some(path) => d.child(img(path).size_full().object_fit(ObjectFit::Cover)),
-                    None => d.child(
-                        Icon::new(IconName::Disc3)
-                            .size(px(16.))
-                            .text_color(m.text_faint),
-                    ),
-                }),
-        )
-        .child({
+        cell.child({
             let label = row.label(Field::Title);
             div()
                 .id(("disc-title", crate::table::stable_element_key(row.key())))
@@ -474,6 +530,29 @@ impl TableDelegate for Discs {
 mod tests {
     use super::{AlbumView, Discs, Field, Shelf, Track};
     use std::{path::Path, sync::Arc};
+
+    #[test]
+    fn legacy_artwork_moves_with_the_title_and_a_hidden_cover_stays_hidden() {
+        let mut view: AlbumView = serde_json::from_value(serde_json::json!({
+            "columns": ["Tracks", "Title", "Year"], "widths": {"Year": 83},
+            "sort": ["Tracks", true]
+        }))
+        .unwrap();
+        view = view.validate();
+        assert_eq!(
+            view.columns,
+            [Field::Tracks, Field::Cover, Field::Title, Field::Year]
+        );
+        assert_eq!(view.width(Field::Year, 720.), 83.);
+        assert_eq!(view.sort, Some((Field::Tracks, true)));
+        view.columns.remove(1);
+        let restored: AlbumView =
+            serde_json::from_value(serde_json::to_value(view).unwrap()).unwrap();
+        assert_eq!(
+            restored.validate().columns,
+            [Field::Tracks, Field::Title, Field::Year]
+        );
+    }
 
     #[test]
     fn sorting_and_legacy_preferences_keep_one_row_per_release() {

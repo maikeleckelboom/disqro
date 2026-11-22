@@ -509,6 +509,7 @@ impl Render for Browser {
             && (!self.location.is_folder() || !self.discs.read(cx).delegate().rows.is_empty())
         {
             let albums = self.discs.clone();
+            let row_height = albums.update(cx, |t, _| crate::collection::Discs::sync_rows(t));
             let focused = keyboard_focus(self.discs.read(cx).focus_handle(cx), window);
             return view.child(
                 div()
@@ -540,7 +541,7 @@ impl Render for Browser {
                             .bordered(false)
                             .stripe(false)
                             .header_row_height(px(size::HEADER))
-                            .with_size(gpui_kit::component::Size::Size(px(42.))),
+                            .with_size(gpui_kit::component::Size::Size(px(row_height))),
                     )
                     .children(focus_outline(focused, &m)),
             );

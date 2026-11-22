@@ -8,9 +8,8 @@ use crate::{
 };
 pub use albums::AlbumView;
 use gpui_kit::{
-    assets::IconName,
     component::{
-        Icon, h_flex,
+        h_flex,
         table::{Column, TableDelegate, TableState},
     },
     prelude::*,
@@ -184,6 +183,7 @@ pub struct Discs {
     parents: Vec<Shelf>,
     pub view: AlbumView,
     viewport: f32,
+    cover_edge: f32,
     pub loading: bool,
     /// Where the commands of the rows' menus go.
     pub browser: Option<WeakEntity<crate::browser::Browser>>,

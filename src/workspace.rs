@@ -1480,15 +1480,16 @@ impl Workspace {
             });
         // Each sidebar toggle sits at the side it shows; navigation, address
         // and search read left to right; workspace commands close the row.
-        h_flex()
+        let controls = h_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .px(px(6.))
             .gap(px(6.))
             .items_center()
-            .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
-            .child(div().w(px(6.)).flex_shrink_0())
+            // Shield the entire client strip from the Kit bar's native Drag
+            // area and its bubbling mouse-down handler, including field insets.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(self.sidebar_button(Home::Leading, cx))
             .child(address)
             .child(self.search_field(window, cx))
@@ -1505,7 +1506,25 @@ impl Workspace {
                     ),
                 )
             })
-            .child(div().occlude().child(self.workspace_menu(cx)))
+            .child(div().occlude().child(self.workspace_menu(cx)));
+
+        // The brand occupies a full-height portion of the Kit's native
+        // caption. Keep a grip even at the minimum width with search open.
+        let caption_width = (f32::from(window.viewport_size().width) * 0.085).clamp(64., 108.);
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .px(px(6.))
+            .child(
+                h_flex()
+                    .w(px(caption_width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .items_center()
+                    .child(img("brand/compact.png").size(px(18.))),
+            )
+            .child(controls)
             .into_any_element()
     }
     /// Recovery when the center contains no visible panels.
