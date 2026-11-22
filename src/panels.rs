@@ -212,13 +212,6 @@ impl EventEmitter<PanelEvent> for Pane {}
 impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
-    /// Whether keyboard focus is in this pane's body or its tab strip controls.
-    pub(crate) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
-        [&self.focus, &self.tab_focus, &self.controls_focus]
-            .into_iter()
-            .any(|handle| handle.contains_focused(window, cx))
-    }
-
     pub fn new(
         ty: &'static PanelType,
         id: InstanceId,

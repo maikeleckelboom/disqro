@@ -951,9 +951,12 @@ impl Workspace {
     }
     /// The pane holding keyboard focus.
     fn focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
-        self.ordered(cx)
-            .into_iter()
-            .find(|p| p.read(cx).contains_focus(window, cx))
+        self.ordered(cx).into_iter().find(|p| {
+            let p = p.read(cx);
+            p.focus_handle(cx).contains_focused(window, cx)
+                || p.tab_focus.contains_focused(window, cx)
+                || p.controls_focus.contains_focused(window, cx)
+        })
     }
 
     /// The default arrangement: Library and Locations, one Music Browser,
