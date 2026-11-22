@@ -133,6 +133,8 @@ pub mod size {
     /// Every panel header: tab strips, the browser bar and table headings
     /// share one height, so their edges line up across the window.
     pub const HEADER: f32 = 30.;
+    /// Minimum usable space for appending a dragged tab to a group.
+    pub const TAB_DROP: f32 = 8.;
     pub const TAB_RADIUS: f32 = 4.;
     /// Rows, tab labels and menus.
     pub const TEXT: f32 = 13.;
@@ -148,6 +150,23 @@ pub mod size {
 
 pub fn materials(cx: &App) -> &Materials {
     cx.global::<Materials>()
+}
+
+/// Single-line text advance in the current interface font, in logical pixels.
+pub(crate) fn label_width(label: SharedString, size: Pixels, window: &Window) -> Pixels {
+    let run = TextRun {
+        len: label.len(),
+        font: window.text_style().font(),
+        color: window.text_style().color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(label, size, &[run], None)
+        .width
+        .ceil()
 }
 
 /// The interface font. Windows 11 ships Segoe UI Variable; older systems fall

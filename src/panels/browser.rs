@@ -236,6 +236,60 @@ impl PaneContent for BrowserPane {
     }
 }
 
+const HEADER_INSET: f32 = 6.;
+const VIEW_INSET: f32 = 7.;
+const VIEW_GAP: f32 = 3.;
+const COUNT_GAP: f32 = 10.;
+const ICON_BUTTON: f32 = 24.;
+const FILTER_COMPACT: f32 = 100.;
+const FILTER_FULL: f32 = 175.;
+
+#[derive(Clone, Copy)]
+pub(crate) struct BrowserHeaderWidths {
+    /// Compact menu and the current filter control, including the drop target.
+    pub minimum: Pixels,
+    /// Room to edit a filter without moving tab identities.
+    pub editable: Pixels,
+    /// Labeled controls and the preferred filter width, before metadata.
+    pub full: Pixels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderDensity {
+    Labeled,
+    Compact,
+    Minimal,
+}
+
+#[derive(Clone)]
+struct ViewFocus {
+    tracks: FocusHandle,
+    albums: FocusHandle,
+    folders: FocusHandle,
+}
+
+impl ViewFocus {
+    fn choice(&self, albums: bool) -> &FocusHandle {
+        if albums { &self.albums } else { &self.tracks }
+    }
+}
+
+impl BrowserHeaderWidths {
+    fn density(self, width: Pixels) -> HeaderDensity {
+        if width < self.minimum {
+            HeaderDensity::Minimal
+        } else if width < self.full {
+            HeaderDensity::Compact
+        } else {
+            HeaderDensity::Labeled
+        }
+    }
+
+    fn fits_summary(self, available: Pixels, text: Pixels) -> bool {
+        available >= self.full + px(COUNT_GAP) + text
+    }
+}
+
 impl Browser {
     /// Only release and disc pages need context beyond their own tab title.
     fn parent_trail(&self, cx: &Context<Self>) -> AnyElement {
@@ -312,64 +366,132 @@ impl Browser {
             .into_any_element()
     }
 
-    /// Width reserved before the dock decides which sibling tabs fit.
-    pub(crate) fn compact_controls_width(&self, cx: &App) -> f32 {
+    pub(crate) fn header_widths(&self, window: &Window, cx: &App) -> BrowserHeaderWidths {
         let view = !self.is_page() && self.can_list_discs();
         let folders = self.location.is_folder() && self.page.is_none();
-        // Compact view menu, subfolder button, filter button or editable text.
-        12. + if view { 100. } else { 0. }
-            + if folders { 30. } else { 0. }
-            + if self.filter_open || !self.search.read(cx).value().is_empty() {
-                114.
-            } else {
-                28.
+        let text = |label: &'static str| {
+            crate::theme::label_width(label.into(), window.rem_size() * 0.75, window)
+        };
+        let mut compact = px(HEADER_INSET * 2. + size::TAB_DROP);
+        let mut full = compact;
+        // Kit's xsmall text buttons use a quarter-rem inset and icon gap.
+        let decorated = window.rem_size() * 0.75 + px(16.);
+        if view {
+            compact += text("Albums / CDs").max(text("All Tracks")) + decorated;
+            full += text("All Tracks") + text("Albums / CDs") + px(4. * VIEW_INSET + VIEW_GAP);
+        }
+        if folders {
+            compact += px(ICON_BUTTON);
+            full += text("Subfolders") + decorated;
+            if view {
+                compact += px(VIEW_GAP);
+                full += px(VIEW_GAP);
             }
+        }
+        let editing = self.filter_open || !self.search.read(cx).value().is_empty();
+        BrowserHeaderWidths {
+            minimum: compact + px(if editing { FILTER_COMPACT } else { ICON_BUTTON }),
+            editable: compact + px(FILTER_COMPACT),
+            full: full
+                + if editing {
+                    px(FILTER_FULL)
+                } else {
+                    text("Filter") + decorated
+                },
+        }
     }
 
     pub(crate) fn header_controls(
         &self,
         width: Pixels,
-        window: &Window,
+        widths: BrowserHeaderWidths,
+        drop_space: Stateful<Div>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let browser = cx.entity();
-        let minimum = px(self.compact_controls_width(cx));
-        let compact = width < minimum + px(170.);
+        let density = widths.density(width);
+        let compact = density != HeaderDensity::Labeled;
+        let tight = density == HeaderDensity::Minimal;
+        let view = !self.is_page() && self.can_list_discs();
         let folders = self.location.is_folder() && self.page.is_none();
+        let count = (!compact)
+            .then(|| status(self, cx).or_else(|| summary(self, cx)))
+            .flatten()
+            .filter(|text| {
+                let text =
+                    crate::theme::label_width(text.clone().into(), px(size::TEXT_SMALL), window);
+                widths.fits_summary(width, text)
+            });
         let m = *materials(cx);
         h_flex()
             .id("browser-controls")
-            .when(width < minimum, |d| d.overflow_x_scroll())
-            .min_w_0()
-            .max_w(width)
+            .w_full()
             .h(px(size::HEADER))
-            .pr(px(4.))
-            .gap(px(3.))
+            .px(px(if tight { 2. } else { HEADER_INSET }))
             .items_center()
-            .when(!self.is_page() && self.can_list_discs(), |d| {
-                d.child(view_switch(&browser, self.prefs.albums, compact))
+            .when(view || folders, |d| {
+                // A focused choice keeps its handle when it folds into a menu.
+                let focus = window
+                    .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
+                        albums: cx.focus_handle(),
+                        tracks: cx.focus_handle(),
+                        folders: cx.focus_handle(),
+                    })
+                    .read(cx)
+                    .clone();
+                let menu_focus = [&focus.tracks, &focus.albums]
+                    .into_iter()
+                    .chain((tight && folders).then_some(&focus.folders))
+                    .find(|handle| handle.is_focused(window))
+                    .unwrap_or(focus.choice(self.prefs.albums));
+                d.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(VIEW_GAP))
+                        .when(view, |d| {
+                            d.child(view_switch(
+                                &browser,
+                                self.prefs.albums,
+                                density,
+                                (tight && folders).then_some(self.subfolders),
+                                &focus,
+                                menu_focus,
+                            ))
+                        })
+                        .when(folders && !(view && tight), |d| {
+                            d.child(subfolder_toggle(
+                                &browser,
+                                self.subfolders,
+                                compact,
+                                &focus.folders,
+                            ))
+                        }),
+                )
             })
-            .when(folders, |d| {
-                d.child(subfolder_toggle(&browser, self.subfolders, compact))
+            .when_some(count, |d, text| {
+                d.child(
+                    div()
+                        .when(view || folders, |d| d.ml(px(COUNT_GAP)))
+                        .whitespace_nowrap()
+                        .text_size(px(size::TEXT_SMALL))
+                        .text_color(m.text_faint)
+                        .child(text),
+                )
             })
-            .when(width >= minimum + px(310.), |d| {
-                d.when_some(status(self, cx).or_else(|| summary(self, cx)), |d, text| {
-                    d.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(size::TEXT_SMALL))
-                            .text_color(m.text_faint)
-                            .child(text),
-                    )
-                })
-            })
-            .child(self.filter_control(compact, window, cx))
+            .child(drop_space)
+            .child(self.filter_control(compact, tight, window, cx))
             .into_any_element()
     }
 
     /// The filter button, or the field once it is open or holds a query.
-    fn filter_control(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn filter_control(
+        &self,
+        compact: bool,
+        tight: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let m = *materials(cx);
         let input = self.search.clone();
         let empty = input.read(cx).value().is_empty();
@@ -383,6 +505,7 @@ impl Browser {
                         .text_color(m.text_muted),
                 )
                 .when(!compact, |b| b.label("Filter"))
+                .when(compact, |b| b.w(px(ICON_BUTTON)))
                 .tab_stop(true)
                 .text_color(m.text_muted)
                 .accessibility_label("Filter this view")
@@ -394,10 +517,10 @@ impl Browser {
         h_flex()
             .id("browser-filter")
             .flex_shrink(1.)
-            .min_w(px(48.))
-            .w(px(if compact { 108. } else { 175. }))
+            .min_w_0()
+            .w(px(if compact { FILTER_COMPACT } else { FILTER_FULL }))
             .h(px(24.))
-            .pl(px(7.))
+            .pl(px(if tight { 2. } else { 7. }))
             .pr(px(2.))
             .gap(px(5.))
             .items_center()
@@ -412,19 +535,21 @@ impl Browser {
                         .hover(|d| d.border_color(m.control_line))
                 }
             })
-            .child(
-                Icon::new(IconName::ListFilter)
-                    .size(px(13.))
-                    .flex_shrink_0()
-                    // A filter that hides rows stays visible, even unfocused.
-                    .text_color(if empty { m.text_faint } else { m.accent }),
-            )
+            .when(!tight, |d| {
+                d.child(
+                    Icon::new(IconName::ListFilter)
+                        .size(px(13.))
+                        .flex_shrink_0()
+                        // A filter that hides rows stays visible, even unfocused.
+                        .text_color(if empty { m.text_faint } else { m.accent }),
+                )
+            })
             .child(
                 div().flex_1().min_w_0().child(
                     Input::new(&input)
                         .xsmall()
                         .appearance(false)
-                        .cleanable(true)
+                        .cleanable(!tight)
                         .aria_label("Filter this view"),
                 ),
             )
@@ -441,15 +566,29 @@ impl Browser {
 
 /// All Tracks or Albums / CDs: side by side while there is room, otherwise a
 /// menu that names the current view.
-fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyElement {
+fn view_switch(
+    browser: &Entity<Browser>,
+    albums: bool,
+    density: HeaderDensity,
+    subfolders: Option<bool>,
+    focus: &ViewFocus,
+    menu_focus: &FocusHandle,
+) -> AnyElement {
     let choices = [("All Tracks", false), ("Albums / CDs", true)];
-    if compact {
+    if density != HeaderDensity::Labeled {
         let browser = browser.clone();
         return Button::new("browser-view")
             .ghost()
             .xsmall()
-            .label(if albums { "Albums / CDs" } else { "All Tracks" })
+            .label(if density == HeaderDensity::Minimal {
+                "View"
+            } else if albums {
+                "Albums / CDs"
+            } else {
+                "All Tracks"
+            })
             .dropdown_caret(true)
+            .track_focus(menu_focus)
             .tab_stop(true)
             .accessibility_label(if albums {
                 "View: Albums / CDs"
@@ -464,6 +603,16 @@ fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyEle
                         move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)),
                     ));
                 }
+                if let Some(include) = subfolders {
+                    let browser = browser.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new("Include subfolders")
+                            .checked(include)
+                            .on_click(move |_, w, cx| {
+                                browser.update(cx, |b, cx| b.set_subfolders(!include, w, cx))
+                            }),
+                    );
+                }
                 menu
             })
             .into_any_element();
@@ -471,7 +620,7 @@ fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyEle
     h_flex()
         .id("browser-views")
         .flex_shrink_0()
-        .gap(px(2.))
+        .gap(px(VIEW_GAP))
         .role(Role::Group)
         .aria_label("View")
         .children(choices.map(|(name, value)| {
@@ -479,22 +628,31 @@ fn view_switch(browser: &Entity<Browser>, albums: bool, compact: bool) -> AnyEle
             Button::new(name)
                 .ghost()
                 .xsmall()
+                .px(px(VIEW_INSET))
                 .label(name)
                 .selected(albums == value)
+                .track_focus(focus.choice(value))
                 .tab_stop(true)
                 .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
         }))
         .into_any_element()
 }
 
-fn subfolder_toggle(browser: &Entity<Browser>, include: bool, compact: bool) -> AnyElement {
+fn subfolder_toggle(
+    browser: &Entity<Browser>,
+    include: bool,
+    compact: bool,
+    focus: &FocusHandle,
+) -> AnyElement {
     let browser = browser.clone();
     Button::new("view-subfolders")
         .ghost()
         .xsmall()
         .icon(Icon::new(IconName::FolderTree).size(px(14.)))
         .when(!compact, |b| b.label("Subfolders"))
+        .when(compact, |b| b.w(px(ICON_BUTTON)))
         .accessibility_label("Include subfolders")
+        .track_focus(focus)
         .tab_stop(true)
         .selected(include)
         .tooltip(if include {
@@ -700,9 +858,25 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BrowserState, grouped, span};
+    use super::{BrowserHeaderWidths, BrowserState, HeaderDensity, grouped, px, span};
     use crate::browser::Location;
     use std::path::PathBuf;
+
+    #[test]
+    fn browser_header_drops_metadata_before_compacting_essential_controls() {
+        let widths = BrowserHeaderWidths {
+            minimum: px(144.),
+            editable: px(220.),
+            full: px(245.),
+        };
+        assert!(widths.fits_summary(px(306.), px(51.)));
+        assert!(!widths.fits_summary(px(305.), px(51.)));
+        assert_eq!(widths.density(px(305.)), HeaderDensity::Labeled);
+        assert_eq!(widths.density(px(245.)), HeaderDensity::Labeled);
+        assert_eq!(widths.density(px(244.)), HeaderDensity::Compact);
+        assert_eq!(widths.density(px(144.)), HeaderDensity::Compact);
+        assert_eq!(widths.density(px(143.)), HeaderDensity::Minimal);
+    }
 
     #[test]
     fn summaries_read_as_people_say_them() {

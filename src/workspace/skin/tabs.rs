@@ -8,27 +8,14 @@ pub(super) fn labels_width(
     window: &Window,
     cx: &App,
 ) -> Pixels {
-    let font = window.text_style().font();
     tabs.iter()
         .map(|&ix| {
             let panel = &group.panels()[ix];
             let label = tab_label(panel, cx);
             let icon = if is_utility(panel, cx) { 0. } else { 20. };
-            let line = window.text_system().shape_line(
-                label.clone(),
-                px(crate::theme::size::TEXT),
-                &[TextRun {
-                    len: label.len(),
-                    font: font.clone(),
-                    color: materials(cx).text,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
+            let text = crate::theme::label_width(label, px(crate::theme::size::TEXT), window);
             // Two text insets and the focus border, matching the tab frame.
-            (line.width.ceil() + px(2. * (TAB_X + 1.) + icon)).clamp(px(40.), px(220.))
+            (text + px(2. * (TAB_X + 1.) + icon)).clamp(px(40.), px(220.))
         })
         .sum()
 }
@@ -70,44 +57,65 @@ pub(super) fn keyboard_tab(
         })
 }
 
-/// Fit all the labels when possible. In overflow, reserve just the selected
-/// label and a switcher. Context controls get the remaining group width.
+/// The switcher has the same width in the fit calculation and the rendered strip.
+pub(super) const SWITCHER: f32 = 26.;
+const READABLE_TAB: f32 = 96.;
+const UNWRAP_GAP: f32 = 8.;
+
+pub(super) struct TabLabels {
+    pub all: Pixels,
+    pub current: Pixels,
+    pub several: bool,
+}
+
 pub(super) struct HeaderWidths {
     pub tabs: Pixels,
     pub controls: Pixels,
     pub overflow: bool,
 }
 
-impl HeaderWidths {
-    pub fn fit(
+impl TabLabels {
+    fn identity(&self) -> Pixels {
+        let switcher = if self.several { px(SWITCHER) } else { px(0.) };
+        self.all.min(self.current.min(px(READABLE_TAB)) + switcher)
+    }
+
+    pub fn stacked(
+        &self,
         width: Pixels,
-        minimum_controls: Pixels,
-        labels: Pixels,
-        current: Pixels,
-        several: bool,
+        controls: Option<BrowserHeaderWidths>,
+        was_stacked: bool,
+    ) -> bool {
+        controls.is_some_and(|controls| {
+            let threshold = self.identity() + controls.minimum;
+            width < threshold + if was_stacked { px(UNWRAP_GAP) } else { px(0.) }
+        })
+    }
+
+    pub fn fit(
+        &self,
+        width: Pixels,
+        controls: Option<BrowserHeaderWidths>,
         stacked: bool,
-    ) -> Self {
-        let available = (width - px(4.)).max(px(0.));
-        let budget = if stacked {
-            available
-        } else {
-            available - minimum_controls
+    ) -> HeaderWidths {
+        let inline = controls.filter(|_| !stacked);
+        // Allow the field to open into spare space. At the narrow end the
+        // selected identity takes precedence and the controls can wrap.
+        let budget = match inline {
+            Some(controls) => (width - controls.editable).max(self.identity()).min(width),
+            None => (width - px(crate::theme::size::TAB_DROP)).max(px(0.)),
         };
-        let overflow = several && labels > budget;
-        let switcher = if overflow {
-            px(28.).min(available)
-        } else {
-            px(0.)
-        };
-        let tabs = (if overflow { current } else { labels }).min((budget - switcher).max(px(0.)));
-        let controls = if stacked {
-            available
-        } else {
-            available - tabs - switcher
-        };
-        Self {
+        let overflow = self.several && self.all > budget;
+        let switcher = if overflow { px(SWITCHER) } else { px(0.) };
+        let natural = if overflow { self.current } else { self.all };
+        let tabs = natural.min((budget - switcher).max(px(0.)));
+        HeaderWidths {
             tabs,
-            controls,
+            controls: if stacked {
+                width
+            } else {
+                (width - tabs - switcher).max(px(0.))
+            },
             overflow,
         }
     }
@@ -115,21 +123,108 @@ impl HeaderWidths {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeaderWidths, px};
+    use super::{BrowserHeaderWidths, SWITCHER, TabLabels, px};
+
+    fn collection(editing: bool) -> BrowserHeaderWidths {
+        BrowserHeaderWidths {
+            minimum: px(if editing { 216. } else { 140. }),
+            editable: px(216.),
+            full: px(if editing { 356. } else { 242. }),
+        }
+    }
+
     #[test]
-    fn tabs_fit_to_the_control_budget_of_their_own_group() {
-        let fit = |width, stacked| {
-            HeaderWidths::fit(px(width), px(140.), px(260.), px(152.), true, stacked)
+    fn opening_filter_preserves_inline_tab_widths_and_overflow_boundary() {
+        let labels = TabLabels {
+            all: px(310.),
+            current: px(110.),
+            several: true,
         };
-        assert!(!fit(404., false).overflow);
-        let narrow = fit(403., false);
-        assert!(narrow.overflow);
-        assert_eq!(narrow.tabs, px(152.));
-        assert!(narrow.controls >= px(140.));
-        assert!(!fit(276., true).overflow);
-        assert_eq!(fit(276., true).controls, px(272.));
-        let utility = HeaderWidths::fit(px(90.), px(0.), px(170.), px(76.), true, false);
-        assert!(utility.overflow);
-        assert_eq!(utility.tabs, px(58.));
+        for width in [525., 526., 1024.] {
+            let closed = labels.fit(px(width), Some(collection(false)), false);
+            let open = labels.fit(px(width), Some(collection(true)), false);
+            assert_eq!(closed.overflow, width < 526.);
+            assert_eq!(closed.overflow, open.overflow);
+            assert_eq!(closed.tabs, open.tabs);
+            assert_eq!(
+                closed.tabs,
+                if closed.overflow {
+                    labels.current
+                } else {
+                    labels.all
+                }
+            );
+            let switcher = if closed.overflow {
+                px(SWITCHER)
+            } else {
+                px(0.)
+            };
+            assert_eq!(open.tabs + switcher + open.controls, px(width));
+            assert!(open.controls >= collection(true).minimum);
+        }
+    }
+
+    #[test]
+    fn short_single_identity_wraps_only_when_essential_controls_need_the_space() {
+        let labels = TabLabels {
+            all: px(66.),
+            current: px(66.),
+            several: false,
+        };
+        let closed = Some(collection(false));
+        let open = Some(collection(true));
+        assert!(!labels.stacked(px(206.), closed, false));
+        assert!(labels.stacked(px(206.), open, false));
+        assert_eq!(labels.fit(px(206.), closed, false).tabs, px(66.));
+        let second_row = labels.fit(px(206.), open, true);
+        assert!(!second_row.overflow);
+        assert_eq!(second_row.controls, px(206.));
+        assert_eq!(second_row.tabs, px(66.));
+    }
+
+    #[test]
+    fn resizing_around_wrap_boundary_settles_until_both_rows_fit_inline_comfortably() {
+        let labels = TabLabels {
+            all: px(400.),
+            current: px(180.),
+            several: true,
+        };
+        let controls = Some(collection(true));
+        let mut stacked = false;
+        for (width, expected) in [
+            (338., false),
+            (337., true),
+            (338., true),
+            (337., true),
+            (345., true),
+            (346., false),
+            (338., false),
+        ] {
+            stacked = labels.stacked(px(width), controls, stacked);
+            assert_eq!(stacked, expected, "group width {width}");
+        }
+    }
+
+    #[test]
+    fn utility_and_wrapped_identity_rows_retain_an_append_target() {
+        let labels = TabLabels {
+            all: px(180.),
+            current: px(120.),
+            several: true,
+        };
+        for width in [100., 187., 188., 720.] {
+            assert!(!labels.stacked(px(width), None, true));
+            let utility = labels.fit(px(width), None, false);
+            let stacked = labels.fit(px(width), Some(collection(true)), true);
+            assert_eq!(utility.overflow, width < 188.);
+            assert_eq!(utility.tabs, stacked.tabs);
+            let switcher = if utility.overflow {
+                px(SWITCHER)
+            } else {
+                px(0.)
+            };
+            assert!(px(width) - utility.tabs - switcher >= px(crate::theme::size::TAB_DROP));
+            assert_eq!(stacked.controls, px(width));
+        }
     }
 }
