@@ -12,13 +12,16 @@ use gpui_kit::{
 };
 use image::RgbaImage;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
     sync::{Arc, atomic::Ordering::Relaxed},
 };
 
+pub(super) struct FieldSize(pub usize);
+impl EventEmitter<FieldSize> for Plot {}
 pub(super) struct Plot {
+    pub(super) field_side: Rc<Cell<usize>>,
     pub(super) config: Config,
     pub(super) frame: Option<Arc<VisualFrame>>,
     pub(super) failed: bool,
@@ -30,6 +33,7 @@ impl Plot {
         cx.on_release(|p, cx| p.cache.borrow_mut().clear_images(cx))
             .detach();
         Self {
+            field_side: Rc::new(Cell::new(257)),
             config,
             frame: None,
             failed: false,
@@ -98,18 +102,29 @@ fn bgra([r, g, b]: [u8; 3]) -> [u8; 4] {
 
 struct FieldImage {
     frame: Arc<VisualFrame>,
-    side: usize,
-    image: Option<([usize; 4], Arc<RenderImage>)>,
+    bands: Vec<Arc<RenderImage>>,
 }
 
 fn field_palette() -> &'static [[u8; 4]; 256] {
     static PALETTE: std::sync::LazyLock<[[u8; 4]; 256]> = std::sync::LazyLock::new(|| {
+        let stops = [
+            PAPER,
+            [35, 75, 93],
+            [53, 132, 153],
+            [96, 183, 198],
+            [166, 222, 227],
+            [229, 245, 246],
+        ];
         std::array::from_fn(|i| {
-            // Give finer cells enough luminance to read against the grid.
-            let density = i as f32 / 255.;
-            let strength = (5. * density / (1. + 4. * density)).sqrt();
-            let [r, g, b] = ramp(&MARINE, strength);
-            [b, g, r, (strength * 255.).round() as u8]
+            // Let the guide show through the weakest samples. This linear
+            // blend over PAPER exactly reconstructs the first palette interval.
+            if i < 51 {
+                let mut entry = bgra(stops[1]);
+                entry[3] = (i * 5) as u8;
+                entry
+            } else {
+                bgra(ramp(&stops, i as f32 / 255.))
+            }
         })
     });
     &PALETTE
@@ -122,6 +137,7 @@ struct Cache {
     waterfall: waterfall::Backdrop,
     paint_key: Option<(u64, u64, spec::Palette, spec::Floor, spec::Ceiling, usize)>,
     field: Option<FieldImage>,
+    guide: Option<field_geometry::Guide>,
     labels: HashMap<&'static str, ShapedLine>,
     luts: Option<[[u8; 4]; 256]>,
 }
@@ -134,8 +150,10 @@ impl Cache {
             for (_, (_, im)) in images {
                 cx.drop_image(im, None);
             }
-            if let Some((_, im)) = field.and_then(|field| field.image) {
-                cx.drop_image(im, None);
+            if let Some(field) = field {
+                for im in field.bands {
+                    cx.drop_image(im, None);
+                }
             }
             if let Some(im) = backdrop {
                 cx.drop_image(im, None);
@@ -266,42 +284,47 @@ impl Cache {
         r: &field::Reading,
         w: &mut Window,
     ) {
-        let side =
-            ((f32::from(area.size.width) * w.scale_factor()).round() as usize).clamp(1, r.side);
-        if self
-            .field
-            .as_ref()
-            .is_none_or(|cached| cached.side != side || !Arc::ptr_eq(&cached.frame, frame))
-        {
-            if let Some((_, im)) = self.field.take().and_then(|field| field.image) {
-                let _ = w.drop_image(im);
-            }
-            let image = r.raster(side).map(|raster| {
-                let [x, y, right, bottom] = raster.bounds;
-                let palette = field_palette();
-                let pixels = raster
+        let side = r.side;
+        let cached = self.field.get_or_insert_with(|| FieldImage {
+            frame: frame.clone(),
+            bands: Vec::new(),
+        });
+        if !Arc::ptr_eq(&cached.frame, frame) || cached.bands.len() != r.bands.len() {
+            let Payload::Field(previous) = &cached.frame.data else {
+                unreachable!()
+            };
+            let lut = field_palette();
+            for (index, band) in r.bands.iter().enumerate() {
+                if index < cached.bands.len() && previous.bands.get(index) == Some(band) {
+                    continue;
+                }
+                let [x, y, right, bottom] = band.bounds;
+                let pixels = band
                     .intensity
-                    .into_iter()
-                    .flat_map(|value| palette[value as usize])
+                    .iter()
+                    .flat_map(|&v| lut[v as usize])
                     .collect();
-                (raster.bounds, bitmap(right - x, bottom - y, pixels))
-            });
-            self.field = Some(FieldImage {
-                frame: frame.clone(),
-                side,
-                image,
-            });
+                let image = bitmap(right - x, bottom - y, pixels);
+                if let Some(old) = cached.bands.get_mut(index) {
+                    let _ = w.drop_image(std::mem::replace(old, image));
+                } else {
+                    cached.bands.push(image);
+                }
+            }
+            for image in cached.bands.drain(r.bands.len()..) {
+                let _ = w.drop_image(image);
+            }
+            cached.frame = frame.clone();
         }
-        if let Some(([x, y, right, bottom], im)) =
-            self.field.as_ref().and_then(|f| f.image.as_ref())
-        {
+        for (band, im) in r.bands.iter().zip(&cached.bands) {
+            let [x, y, right, bottom] = band.bounds;
             let p = |x: usize, y: usize| {
                 point(
                     area.left() + area.size.width * (x as f32 / side as f32),
                     area.top() + area.size.height * (y as f32 / side as f32),
                 )
             };
-            let bounds = Bounds::from_corners(p(*x, *y), p(*right, *bottom));
+            let bounds = Bounds::from_corners(p(x, y), p(right, bottom));
             let _ = w.paint_image(bounds, bounds, Default::default(), im.clone(), 0, false);
         }
     }
@@ -416,6 +439,9 @@ impl SpectralScene<'_> {
         }
     }
 }
+#[path = "fieldGeometry.rs"]
+mod field_geometry;
+
 fn field_plot(
     b: Bounds<Pixels>,
     frame: Option<&Arc<VisualFrame>>,
@@ -424,48 +450,25 @@ fn field_plot(
     w: &mut Window,
     cx: &mut App,
 ) {
-    let side = (b.size.width - px(46.)).min(b.size.height - px(25.));
-    if side < px(12.) {
+    let scale = w.scale_factor();
+    let Some((a, _)) = field_geometry::area(b, scale) else {
         return;
+    };
+    let c = a.center();
+    if cache
+        .guide
+        .as_ref()
+        .is_none_or(|g| !g.matches(a, axes, scale))
+    {
+        cache.guide = field_geometry::Guide::new(a, axes, scale);
     }
-    let a = Bounds::new(b.center() - point(side * 0.5, side * 0.5), size(side, side));
+    if let Some(guide) = &cache.guide {
+        guide.paint(w);
+    }
     if let Some(f) = frame
         && let Payload::Field(r) = &f.data
     {
         cache.field_image(a, f, r, w);
-    }
-    let c = a.center();
-    let grid: Hsla = rgb(0xb0cbd1).opacity(0.22).into();
-    rect(w, c.x, a.top(), px(0.7), side, grid);
-    rect(w, a.left(), c.y, side, px(0.7), grid);
-    let mut path = PathBuilder::stroke(px(0.8));
-    let points = if axes == field::Axes::MidSide {
-        [
-            point(c.x, a.top()),
-            point(a.right(), c.y),
-            point(c.x, a.bottom()),
-            point(a.left(), c.y),
-        ]
-    } else {
-        [a.origin, a.top_right(), a.bottom_right(), a.bottom_left()]
-    };
-    path.move_to(points[0]);
-    for p in &points[1..] {
-        path.line_to(*p);
-    }
-    path.close();
-    if axes == field::Axes::XY {
-        path.move_to(a.bottom_left());
-        path.line_to(a.top_right());
-        path.move_to(a.origin);
-        path.line_to(a.bottom_right());
-    }
-    if let Ok(path) = path.build() {
-        w.paint_path(path, grid);
-    }
-    for offset in [-0.375, -0.25, -0.125, 0.125, 0.25, 0.375] {
-        rect(w, c.x + side * offset, c.y - px(2.), px(0.75), px(4.), grid);
-        rect(w, c.x - px(2.), c.y + side * offset, px(4.), px(0.75), grid);
     }
     let labels = if axes == field::Axes::MidSide {
         ["+M", "−M", "−S", "+S"]
@@ -578,8 +581,17 @@ impl Render for Plot {
         } else {
             None
         };
+        let plot_entity = cx.weak_entity();
+        let field_side = self.field_side.clone();
         let plot = canvas(
-            |_, _, _| (),
+            move |b, w, cx| {
+                if matches!(config, Config::Field(_))
+                    && let Some((_, side)) = field_geometry::area(b, w.scale_factor())
+                    && field_side.replace(side) != side
+                {
+                    let _ = plot_entity.update(cx, |_, cx| cx.emit(FieldSize(side)));
+                }
+            },
             move |b, _, w, cx| {
                 let _timer = diagnostics::Timer::measure(|d| &d.visual_paint_us);
                 if let Some(d) = diagnostics::get() {

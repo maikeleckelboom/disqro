@@ -1,11 +1,37 @@
-//! Paired PCM occupancy independent of viewport size. Sample time controls phosphor
+//! Paired PCM occupancy at the largest live subscriber's physical plot size. Sample time controls phosphor
 //! decay, including during digital silence. Neither coordinate is synthesized.
 use crate::spectrum::{Speed, Stereo, choices};
 use kira::Frame;
 use serde::{Deserialize, Serialize};
-const DENSITY_SIDE: usize = 2048;
-const TRACE_SIDE: usize = 1024;
-const HALF_INTENSITY: f32 = 2.5;
+pub const MAX_SIDE: usize = 2049;
+const BAND_HEIGHT: usize = 64;
+
+// Logarithmic high-density shoulder, with a softer toe for isolated samples.
+// Use the exponent and six mantissa bits to avoid a logarithm per active cell.
+fn intensity_table(ink: Ink) -> &'static [u8] {
+    fn table(ink: Ink) -> Box<[u8]> {
+        (0..16384)
+            .map(|i| {
+                let mut hits = f32::from_bits(i << 17);
+                // A fast scope sweep spends only a fraction of a sample at each
+                // pixel. Lift just this toe, preserving dwell and segment ordering.
+                if ink == Ink::Trace && hits < 1. {
+                    hits = hits.sqrt();
+                }
+                let octaves = hits.ln_1p() / std::f32::consts::LN_2;
+                let value = 0.86 * (hits / (hits + 2.2)) + 0.14 * (octaves / (octaves + 6.));
+                (255. * value).round() as u8
+            })
+            .collect()
+    }
+    static DENSITY: std::sync::LazyLock<Box<[u8]>> =
+        std::sync::LazyLock::new(|| table(Ink::Density));
+    static TRACE: std::sync::LazyLock<Box<[u8]>> = std::sync::LazyLock::new(|| table(Ink::Trace));
+    match ink {
+        Ink::Density => &DENSITY,
+        Ink::Trace => &TRACE,
+    }
+}
 
 choices!(Axes { MidSide => "Mid / side", XY => "Left / right (XY)" });
 choices!(Ink { Density => "Point density", Trace => "Vector trace" });
@@ -55,44 +81,15 @@ impl Axes {
 }
 pub struct Reading {
     pub side: usize,
-    // Inclusive bounds of the visible cells in the analysis grid.
-    bounds: [usize; 4],
-    occupied: Vec<(u32, u8)>,
+    pub bands: Vec<Raster>,
     pub stereo: Stereo,
 }
 
+#[derive(PartialEq)]
 pub struct Raster {
+    // Half-open pixel bounds in the presentation grid.
     pub bounds: [usize; 4],
     pub intensity: Vec<u8>,
-}
-
-impl Reading {
-    pub fn raster(&self, side: usize) -> Option<Raster> {
-        if self.occupied.is_empty() {
-            return None;
-        }
-
-        // Map cell centers into display pixels. Retain the peak where several
-        // cells share one pixel so thin traces survive in small panes.
-        let shift = self.side.trailing_zeros();
-        let pixel = |cell: usize| ((2 * cell + 1) * side) >> (shift + 1);
-        let [x, y, right, bottom] = self.bounds;
-        let (left, top) = (pixel(x).saturating_sub(1), pixel(y).saturating_sub(1));
-        let (right, bottom) = ((pixel(right) + 2).min(side), (pixel(bottom) + 2).min(side));
-        let width = right - left;
-        let mut intensity = vec![0; width * (bottom - top)];
-        for &(cell, value) in &self.occupied {
-            let cell = cell as usize;
-            let x = pixel(cell & (self.side - 1)) - left;
-            let y = pixel(cell >> shift) - top;
-            let index = y * width + x;
-            intensity[index] = intensity[index].max(value);
-        }
-        Some(Raster {
-            bounds: [left, top, right, bottom],
-            intensity,
-        })
-    }
 }
 
 pub struct Field {
@@ -107,11 +104,8 @@ pub struct Field {
     silent_frames: usize,
 }
 impl Field {
-    pub fn new(analysis: Analysis, rate: u32) -> Self {
-        let side = match analysis.ink {
-            Ink::Density => DENSITY_SIDE,
-            Ink::Trace => TRACE_SIDE,
-        };
+    pub fn new(analysis: Analysis, rate: u32, side: usize) -> Self {
+        let side = side.clamp(3, MAX_SIDE);
         Self {
             analysis,
             rate,
@@ -167,6 +161,9 @@ impl Field {
         };
         let weight = 48000. / self.rate as f32 / self.scale;
         let k = (self.side - 2) as f32 * 0.5;
+        // An isolated full-scale transient may traverse the entire plot. Bound
+        // total line work for pathological alternating/Nyquist-frequency PCM.
+        let mut line_budget = frames.len() * 64;
         for &f in frames {
             let (x, y) = self.analysis.axes.coordinates(f);
             if f == Frame::ZERO {
@@ -186,7 +183,13 @@ impl Field {
             if self.analysis.ink == Ink::Trace
                 && let Some((a, b)) = self.previous
             {
-                let steps = ((x - a).abs().max((y - b).abs()).ceil() as usize).clamp(1, 32);
+                let steps = ((x - a).abs().max((y - b).abs()).ceil() as usize).max(1);
+                if steps > line_budget {
+                    self.deposit(x, y, weight);
+                    self.previous = Some((x, y));
+                    continue;
+                }
+                line_budget -= steps;
                 let weight = weight / steps as f32;
                 for i in 1..=steps {
                     let t = i as f32 / steps as f32;
@@ -204,33 +207,124 @@ impl Field {
             }
         }
     }
-    pub fn reading(&self, stereo: Stereo) -> Reading {
-        // Bounded monotone density response, normalized for the decay window.
-        let scale = self.scale * (0.24 / self.analysis.persistence.half_life());
-        let (mut left, mut top, mut right, mut bottom) = (self.side, self.side, 0, 0);
-        let shift = self.side.trailing_zeros();
-        let occupied = self
-            .active
-            .iter()
-            .filter_map(|&cell| {
-                let hits = self.cells[cell as usize] * scale;
-                if hits < HALF_INTENSITY / 509. {
-                    return None;
+    pub fn side(&self) -> usize {
+        self.side
+    }
+
+    pub fn resize(&mut self, side: usize) {
+        let side = side.clamp(3, MAX_SIDE);
+        if self.side == side {
+            return;
+        }
+        let mut next = Self::new(self.analysis, self.rate, side);
+        let ratio = (next.side - 2) as f32 / (self.side - 2) as f32;
+        let last = next.side as f32 - 1.001;
+        let project = |value: f32| ((value - 0.5) * ratio + 0.5).clamp(0., last);
+        for &cell in &self.active {
+            let i = cell as usize;
+            next.deposit(
+                project((i % self.side) as f32),
+                project((i / self.side) as f32),
+                self.cells[i],
+            );
+        }
+        next.scale = self.scale;
+        next.previous = self.previous.map(|(x, y)| (project(x), project(y)));
+        next.settled = self.settled;
+        next.silent_frames = self.silent_frames;
+        *self = next;
+    }
+
+    pub fn reading(&self, stereo: Stereo, side: usize) -> Reading {
+        let side = side.clamp(3, MAX_SIDE);
+        // A one-dimensional sweep spends half as long in a pixel when its
+        // diameter doubles. Compensate that linear change without making a
+        // diffuse two-dimensional distribution as bright as a narrow line.
+        let exposure = (side as f32 / 769.).clamp(0.5, 2.5);
+        let scale = self.scale * exposure * (0.24 / self.analysis.persistence.half_life());
+        let table = intensity_table(self.analysis.ink);
+        let intensity = |mass: f32| table[(mass.to_bits() >> 17) as usize];
+        let mut extents = [[side, side, 0, 0]; MAX_SIDE.div_ceil(BAND_HEIGHT)];
+        let bounds = &mut extents[..side.div_ceil(BAND_HEIGHT)];
+        let pixel = |i: usize| ((2 * i + 1) * side / (2 * self.side)).min(side - 1);
+        let xy = |cell: usize| (pixel(cell % self.side), pixel(cell / self.side));
+        let native = side == self.side;
+        for &index in &self.active {
+            let i = index as usize;
+            if native && intensity(self.cells[i] * scale) == 0 {
+                continue;
+            }
+            let (x, y) = if native { (i % side, i / side) } else { xy(i) };
+            let b = &mut bounds[y / BAND_HEIGHT];
+            b[0] = b[0].min(x);
+            b[1] = b[1].min(y);
+            b[2] = b[2].max(x + 1);
+            b[3] = b[3].max(y + 1);
+        }
+        // Join neighboring bands when one atlas insertion costs little extra
+        // empty area. Diagonals retain narrow strips and mono uses one sprite.
+        let mut bands: Vec<Raster> = Vec::new();
+        let mut band_at = [0; MAX_SIDE.div_ceil(BAND_HEIGHT)];
+        for (row, &b) in bounds.iter().enumerate() {
+            if b[2] == 0 {
+                continue;
+            }
+            let area = |[x, y, r, d]: [usize; 4]| (r - x) * (d - y);
+            if let Some(last) = bands.last_mut() {
+                let a = last.bounds;
+                let union = [a[0].min(b[0]), a[1], a[2].max(b[2]), b[3]];
+                if area(union) <= (area(a) + area(b)) * 9 / 8 + 256 {
+                    last.bounds = union;
+                    band_at[row] = bands.len() - 1;
+                    continue;
                 }
-                let intensity = (255. * hits / (hits + HALF_INTENSITY) + 0.5) as u8;
-                let (x, y) = (cell as usize & (self.side - 1), cell as usize >> shift);
-                left = left.min(x);
-                top = top.min(y);
-                right = right.max(x);
-                bottom = bottom.max(y);
-                Some((cell, intensity))
-            })
-            .collect();
+            }
+            band_at[row] = bands.len();
+            bands.push(Raster {
+                bounds: b,
+                intensity: Vec::new(),
+            });
+        }
+        for band in &mut bands {
+            let [x, y, r, d] = band.bounds;
+            band.intensity.resize((r - x) * (d - y), 0);
+        }
+        let mut mass: Vec<Vec<f32>> = if native {
+            Vec::new()
+        } else {
+            bands.iter().map(|b| vec![0.; b.intensity.len()]).collect()
+        };
+        for &index in &self.active {
+            let i = index as usize;
+            let hits = self.cells[i] * scale;
+            let code = intensity(hits);
+            if native && code == 0 {
+                continue;
+            }
+            let (x, y) = if native { (i % side, i / side) } else { xy(i) };
+            let slot = band_at[y / BAND_HEIGHT];
+            let band = &mut bands[slot];
+            let [left, top, right, _] = band.bounds;
+            let offset = (y - top) * (right - left) + x - left;
+            if native {
+                band.intensity[offset] = code;
+            } else {
+                mass[slot][offset] += hits;
+            }
+        }
+        for (band, hits) in bands.iter_mut().zip(mass) {
+            for (out, hits) in band.intensity.iter_mut().zip(hits) {
+                *out = intensity(hits);
+            }
+        }
         Reading {
-            side: self.side,
-            occupied,
+            side,
+            bands,
             stereo,
-            bounds: [left, top, right, bottom],
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stereoFieldTests.rs"]
+mod tests;

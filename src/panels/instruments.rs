@@ -56,14 +56,16 @@ impl Config {
             Self::Field(s) => Request::Field(s.analysis),
         }
     }
-    fn delivery(self) -> Delivery {
+    fn delivery(self, field_side: usize) -> Delivery {
         match self {
             Self::Spectral(s) => Delivery {
                 speed: s.speed,
+                field_side,
                 statistics: false,
             },
             Self::Field(s) => Delivery {
                 speed: s.speed,
+                field_side,
                 statistics: s.statistics,
             },
         }
@@ -110,10 +112,17 @@ impl Instrument {
             })
         })
         .detach();
+        let plot = cx.new(|cx| Plot::new(config, cx));
+        cx.subscribe(&plot, |s: &mut Self, _, &plot::FieldSize(side), _| {
+            if let Some((sub, _)) = &s.stream {
+                sub.set_delivery(s.config.delivery(side));
+            }
+        })
+        .detach();
         Self {
             field_readouts: s.field_readouts.clone(),
             player: s.player.clone(),
-            plot: cx.new(|cx| Plot::new(config, cx)),
+            plot,
             focus: cx.focus_handle(),
             config,
             presented: false,
@@ -150,10 +159,10 @@ impl Instrument {
             return;
         }
         let capture = p.spectra.capture.clone();
-        let Ok((sub, rx)) = p
-            .spectra
-            .visualize(self.config.request(), self.config.delivery())
-        else {
+        let Ok((sub, rx)) = p.spectra.visualize(
+            self.config.request(),
+            self.config.delivery(self.plot.read(cx).field_side.get()),
+        ) else {
             self.plot.update(cx, |plot, cx| {
                 plot.failed = true;
                 cx.notify();
@@ -199,7 +208,7 @@ impl Instrument {
             cx.notify();
         });
         if let Some((sub, _)) = &self.stream {
-            sub.set_delivery(config.delivery());
+            sub.set_delivery(config.delivery(self.plot.read(cx).field_side.get()));
         }
         self.sync(cx);
         drop(old);

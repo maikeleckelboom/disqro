@@ -20,6 +20,7 @@ pub enum Request {
 pub struct Delivery {
     pub speed: Speed,
     pub statistics: bool,
+    pub field_side: usize,
 }
 pub enum Payload {
     Spectral(spectral::History),
@@ -51,6 +52,22 @@ struct Group {
     state: Option<Analysis>,
     /// During activation a reused PCM tail can predate the panel.
     first: u64,
+    field_side: usize,
+    resized: Option<std::time::Instant>,
+}
+impl Group {
+    fn fit(&mut self) {
+        let side = self
+            .clients
+            .iter()
+            .map(|c| c.delivery.field_side)
+            .max()
+            .unwrap_or(0);
+        if side != self.field_side {
+            self.field_side = side;
+            self.resized = Some(std::time::Instant::now());
+        }
+    }
 }
 #[derive(Default)]
 pub(super) struct Streams {
@@ -88,20 +105,24 @@ impl Streams {
             last_end: None,
             settled: false,
         });
+        group.fit();
     }
     pub fn set_delivery(&mut self, id: usize, delivery: Delivery) {
-        if let Some(client) = self
-            .groups
-            .values_mut()
-            .flat_map(|g| &mut g.clients)
-            .find(|c| c.id == id)
-        {
-            client.delivery = delivery;
+        for g in self.groups.values_mut() {
+            if let Some(client) = g.clients.iter_mut().find(|c| c.id == id) {
+                if client.delivery != delivery {
+                    client.delivery = delivery;
+                    client.last_end = None;
+                    g.fit();
+                }
+                break;
+            }
         }
     }
     pub fn remove(&mut self, id: usize) {
         self.groups.retain(|_, g| {
             g.clients.retain(|c| c.id != id);
+            g.fit();
             !g.clients.is_empty()
         });
     }
@@ -154,12 +175,17 @@ impl Streams {
                 }
                 Request::Field(a) => {
                     let _timer = diagnostics::Timer::measure(|d| &d.field_us);
-                    let Analysis::Field(field) = g
-                        .state
-                        .get_or_insert_with(|| Analysis::Field(field::Field::new(a, h.rate)))
-                    else {
+                    let Analysis::Field(field) = g.state.get_or_insert_with(|| {
+                        Analysis::Field(field::Field::new(a, h.rate, g.field_side))
+                    }) else {
                         unreachable!()
                     };
+                    if field.side() != g.field_side
+                        && g.resized
+                            .is_some_and(|since| since.elapsed().as_millis() >= 150)
+                    {
+                        field.resize(g.field_side);
+                    }
                     field.push(h.tail(BLOCK));
                 }
             }
@@ -179,7 +205,7 @@ impl Streams {
                 Analysis::Spectral(_, ring) => (ring.end, false),
                 Analysis::Field(f) => (h.end, f.settled),
             };
-            let mut frame = None;
+            let mut frames = Vec::<(usize, Arc<VisualFrame>)>::new();
             let statistics = g.clients.iter().any(|c| c.delivery.statistics);
             for c in &mut g.clients {
                 if !tick.is_multiple_of(60 / u64::from(c.delivery.speed.hz()))
@@ -187,7 +213,14 @@ impl Streams {
                 {
                     continue;
                 }
-                let frame = frame.get_or_insert_with(|| {
+                let side = match state {
+                    Analysis::Field(f) => c.delivery.field_side.min(f.side()),
+                    Analysis::Spectral(..) => 0,
+                };
+                let frame = if let Some((_, frame)) = frames.iter().find(|(size, _)| *size == side)
+                {
+                    frame.clone()
+                } else {
                     let data = match state {
                         Analysis::Spectral(_, ring) => Payload::Spectral(ring.clone()),
                         Analysis::Field(f) => {
@@ -198,18 +231,20 @@ impl Streams {
                             } else {
                                 Stereo::default()
                             };
-                            Payload::Field(f.reading(stats))
+                            Payload::Field(f.reading(stats, side))
                         }
                     };
-                    Arc::new(VisualFrame {
+                    let frame = Arc::new(VisualFrame {
                         published: std::time::Instant::now(),
                         epoch: h.epoch,
                         continuity: h.continuity,
                         rate: h.rate,
                         data,
-                    })
-                });
-                let _ = c.tx.force_send(Some(frame.clone()));
+                    });
+                    frames.push((side, frame.clone()));
+                    frame
+                };
+                let _ = c.tx.force_send(Some(frame));
                 c.sent = true;
                 c.last_end = Some(end);
                 c.settled = settled;

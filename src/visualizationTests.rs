@@ -65,6 +65,7 @@ fn every_hop_survives_a_slow_consumer_and_frozen_tiles_stay_immutable() {
         Delivery {
             speed: Speed::Slow,
             statistics: false,
+            field_side: 0,
         },
         send,
         0,
@@ -75,6 +76,7 @@ fn every_hop_survives_a_slow_consumer_and_frozen_tiles_stay_immutable() {
         Delivery {
             speed: Speed::Fast,
             statistics: false,
+            field_side: 0,
         },
         other,
         0,
@@ -184,14 +186,14 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
         let f = Frame::new(l, r);
         assert_eq!(field::Axes::XY.coordinates(f), (l, r));
         assert_eq!(field::Axes::MidSide.coordinates(f), (x, y));
-        let mut g = field::Field::new(Default::default(), 48000);
+        let mut g = field::Field::new(Default::default(), 48000, 1441);
         let block = [f; BLOCK];
         g.push(&block);
-        let reading = g.reading(Stereo::measure(&block));
+        let reading = g.reading(Stereo::measure(&block), 1441);
         assert_eq!(reading.stereo.correlation, corr);
         assert_eq!(reading.stereo.mono_retained(), Some(mono));
         let k = (reading.side - 2) as f32 * 0.5;
-        let raster = reading.raster(reading.side).unwrap();
+        let raster = &reading.bands[0];
         let [left, top, right, _] = raster.bounds;
         let width = right - left;
         for (i, _) in raster.intensity.iter().enumerate().filter(|(_, v)| **v > 0) {
@@ -206,11 +208,11 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
         for _ in 0..2000 {
             g.push(&[Frame::ZERO; BLOCK]);
         }
-        let silent = g.reading(Stereo::default());
-        assert!(g.settled && silent.raster(silent.side).is_none());
+        let silent = g.reading(Stereo::default(), 1441);
+        assert!(g.settled && silent.bands.is_empty());
         assert!(silent.stereo.correlation.is_none() && silent.stereo.mono_retained().is_none());
     }
-    let mut g = field::Field::new(Default::default(), 48000);
+    let mut g = field::Field::new(Default::default(), 48000, 1441);
     let mut fixtures = Vec::new();
     for i in 0..8192 {
         fixtures.push(Frame::new(
@@ -221,9 +223,16 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
     for block in fixtures.chunks(BLOCK) {
         g.push(block);
     }
-    let reading = g.reading(Stereo::measure(&fixtures));
-    let raster = reading.raster(reading.side).unwrap();
-    assert!(raster.intensity.iter().filter(|&&v| v > 0).count() > 5000);
+    let reading = g.reading(Stereo::measure(&fixtures), 1441);
+    assert!(
+        reading
+            .bands
+            .iter()
+            .flat_map(|b| &b.intensity)
+            .filter(|&&v| v > 0)
+            .count()
+            > 5000
+    );
     assert!(reading.stereo.correlation.unwrap().abs() < 0.01);
 }
 
@@ -231,18 +240,23 @@ fn paired_geometry_and_density_match_phase_balance_and_silence() {
 fn stereo_field_resolves_sub_cell_detail_when_the_plot_grows() {
     let first = Frame::new(0.5, 0.5);
     let second = Frame::new(0.505, 0.505);
-    let mut field = field::Field::new(Default::default(), 48000);
+    let mut field = field::Field::new(Default::default(), 48000, 1441);
     field.push(&[first; BLOCK]);
     field.push(&[second; BLOCK]);
-    let reading = field.reading(Stereo::default());
     let occupied_rows = |side| {
-        let raster = reading.raster(side).unwrap();
-        let [left, top, right, _] = raster.bounds;
-        raster
-            .intensity
-            .chunks_exact(right - left)
-            .enumerate()
-            .filter_map(|(row, values)| values.iter().any(|&v| v > 0).then_some(row + top))
+        field
+            .reading(Stereo::default(), side)
+            .bands
+            .into_iter()
+            .flat_map(|raster| {
+                let [left, top, right, _] = raster.bounds;
+                raster
+                    .intensity
+                    .chunks_exact(right - left)
+                    .enumerate()
+                    .filter_map(|(row, values)| values.iter().any(|&v| v > 0).then_some(row + top))
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>()
     };
     let compact = occupied_rows(256);
