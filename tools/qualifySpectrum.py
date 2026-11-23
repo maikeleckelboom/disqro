@@ -279,7 +279,12 @@ def measure(args):
             if not user32.SetWindowPos(hwnd, 0, 0, 0, round(width*scale), round(height*scale), 0x16):
                 raise C.WinError()
         dimensions = (1380, 900) if args.scenario == "three-views" else (1240, 780)
-        resize(*dimensions)
+        if args.physical_size:
+            width, height = args.physical_size
+            if not user32.SetWindowPos(hwnd, 0, 0, 0, width, height, 0x416):
+                raise C.WinError()
+        else:
+            resize(*dimensions)
         time.sleep(3)
         if args.scenario == "three-views":
             # Opening a source selects its browser tab. Reveal the top heatmap again.
@@ -287,7 +292,7 @@ def measure(args):
         screenshot(hwnd, args.output / "native.webp")
         buttons = control_centers(hwnd, ["Track", "Full CD"]) if args.scenario == "activity" else None
         phases = [("activity" if buttons else "steady", 25)]
-        if args.scenario in ("off", "two", "all"):
+        if args.exercise_resize or args.scenario in ("off", "two", "all"):
             phases += [("resize", 15), ("minimized", 20)]
         if args.scenario in ("soak", "sustained"):
             phases = [("sustained", 600)]
@@ -326,6 +331,8 @@ def measure(args):
             gpu_busy = gpu.finish()
             if not observed:
                 raise RuntimeError("No playback trace during " + phase)
+            if (args.output / "observed.f32").exists():
+                raise RuntimeError("Use a live qualification build for timing, never a held reference player")
             result = dict(build=args.scenario, binary_sha256=build_digest, phase=phase, seconds=round(elapsed, 2),
                           worker_cpu=round(worker_cpu, 3), gpu_busiest_engine=gpu_busy, process_cpu=round((end[1]-start[1])*100/elapsed, 2),
                           ui_cpu=round((end[2]-start[2])*100/elapsed, 2),
@@ -388,6 +395,9 @@ if __name__ == "__main__":
     parser.add_argument("exe", type=lambda p: Path(p).resolve(strict=True))
     parser.add_argument("source", type=lambda p: Path(p).resolve(strict=True))
     parser.add_argument("output", type=lambda p: Path(p).resolve())
+    parser.add_argument("--physical-size", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"),
+                        help="Set the private native window dimensions in device pixels")
+    parser.add_argument("--exercise-resize", action="store_true", help="Also measure drag-resize and minimize")
     parser.add_argument("--desktop-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.desktop_worker:

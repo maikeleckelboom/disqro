@@ -1,5 +1,7 @@
 # Windows visualization qualification
 
+The later Stereo Field refinement has its own matched native captures, DPI measurements and live performance comparison. [Stereo Field rendering qualification](stereo-field-rendering.md)
+
 The release player completed a 600.15-second native GUI run with Spectrum, Spectrogram and Stereo Field visible. Symphonia played the first ten minutes of a 77-minute FLAC/CUE disc through a single Kira voice. The run crossed the authored chapter boundaries at 4:18 and 8:27. It recorded 28,808,704 captured stereo frames, 56,268 spectral columns, and zero capture drops, decoder errors or reported device errors. The one-second trace has playback callbacks and analysis in every measured interval. [Full sustained trace](evidence/live-visualizations/sustained-trace.csv)
 
 ![Spectrogram, Waterfall and Stereo Field in the native player](evidence/live-visualizations/three-views.webp)
