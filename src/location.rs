@@ -344,7 +344,8 @@ impl LocationBar {
             Location::Playlist(_) | Location::Playlists => Some(IconName::ListMusic),
             Location::Folder(_) => None,
             _ => Some(IconName::Library),
-        };
+        }
+        .filter(|_| self.width.get() >= px(160.));
         let all = view_crumbs(current, cx);
         // Collapse leading folders into a menu when the path does not fit.
         let font_size = px(13.);
