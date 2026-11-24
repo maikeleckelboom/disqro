@@ -79,6 +79,12 @@ pub(crate) fn cover_row_height<D: TableDelegate>(
     new
 }
 
+pub(crate) fn playing_icon(cx: &App) -> Icon {
+    Icon::new(IconName::AudioLines)
+        .size(px(14.))
+        .text_color(materials(cx).accent)
+}
+
 /// A cover thumbnail, or the one fallback every artwork slot shares: a quiet
 /// tile with a disc glyph. A slot is never left blank, whether the release has
 /// no artwork or its image is still loading.
@@ -278,6 +284,9 @@ struct Paged {
     scope: Scope,
     search: String,
     keys: Arc<[i64]>,
+    playlist_tracks: Vec<i64>,
+    requested_child: Option<Scope>,
+    child_row: Option<(Scope, i64)>,
     cache: HashMap<i64, Row>,
     loaded: bool,
     grouped: bool,
@@ -389,6 +398,29 @@ impl Rows {
         }?;
         Some(self.sections.display_index(ix))
     }
+    fn recording_key(&self, track: &Track, library_id: Option<i64>) -> Option<RowKey> {
+        match &self.data {
+            Contents::Folder { sorted, .. } => {
+                sorted.iter().find(|t| t.same_item(track)).map(|t| key(t))
+            }
+            Contents::Library(p) => {
+                let id = library_id.or(track.library_id).or_else(|| {
+                    p.cache
+                        .values()
+                        .find(|r| r.track.same_item(track))
+                        .map(|r| r.id)
+                })?;
+                let identities = if p.scope.keys_are_entries() {
+                    &p.playlist_tracks[..]
+                } else {
+                    &p.keys
+                };
+                let index = identities.iter().position(|&k| k == id)?;
+                Some(RowKey::Key(p.keys[index]))
+            }
+        }
+    }
+
     fn row(&self, row: usize) -> Option<&Row> {
         match &self.data {
             Contents::Library(p) => p.cache.get(p.keys.get(self.sections.data_index(row)?)?),
@@ -614,7 +646,7 @@ pub fn set_rows_in_place(
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Viewport {
-    anchor: Option<RowKey>,
+    pub(crate) anchor: Option<RowKey>,
     within_row: f32,
     scroll: f32,
     horizontal: f32,
@@ -1006,6 +1038,7 @@ impl MusicTable {
         scope: Scope,
         search: String,
         grouped: bool,
+        requested_child: Option<Scope>,
         cx: &mut Context<TableState<Self>>,
     ) {
         let same = matches!(&self.rows.data, Contents::Library(p) if p.scope == scope);
@@ -1013,6 +1046,7 @@ impl MusicTable {
             if let Contents::Library(p) = &mut self.rows.data {
                 p.search = search;
                 p.grouped = grouped;
+                p.requested_child = requested_child;
             }
         } else {
             self.view += 1;
@@ -1022,6 +1056,9 @@ impl MusicTable {
                 scope,
                 search,
                 keys: Arc::default(),
+                playlist_tracks: Vec::new(),
+                requested_child,
+                child_row: None,
                 cache: HashMap::new(),
                 loaded: false,
                 grouped,
@@ -1032,12 +1069,13 @@ impl MusicTable {
     /// Queries the library view again, keeping the rows on screen until the
     /// new listing arrives.
     pub fn query(&mut self, cx: &mut Context<TableState<Self>>) {
-        let Contents::Library(p) = &self.rows.data else {
+        let Contents::Library(p) = &mut self.rows.data else {
             return;
         };
         let Some(store) = self.catalog.read(cx).handle() else {
             return;
         };
+        p.loaded = false;
         let q = store::Query {
             scope: p.scope,
             search: p.search.clone(),
@@ -1048,8 +1086,9 @@ impl MusicTable {
         let generation = self.keys_ticket.next();
         let view = self.view;
         let grouped = p.grouped && self.sort.is_none();
+        let child = p.requested_child;
         let listing = store.query(&self.keys_ticket, generation, move |s| {
-            let (listing, albums) = s.table_listing(&q, grouped)?;
+            let (listing, albums) = s.table_listing(&q, grouped, child)?;
             let sections = Sections::new(albums.into_iter().map(|a| {
                 let count = a.count;
                 (Arc::new(Disc::from_album(a)), count)
@@ -1079,6 +1118,9 @@ impl MusicTable {
                 t.delegate_mut().selection.ordered.take();
                 if let Contents::Library(p) = &mut t.delegate_mut().rows.data {
                     p.keys = listing.keys.into();
+                    p.playlist_tracks = listing.playlist_tracks;
+                    p.child_row = listing.child_row;
+                    p.requested_child = None;
                     p.loaded = true;
                     p.cache.clear();
                 }
@@ -1233,8 +1275,40 @@ impl MusicTable {
     pub fn first_track(&self) -> usize {
         self.rows.sections.display_index(0)
     }
-    pub(crate) fn first_on_disc(&self, id: &DiscId) -> Option<usize> {
-        (0..self.rows.len()).find(|&row| self.track(row).is_some_and(|track| id.contains(track)))
+    pub(crate) fn child_position(&self, key: &RowKey, id: &DiscId) -> Option<usize> {
+        if matches!(key, RowKey::Release(_))
+            && let Some(section) = self
+                .rows
+                .sections
+                .0
+                .iter()
+                .find(|s| s.disc.release.as_ref().is_some_and(|m| m.key.same(id)))
+        {
+            return Some(section.header);
+        }
+        match (&self.rows.data, id) {
+            (Contents::Library(p), DiscId::Library(id)) => {
+                let child = if matches!(key, RowKey::Release(_)) {
+                    Scope::Release(*id)
+                } else {
+                    Scope::Album(*id)
+                };
+                let (_, row) = p.child_row.filter(|(scope, _)| *scope == child)?;
+                self.rows.position(&RowKey::Key(row))
+            }
+            (Contents::Folder { sorted, .. }, _) => {
+                let disc = if matches!(key, RowKey::Release(_)) {
+                    self.programs
+                        .iter()
+                        .filter(|d| d.release.as_ref().is_some_and(|m| m.key.same(id)))
+                        .find_map(|d| sorted.iter().position(|t| d.id.contains(t)))
+                } else {
+                    sorted.iter().position(|t| id.contains(t))
+                }?;
+                Some(self.rows.sections.display_index(disc))
+            }
+            _ => None,
+        }
     }
 
     pub fn extend_selection(&mut self, primary: Option<usize>, direction: isize) -> Option<usize> {
@@ -1373,6 +1447,17 @@ impl MusicTable {
             Contents::Library(p) => Targets::Keys(p.scope, p.keys.to_vec()),
         }
     }
+    pub(crate) fn disc_playing(&self, disc: &Disc, cx: &App) -> bool {
+        let status = &self.player.read(cx).status;
+        let Some(track) = status.track.as_ref().filter(|_| status.playing) else {
+            return false;
+        };
+        match disc.id {
+            DiscId::Library(id) => self.catalog.read(cx).playing_album(track) == Some(id),
+            _ => disc.id.contains(track) && disc.tracks.iter().any(|t| t.same_item(track)),
+        }
+    }
+
     fn is_playing(&self, t: &Track, cx: &App) -> bool {
         let status = &self.player.read(cx).status;
         status.playing && status.track.as_ref().is_some_and(|p| p.same_item(t))
@@ -1807,10 +1892,22 @@ impl TableDelegate for MusicTable {
     }
     fn cell_label(&self, row: usize, col: usize, cx: &App) -> Option<SharedString> {
         if let Some(d) = self.header(row) {
-            return (col == 0).then(|| d.title.clone().into());
+            return (col == 0).then(|| {
+                if self.disc_playing(d, cx) {
+                    format!("{} · Now playing", d.title).into()
+                } else {
+                    d.title.clone().into()
+                }
+            });
         }
         let t = self.rows.track(row)?;
         let field = self.layout().columns[col].field;
+        if field == Field::Number && self.is_playing(t, cx) {
+            return Some(format!("Now playing · {}", field.value(t, self.mark(row, cx))).into());
+        }
+        if field == Field::Title && !self.layout().has(Field::Number) && self.is_playing(t, cx) {
+            return Some(format!("{} · Now playing", t.title).into());
+        }
         (!matches!(field, Field::Cover | Field::Favorite))
             .then(|| field.value(t, self.mark(row, cx)).into())
     }
@@ -1852,13 +1949,7 @@ impl TableDelegate for MusicTable {
         let playing = self.is_playing(&t, cx);
         let cell = cell.when(!available, |d| d.opacity(0.45));
         match f {
-            Field::Number if playing => cell
-                .child(
-                    Icon::new(IconName::AudioLines)
-                        .size(px(14.))
-                        .text_color(m.accent),
-                )
-                .into_any_element(),
+            Field::Number if playing => cell.child(playing_icon(cx)).into_any_element(),
             Field::Number if !available => cell
                 .child(
                     div()
@@ -1894,6 +1985,9 @@ impl TableDelegate for MusicTable {
                     col,
                     self.rows.sections.parent(row).is_some(),
                 )))
+                .when(playing && !self.layout().has(Field::Number), |d| {
+                    d.gap(px(5.)).child(playing_icon(cx))
+                })
                 .text_color(if playing { m.accent } else { m.text })
                 .child(
                     div()
@@ -1965,14 +2059,17 @@ impl TableDelegate for MusicTable {
                 })
                 .when(focused && cursor, |d| d.child(focus_indicator()))
                 .cursor_pointer()
-                .child(d.section(
-                    self.cover,
-                    lead,
-                    self.settled_cover,
-                    self.artwork_revision,
-                    window,
-                    cx,
-                ))
+                .child(
+                    d.section(
+                        self.cover,
+                        lead,
+                        self.settled_cover,
+                        self.artwork_revision,
+                        window,
+                        cx,
+                    )
+                    .when(self.disc_playing(d, cx), |d| d.child(playing_icon(cx))),
+                )
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(format!(
                         "{}  ·  {}",
@@ -2409,6 +2506,13 @@ mod tests {
             }
         };
         let all = project(chapters.clone());
+        assert_eq!(
+            all.recording_key(&chapters[1], None),
+            Some(key(&chapters[1]))
+        );
+        let mut shifted = (*chapters[1]).clone();
+        shifted.disc.as_mut().unwrap().start += 1;
+        assert_eq!(all.recording_key(&shifted, None), None);
         assert_eq!(all.sections.parent(2).unwrap().id, disc.id);
         assert!(all.sections.parent(3).is_none());
         let mut selection = Selection::default();
@@ -2462,7 +2566,7 @@ mod tests {
                 search: search.into(),
                 order,
             };
-            let (listing, albums) = store.table_listing(&query, order.is_none()).unwrap();
+            let (listing, albums) = store.table_listing(&query, order.is_none(), None).unwrap();
             let sections = Sections::new(albums.into_iter().map(|a| {
                 let count = a.count;
                 (Arc::new(super::Disc::from_album(a)), count)
@@ -2479,6 +2583,9 @@ mod tests {
                     scope,
                     search: query.search,
                     keys: listing.keys.into(),
+                    playlist_tracks: listing.playlist_tracks,
+                    requested_child: None,
+                    child_row: listing.child_row,
                     cache,
                     loaded: true,
                     grouped: order.is_none(),
@@ -2498,6 +2605,28 @@ mod tests {
         assert_eq!(sorted.key(1), grouped.key(2));
         assert!(sorted.sections.parent(1).is_none());
     }
+    #[test]
+    fn playing_recording_in_an_unhydrated_playlist_uses_its_first_displayed_occurrence() {
+        let rows = Rows {
+            sections: Sections::default(),
+            data: Contents::Library(super::Paged {
+                scope: crate::store::Scope::Playlist(3),
+                search: String::new(),
+                keys: [11, 12, 13].into(),
+                playlist_tracks: vec![12, 41, 41],
+                requested_child: None,
+                child_row: None,
+                cache: Default::default(),
+                loaded: true,
+                grouped: false,
+            }),
+        };
+        let track = Track::file("recording.wav".into());
+        assert_eq!(rows.recording_key(&track, Some(41)), Some(RowKey::Key(12)));
+        assert_eq!(rows.recording_key(&track, Some(12)), Some(RowKey::Key(11)));
+        assert_eq!(rows.recording_key(&track, Some(13)), None);
+    }
+
     #[test]
     fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {
         let mut rows: Vec<_> = ["a", "b", "c", "d"]

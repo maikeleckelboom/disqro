@@ -27,7 +27,7 @@ Each step records the outgoing visit in the same browser. Back and Forward follo
 | Choose **Add All to Queue** from a collection | Append the matching recordings in the table's display order. |
 | Double-click a playlist occurrence | Play from that occurrence in the displayed playlist sequence. Repeated occurrences retain independent queue entries. |
 | Choose **Show in Library** or **Show in Locations** from the Now Playing menu | Reveal the exact chapter in the active Music Browser. Library opens the registered disc. Locations opens the physical location. Back returns to the previous browsing position. |
-| Click the player artwork | Reveal the current recording in its indexed disc when it has a Library identity, or in its physical location. |
+| Click the player artwork | **Go to Playing Track** selects the exact chapter in the active browser’s existing results. On an Albums / CDs shelf it opens All Tracks in that collection. If the recording is outside the results, it opens its indexed disc or physical location. |
 | Choose **Show in Library** or **Show in Locations** from a queue or history entry | Select that entry’s exact chapter. The playback indicator stays on the active recording. A live indexed entry can also resolve the current path after a verified move. |
 | Choose **Continue This CD** from the Now Playing menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
 
@@ -48,6 +48,28 @@ Up follows the same hierarchy as the breadcrumb. From a CD it selects the CD sec
 Workspace saves store logical keys and viewport positions. Each browser retains up to 100 visits per history direction and 100 recent locations. Archived selections share a per-browser budget of 128 Ki selected keys and prioritize recent visits. A selection over that budget can keep its primary row and viewport when archived. Each browser also owns its subfolder preferences. A newly opened browser starts from the current defaults. Live indexed tracks can follow verified relocation by database ID. Saved queues retain their original file and chapter locators across restarts.
 
 ![Queue chapter nine selected while chapter seven plays](evidence/cd-queue-reveal.png)
+
+## Collection returns and Now Playing
+
+Back and Forward replay visits, including their filters, sort, selection and viewport. Hover either arrow for its destination. Up and ancestor breadcrumbs reveal the child in the parent’s saved presentation. A jump from a CD straight to the collection selects that CD. A return from a release selects its shelf row, matching group header or a recording on the release in a flat list. A filter that hides the requested child clears for the reveal. Back still holds the visit as it was before navigation.
+
+The waveform glyph identifies the playing chapter and its CD. It appears beside the title when the number column is hidden, and on the containing disc and release in Albums / CDs. The artwork’s locator opens **Go to Playing Track** with a click, Enter or Space. An indexed playlist with repeated copies reveals the first occurrence in display order. Playback changes update the glyph while browsing stays in place.
+
+### Windows reproduction
+
+On production, opening VII CD 2 directly and pressing Back restored its original collection row and offset. With *Controllin' The Universe* by The Prophet playing on VII CD 2, issuing **Show in Locations** from XV and then pressing Back correctly returned to XV. Clicking the **# 1-22** collection breadcrumb from VII CD 2 also returned to XV on production. The breadcrumb skipped the release and reopened the collection as an ordinary revisit, so the saved XV viewport won.
+
+The same breadcrumb now places VII CD 2 at the top. Up selects CD 2 inside release VII. Clicking the artwork in All Tracks selects chapter 9 in that collection. The captures use the real Windows player and collection, with isolated profiles on a private desktop and the qualification output fader set to digital silence before device creation.
+
+| Production breadcrumb | Corrected breadcrumb |
+| --- | --- |
+| ![Collection returns to XV while VII CD 2 plays](evidence/context-navigation/breadcrumb-before.webp) | ![Collection reveals VII CD 2 and marks chapter 9](evidence/context-navigation/breadcrumb-after.webp) |
+
+![The artwork action selects the playing chapter in the collection](evidence/context-navigation/playing-in-collection.webp)
+
+In a split workspace, the left browser kept its `injected` filter, descending title sort, selected chapter and viewport through a natural CUE boundary. The right browser stayed on XV. Both visits and histories survived a native restart. A separate indexed playlist held two offscreen occurrences of the same chapter after 324 other entries. The artwork selected its first occurrence. **Show in Library** opened the indexed CD. Holding a fixture database write lock delayed the lookup behind a queued edit. A subsequent row click and a separate Back navigation each retained their destination after the lock was released. Returning from an indexed release to a title-sorted collection preserved a filter that hid CD 1 and selected the first matching CD 2 track. The checks compared saved queue entries before and after navigation.
+
+The pinned Windows toolchain passed formatting, all-target Clippy with warnings denied, the standard Windows build and 171 default tests. Five opt-in tests were skipped by the default command. Native interaction used the optimized qualification build. The debug window hit the existing GPUI “hover style already set” assertion, also recorded on the dock-tab baseline.
 
 ## Sequential navigation qualification, 24 November 2026
 

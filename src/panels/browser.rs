@@ -625,14 +625,23 @@ impl Browser {
 
     fn history(&self, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
-        let button = |id: &'static str, icon: IconName, label: &'static str, enabled: bool| {
+        let button = |id: &'static str,
+                      icon: IconName,
+                      action: &'static str,
+                      shortcut: &'static str,
+                      target: Option<String>| {
+            let enabled = target.is_some();
+            let label = target.map_or_else(
+                || format!("{action} · {shortcut}"),
+                |target| format!("{action} · {target} · {shortcut}"),
+            );
             Button::new(id)
                 .ghost()
                 .xsmall()
                 .w(px(NAV_BUTTON))
                 .h(px(NAV_BUTTON))
                 .icon(Icon::new(icon).size(px(15.)).text_color(m.text_muted))
-                .accessibility_label(label)
+                .accessibility_label(label.clone())
                 .tooltip(label)
                 .tab_stop(true)
                 .disabled(!enabled)
@@ -647,8 +656,9 @@ impl Browser {
                 button(
                     "back",
                     IconName::ArrowLeft,
-                    "Back · Alt+Left",
-                    self.can_go_back(),
+                    "Back",
+                    "Alt+Left",
+                    self.history_label(false, cx),
                 )
                 .on_click(cx.listener(|b, _, w, cx| b.back(w, cx))),
             )
@@ -656,13 +666,14 @@ impl Browser {
                 button(
                     "forward",
                     IconName::ArrowRight,
-                    "Forward · Alt+Right",
-                    self.can_go_forward(),
+                    "Forward",
+                    "Alt+Right",
+                    self.history_label(true, cx),
                 )
                 .on_click(cx.listener(|b, _, w, cx| b.forward(w, cx))),
             )
             .child(
-                button("up", IconName::ArrowUp, "Up · Alt+Up", self.can_go_up())
+                button("up", IconName::ArrowUp, "Up", "Alt+Up", self.up_label(cx))
                     .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
             )
             .into_any_element()

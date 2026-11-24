@@ -239,6 +239,17 @@ impl Discs {
             ..Default::default()
         }
     }
+    fn row_playing(&self, row: &Shelf, cx: &App) -> bool {
+        let Some(table) = self.tracks.as_ref().and_then(WeakEntity::upgrade) else {
+            return false;
+        };
+        let playing = |disc: &Arc<Disc>| table.read(cx).delegate().disc_playing(disc, cx);
+        match row {
+            Shelf::Disc(disc) => playing(disc),
+            Shelf::Release(release) => release.discs.iter().any(playing),
+            Shelf::Link(..) => false,
+        }
+    }
     /// Top-level albums and releases. Each release owns its numbered discs.
     pub fn shelve(discs: Vec<Arc<Disc>>) -> Vec<Shelf> {
         let order = crate::release::ordered(
@@ -470,7 +481,7 @@ impl Disc {
         listing: u64,
         window: &mut Window,
         cx: &mut App,
-    ) -> impl IntoElement {
+    ) -> Div {
         let m = *materials(cx);
         let cover = self
             .section_cover(settled_cover, listing, window, cx)
@@ -634,8 +645,14 @@ impl TableDelegate for Discs {
         ][i];
         Column::new(label, label).width(w)
     }
-    fn cell_label(&self, r: usize, c: usize, _: &App) -> Option<SharedString> {
-        Some(self.rows.get(r)?.label(c).into())
+    fn cell_label(&self, r: usize, c: usize, cx: &App) -> Option<SharedString> {
+        let row = self.rows.get(r)?;
+        let label = row.label(c);
+        Some(if c == 0 && self.row_playing(row, cx) {
+            format!("{label} · Now playing").into()
+        } else {
+            label.into()
+        })
     }
     fn render_empty(
         &mut self,
@@ -699,6 +716,9 @@ impl TableDelegate for Discs {
         if let Some((number, subtitle)) = member {
             return cell
                 .pl(px(42.))
+                .when(self.row_playing(row, cx), |d| {
+                    d.child(crate::table::playing_icon(cx))
+                })
                 .child(div().flex_shrink_0().text_color(m.text_muted).child(number))
                 .when(!subtitle.is_empty(), |d| {
                     d.child(
@@ -743,6 +763,9 @@ impl TableDelegate for Discs {
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
                 })
+        })
+        .when(self.row_playing(row, cx), |d| {
+            d.child(crate::table::playing_icon(cx))
         })
         .when_some(discs, |d, n| {
             d.child(

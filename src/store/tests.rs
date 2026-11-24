@@ -285,6 +285,19 @@ fn playlists_order_duplicates_and_queries() {
     let order =
         |s: &Store| -> Vec<TrackId> { all(s, Scope::Playlist(p)).iter().map(|r| r.id).collect() };
     assert_eq!(order(&s), [one, x, one, two]);
+    let (listing, _) = s
+        .table_listing(
+            &Query {
+                scope: Scope::Playlist(p),
+                search: String::new(),
+                order: None,
+            },
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(listing.playlist_tracks, [one, x, one, two]);
+    assert_ne!(listing.keys[0], listing.keys[2]);
     s.move_entries(p, &[added[0]], None).unwrap();
     assert_eq!(order(&s), [one, one, two, x]);
     s.remove_entries(p, &[added[1]]).unwrap();
@@ -327,7 +340,7 @@ fn playlists_order_duplicates_and_queries() {
     let albums = s.albums(Some(r), "").unwrap();
     assert_eq!(albums.len(), 3);
     assert_eq!(albums.iter().map(|a| a.count).sum::<usize>(), 8);
-    assert_eq!(s.albums(Some(r), "b1").unwrap()[0].count, 1);
+    assert_eq!(s.albums(Some(r), "title:b1").unwrap()[0].count, 1);
 }
 
 #[test]
@@ -376,7 +389,7 @@ fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
         search: "title:b2".into(),
         order: None,
     };
-    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    let (listing, sections) = s.table_listing(&query, true, None).unwrap();
     assert_eq!(
         (sections.len(), sections[0].count, listing.keys.len()),
         (1, 1, 1)
@@ -391,6 +404,7 @@ fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
                 ..query.clone()
             },
             true,
+            None,
         )
         .unwrap();
     assert_eq!(image_section.len(), 1);
@@ -729,15 +743,29 @@ fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
         search: "title:two".into(),
         order: None,
     };
-    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    let (listing, sections) = s.table_listing(&query, true, None).unwrap();
     assert_eq!((listing.keys.len(), sections.len()), (2, 2));
     let query = Query {
         search: "title:cd2".into(),
         ..query
     };
-    let (listing, sections) = s.table_listing(&query, true).unwrap();
+    let (listing, sections) = s.table_listing(&query, true, None).unwrap();
     assert_eq!((listing.keys.len(), sections.len()), (2, 1));
     assert_eq!(sections[0].id, two.id);
+    let flat = Query {
+        scope: Scope::Library(Some(r)),
+        order: Some((Order::Title, true)),
+        ..query
+    };
+    let child = Scope::Release(one.id);
+    let (listing, _) = s.table_listing(&flat, false, Some(child)).unwrap();
+    let disc_keys = s
+        .keys(&Query {
+            scope: Scope::Album(two.id),
+            ..flat
+        })
+        .unwrap();
+    assert_eq!(listing.child_row, Some((child, disc_keys[0])));
 
     // Grouping is derived on every read: personal marks keep their tracks.
     let liked = keys[2];

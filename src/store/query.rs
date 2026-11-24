@@ -210,6 +210,10 @@ struct ReleaseContents {
 }
 
 enum ListingContext<'a> {
+    FlatTable {
+        child: Option<Scope>,
+        albums: &'a [AlbumId],
+    },
     Default,
     Release(&'a [AlbumId]),
     Collection(&'a HashMap<AlbumId, usize>),
@@ -227,6 +231,10 @@ pub struct RegisteredDisc {
 pub struct Listing {
     pub keys: Vec<i64>,
     pub duration: f64,
+    /// Playlist occurrences have distinct keys. Keep their recording IDs in display order.
+    pub playlist_tracks: Vec<TrackId>,
+    /// First matching row of an explicitly requested child in a flat table.
+    pub child_row: Option<(Scope, i64)>,
 }
 
 impl Store {
@@ -354,7 +362,7 @@ impl Store {
             None => default.into(),
         };
         let sql = format!(
-            "SELECT {key}, t.duration, t.album_id FROM {from}
+            "SELECT {key}, t.duration, t.album_id, t.id FROM {from}
              JOIN files s ON s.id = t.source
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
@@ -367,6 +375,18 @@ impl Store {
         let mut ranked = Vec::new();
         while let Some(r) = rows.next()? {
             let key = r.get(0)?;
+            if let ListingContext::FlatTable { child, albums } = context {
+                if q.scope.keys_are_entries() {
+                    listing.playlist_tracks.push(r.get(3)?);
+                }
+                if listing.child_row.is_none()
+                    && let Some(child) = child
+                    && let Some(album) = r.get::<_, Option<AlbumId>>(2)?
+                    && albums.contains(&album)
+                {
+                    listing.child_row = Some((child, key));
+                }
+            }
             if let ListingContext::Collection(ranks) = context {
                 let album: Option<AlbumId> = r.get(2)?;
                 let rank = album
@@ -386,7 +406,12 @@ impl Store {
     }
 
     /// Read keys and section counts from the same SQLite snapshot during indexing.
-    pub fn table_listing(&self, query: &Query, grouped: bool) -> Result<(Listing, Vec<AlbumRow>)> {
+    pub fn table_listing(
+        &self,
+        query: &Query,
+        grouped: bool,
+        child: Option<Scope>,
+    ) -> Result<(Listing, Vec<AlbumRow>)> {
         let snapshot = self.db.unchecked_transaction()?;
         let (listing, sections) = match query.scope {
             Scope::Library(root) if grouped => {
@@ -403,7 +428,23 @@ impl Store {
                 self.listing(query)?,
                 self.album_rows(Albums::Disc(id), &query.search)?,
             ),
-            _ => (self.listing(query)?, vec![]),
+            _ => {
+                let albums = match child {
+                    Some(Scope::Album(id)) => vec![id],
+                    Some(Scope::Release(id)) => self.release_discs(id)?,
+                    _ => Vec::new(),
+                };
+                (
+                    self.listing_in_order(
+                        query,
+                        ListingContext::FlatTable {
+                            child,
+                            albums: &albums,
+                        },
+                    )?,
+                    vec![],
+                )
+            }
         };
         snapshot.commit()?;
         Ok((listing, sections))

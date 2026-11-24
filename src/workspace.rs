@@ -347,7 +347,11 @@ impl Workspace {
                 }
                 RouterEvent::Reveal => s.reveal_active_browser(w, cx),
             }),
-            cx.subscribe_in(&catalog, window, |_, _, e, window, cx| {
+            cx.subscribe_in(&catalog, window, |s: &mut Self, catalog, e, window, cx| {
+                if matches!(e, CatalogEvent::Structure(_)) {
+                    let track = s.services.player.read(cx).status.track.clone();
+                    catalog.update(cx, |c, cx| c.index_playing(track, true, cx));
+                }
                 if let CatalogEvent::Notice(text) = e {
                     window.push_notification(text.clone(), cx);
                 }
@@ -373,6 +377,12 @@ impl Workspace {
                 PlayerEvent::QueueChanged
                 | PlayerEvent::TrackChanged
                 | PlayerEvent::StateChanged => {
+                    if matches!(e, PlayerEvent::TrackChanged) {
+                        let track = s.services.player.read(cx).status.track.clone();
+                        s.services
+                            .catalog
+                            .update(cx, |c, cx| c.index_playing(track, false, cx));
+                    }
                     s.update_system(cx);
                     s.schedule_save(cx);
                 }

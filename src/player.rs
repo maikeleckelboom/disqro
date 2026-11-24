@@ -499,14 +499,27 @@ impl Render for Player {
             .map_or_default(|entry| entry.disc_context);
         let art = art
             .id("playing-artwork")
+            .relative()
             .when_some(s.track.clone(), |art, track| {
-                let (destination, label) = if track.library_id.is_some() {
-                    (Destination::Library, "Show in Library")
-                } else {
-                    (Destination::Locations, "Show in Locations")
-                };
+                let label = "Go to Playing Track";
                 let keyboard_track = track.clone();
                 art.role(Role::Button)
+                    .child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .bottom_0()
+                            .size(px(16.))
+                            .bg(m.canvas.opacity(0.9))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Icon::new(IconName::LocateFixed)
+                                    .size(px(12.))
+                                    .text_color(m.text),
+                            ),
+                    )
                     .aria_label(label)
                     .tab_index(0)
                     .key_context("LocationControl")
@@ -517,14 +530,14 @@ impl Render for Player {
                         cx.emit(PlayerEvent::Locate(
                             track.clone(),
                             disc_context,
-                            destination,
+                            Destination::Current,
                         ));
                     }))
                     .on_action(cx.listener(move |_, _: &ActivateLocationControl, _, cx| {
                         cx.emit(PlayerEvent::Locate(
                             keyboard_track.clone(),
                             disc_context,
-                            destination,
+                            Destination::Current,
                         ));
                     }))
             });

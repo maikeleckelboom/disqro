@@ -287,6 +287,10 @@ impl MusicTable {
             });
         }
     }
+    pub(crate) fn recording_key(&self, track: &Track, library_id: Option<i64>) -> Option<RowKey> {
+        self.rows.recording_key(track, library_id)
+    }
+
     /// Whether the rows in memory include `track`, as the rows of a short
     /// page such as a release do.
     pub fn lists(&self, track: &Track) -> bool {

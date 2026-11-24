@@ -59,6 +59,7 @@ pub struct Collection {
 }
 
 pub enum CatalogEvent {
+    PlayingDisc,
     /// Collections or playlists changed.
     Changed,
     /// Library rows changed; open views should query again.
@@ -81,6 +82,9 @@ pub struct Catalog {
     scanning: Option<(RootId, Arc<AtomicBool>)>,
     pending: VecDeque<RootId>,
     pub loaded: bool,
+    playing_lookup: store::Ticket,
+    playing_track: Option<Arc<Track>>,
+    playing_disc: Option<store::query::RegisteredDisc>,
 }
 
 impl Catalog {
@@ -96,6 +100,9 @@ impl Catalog {
             scanning: None,
             pending: VecDeque::new(),
             loaded: false,
+            playing_lookup: Default::default(),
+            playing_track: None,
+            playing_disc: None,
         };
         this.load(true, cx);
         this
@@ -191,6 +198,42 @@ impl Catalog {
             }
         }
     }
+    /// Resolve a physical queue entry once for all indexed browser headers.
+    pub fn index_playing(
+        &mut self,
+        track: Option<Arc<Track>>,
+        refresh: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !refresh && self.playing_track == track {
+            return;
+        }
+        let revision = self.playing_lookup.next();
+        self.playing_track = track.clone();
+        self.playing_disc = None;
+        let (Some(store), Some(track)) = (&self.store, track) else {
+            return;
+        };
+        let lookup = store.query(&self.playing_lookup, revision, move |s| {
+            s.registered_disc(&track)
+        });
+        cx.spawn(async move |this, cx| {
+            let disc = lookup.await.ok().flatten();
+            let _ = this.update(cx, |c, cx| {
+                if c.playing_lookup.is_current(revision) {
+                    c.playing_disc = disc;
+                    cx.emit(CatalogEvent::PlayingDisc);
+                }
+            });
+        })
+        .detach();
+    }
+
+    pub fn playing_album(&self, track: &Track) -> Option<store::AlbumId> {
+        self.playing_track.as_ref().filter(|t| t.same_item(track))?;
+        Some(self.playing_disc.as_ref()?.album)
+    }
+
     pub fn collection(&self, id: RootId) -> Option<&Collection> {
         self.collections.iter().find(|c| c.root.id == id)
     }

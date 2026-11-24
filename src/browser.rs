@@ -99,6 +99,7 @@ pub enum Reveal {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Destination {
+    Current,
     Library,
     Locations,
 }
@@ -130,6 +131,8 @@ pub struct Browser {
     pub(crate) active: bool,
     history: History,
     pending: Option<Pending>,
+    /// A deliberate artwork click while discovery or an index query is still running.
+    pending_playing: Option<(u64, Arc<Track>, library::DiscContext)>,
     folder_child: Option<PathBuf>,
     window: AnyWindowHandle,
     navigation: u64,
@@ -238,6 +241,11 @@ impl Browser {
             if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
                 return;
             }
+            if matches!(ev, PlayerEvent::TrackChanged | PlayerEvent::StateChanged)
+                && b.listing_discs()
+            {
+                b.discs.update(cx, |_, cx| cx.notify());
+            }
             b.table.update(cx, |t, cx| match ev {
                 PlayerEvent::TrackChanged | PlayerEvent::StateChanged => cx.notify(),
                 PlayerEvent::PlaySelection => t.delegate().play(
@@ -282,7 +290,7 @@ impl Browser {
                 )
                 && b.list_focus(cx).contains_focused(window, cx)
             {
-                b.begin_navigation(cx);
+                b.cancel_context_for_input(cx);
             }
         })
         .detach();
@@ -313,6 +321,12 @@ impl Browser {
         )
         .detach();
         cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
+            CatalogEvent::PlayingDisc => {
+                b.table.update(cx, |_, cx| cx.notify());
+                if b.listing_discs() {
+                    b.discs.update(cx, |_, cx| cx.notify());
+                }
+            }
             CatalogEvent::Content => b.library_changed(cx),
             CatalogEvent::Structure(root) => {
                 b.refresh_indexed_sequence(*root, cx);
@@ -369,6 +383,7 @@ impl Browser {
             indexed_sequence: Default::default(),
             history: History::default(),
             pending: None,
+            pending_playing: None,
             folder_child: None,
             window: window.window_handle(),
             navigation: 0,
@@ -654,12 +669,6 @@ impl Browser {
         }
         cx.notify();
     }
-    pub fn can_go_back(&self) -> bool {
-        self.history.can_step(false)
-    }
-    pub fn can_go_forward(&self) -> bool {
-        self.history.can_step(true)
-    }
     fn filter(&mut self, cx: &mut Context<Self>) {
         self.albums.next();
         if self.location.is_directory() {
@@ -820,6 +829,10 @@ impl Browser {
                 .selected_row()
                 .and_then(|i| table.delegate().rows.get(i))
                 .map(Shelf::key);
+            let viewport =
+                crate::table::Viewport::capture(table, navigation::SHELF_ROW_HEIGHT, |i| {
+                    table.delegate().rows.get(i).map(Shelf::key)
+                });
             table.delegate_mut().rows = rows;
             table.delegate_mut().empty = empty.into();
             if table.delegate().directory_label != label {
@@ -828,6 +841,13 @@ impl Browser {
             }
             let ix = selected.and_then(|k| table.delegate().rows.iter().position(|r| r.key() == k));
             reselect(table, ix, cx);
+            viewport.restore(table, navigation::SHELF_ROW_HEIGHT, |key| {
+                table
+                    .delegate()
+                    .rows
+                    .iter()
+                    .position(|row| row.key() == *key)
+            });
             cx.notify();
         });
     }
@@ -913,7 +933,13 @@ impl Browser {
                 _ => ContextKind::Mixed,
             };
             MusicTable::set_context(t, context, cx);
-            t.delegate_mut().show_library(scope, search, grouped, cx)
+            t.delegate_mut().show_library(
+                scope,
+                search,
+                grouped,
+                self.pending.as_ref().and_then(Pending::indexed_child),
+                cx,
+            )
         });
     }
     fn load_albums(&mut self, cx: &mut Context<Self>) {
@@ -969,6 +995,9 @@ impl Browser {
     }
     /// The table finished listing a library view.
     pub fn library_listed(&mut self, count: usize, duration: f64, cx: &mut Context<Self>) {
+        if self.listing_discs() {
+            self.resume_playing_reveal(cx);
+        }
         if self.scope().is_some() && self.active {
             self.table
                 .read(cx)
@@ -1325,12 +1354,18 @@ impl Browser {
     }
     /// A short name for the current view.
     pub fn title(&self, cx: &App) -> String {
+        if self.location.is_folder()
+            && let Some(album) = &self.album
+        {
+            return album.clone();
+        }
+        self.location_label(&self.location, cx)
+    }
+
+    fn location_label(&self, location: &Location, cx: &App) -> String {
         let catalog = self.catalog.read(cx);
-        match &self.location {
-            Location::Folder(_) => self
-                .album
-                .clone()
-                .unwrap_or_else(|| library::display_name(&self.path)),
+        match location {
+            Location::Folder(path) => library::display_name(path),
             Location::Library(None) => "All Music".into(),
             Location::Library(Some(r)) => catalog
                 .collection(*r)
