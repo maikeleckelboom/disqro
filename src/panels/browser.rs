@@ -211,7 +211,9 @@ impl BrowserPane {
 fn browser_menu(
     browser: &Entity<Browser>,
     player: &Entity<Player>,
-    menu: PopupMenu,
+    mut menu: PopupMenu,
+    inline_sequence: bool,
+    compact: bool,
     cx: &App,
 ) -> PopupMenu {
     use crate::collection::{DiscId, Page};
@@ -225,10 +227,19 @@ fn browser_menu(
         .collections
         .iter()
         .any(|c| b.path.starts_with(&c.root.path));
-    let menu = if b.sequence_kind() == Some(SequenceKind::Disc) {
-        let mut menu = menu;
+    if compact {
+        menu = compact_header_menu(b, browser, menu, cx);
+    }
+    let axis = b.sequence_kind();
+    let extra_axis = axis
+        .filter(|kind| *kind == SequenceKind::Disc)
+        .map(|_| SequenceKind::Release);
+    for kind in axis
+        .filter(|_| !inline_sequence)
+        .into_iter()
+        .chain(extra_axis)
+    {
         for next in [false, true] {
-            let kind = SequenceKind::Release;
             let Some(target) = b.sequence_label(kind, next) else {
                 continue;
             };
@@ -241,10 +252,7 @@ fn browser_menu(
                 ),
             );
         }
-        menu
-    } else {
-        menu
-    };
+    }
     let shuffle_table = b.table.clone();
     let add_table = b.table.clone();
     let add_player = player.clone();
@@ -259,7 +267,7 @@ fn browser_menu(
     };
     let release = match &page {
         Some(Page::Release(_)) => None,
-        _ => b.release().map(|(key, _)| Page::Release(key)),
+        _ => b.release_key().map(Page::Release),
     };
     let playing = player
         .read(cx)
@@ -431,12 +439,57 @@ impl PaneContent for BrowserPane {
     }
 }
 
+fn compact_header_menu(
+    browser: &Browser,
+    entity: &Entity<Browser>,
+    mut menu: PopupMenu,
+    cx: &App,
+) -> PopupMenu {
+    let steps = [
+        (
+            "Back",
+            browser.history_label(false, cx),
+            Browser::back as fn(&mut Browser, &mut Window, &mut Context<Browser>),
+        ),
+        ("Forward", browser.history_label(true, cx), Browser::forward),
+        ("Up", browser.up_label(cx), Browser::up),
+    ];
+    for (name, target, step) in steps {
+        let browser = entity.clone();
+        let enabled = target.is_some();
+        let label = target.map_or_else(|| name.to_owned(), |target| format!("{name} · {target}"));
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .disabled(!enabled)
+                .on_click(move |_, w, cx| browser.update(cx, |b, cx| step(b, w, cx))),
+        );
+    }
+    let filter = entity.clone();
+    menu = menu.separator().item(
+        PopupMenuItem::new("Filter this view")
+            .on_click(move |_, w, cx| filter.update(cx, |b, cx| b.set_filter_open(true, w, cx))),
+    );
+    if !browser.search.read(cx).value().is_empty() {
+        let filter = entity.clone();
+        menu = menu.item(
+            PopupMenuItem::new("Clear filter")
+                .on_click(move |_, w, cx| filter.update(cx, |b, cx| b.dismiss_filter(w, cx))),
+        );
+    }
+    browser.header_views().menu(menu, entity).separator()
+}
+
 const HEADER_INSET: f32 = 8.;
 const BAR_INSET: f32 = 4.;
 const NAV_BUTTON: f32 = 26.;
 const NAV_GAP: f32 = 1.;
 /// The location keeps room for a short name before the controls compress.
 const IDENTITY_MIN: f32 = 140.;
+const IDENTITY_FLOOR: f32 = 84.;
+const SEQUENCE_RAIL: f32 = 64.;
+// Below this width, history and the folded view and filter controls cannot
+// share the header with a usable breadcrumb.
+const COMPACT_HEADER: f32 = 268.;
 
 const VIEW_TAB: f32 = 36.;
 const VIEW_TAB_HEIGHT: f32 = 29.;
@@ -483,6 +536,43 @@ impl BrowserViews {
             full: px(fixed + if editing { FILTER_FULL } else { ICON_BUTTON }),
         }
     }
+
+    fn menu(self, mut menu: PopupMenu, browser: &Entity<Browser>) -> PopupMenu {
+        if let Some(albums) = self.albums {
+            for (value, name, icon) in VIEW_CHOICES {
+                let browser = browser.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(name)
+                        .icon(Icon::new(icon))
+                        .checked(albums == value)
+                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx))),
+                );
+            }
+            if self.subfolders.is_some() {
+                menu = menu.separator();
+            }
+        }
+        if let Some(include) = self.subfolders {
+            menu = menu.label("Folder scope");
+            for (value, name, icon) in SCOPE_CHOICES {
+                let browser = browser.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(name)
+                        .icon(Icon::new(icon))
+                        .checked(include == value)
+                        .on_click(move |_, w, cx| {
+                            browser.update(cx, |b, cx| {
+                                // Reapplying a scope would clear descendant overrides.
+                                if b.subfolders != value {
+                                    b.set_subfolders(value, w, cx);
+                                }
+                            })
+                        }),
+                );
+            }
+        }
+        menu
+    }
 }
 
 #[derive(Clone)]
@@ -499,27 +589,40 @@ impl ViewFocus {
 }
 
 impl Browser {
-    /// The browser's header: its history, where it is, what it holds, and
-    /// how it is shown. Every browser has one, whether it is alone in its
-    /// group or one of several tabs, so its controls never move.
+    /// The shared header for standalone and tabbed browsers. History and
+    /// view controls fold into the panel menu as the dock narrows.
     fn bar(&self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let widths = self.header_widths(cx);
-        let nav = px(3. * NAV_BUTTON
-            + 2. * NAV_GAP
-            + BAR_INSET
-            + ICON_BUTTON
-            + if self.sequence_kind().is_some() {
-                64.
+        let compact = width < px(COMPACT_HEADER);
+        let filter_focused = compact && self.search.read(cx).focus_handle(cx).is_focused(window);
+        let filter_applied = compact && !self.search.read(cx).value().is_empty();
+        let history = if compact {
+            0.
+        } else {
+            3. * NAV_BUTTON + 2. * NAV_GAP
+        };
+        let fixed = px(history + BAR_INSET + ICON_BUTTON);
+        let sequence = self.sequence_kind().filter(|_| {
+            !compact
+                && width >= fixed + px(SEQUENCE_RAIL + IDENTITY_MIN) + widths.minimum.min(px(88.))
+        });
+        let nav = fixed
+            + if sequence.is_some() {
+                px(SEQUENCE_RAIL)
             } else {
-                0.
-            });
+                px(0.)
+            };
         // The location keeps a readable minimum; the controls take what they
         // need up to their comfortable width and give way first.
-        let controls = (width - nav - px(IDENTITY_MIN))
-            .min(widths.full)
-            .max(widths.minimum.min(width - nav))
-            .max(px(0.));
+        let controls = if compact {
+            px(0.)
+        } else {
+            (width - nav - px(IDENTITY_MIN))
+                .min(widths.full)
+                .max(widths.minimum.min(width - nav - px(IDENTITY_FLOOR)))
+                .max(px(0.))
+        };
         let identity = (width - nav - controls).max(px(0.));
         let browser = cx.entity();
         let player = self.table.read(cx).delegate().player.clone();
@@ -543,16 +646,22 @@ impl Browser {
                     .h(px(1.))
                     .bg(m.line),
             )
-            .child(self.history(cx))
+            .when(!compact, |bar| bar.child(self.history(cx)))
             .child(
                 h_flex()
                     .w(identity)
                     .h_full()
                     .min_w_0()
                     .items_center()
-                    .children(self.address.as_ref().and_then(WeakEntity::upgrade)),
+                    .map(|d| {
+                        if filter_focused {
+                            d.child(self.filter_control(true, true, window, cx))
+                        } else {
+                            d.children(self.address.as_ref().and_then(WeakEntity::upgrade))
+                        }
+                    }),
             )
-            .when_some(self.sequence_kind(), |bar, kind| {
+            .when_some(sequence, |bar, kind| {
                 bar.child(
                     h_flex()
                         .flex_shrink_0()
@@ -588,13 +697,15 @@ impl Browser {
                         })),
                 )
             })
-            .child(
-                div()
-                    .w(controls)
-                    .h_full()
-                    .flex_shrink_0()
-                    .child(self.header_controls(controls, widths, window, cx)),
-            )
+            .when(!compact, |bar| {
+                bar.child(
+                    div()
+                        .w(controls)
+                        .h_full()
+                        .flex_shrink_0()
+                        .child(self.header_controls(controls, widths, window, cx)),
+                )
+            })
             .child(
                 Button::new("browser-menu")
                     .ghost()
@@ -602,9 +713,15 @@ impl Browser {
                     .w(px(ICON_BUTTON))
                     .icon(IconName::Ellipsis)
                     .accessibility_label("Panel menu")
-                    .tooltip("Panel menu")
+                    .when(filter_applied, |button| button.text_color(m.accent))
+                    .tooltip(if filter_applied {
+                        "Panel menu · Filter active"
+                    } else {
+                        "Panel menu"
+                    })
                     .dropdown_menu(move |menu, w, cx| {
-                        let menu = browser_menu(&browser, &player, menu, cx);
+                        let menu =
+                            browser_menu(&browser, &player, menu, sequence.is_some(), compact, cx);
                         let pane = browser.read(cx).pane.as_ref().and_then(WeakEntity::upgrade);
                         match (pane, cx.try_global::<super::PaneMenus>().cloned()) {
                             (Some(pane), Some(menus)) => (menus.0)(&pane, menu.separator(), w, cx),
@@ -927,44 +1044,7 @@ fn view_menu(
         .tab_stop(true)
         .accessibility_label(description.clone())
         .tooltip(description)
-        .dropdown_menu_with_anchor(anchor, move |mut menu, _, _| {
-            if let Some(albums) = views.albums {
-                for (value, name, icon) in VIEW_CHOICES {
-                    let browser = browser.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name)
-                            .icon(Icon::new(icon))
-                            .checked(albums == value)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| b.view(value, w, cx))
-                            }),
-                    );
-                }
-                if views.subfolders.is_some() {
-                    menu = menu.separator();
-                }
-            }
-            if let Some(include) = views.subfolders {
-                menu = menu.label("Folder scope");
-                for (value, name, icon) in SCOPE_CHOICES {
-                    let browser = browser.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name)
-                            .icon(Icon::new(icon))
-                            .checked(include == value)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| {
-                                    // Reapplying a scope would clear descendant overrides.
-                                    if b.subfolders != value {
-                                        b.set_subfolders(value, w, cx);
-                                    }
-                                })
-                            }),
-                    );
-                }
-            }
-            menu
-        })
+        .dropdown_menu_with_anchor(anchor, move |menu, _, _| views.menu(menu, &browser))
         .into_any_element()
 }
 

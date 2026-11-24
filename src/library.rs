@@ -350,16 +350,18 @@ fn hidden(entry: &fs::DirEntry) -> bool {
 }
 /// The visible subfolders of a folder, sorted by name.
 pub fn subfolders(path: &Path) -> Vec<PathBuf> {
-    let Ok(dir) = fs::read_dir(path) else {
-        return vec![];
-    };
+    try_subfolders(path).unwrap_or_default()
+}
+
+pub(crate) fn try_subfolders(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let dir = fs::read_dir(path)?;
     let mut dirs: Vec<PathBuf> = dir
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !hidden(e))
         .map(|e| e.path())
         .collect();
     sort_by_name(&mut dirs, folder_name);
-    dirs
+    Ok(dirs)
 }
 
 /// Orders paths by name as Explorer does, so `CD 2` precedes `CD 10`.

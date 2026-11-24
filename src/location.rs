@@ -1,25 +1,22 @@
-//! Per-browser breadcrumbs and the explicit Go to Folder or File editor.
+//! The Music Browser location field and its explicit address editor.
+mod breadcrumb;
+
 use crate::{
-    browser::{Browser, Location, Reveal, Route},
+    browser::{Browser, Location, Reveal},
     theme::materials,
 };
+use breadcrumb::Breadcrumbs;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
-        Icon, Sizable, Size, StyleSized,
-        button::{Button, ButtonVariants},
-        h_flex,
+        Icon, Sizable, h_flex,
         input::{Input, InputEvent, InputState},
-        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, PopupMenuItem},
     },
     prelude::*,
     *,
 };
-use std::{
-    cell::Cell,
-    path::{Component, Path, PathBuf, Prefix},
-    rc::Rc,
-};
+use std::path::{Path, PathBuf};
 
 gpui_kit::actions!(location, [CancelEdit, ActivateLocationControl]);
 
@@ -27,6 +24,7 @@ gpui_kit::actions!(location, [CancelEdit, ActivateLocationControl]);
 pub const NAV_FIELD_HEIGHT: f32 = 28.;
 
 pub fn bind_keys(cx: &mut App) {
+    breadcrumb::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("escape", CancelEdit, Some("LocationBar")),
         KeyBinding::new("enter", ActivateLocationControl, Some("LocationControl")),
@@ -41,7 +39,7 @@ pub struct LocationBar {
     pending: bool,
     request: u64,
     error: Option<SharedString>,
-    width: Rc<Cell<Pixels>>,
+    trail: Entity<Breadcrumbs>,
     _view: Subscription,
 }
 
@@ -55,89 +53,6 @@ pub(crate) fn physical_address<'a>(
         (Location::Folder(path), None) => Some(path),
         _ => None,
     }
-}
-
-#[derive(Clone)]
-struct Crumb {
-    label: SharedString,
-    step: Step,
-}
-
-#[derive(Clone)]
-enum Step {
-    Route(Route),
-    /// The current page or a section with no independent destination.
-    Label,
-}
-
-impl Crumb {
-    fn new(label: impl Into<SharedString>, step: Step) -> Self {
-        Self {
-            label: label.into(),
-            step,
-        }
-    }
-}
-
-impl Step {
-    fn open(&self, browser: &mut Browser, window: &mut Window, cx: &mut Context<Browser>) {
-        match self {
-            Self::Route(route) => browser.open_ancestor(route.clone(), window, cx),
-            Self::Label => {}
-        }
-    }
-}
-
-fn folder_label(folder: &Path) -> String {
-    match folder.components().next_back() {
-        Some(Component::Normal(name)) => name.to_string_lossy().into_owned(),
-        _ => match folder.components().next() {
-            Some(Component::Prefix(prefix)) => match prefix.kind() {
-                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
-                    "\\\\{}\\{}",
-                    server.to_string_lossy(),
-                    share.to_string_lossy()
-                ),
-                _ => prefix.as_os_str().to_string_lossy().into_owned(),
-            },
-            _ => folder.display().to_string(),
-        },
-    }
-}
-
-fn view_crumbs(browser: &Browser, cx: &App) -> Vec<Crumb> {
-    use crate::collection::Page;
-    let routes = browser.ancestors();
-    let last = routes.len().saturating_sub(1);
-    routes
-        .into_iter()
-        .enumerate()
-        .map(|(index, route)| {
-            let label = match (&route.location, &route.page) {
-                (_, Some(Page::Disc(_))) | (Location::Album { .. }, _) => browser.crumb_title(cx),
-                (_, Some(Page::Release(_))) => browser
-                    .release()
-                    .map_or_else(|| "Release".into(), |(_, title)| title),
-                (Location::Folder(path), _) => folder_label(path),
-                (Location::Library(None), _) if index != last => "Library".into(),
-                (Location::Collections, _) => "Collections".into(),
-                (Location::Playlists, _) => "Playlists".into(),
-                (Location::Library(Some(id)), _) => browser
-                    .catalog
-                    .read(cx)
-                    .collection(*id)
-                    .map_or_else(|| "Collection".into(), |c| c.root.name.clone()),
-                (Location::Release { title, .. }, _) => title.clone(),
-                _ => browser.title(cx),
-            };
-            let step = if index == last {
-                Step::Label
-            } else {
-                Step::Route(route)
-            };
-            Crumb::new(label, step)
-        })
-        .collect()
 }
 
 /// Turns what the user typed or pasted into an absolute path, or explains
@@ -214,6 +129,7 @@ impl LocationBar {
         })
         .detach();
         let view = Self::follow(&browser, window, cx);
+        let trail = cx.new(|cx| Breadcrumbs::new(browser.clone(), window, cx));
         Self {
             browser,
             input,
@@ -221,7 +137,7 @@ impl LocationBar {
             pending: false,
             request: 0,
             error: None,
-            width: Rc::new(Cell::new(px(0.))),
+            trail,
             _view: view,
         }
     }
@@ -256,6 +172,7 @@ impl LocationBar {
     }
     /// Shows the path as text with everything selected, ready to replace.
     pub fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.trail.update(cx, |trail, cx| trail.leave(window, cx));
         self.browser.update(cx, |b, cx| {
             b.begin_navigation(cx);
         });
@@ -344,191 +261,11 @@ impl LocationBar {
         })
         .detach();
     }
-    fn render_crumbs(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let m = *materials(cx);
-        let current = self.browser.read(cx);
-        let icon = match current.location {
-            Location::Playlist(_) | Location::Playlists => Some(IconName::ListMusic),
-            Location::Folder(_) => None,
-            _ => Some(IconName::Library),
-        }
-        .filter(|_| self.width.get() >= px(160.));
-        let all = view_crumbs(current, cx);
-        // Collapse leading folders into a menu when the path does not fit.
-        let font_size = px(13.);
-        let font = window.text_style().font();
-        let measure = |s: &SharedString| {
-            window
-                .text_system()
-                .shape_line(
-                    s.clone(),
-                    font_size,
-                    &[TextRun {
-                        len: s.len(),
-                        font: font.clone(),
-                        color: m.text,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                )
-                .width
-        };
-        let chevron = px(16.);
-        let pad = px(14.);
-        let available = self.width.get() - px(20.) - if icon.is_some() { px(18.) } else { px(0.) };
-        let overflow = px(40.);
-        let widths: Vec<Pixels> = all.iter().map(|c| measure(&c.label) + pad).collect();
-        let mut hidden = 0;
-        if available > px(0.) {
-            let first_to_keep = if available >= px(112.) { 2 } else { 1 };
-            let mut total: Pixels = widths.iter().copied().sum::<Pixels>()
-                + chevron * all.len().saturating_sub(1) as f32;
-            while hidden + first_to_keep < all.len() && total > available {
-                total -= widths[hidden] + chevron;
-                hidden += 1;
-            }
-            if hidden > 0 {
-                total += overflow;
-                while hidden + first_to_keep < all.len() && total > available {
-                    total -= widths[hidden] + chevron;
-                    hidden += 1;
-                }
-            }
-        }
-        let browser = self.browser.clone();
-        let last = all.len().saturating_sub(1);
-        let mut row = h_flex()
-            .h_full()
-            .min_w_0()
-            .items_center()
-            .overflow_hidden()
-            .when_some(icon, |row, icon| {
-                row.child(
-                    Icon::new(icon)
-                        .size(px(14.))
-                        .mr(px(4.))
-                        .flex_shrink_0()
-                        .text_color(m.text_faint),
-                )
-            });
-        if hidden > 0 {
-            let collapsed: Vec<_> = all[..hidden].iter().rev().cloned().collect();
-            let browser = browser.clone();
-            row = row.child(
-                div().occlude().child(
-                    Button::new("crumbs-overflow")
-                        .ghost()
-                        .xsmall()
-                        .icon(Icon::new(IconName::Ellipsis).text_color(m.text_muted))
-                        .accessibility_label("Earlier locations")
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for crumb in &collapsed {
-                                let step = crumb.step.clone();
-                                let browser = browser.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(crumb.label.clone())
-                                        .disabled(matches!(step, Step::Label))
-                                        .on_click(move |_, w, cx| {
-                                            browser.update(cx, |b, cx| step.open(b, w, cx))
-                                        }),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-            );
-            row = row.child(
-                Icon::new(IconName::ChevronRight)
-                    .size(px(12.))
-                    .text_color(m.text_faint)
-                    .mx(px(2.)),
-            );
-        }
-        for (i, c) in all.into_iter().enumerate().skip(hidden) {
-            if i > hidden {
-                row = row.child(
-                    Icon::new(IconName::ChevronRight)
-                        .size(px(12.))
-                        .text_color(m.text_faint)
-                        .flex_shrink_0()
-                        .mx(px(2.)),
-                );
-            }
-            let browser = browser.clone();
-            let navigates = !matches!(c.step, Step::Label);
-            let step = c.step.clone();
-            let keyboard = (browser.clone(), step.clone());
-            row = row.child(
-                div()
-                    .id(("crumb", i))
-                    .map(|d| {
-                        if navigates {
-                            d.role(Role::Button).aria_label(c.label.clone())
-                        } else {
-                            d.role(Role::Label).aria_value(c.label.clone())
-                        }
-                    })
-                    .min_w_0()
-                    .when(i == last && available > px(0.), |d| {
-                        let budget = available - if hidden > 0 { overflow } else { px(0.) };
-                        let cap = if i > hidden { budget * 0.57 } else { budget };
-                        d.flex_shrink_0().max_w(cap.max(px(32.)))
-                    })
-                    .px(px(7.))
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.))
-                    .text_size(font_size)
-                    .text_color(if i == last { m.text } else { m.text_muted })
-                    .when(navigates, |d| {
-                        d.tab_index(0)
-                            .key_context("LocationControl")
-                            .on_action(move |_: &ActivateLocationControl, w, cx| {
-                                keyboard.0.update(cx, |b, cx| keyboard.1.open(b, w, cx));
-                            })
-                            .focus_visible(|d| d.bg(m.hover))
-                            .hover(|d| d.bg(m.hover).text_color(m.text))
-                            .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, w, cx| {
-                                cx.stop_propagation();
-                                browser.update(cx, |b, cx| step.open(b, w, cx));
-                            })
-                    })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .when(i != last, |d| d.text_ellipsis_middle())
-                            .child(c.label.clone()),
-                    )
-                    .tooltip(move |w, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(c.label.clone()).build(w, cx)
-                    }),
-            );
-        }
-        row.into_any_element()
-    }
 }
 
 impl Render for LocationBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
-        let width = self.width.clone();
-        let measure = canvas(
-            move |b, window, _| {
-                if (width.get() - b.size.width).abs() > px(0.5) {
-                    width.set(b.size.width);
-                    window.refresh();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
         let base = h_flex()
             .id("location")
             .key_context("LocationBar")
@@ -540,7 +277,6 @@ impl Render for LocationBar {
             .gap(px(4.))
             .rounded(px(6.))
             .border_1()
-            .child(measure)
             .on_action(cx.listener(|bar, _: &CancelEdit, w, cx| bar.cancel(w, cx)));
         if self.editing.is_some() {
             return base
@@ -590,16 +326,14 @@ impl Render for LocationBar {
         let browser = self.browser.read(cx);
         let address = physical_address(&browser.location, browser.page.as_ref())
             .map(|path| path.display().to_string());
-        base.input_px(Size::Small)
-            .bg(m.hover)
+        base.bg(m.field())
             .border_color(gpui::transparent_black())
             .hover(|d| d.border_color(m.control_line))
             .when(address.is_some(), |d| {
                 d.cursor_text()
                     .on_click(cx.listener(|bar, _, w, cx| bar.edit(w, cx)))
             })
-            .child(self.render_crumbs(window, cx))
-            .child(div().flex_1().h_full())
+            .child(self.trail.clone())
             .context_menu(move |menu, _, _| {
                 let physical = address.is_some();
                 menu.when_some(address.clone(), |menu, copy| {
@@ -627,7 +361,7 @@ impl Render for LocationBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{folder_label, parse};
+    use super::parse;
     use std::path::{Path, PathBuf};
     #[test]
     fn only_physical_folder_views_offer_an_address() {
@@ -683,12 +417,5 @@ mod tests {
             parse("%DISQRO_TEST_ROOT%\\CD1").unwrap(),
             PathBuf::from("E:\\Rips\\CD1")
         );
-    }
-    #[test]
-    fn breadcrumbs_for_drive_and_share() {
-        assert_eq!(folder_label(Path::new(r"C:\")), "C:");
-        assert_eq!(folder_label(Path::new(r"C:\Users\Music")), "Music");
-        assert_eq!(folder_label(Path::new(r"\\nas\media")), r"\\nas\media");
-        assert_eq!(folder_label(Path::new(r"\\nas\media\Rips")), "Rips");
     }
 }

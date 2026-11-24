@@ -1,3 +1,4 @@
+mod breadcrumb;
 mod navigation;
 mod sequential;
 use crate::{
@@ -13,6 +14,7 @@ use crate::{
         set_rows_in_place,
     },
 };
+pub(crate) use breadcrumb::{BreadcrumbChoice, BreadcrumbChoices};
 use gpui_kit::{
     component::{
         WindowExt,
@@ -112,7 +114,6 @@ pub struct Browser {
     /// The current folder, or the last one while a library view is shown.
     pub path: PathBuf,
     pub location: Location,
-    pub album: Option<String>,
     pub folder_count: usize,
     pub notice: Option<String>,
     /// Discovery of the open folder is running.
@@ -139,7 +140,7 @@ pub struct Browser {
     navigation: u64,
     intent: Ticket,
     programs: Arc<[Arc<Disc>]>,
-    folder_sequence: sequential::Sequence,
+    folder_sequence: Arc<sequential::Sequence>,
     folder_traversal: sequential::FolderTraversal,
     indexed_sequence: sequential::IndexedSequence,
     folder_ready: bool,
@@ -262,9 +263,11 @@ impl Browser {
         .detach();
         cx.subscribe(&search, |s: &mut Self, e, ev, cx| {
             // An empty filter folds back into its button when left.
-            if matches!(ev, InputEvent::Blur) && s.filter_open && e.read(cx).value().is_empty() {
-                s.filter_open = false;
-                cx.emit(ViewChanged);
+            if matches!(ev, InputEvent::Blur) {
+                if s.filter_open && e.read(cx).value().is_empty() {
+                    s.filter_open = false;
+                    cx.emit(ViewChanged);
+                }
                 cx.notify();
                 return;
             }
@@ -353,7 +356,6 @@ impl Browser {
         Self {
             path: PathBuf::new(),
             location: Location::Folder(PathBuf::new()),
-            album: None,
             folders,
             table,
             filter_open: false,
@@ -511,14 +513,11 @@ impl Browser {
             )
     }
     /// The release shown, or the one the CD shown belongs to.
-    pub fn release(&self) -> Option<(DiscId, String)> {
+    pub fn release_key(&self) -> Option<DiscId> {
         match (&self.location, &self.page) {
-            (Location::Release { id, title, .. }, _) => Some((DiscId::Library(*id), title.clone())),
-            (_, Some(Page::Release(key))) => Some((key.clone(), self.title_of(key))),
-            _ => self
-                .membership
-                .as_ref()
-                .map(|m| (m.key.clone(), m.title.clone())),
+            (Location::Release { id, .. }, _) => Some(DiscId::Library(*id)),
+            (_, Some(Page::Release(key))) => Some(key.clone()),
+            _ => self.membership.as_ref().map(|m| m.key.clone()),
         }
     }
     /// Whether the page shown lists every CD of the release `key`.
@@ -528,22 +527,6 @@ impl Browser {
             (_, Some(Page::Release(shown))) => shown == key,
             _ => false,
         }
-    }
-    /// What a CD page is called beneath its release in the local trail:
-    /// `CD 2` rather than the full title the panel already shows.
-    pub fn crumb_title(&self, cx: &App) -> String {
-        match &self.membership {
-            Some(m) if m.subtitle.is_empty() => format!("CD {}", m.number),
-            Some(m) => format!("CD {} · {}", m.number, m.subtitle),
-            None => self.title(cx),
-        }
-    }
-    fn title_of(&self, key: &DiscId) -> String {
-        self.programs
-            .iter()
-            .find(|d| d.id.same(key))
-            .and_then(|d| d.release.as_ref())
-            .map_or_else(String::new, |m| m.title.clone())
     }
     fn page_available(&self) -> bool {
         match &self.page {
@@ -714,19 +697,6 @@ impl Browser {
             Some(Page::Disc(_)) => discs.first().and_then(|d| d.release.clone()),
             _ => None,
         };
-        self.album = match &self.page {
-            Some(Page::Disc(_)) => discs.first().map(|d| d.title.clone()),
-            Some(Page::Release(_)) => discs
-                .first()
-                .and_then(|d| d.release.as_ref())
-                .map(|m| m.title.clone()),
-            None => None,
-        }
-        .or_else(|| {
-            rows.first()
-                .filter(|t| !t.album.is_empty() && rows.iter().all(|r| r.album == t.album))
-                .map(|t| t.album.clone())
-        });
         if self.listing_discs() {
             self.set_discs(groups.iter().map(|(d, _)| d.clone()).collect(), cx);
         }
@@ -885,7 +855,6 @@ impl Browser {
         }
     }
     fn filter_library(&mut self, scope: Scope, cx: &mut Context<Self>) {
-        self.album = None;
         self.busy = false;
         let empty: SharedString = if !self.query.is_empty() {
             crate::table::NO_MATCHES.into()
@@ -1267,7 +1236,8 @@ impl Browser {
                     b.busy = false;
                     b.folder_ready &= complete;
                     if b.folder_ready {
-                        b.folder_sequence = sequential::Sequence::folder(&b.programs, &b.unreadable);
+                        b.folder_sequence =
+                            Arc::new(sequential::Sequence::folder(&b.programs, &b.unreadable));
                     }
                     if let Some(start) = timing {
                         eprintln!(
@@ -1360,18 +1330,13 @@ impl Browser {
     }
     /// A short name for the current view.
     pub fn title(&self, cx: &App) -> String {
-        if self.location.is_folder()
-            && let Some(album) = &self.album
-        {
-            return album.clone();
-        }
-        self.location_label(&self.location, cx)
+        self.route_label(&self.route(), cx)
     }
 
     fn location_label(&self, location: &Location, cx: &App) -> String {
         let catalog = self.catalog.read(cx);
         match location {
-            Location::Folder(path) => library::display_name(path),
+            Location::Folder(path) => breadcrumb::folder_label(path),
             Location::Library(None) => "All Music".into(),
             Location::Library(Some(r)) => catalog
                 .collection(*r)

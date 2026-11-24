@@ -20,11 +20,73 @@ impl SequenceKind {
     }
 }
 
+pub(super) fn program_label(
+    title: &str,
+    member: Option<&Membership>,
+    kind: SequenceKind,
+    compact: bool,
+) -> String {
+    let Some(member) = member else {
+        return title.to_owned();
+    };
+    if kind == SequenceKind::Release {
+        return member.title.clone();
+    }
+    let mut disc = format!("CD {}", member.number);
+    if !member.subtitle.is_empty() {
+        disc.push_str(" · ");
+        disc.push_str(&member.subtitle);
+    }
+    if compact {
+        disc
+    } else {
+        format!("{} › {disc}", member.title)
+    }
+}
+
 struct DestinationNode {
     id: DiscId,
     title: String,
     membership: Option<Arc<Membership>>,
     stop: bool,
+}
+
+impl DestinationNode {
+    fn label(&self, kind: SequenceKind, compact: bool) -> String {
+        program_label(&self.title, self.membership.as_deref(), kind, compact)
+    }
+
+    fn route(
+        &self,
+        kind: SequenceKind,
+        root: Option<RootId>,
+        folder: Option<&Path>,
+    ) -> Option<Route> {
+        let release = kind == SequenceKind::Release && self.membership.is_some();
+        let location = match self.id {
+            DiscId::Library(id) if release => Location::Release {
+                root,
+                id,
+                title: self.label(kind, false),
+            },
+            DiscId::Library(id) => Location::Album {
+                root,
+                id,
+                title: self.title.clone(),
+            },
+            _ => {
+                return Some(Route::new(
+                    Location::Folder(folder?.to_owned()),
+                    Some(if release {
+                        Page::Release(self.id.clone())
+                    } else {
+                        Page::Disc(self.id.clone())
+                    }),
+                ));
+            }
+        };
+        Some(Route::new(location, None))
+    }
 }
 
 #[derive(Default)]
@@ -160,6 +222,64 @@ impl Sequence {
         self.nodes
             .get(order.adjacent(*self.positions.get(id)?, next)?)
     }
+
+    fn related(
+        &self,
+        selected: Route,
+        id: &DiscId,
+        kind: SequenceKind,
+        root: Option<RootId>,
+        folder: Option<&Path>,
+    ) -> Option<Vec<BreadcrumbChoice>> {
+        let current = self.physical_node(id)?;
+        let current_index = self.positions[&current.id];
+        let member = current.membership.as_deref();
+        // A release whose grouping disappeared after a rescan is no longer
+        // a destination. A standalone CD uses the release order instead.
+        if kind == SequenceKind::Release && member.is_none() {
+            return None;
+        }
+        let group = (kind == SequenceKind::Disc).then_some(member).flatten();
+        let (axis, order) = if group.is_some() {
+            (SequenceKind::Disc, &self.discs)
+        } else {
+            (SequenceKind::Release, &self.releases)
+        };
+        let rank = *order.ranks.get(&current_index)?;
+        let first = order.stops.partition_point(|&(r, _)| r < rank);
+        let current_missing = order.stops.get(first).is_none_or(|&(r, _)| r != rank);
+        let indices = order.stops[..first]
+            .iter()
+            .map(|&(_, index)| index)
+            .chain(current_missing.then_some(current_index))
+            .chain(order.stops[first..].iter().map(|&(_, index)| index));
+        Some(
+            indices
+                .filter_map(|index| {
+                    let node = &self.nodes[index];
+                    if let Some(group) = group
+                        && node
+                            .membership
+                            .as_ref()
+                            .is_none_or(|m| !m.key.same(&group.key))
+                    {
+                        return None;
+                    }
+                    let current = index == current_index;
+                    let route = if current {
+                        selected.clone()
+                    } else {
+                        node.route(axis, root, folder)?
+                    };
+                    Some(BreadcrumbChoice::new(
+                        route,
+                        node.label(axis, true),
+                        current,
+                    ))
+                })
+                .collect(),
+        )
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -216,12 +336,12 @@ impl FolderScope {
 #[derive(Default)]
 pub(super) struct FolderTraversal {
     scope: Option<FolderScope>,
-    sequence: Option<Sequence>,
+    sequence: Option<Arc<Sequence>>,
     task: Option<Task<()>>,
 }
 
 impl FolderTraversal {
-    fn current(&self, id: &DiscId) -> Option<(&Sequence, &DiscId, &Path)> {
+    fn current(&self, id: &DiscId) -> Option<(&Arc<Sequence>, &DiscId, &Path)> {
         let scope = self.scope.as_ref()?;
         let sequence = self.sequence.as_ref()?;
         let node = sequence.physical_node(id)?;
@@ -234,7 +354,7 @@ impl FolderTraversal {
 
 #[derive(Default)]
 pub(super) struct IndexedSequence {
-    data: Option<(RootId, Sequence)>,
+    data: Option<(RootId, Arc<Sequence>)>,
     request: Ticket,
     pending: Option<(Option<RootId>, crate::store::AlbumId)>,
 }
@@ -248,6 +368,94 @@ impl IndexedSequence {
 }
 
 impl Browser {
+    fn indexed_projection(&self, route: &Route) -> Option<(RootId, &Arc<Sequence>)> {
+        let root = match route.location {
+            Location::Album { root, .. } | Location::Release { root, .. } => root,
+            _ => return None,
+        };
+        let (actual, sequence) = self.indexed_sequence.data.as_ref()?;
+        root.is_none_or(|root| root == *actual)
+            .then_some((*actual, sequence))
+    }
+
+    pub(super) fn program_title(&self, route: &Route, compact: bool) -> Option<String> {
+        let (id, kind) = route.program()?;
+        match &route.location {
+            Location::Folder(path) if crate::places::same_path(path, &self.path) => {
+                if let Some(node) = self.folder_sequence.physical_node(&id) {
+                    return Some(node.label(kind, compact));
+                }
+                // The program can already be visible during progressive discovery.
+                let disc = self.programs.iter().find(|d| d.id.same(&id))?;
+                Some(program_label(
+                    &disc.title,
+                    disc.release.as_deref(),
+                    kind,
+                    compact,
+                ))
+            }
+            Location::Album { title, .. } | Location::Release { title, .. } => {
+                if let Some(node) = self
+                    .indexed_projection(route)
+                    .and_then(|(_, s)| s.node(&id))
+                {
+                    return Some(node.label(kind, compact));
+                }
+                let member = (self.location == route.location)
+                    .then_some(self.membership.as_deref())
+                    .flatten();
+                Some(program_label(title, member, kind, compact))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn program_choices(&self, route: &Route) -> BreadcrumbChoices {
+        let Some((id, kind)) = route.program() else {
+            return BreadcrumbChoices::Unavailable;
+        };
+        let (sequence, root, folder) = match &route.location {
+            Location::Folder(_) if self.busy => return BreadcrumbChoices::Waiting,
+            Location::Folder(path) if crate::places::same_path(path, &self.path) => {
+                let local = self.folder_sequence.physical_node(&id);
+                // Preserve the projection that already defines this CD's
+                // release. Release-level siblings may use the wider traversal.
+                let traversal = self
+                    .folder_traversal
+                    .current(&id)
+                    .filter(|(sequence, key, _)| {
+                        if kind == SequenceKind::Release {
+                            sequence
+                                .node(key)
+                                .and_then(|n| n.membership.as_ref())
+                                .is_some_and(|m| m.key.same(key))
+                        } else {
+                            local.is_none_or(|node| node.membership.is_none())
+                        }
+                    });
+                let (sequence, folder) = traversal
+                    .map(|(sequence, _, folder)| (sequence, folder))
+                    .unwrap_or((&self.folder_sequence, path.as_path()));
+                (sequence.clone(), None, Some(folder.to_owned()))
+            }
+            Location::Album { .. } | Location::Release { .. } => {
+                let Some((root, sequence)) = self.indexed_projection(route) else {
+                    return if self.indexed_sequence.pending.is_some() {
+                        BreadcrumbChoices::Waiting
+                    } else {
+                        BreadcrumbChoices::Unavailable
+                    };
+                };
+                (sequence.clone(), Some(root), None)
+            }
+            _ => return BreadcrumbChoices::Unavailable,
+        };
+        let route = route.clone();
+        BreadcrumbChoices::Enumerate(Box::new(move || {
+            sequence.related(route, &id, kind, root, folder.as_deref())
+        }))
+    }
+
     pub(super) fn physical_sequence_disc(&self) -> Option<&DiscId> {
         match &self.page {
             Some(Page::Disc(id)) => Some(id),
@@ -333,7 +541,7 @@ impl Browser {
                         return None;
                     }
                     let discs = Discs::group(tracks.iter().flatten(), &HashMap::new(), &scope.path);
-                    Some(Sequence::folder(&discs, &unreadable))
+                    Some(Arc::new(Sequence::folder(&discs, &unreadable)))
                 })
                 .await;
             let _ = this.update(cx, |b, cx| {
@@ -427,8 +635,9 @@ impl Browser {
         self.indexed_sequence.pending = Some((root, id));
         let revision = self.indexed_sequence.request.next();
         let query = store.query(&self.indexed_sequence.request, revision, move |s| {
-            s.navigation_albums(root, id)
-                .map(|result| result.map(|(root, nodes)| (root, Sequence::indexed(nodes))))
+            s.navigation_albums(root, id).map(|result| {
+                result.map(|(root, nodes)| (root, Arc::new(Sequence::indexed(nodes))))
+            })
         });
         cx.spawn(async move |this, cx| {
             let result = query.await;
@@ -485,46 +694,7 @@ impl Browser {
             _ => return None,
         };
         let node = sequence.adjacent(&current, kind, next)?;
-        let release = (kind == SequenceKind::Release)
-            .then_some(node.membership.as_deref())
-            .flatten();
-        let title = release.map_or(&node.title, |m| &m.title).clone();
-        let route = match node.id {
-            DiscId::Library(id) if release.is_some() => Route::new(
-                Location::Release {
-                    root,
-                    id,
-                    title: title.clone(),
-                },
-                None,
-            ),
-            DiscId::Library(id) => Route::new(
-                Location::Album {
-                    root,
-                    id,
-                    title: title.clone(),
-                },
-                None,
-            ),
-            _ => Route::new(
-                Location::Folder(folder?.to_owned()),
-                Some(if release.is_some() {
-                    Page::Release(node.id.clone())
-                } else {
-                    Page::Disc(node.id.clone())
-                }),
-            ),
-        };
-        let label = match (kind, &node.membership) {
-            (SequenceKind::Disc, Some(m)) if m.subtitle.is_empty() => {
-                format!("{} › CD {}", m.title, m.number)
-            }
-            (SequenceKind::Disc, Some(m)) => {
-                format!("{} › CD {} · {}", m.title, m.number, m.subtitle)
-            }
-            _ => title,
-        };
-        Some((route, label))
+        Some((node.route(kind, root, folder)?, node.label(kind, false)))
     }
 
     pub(crate) fn sequence_label(&self, kind: SequenceKind, next: bool) -> Option<String> {
@@ -542,15 +712,19 @@ impl Browser {
             .or_else(|| self.sequence_kind())
             .and_then(|kind| self.sequential_target(kind, next))
         {
-            let arrival = match &route.location {
-                Location::Folder(folder) => Arrival::Sequence(
-                    self.subfolders || !crate::places::same_path(folder, &self.path),
-                ),
-                _ => Arrival::Regular,
-            };
+            let arrival = self.sequence_arrival(&route);
             self.move_to(route, arrival, window, cx);
         } else {
             self.begin_navigation(cx);
+        }
+    }
+
+    pub(super) fn sequence_arrival(&self, route: &Route) -> Arrival {
+        match (&route.location, &route.page) {
+            (Location::Folder(folder), Some(_)) => {
+                Arrival::Sequence(self.subfolders || !crate::places::same_path(folder, &self.path))
+            }
+            _ => Arrival::Regular,
         }
     }
 }
@@ -558,7 +732,8 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::{
-        DestinationNode, DiscId, FolderScope, Membership, Sequence, SequenceKind, ViewPrefs,
+        DestinationNode, DiscId, FolderScope, Location, Membership, Route, Sequence, SequenceKind,
+        ViewPrefs,
     };
     use std::{path::Path, sync::Arc};
 
@@ -642,6 +817,108 @@ mod tests {
     }
 
     #[test]
+    fn breadcrumb_menus_preserve_authored_membership_and_release_routes() {
+        let mut loose = disc(40, None);
+        loose.stop = false;
+        let sequence = Sequence::new(vec![
+            disc(3, Some((1, 3))),
+            disc(1, Some((1, 1))),
+            loose,
+            disc(8, None),
+            disc(2, Some((1, 2))),
+            disc(9, Some((7, 2))),
+            disc(7, Some((7, 1))),
+        ]);
+        let root = Some(5);
+        let cd = Route::new(
+            Location::Album {
+                root,
+                id: 2,
+                title: "An old title".into(),
+            },
+            None,
+        );
+        let siblings = sequence
+            .related(
+                cd.clone(),
+                &DiscId::Library(2),
+                SequenceKind::Disc,
+                root,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            siblings
+                .iter()
+                .map(|c| c.label.as_ref())
+                .collect::<Vec<_>>(),
+            ["CD 1", "CD 2", "CD 3"]
+        );
+        assert_eq!(siblings.iter().filter(|c| c.current).count(), 1);
+        assert!(siblings[1].current && siblings[1].route.same(&cd));
+        assert!(matches!(
+            siblings[0].route.location,
+            Location::Album {
+                root: Some(5),
+                id: 1,
+                ..
+            }
+        ));
+
+        let release = Route::new(
+            Location::Release {
+                root,
+                id: 1,
+                title: "Release 1".into(),
+            },
+            None,
+        );
+        let alternatives = sequence
+            .related(
+                release,
+                &DiscId::Library(1),
+                SequenceKind::Release,
+                root,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            alternatives
+                .iter()
+                .map(|c| c.label.as_ref())
+                .collect::<Vec<_>>(),
+            ["Release 1", "Album 8", "Release 7"]
+        );
+        assert!(matches!(
+            alternatives[1].route.location,
+            Location::Album { id: 8, .. }
+        ));
+        assert!(matches!(
+            alternatives[2].route.location,
+            Location::Release { id: 7, .. }
+        ));
+        let removed = Route::new(
+            Location::Release {
+                root,
+                id: 40,
+                title: "Removed release".into(),
+            },
+            None,
+        );
+        assert!(
+            sequence
+                .related(
+                    removed,
+                    &DiscId::Library(40),
+                    SequenceKind::Release,
+                    root,
+                    None
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_rebuilt_index_uses_the_new_shelf_order_with_the_same_identities() {
         let first = Sequence::new((1..=1011).map(|id| disc(id, None)).collect());
         let reordered = Sequence::new((1..=1011).rev().map(|id| disc(id, None)).collect());
@@ -705,7 +982,7 @@ mod tests {
                 path: r"C:\Music".into(),
                 release_only: true,
             }),
-            sequence: Some(Sequence::new(vec![node])),
+            sequence: Some(Arc::new(Sequence::new(vec![node]))),
             ..FolderTraversal::default()
         };
         assert!(traversal.current(&id).is_none());

@@ -1,7 +1,10 @@
 //! Per-browser navigation routes, history, and view restoration.
 use super::*;
 use crate::table::{Selection, Viewport};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 const HISTORY_SELECTION_KEYS: usize = 128 * 1024;
 
@@ -26,7 +29,7 @@ impl Route {
         Self { location, page }
     }
 
-    fn same(&self, other: &Self) -> bool {
+    pub(crate) fn same(&self, other: &Self) -> bool {
         let same_page = match (&self.page, &other.page) {
             (Some(Page::Disc(a)), Some(Page::Disc(b)))
             | (Some(Page::Release(a)), Some(Page::Release(b))) => a.same(b),
@@ -53,6 +56,50 @@ impl Route {
                 ) => a == b && ar == br,
                 (a, b) => a == b,
             }
+    }
+
+    /// An identity for focus and element state across relabeling and reflow.
+    pub(crate) fn control_id(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        std::mem::discriminant(&self.location).hash(&mut hash);
+        match &self.location {
+            Location::Folder(path) => crate::places::path_key(path).hash(&mut hash),
+            Location::Library(root) => root.hash(&mut hash),
+            Location::Playlist(id) | Location::Album { id, .. } | Location::Release { id, .. } => {
+                // Indexed disc ids are unique across the catalog, even before
+                // a legacy visit with an unspecified root resolves its root.
+                id.hash(&mut hash);
+            }
+            _ => {}
+        }
+        std::mem::discriminant(&self.page).hash(&mut hash);
+        if let Some(page) = &self.page {
+            std::mem::discriminant(page).hash(&mut hash);
+            let (Page::Disc(id) | Page::Release(id)) = page;
+            std::mem::discriminant(id).hash(&mut hash);
+            match id {
+                DiscId::Cue(path) => crate::places::path_key(path).hash(&mut hash),
+                DiscId::Album(path, title, number) => {
+                    crate::places::path_key(path).hash(&mut hash);
+                    title.hash(&mut hash);
+                    number.hash(&mut hash);
+                }
+                DiscId::Library(id) => id.hash(&mut hash),
+            }
+        }
+        hash.finish()
+    }
+
+    pub(super) fn program(&self) -> Option<(DiscId, SequenceKind)> {
+        match (&self.location, &self.page) {
+            (Location::Album { id, .. }, _) => Some((DiscId::Library(*id), SequenceKind::Disc)),
+            (Location::Release { id, .. }, _) => {
+                Some((DiscId::Library(*id), SequenceKind::Release))
+            }
+            (_, Some(Page::Disc(id))) => Some((id.clone(), SequenceKind::Disc)),
+            (_, Some(Page::Release(id))) => Some((id.clone(), SequenceKind::Release)),
+            _ => None,
+        }
     }
 
     /// Keep the nearest useful child when a breadcrumb skips the release.
@@ -341,6 +388,10 @@ pub(super) const SHELF_ROW_HEIGHT: f32 = 42.;
 impl Browser {
     pub(crate) fn route(&self) -> Route {
         Route::new(self.location.clone(), self.page.clone())
+    }
+
+    pub(crate) fn navigation_revision(&self) -> u64 {
+        self.navigation
     }
 
     fn bookmark(&self, cx: &App) -> Bookmark {
@@ -702,19 +753,20 @@ impl Browser {
         }
     }
 
-    fn route_label(&self, route: &Route, cx: &App) -> String {
-        match &route.page {
-            Some(Page::Release(id)) => {
-                let title = self.title_of(id);
-                if !title.is_empty() {
-                    return title;
-                }
-                self.disc_label(id)
-            }
-            Some(Page::Disc(id)) => self.disc_label(id),
-            None => None,
-        }
-        .unwrap_or_else(|| self.location_label(&route.location, cx))
+    pub(crate) fn route_label(&self, route: &Route, cx: &App) -> String {
+        self.navigation_label(route, false, cx)
+    }
+
+    pub(crate) fn breadcrumb_label(&self, route: &Route, cx: &App) -> String {
+        self.navigation_label(route, true, cx)
+    }
+
+    fn navigation_label(&self, route: &Route, compact: bool, cx: &App) -> String {
+        self.program_title(route, compact)
+            .or_else(|| match route.page.as_ref()? {
+                Page::Disc(id) | Page::Release(id) => self.disc_label(id),
+            })
+            .unwrap_or_else(|| self.location_label(&route.location, cx))
     }
 
     pub(crate) fn up_label(&self, cx: &App) -> Option<String> {
@@ -758,7 +810,7 @@ impl Browser {
             && self.route().parent(self.membership.as_deref()).is_some()
     }
 
-    pub(crate) fn open_ancestor(
+    pub(crate) fn open_breadcrumb(
         &mut self,
         route: Route,
         window: &mut Window,
@@ -767,7 +819,7 @@ impl Browser {
         let arrival = self
             .route()
             .arrival_at(&route, self.membership.as_deref())
-            .unwrap_or(Arrival::Regular);
+            .unwrap_or_else(|| self.sequence_arrival(&route));
         self.move_to(route, arrival, window, cx);
     }
 
@@ -775,7 +827,7 @@ impl Browser {
         if self.can_go_up()
             && let Some((parent, _)) = self.route().parent(self.membership.as_deref())
         {
-            self.open_ancestor(parent, window, cx);
+            self.open_breadcrumb(parent, window, cx);
         } else {
             self.begin_navigation(cx);
         }

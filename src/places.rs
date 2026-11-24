@@ -221,13 +221,14 @@ impl Place {
 }
 
 pub fn same_path(a: &Path, b: &Path) -> bool {
-    let norm = |p: &Path| {
-        p.to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches(['\\', '/'])
-            .to_lowercase()
-    };
-    norm(a) == norm(b)
+    path_key(a) == path_key(b)
+}
+
+pub(crate) fn path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches(['\\', '/'])
+        .to_lowercase()
 }
 
 fn defaults() -> Vec<Place> {
@@ -309,7 +310,7 @@ pub fn known_path(k: Known) -> Option<PathBuf> {
 /// local fixed and removable volumes are asked for their name, since an
 /// optical or disconnected network drive can stall for seconds.
 #[cfg(windows)]
-fn drives() -> Vec<(PathBuf, String)> {
+pub(crate) fn drives() -> Vec<(PathBuf, String)> {
     use windows::{
         Win32::{
             Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives},
@@ -362,7 +363,7 @@ fn drives() -> Vec<(PathBuf, String)> {
     out
 }
 #[cfg(not(windows))]
-fn drives() -> Vec<(PathBuf, String)> {
+pub(crate) fn drives() -> Vec<(PathBuf, String)> {
     vec![(PathBuf::from("/"), "Root".into())]
 }
 
