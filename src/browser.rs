@@ -99,7 +99,7 @@ pub enum Reveal {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Destination {
-    Current,
+    Current(Option<crate::queue::PlaylistOccurrence>),
     Library,
     Locations,
     Playlist(crate::queue::PlaylistOccurrence),
@@ -133,7 +133,7 @@ pub struct Browser {
     history: History,
     pending: Option<Pending>,
     /// A deliberate artwork click while discovery or an index query is still running.
-    pending_playing: Option<(u64, Arc<Track>, library::DiscContext)>,
+    pending_playing: Option<(u64, Arc<Track>, library::DiscContext, Destination)>,
     folder_child: Option<PathBuf>,
     window: AnyWindowHandle,
     navigation: u64,

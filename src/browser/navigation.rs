@@ -325,6 +325,17 @@ pub(super) enum Arrival {
     Sequence(bool),
 }
 
+impl Destination {
+    fn prefers_current_view(self, location: &Location) -> bool {
+        matches!(self, Self::Current(origin)
+            if origin.is_none_or(|origin| *location != Location::Playlist(origin.playlist)))
+    }
+
+    fn playlist_fallback(self) -> Option<Self> {
+        matches!(self, Self::Current(Some(_))).then_some(Self::Current(None))
+    }
+}
+
 pub(super) const SHELF_ROW_HEIGHT: f32 = 42.;
 
 impl Browser {
@@ -774,14 +785,14 @@ impl Browser {
         if self.busy || self.table.read(cx).delegate().is_loading() {
             return;
         }
-        if let Some((request, track, context)) = self.pending_playing.take() {
+        if let Some((request, track, context, dest)) = self.pending_playing.take() {
             let browser = cx.entity();
             let window = self.window;
             cx.defer(move |cx| {
                 let _ = window.update(cx, |_, w, cx| {
                     browser.update(cx, |b, cx| {
                         if b.navigation_is_current(request) {
-                            b.locate(track, context, Destination::Current, w, cx);
+                            b.locate(track, context, dest, w, cx);
                         }
                     })
                 });
@@ -966,7 +977,24 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         let request = self.begin_navigation(cx);
-        if let Destination::Playlist(occurrence) = dest {
+        let contextual = matches!(dest, Destination::Current(_));
+        if contextual {
+            if self.busy
+                || (self.scope().is_some()
+                    && self.catalog.read(cx).handle().is_some()
+                    && self.table.read(cx).delegate().is_loading())
+            {
+                self.pending_playing = Some((request, track, context, dest));
+                return;
+            }
+            if dest.prefers_current_view(&self.location)
+                && self.reveal_listed(&track, track.library_id, w, cx)
+            {
+                return;
+            }
+        }
+        if let Destination::Playlist(occurrence) | Destination::Current(Some(occurrence)) = dest {
+            let fallback = dest.playlist_fallback();
             let key = RowKey::Key(occurrence.entry);
             let location = Location::Playlist(occurrence.playlist);
             if matches!(self.location, Location::Playlist(id) if id == occurrence.playlist)
@@ -980,12 +1008,20 @@ impl Browser {
                 return;
             }
             let Some(store) = self.catalog.read(cx).handle() else {
-                w.push_notification("The Library is unavailable.", cx);
+                if let Some(fallback) = fallback {
+                    self.locate(track, context, fallback, w, cx);
+                } else {
+                    w.push_notification("The Library is unavailable.", cx);
+                }
                 return;
             };
+            let target = track.clone();
             let lookup = store.query(&self.intent, request, move |store| {
                 let rows = store.rows(Scope::Playlist(occurrence.playlist), &[occurrence.entry])?;
-                Ok(rows.first().is_some_and(|row| row.track.same_item(&track)))
+                Ok(rows
+                    .first()
+                    .filter(|row| row.track.same_item(&target))
+                    .map(|row| row.id))
             });
             cx.spawn_in(w, async move |this, cx| {
                 let found = lookup.await;
@@ -993,54 +1029,48 @@ impl Browser {
                     if !b.navigation_is_current(request) {
                         return;
                     }
-                    match found {
-                        Ok(true) => b.move_to(Route::new(location, None), Arrival::Row(key), w, cx),
-                        Ok(false) => {
+                    match (found, fallback) {
+                        (Ok(Some(id)), _) => {
+                            // A restored track may only have its locator. The
+                            // playlist lookup also resolves its indexed ID.
+                            if !dest.prefers_current_view(&b.location)
+                                || !b.reveal_listed(&track, Some(id), w, cx)
+                            {
+                                b.move_to(Route::new(location, None), Arrival::Row(key), w, cx);
+                            }
+                        }
+                        (_, Some(fallback)) => b.locate(track, context, fallback, w, cx),
+                        (Ok(None), None) => {
                             w.push_notification("This entry is no longer in the playlist.", cx)
                         }
-                        Err(_) => w.push_notification("This playlist is unavailable.", cx),
+                        (Err(_), None) => w.push_notification("This playlist is unavailable.", cx),
                     }
                 });
             })
             .detach();
             return;
         }
-        if dest == Destination::Current {
-            if self.busy
-                || (self.scope().is_some()
-                    && self.catalog.read(cx).handle().is_some()
-                    && self.table.read(cx).delegate().is_loading())
+        if contextual && track.library_id.is_none() {
+            // A physical queue entry may also be in an indexed view whose row
+            // has never been hydrated. Resolve its locator off the UI thread.
+            if self.scope().is_some()
+                && let Some(store) = self.catalog.read(cx).handle()
             {
-                self.pending_playing = Some((request, track, context));
-                return;
+                let locator = crate::store::Locator::of(&track);
+                let lookup = store.query(&self.intent, request, move |s| s.find(&locator));
+                cx.spawn_in(w, async move |this, cx| {
+                    let id = lookup.await.ok().flatten();
+                    let _ = this.update_in(cx, |b, w, cx| {
+                        if b.navigation_is_current(request) && !b.reveal_listed(&track, id, w, cx) {
+                            b.reveal_folder(track, context, w, cx);
+                        }
+                    });
+                })
+                .detach();
+            } else {
+                self.reveal_folder(track, context, w, cx);
             }
-            if self.reveal_listed(&track, track.library_id, w, cx) {
-                return;
-            }
-            if track.library_id.is_none() {
-                // A physical queue entry may also be in an indexed view whose row
-                // has never been hydrated. Resolve its locator off the UI thread.
-                if self.scope().is_some()
-                    && let Some(store) = self.catalog.read(cx).handle()
-                {
-                    let locator = crate::store::Locator::of(&track);
-                    let lookup = store.query(&self.intent, request, move |s| s.find(&locator));
-                    cx.spawn_in(w, async move |this, cx| {
-                        let id = lookup.await.ok().flatten();
-                        let _ = this.update_in(cx, |b, w, cx| {
-                            if b.navigation_is_current(request)
-                                && !b.reveal_listed(&track, id, w, cx)
-                            {
-                                b.reveal_folder(track, context, w, cx);
-                            }
-                        });
-                    })
-                    .detach();
-                } else {
-                    self.reveal_folder(track, context, w, cx);
-                }
-                return;
-            }
+            return;
         }
         if dest == Destination::Locations {
             let Some((id, store)) = track.library_id.zip(self.catalog.read(cx).handle()) else {
@@ -1091,7 +1121,7 @@ impl Browser {
                             cx,
                         );
                     }
-                    _ if dest == Destination::Current => b.reveal_folder(track, context, w, cx),
+                    _ if contextual => b.reveal_folder(track, context, w, cx),
                     Ok(None) => w.push_notification("This recording is outside the Library.", cx),
                     Err(_) => {
                         w.push_notification("This recording is unavailable in the Library.", cx)
@@ -1255,13 +1285,39 @@ pub fn continue_cd(
 #[cfg(test)]
 mod tests {
     use super::{
-        Arrival, DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf, PlaylistId,
-        Route, RowKey, SavedVisit, ShelfLink,
+        Arrival, Destination, DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf,
+        PlaylistId, Route, RowKey, SavedVisit, ShelfLink,
     };
     use crate::library::DiscTrack;
+    use crate::queue::PlaylistOccurrence;
 
     fn playlist(id: PlaylistId) -> SavedVisit {
         SavedVisit::new(Route::new(Location::Playlist(id), None), false)
+    }
+
+    #[test]
+    fn artwork_keeps_a_matching_view_and_can_reveal_without_its_playlist() {
+        let occurrence = PlaylistOccurrence {
+            playlist: 8,
+            entry: 13,
+        };
+        let artwork = Destination::Current(Some(occurrence));
+        let menu = Destination::Playlist(occurrence);
+        let origin = Location::Playlist(8);
+        let other_views = [
+            Location::Library(None),
+            Location::Playlist(9),
+            Location::Folder(PathBuf::from(r"C:\Music")),
+        ];
+        assert!(!artwork.prefers_current_view(&origin));
+        for view in other_views {
+            assert!(artwork.prefers_current_view(&view));
+            assert!(!menu.prefers_current_view(&view));
+        }
+        let fallback = artwork.playlist_fallback().unwrap();
+        assert!(fallback.prefers_current_view(&origin));
+        assert!(fallback.playlist_fallback().is_none());
+        assert!(menu.playlist_fallback().is_none());
     }
 
     #[test]

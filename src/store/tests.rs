@@ -612,17 +612,23 @@ fn stale_playlist_keys_cannot_target_another_occurrence() {
     let mut s = Store::memory();
     let file = dir.path().join("single.wav");
     fs::write(&file, b"sample").unwrap();
-    let ids = s.resolve(&[Arc::new(Track::file(file))]).unwrap();
+    let recording = Arc::new(Track::file(file));
+    let ids = s.resolve(std::slice::from_ref(&recording)).unwrap();
     let p = s.create_playlist("First", &ids).unwrap();
     let old = s.entries(p).unwrap()[0].0;
     let q = s.create_playlist("Second", &ids).unwrap();
     assert!(s.rows(Scope::Playlist(q), &[old]).unwrap().is_empty());
     assert!(s.track_ids(Scope::Playlist(q), &[old]).is_err());
     s.remove_entries(p, &[old]).unwrap();
+    assert!(s.rows(Scope::Playlist(p), &[old]).unwrap().is_empty());
+    assert_eq!(s.find(&Locator::of(&recording)).unwrap(), Some(ids[0]));
     let current = s.add_entries(p, &ids, None).unwrap()[0];
     assert_ne!(current, old);
     assert!(s.move_entries(p, &[current], Some(old)).is_err());
     assert_eq!(s.entries(p).unwrap(), [(current, ids[0])]);
+    s.delete_playlist(p).unwrap();
+    assert!(s.rows(Scope::Playlist(p), &[current]).unwrap().is_empty());
+    assert_eq!(s.find(&Locator::of(&recording)).unwrap(), Some(ids[0]));
 }
 
 #[test]

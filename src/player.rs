@@ -507,7 +507,7 @@ impl Render for Player {
         let occurrence = self
             .playing_entry()
             .and_then(|entry| entry.playlist_occurrence);
-        let playing_destination = occurrence.map_or(Destination::Current, Destination::Playlist);
+        let playing_destination = Destination::Current(occurrence);
         let art = art
             .id("playing-artwork")
             .relative()
