@@ -1,8 +1,18 @@
-# Browsing and continuing a CD
+# Browsing discs and releases
 
 **All Tracks** groups a recursive folder or indexed collection by disc. Double-click a section header, or select it and press Enter, to open the CD. Search keeps the headers of matching discs. Clicking a column heading sorts across the collection. The third click restores the grouped order. **Albums / CDs** remains the disc overview.
 
 ![The collection between two CDs](evidence/cd-sections.png)
+
+## Previous and Next
+
+The chevrons beside the address bar move between CDs on a disc page and between releases on a release page. Hover a chevron to see its destination. **Alt+Page Up** and **Alt+Page Down** invoke the same actions. From a CD, the browser menu and **Alt+Shift+Page Up / Page Down** move between releases. A single-disc release opens its disc page and supports both kinds of step. The breadcrumb overflow keeps earlier locations reachable when the path is narrow.
+
+- In **Locations**, a disc or release opened from a recursive collection browses that folder's scan scope. The order follows the unfiltered Albums / CDs shelf, using the same natural folder order and authored disc order. Nested folders contribute their discs to the sequence. A disc opened from a smaller folder has that folder's scope.
+- In **Library**, a disc or release browses its registered collection. The indexed shelf orders by year where known, then its stored path and title sort key, with album ID as the final tie-breaker. A release keeps the position of its first authored disc. Indexed collections have one registered root and project nested physical folders onto that shelf. The Locations tree provides direct access to the physical hierarchy.
+- A CUE program, tagged album, or numbered disc recognized by the library contributes a CD. Empty folders, missing indexed programs, and loose recordings without disc context are skipped. The controls stop at the scope's ends. Track filters and column sorts affect the visible table and are restored on revisit. The sequence uses the collection's unfiltered structure.
+
+Each step records the outgoing visit in the same browser. Back and Forward follow the order of visits. The chevrons follow collection order and restore the most recently saved view of the destination. Rescanning can change the order for future steps while existing history keeps its destination identities.
 
 ## Listening controls
 
@@ -10,13 +20,15 @@
 | --- | --- |
 | Double-click a chapter, including a filtered or globally sorted result | Start at that chapter in the complete authored CD sequence. Previous reaches earlier chapters and Up Next contains the remainder of that CD. |
 | Double-click a loose file | Play the single file. Album tags, a disc tag, a CUE program or a numbered CD folder supply disc context. Opening a disc page also explicitly selects that scope. |
+| Choose **Play Only This Track** from a CD or playlist row | Replace the queue with just the clicked track or playlist occurrence. The ordinary **Play** and double-click actions keep their CD or playlist behavior. |
 | Choose **Play CD** from a CD row, section or page menu | Start the whole CD at the beginning, including a recorded lead-in. Disc playback uses authored order and clears shuffle and repeat-one. The queue ends with the CD. |
 | Choose **Play Release** from a release, one of its CDs, or the release page | Start CD 1, then each following CD of the release in authored order, then stop. Only CDs that belong to a release of several discs offer it. [Releases](releases.md) |
-| Choose **Play Collection** or **Add All to Queue** from a collection | Play or append the whole displayed track sequence, several releases and loose recordings included. A search limits these actions to the results. Liked Tracks, playlists and single folders call it **Play All**. |
+| Choose **Play Collection** from a collection | Start with the first matching recording and follow the shelf's release and disc order, including loose recordings. The current search limits the queue. Column sorting affects the displayed rows. Liked Tracks, playlists and single folders call their corresponding action **Play All**. |
+| Choose **Add All to Queue** from a collection | Append the matching recordings in the table's display order. |
 | Double-click a playlist occurrence | Play from that occurrence in the displayed playlist sequence. Repeated occurrences retain independent queue entries. |
 | Choose **Show in Library** or **Show in Locations** from the Now Playing menu | Reveal the exact chapter in the active Music Browser. Library opens the registered disc. Locations opens the physical location. Back returns to the previous browsing position. |
 | Click the player artwork | Reveal the current recording in its indexed disc when it has a Library identity, or in its physical location. |
-| Choose a reveal action from a queue entry | Select that entry’s exact chapter. The playback indicator stays on the active recording. |
+| Choose **Show in Library** or **Show in Locations** from a queue or history entry | Select that entry’s exact chapter. The playback indicator stays on the active recording. A live indexed entry can also resolve the current path after a verified move. |
 | Choose **Continue This CD** from the Now Playing menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
 
 Continue reuses the first available queued occurrence of each required chapter and creates only missing entries. All other upcoming entries keep their relative order, including intentional repeats. If the continuation is already correct, a second invocation leaves the queue revision unchanged. When there are chapters to continue, the operation disables shuffle and repeat-one. Saved playlists keep their entries and ordering.
@@ -33,9 +45,31 @@ Each Music Browser saves its current view, Back and Forward stacks, and most rec
 
 Up follows the same hierarchy as the breadcrumb. From a CD it selects the CD section in the release. From a playlist or a registered collection it selects that item in the parent directory. From a physical folder it opens the parent and selects the originating child in Locations. Navigating, including explicit reveal, uses the active Music Browser. Playback changes only the playing indicator as it advances.
 
-Workspace saves store logical keys and viewport positions. Each browser retains up to 100 history steps and 100 recent locations. For unusually large archived selections, the most recent selections take priority within a per-browser budget of 128 Ki selected keys. The newest archived selection can exceed that budget so it stays intact. Live indexed tracks can follow verified relocation by database ID. Saved queues retain their original file and chapter locators across restarts.
+Workspace saves store logical keys and viewport positions. Each browser retains up to 100 visits per history direction and 100 recent locations. Archived selections share a per-browser budget of 128 Ki selected keys and prioritize recent visits. A selection over that budget can keep its primary row and viewport when archived. Each browser also owns its subfolder preferences. A newly opened browser starts from the current defaults. Live indexed tracks can follow verified relocation by database ID. Saved queues retain their original file and chapter locators across restarts.
 
 ![Queue chapter nine selected while chapter seven plays](evidence/cd-queue-reveal.png)
+
+## Sequential navigation qualification, 24 November 2026
+
+The optimized Windows app ran at 150% scaling with isolated profiles and muted output. The real Thunderdome run started *Extreme Terror* near the end of VII CD 2. **Next CD** opened VIII CD 1. **Previous CD** restored VII CD 2 and its bookmark, then opened VII CD 1 and VI CD 2. Back and Forward replayed the visits in order. Up opened VI and selected CD 2. **Next Release** opened VII. Up again returned to the shelf with its earlier `injected` search. The saved queue entries stayed identical throughout. The long title on VI still left the current disc number visible.
+
+A second pass on the real collection visited a playlist and Downloads during playback. Back restored the playlist, then VII CD 2 and its exact bookmark. The player artwork revealed the playing CUE chapter from the playlist. Back returned to that playlist and the queue entries stayed identical.
+
+![Thunderdome VIII CD 1 while Thunderdome VII CD 2 continues playing](evidence/navigation-continuity/thunderdome-next-cd.webp)
+
+The fixture placed a two-disc CUE release, a single-disc CUE release three folders deep, and a three-disc release of individual WAV files into one recursive scope. An empty directory and a CUE with a missing image contributed no steps. Traversal reached both boundaries in both directions. Back and Forward restored the previous visits. A direct sequence revisit returned to chapter 30 at its original viewport, anchored to chapter 17 with a 24.67 px offset. By then chapter 33 was playing on a separate row. The test compared the saved queue entries, stable row identity, viewport anchor, and offset. The available destination tooltip named VIII CD 1 on the final step out of VII CD 2. [Tooltip capture](evidence/navigation-continuity/thunderdome-next-cd-tooltip.webp) · [VI CD 2 breadcrumb](evidence/navigation-continuity/thunderdome-previous-cd.webp)
+
+![Chapter 30 selected at the saved viewport while chapter 33 plays](evidence/navigation-continuity/fixture-restored-context.webp)
+
+The indexed fixture exercised both Now Playing menus and the artwork. Library and Locations selected the logical CUE chapter. Revealing chapter 32 from the queue selected it while the paused transport remained on chapter 30. Two side-by-side browsers kept separate filters and histories. After closing and reopening the app, Forward changed the right browser to the single-disc release while the left browser kept the indexed chapter and filter. [Queue reveal](evidence/navigation-continuity/indexed-queue-reveal.webp) · [Split browser after restart](evidence/navigation-continuity/split-browser-restart.webp)
+
+Physical **Play Collection** played two CUE chapters and crossed into the three-disc release while the browser stayed on CD 2. **Play Release** advanced from CD 1 to CD 2. **Play Only This Track** queued chapter 2 alone. Double-clicking chapter 1 then restored the normal two-chapter CD queue. The native shortcut check drove CD navigation in both directions and invoked Next Release from the focused disc pane.
+
+The split check restored four marked chapters with the original selection anchor and cursor. Opening Liked Tracks in a new tab and moving it into a vertical split kept all three browsers open through resizing. Renaming a fixture folder and refreshing changed the next-step order. Its old historical destination reported unavailability, and Forward returned to the surviving disc. [Vertical split and restored range](evidence/navigation-continuity/vertical-split.webp)
+
+Formatting, Clippy with warnings denied, the debug and release Windows builds, and all 131 default tests passed. The separate six-figure test scanned 100,089 tracks in 1.50 s, grouped 1,011 discs in 31 ms, and ran its filtered query in 45 ms on the local Windows machine. The codec decode and seek test passed. The sequence regression also rebuilds an order of 1,011 destinations and verifies neighbor lookup after reordering.
+
+The native checks used deterministic fixture renames and removals. Recovery from unplugging a drive during an active scan, relocation of a restored queue entry, and audible or gapless output across files remain outside this run.
 
 ## Navigation verification, 24 November 2026
 
