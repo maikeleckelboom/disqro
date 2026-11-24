@@ -3,7 +3,116 @@ use super::*;
 use crate::{collection::release_discs, library::DiscContext};
 
 impl MusicTable {
+    pub fn play_collection(&self, cx: &mut App) {
+        let player = self.player.clone();
+        let request = player.read(cx).play_request.clone();
+        let generation = request.next();
+        match &self.rows.data {
+            Contents::Folder { original, .. } => {
+                let visible: HashSet<_> = original.iter().map(Arc::as_ptr).collect();
+                let ordered = crate::release::ordered(
+                    self.programs
+                        .iter()
+                        .map(|d| d.release.as_ref().map(|m| (&m.key, m.number))),
+                );
+                let mut tracks = Vec::with_capacity(original.len());
+                let mut append = |index: usize| {
+                    tracks.extend(
+                        self.programs[index]
+                            .tracks
+                            .iter()
+                            .filter(|t| visible.contains(&Arc::as_ptr(t)))
+                            .cloned(),
+                    );
+                };
+                for item in ordered {
+                    match item {
+                        crate::release::Ordered::Disc(index) => append(index),
+                        crate::release::Ordered::Release(discs) => {
+                            discs.into_iter().for_each(&mut append)
+                        }
+                    }
+                }
+                if !tracks.is_empty() {
+                    player.update(cx, |p, cx| {
+                        p.command(Command::Shuffle(false), cx);
+                        p.command(Command::Play(tracks.into(), 0), cx);
+                    });
+                }
+            }
+            Contents::Library(p) => {
+                let Scope::Library(root) = p.scope else {
+                    return;
+                };
+                let catalog = self.catalog.clone();
+                let search = p.search.clone();
+                let Some(store) = catalog.read(cx).handle() else {
+                    return;
+                };
+                let keys = store.query(&request, generation, move |s| {
+                    s.collection_keys(root, search)
+                });
+                cx.spawn(async move |cx| {
+                    let tracks: anyhow::Result<TrackList> = async {
+                        let keys = keys.await?;
+                        let rows = catalog
+                            .read_with(cx, |c, cx| {
+                                c.rows(Scope::Library(root), keys, &request, generation, cx)
+                            })
+                            .await?;
+                        Ok(rows
+                            .into_iter()
+                            .filter(|r| r.available)
+                            .map(|r| r.track)
+                            .collect())
+                    }
+                    .await;
+                    if !request.is_current(generation) {
+                        return;
+                    }
+                    match tracks {
+                        Ok(tracks) if !tracks.is_empty() => player.update(cx, |p, cx| {
+                            p.command(Command::Shuffle(false), cx);
+                            p.command(Command::Play(tracks, 0), cx);
+                        }),
+                        result => catalog.update(cx, |_, cx| {
+                            cx.emit(crate::catalog::CatalogEvent::Notice(
+                                result.err().map_or_else(
+                                    || "No available tracks in this collection.".into(),
+                                    |e| format!("{e:#}"),
+                                ),
+                            ))
+                        }),
+                    }
+                })
+                .detach();
+            }
+        }
+    }
+
     pub fn play(&self, row: usize, cx: &mut App) {
+        self.play_row(row, false, cx);
+    }
+
+    pub(super) fn can_play_track_only(&self, row: usize) -> bool {
+        let scoped = match &self.rows.data {
+            Contents::Folder { .. } => self.folder_cd,
+            Contents::Library(page) => matches!(
+                page.scope,
+                Scope::Album(_) | Scope::Release(_) | Scope::Playlist(_)
+            ),
+        };
+        scoped
+            || self
+                .track(row)
+                .is_some_and(|track| track.has_disc_context())
+    }
+
+    pub(super) fn play_track(&self, row: usize, cx: &mut App) {
+        self.play_row(row, true, cx);
+    }
+
+    fn play_row(&self, row: usize, track_only: bool, cx: &mut App) {
         let Some(ix) = self.rows.sections.data_index(row) else {
             return;
         };
@@ -15,7 +124,7 @@ impl MusicTable {
                 } else {
                     DiscContext::Inferred
                 };
-                if !context.allows(track) {
+                if track_only || !context.allows(track) {
                     let single = Arc::from([track.clone()]);
                     self.player
                         .update(cx, |p, cx| p.command(Command::Play(single, 0), cx));
@@ -42,7 +151,7 @@ impl MusicTable {
                 let generation = request.next();
                 cx.spawn(async move |cx| {
                     let result: anyhow::Result<Command> = async {
-                        if scope.keys_are_entries() {
+                        if !track_only && scope.keys_are_entries() {
                             let store = catalog
                                 .read_with(cx, |c, _| c.handle())
                                 .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
@@ -94,7 +203,7 @@ impl MusicTable {
                         } else {
                             DiscContext::Inferred
                         };
-                        if !context.allows(&target) {
+                        if track_only || !context.allows(&target) {
                             return Ok(Command::Play(Arc::from([target]), 0));
                         }
                         let tracks =

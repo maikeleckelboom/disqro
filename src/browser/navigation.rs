@@ -1,443 +1,875 @@
-//! Browser history and exact-track navigation between folders, indexed CDs and the player.
+//! Per-browser navigation routes, history, and view restoration.
 use super::*;
+use crate::table::{Selection, Viewport};
+use std::collections::HashMap;
 
-/// A history entry owns navigation state only. Folder CD pages can project
-/// the open scan without replacing its root or starting another walker.
-pub(super) struct Visit {
-    destination: SavedVisit,
-    sort: Option<(Field, ColumnSort)>,
-    bookmark: Bookmark,
+const HISTORY_SELECTION_KEYS: usize = 128 * 1024;
+
+fn read_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
-/// A history destination survives a restart. The live visit also remembers
-/// its table selection and sort while the instance remains open.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Route {
+    pub location: Location,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<Page>,
+}
+
+impl Route {
+    pub fn new(location: Location, page: Option<Page>) -> Self {
+        Self { location, page }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        let same_page = match (&self.page, &other.page) {
+            (Some(Page::Disc(a)), Some(Page::Disc(b)))
+            | (Some(Page::Release(a)), Some(Page::Release(b))) => a.same(b),
+            (a, b) => a == b,
+        };
+        same_page
+            && match (&self.location, &other.location) {
+                (Location::Folder(a), Location::Folder(b)) => crate::places::same_path(a, b),
+                (Location::Album { id: a, .. }, Location::Album { id: b, .. })
+                | (Location::Release { id: a, .. }, Location::Release { id: b, .. }) => a == b,
+                (a, b) => a == b,
+            }
+    }
+
+    fn parent(&self, membership: Option<&Membership>) -> Option<(Route, Option<RowKey>)> {
+        let (location, page, child) = match (&self.location, &self.page) {
+            (location @ Location::Folder(_), Some(Page::Disc(id))) => (
+                location.clone(),
+                membership.map(|m| Page::Release(m.key.clone())),
+                Some(RowKey::Disc(id.clone())),
+            ),
+            (location @ Location::Folder(_), Some(Page::Release(id))) => {
+                (location.clone(), None, Some(RowKey::Release(id.clone())))
+            }
+            (Location::Folder(path), None) => (
+                Location::Folder(
+                    path.parent()
+                        .filter(|p| !p.as_os_str().is_empty())?
+                        .to_owned(),
+                ),
+                None,
+                None,
+            ),
+            (Location::Album { root, id, .. }, _) => (
+                membership
+                    .and_then(|m| {
+                        Some(Location::Release {
+                            root: *root,
+                            id: m.key.album()?,
+                            title: m.title.clone(),
+                        })
+                    })
+                    .unwrap_or(Location::Library(*root)),
+                None,
+                Some(RowKey::Disc(DiscId::Library(*id))),
+            ),
+            (Location::Release { root, id, .. }, _) => (
+                Location::Library(*root),
+                None,
+                Some(RowKey::Release(DiscId::Library(*id))),
+            ),
+            (Location::Library(Some(root)), _) => (
+                Location::Collections,
+                None,
+                Some(RowKey::Link(ShelfLink::Collection(*root))),
+            ),
+            (Location::Playlist(id), _) => (
+                Location::Playlists,
+                None,
+                Some(RowKey::Link(ShelfLink::Playlist(*id))),
+            ),
+            (Location::Liked, _) => (Location::Library(None), None, None),
+            _ => return None,
+        };
+        Some((Route::new(location, page), child))
+    }
+}
+
+/// Compact, serializable context shared by the current view, history, and
+/// previously visited routes. No listings or hydrated tracks are retained.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SavedVisit {
-    location: Location,
+    #[serde(flatten)]
+    pub route: Route,
+    #[serde(default)]
+    pub albums: bool,
+    #[serde(default)]
+    pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    page: Option<Page>,
-    albums: bool,
-    query: String,
-}
-#[derive(Default)]
-pub(super) struct Bookmark {
-    selected: Option<RowKey>,
-    marked: Option<crate::table::Selection>,
-    offset: Point<Pixels>,
+    pub root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    child: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subfolders: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_or_default"
+    )]
+    sort: Option<(Field, bool)>,
+    #[serde(
+        default,
+        skip_serializing_if = "Bookmark::is_empty",
+        deserialize_with = "read_or_default"
+    )]
+    pub bookmark: Bookmark,
 }
 
-impl Browser {
-    fn visit(&self, cx: &App) -> Visit {
-        let table = self.table.read(cx);
-        let bookmark = if self.listing_discs() {
-            let t = self.discs.read(cx);
-            Bookmark {
-                marked: None,
-                selected: t
-                    .selected_row()
-                    .and_then(|i| t.delegate().rows.get(i))
-                    .map(Shelf::key),
-                offset: t.vertical_scroll_handle.0.borrow().base_handle.offset(),
-            }
-        } else {
-            Bookmark {
-                marked: table.delegate().marked_selection(),
-                selected: table
-                    .selected_row()
-                    .and_then(|i| table.delegate().selected_key(i)),
-                offset: table.vertical_scroll_handle.0.borrow().base_handle.offset(),
-            }
-        };
-        Visit {
-            destination: SavedVisit {
-                location: self.location.clone(),
-                page: self.page.clone(),
-                albums: self.prefs.albums,
-                query: self.query.clone(),
-            },
-            sort: table.delegate().sort,
-            bookmark,
+impl SavedVisit {
+    pub fn new(route: Route, albums: bool) -> Self {
+        Self {
+            route,
+            albums,
+            query: String::new(),
+            root: None,
+            child: None,
+            subfolders: None,
+            sort: None,
+            bookmark: Bookmark::default(),
         }
     }
-    pub(crate) fn saved_history(&self) -> (Vec<SavedVisit>, Vec<SavedVisit>) {
-        let save = |visits: &[Visit]| visits.iter().map(|v| v.destination.clone()).collect();
-        (save(&self.back), save(&self.forward))
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Bookmark {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected: Option<RowKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    marked: Option<Arc<Selection>>,
+    viewport: Viewport,
+}
+
+impl Bookmark {
+    pub fn legacy(scroll: f32) -> Self {
+        Self {
+            viewport: Viewport::legacy(scroll),
+            ..Self::default()
+        }
     }
-    pub(crate) fn restore_history(&mut self, back: Vec<SavedVisit>, forward: Vec<SavedVisit>) {
-        let restore = |visits: Vec<SavedVisit>| {
-            let skip = visits.len().saturating_sub(HISTORY);
-            visits
-                .into_iter()
-                .skip(skip)
-                .map(|destination| Visit {
-                    destination,
-                    sort: None,
-                    bookmark: Bookmark::default(),
-                })
-                .collect()
+
+    fn has_context(&self) -> bool {
+        self.selected.is_some() || self.marked.is_some() || !self.viewport.is_at_start()
+    }
+    fn is_empty(&self) -> bool {
+        !self.has_context()
+    }
+}
+
+#[derive(Default)]
+pub(super) struct History {
+    back: Vec<SavedVisit>,
+    forward: Vec<SavedVisit>,
+    recent: Vec<SavedVisit>,
+}
+
+fn push_bounded(visits: &mut Vec<SavedVisit>, visit: SavedVisit) {
+    if visits.len() == HISTORY {
+        visits.remove(0);
+    }
+    visits.push(visit);
+}
+
+impl History {
+    pub(super) fn can_step(&self, forward: bool) -> bool {
+        if forward {
+            !self.forward.is_empty()
+        } else {
+            !self.back.is_empty()
+        }
+    }
+    fn remember(&mut self, visit: SavedVisit) {
+        self.recent.retain(|entry| !entry.route.same(&visit.route));
+        push_bounded(&mut self.recent, visit);
+    }
+
+    fn find(&self, route: &Route) -> Option<SavedVisit> {
+        self.recent
+            .iter()
+            .rev()
+            .find(|entry| entry.route.same(route))
+            .cloned()
+    }
+
+    fn record(&mut self, current: SavedVisit) {
+        self.remember(current.clone());
+        push_bounded(&mut self.back, current);
+        self.forward.clear();
+        self.limit_selections();
+    }
+
+    fn step(&mut self, current: SavedVisit, forward: bool) -> Option<SavedVisit> {
+        let next = if forward {
+            self.forward.pop()?
+        } else {
+            self.back.pop()?
         };
-        self.back = restore(back);
-        self.forward = restore(forward);
+        self.remember(current.clone());
+        push_bounded(
+            if forward {
+                &mut self.back
+            } else {
+                &mut self.forward
+            },
+            current,
+        );
+        self.limit_selections();
+        Some(next)
     }
-    /// Restores the persisted filter before asynchronous listing completes.
-    pub(crate) fn restore_search(
+
+    fn limit_selections(&mut self) {
+        let mut decisions = HashMap::new();
+        let mut retained = 0usize;
+        // Prefer the latest context for each location. Share identical in-memory
+        // snapshots between the last visit and the history entry for that visit.
+        let visits = self
+            .recent
+            .iter_mut()
+            .rev()
+            .chain(self.back.iter_mut().rev())
+            .chain(self.forward.iter_mut().rev());
+        for visit in visits {
+            if let Some(marked) = &visit.bookmark.marked {
+                let keep = *decisions.entry(Arc::as_ptr(marked)).or_insert_with(|| {
+                    if marked.len() <= HISTORY_SELECTION_KEYS.saturating_sub(retained) {
+                        retained = retained.saturating_add(marked.len());
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if !keep {
+                    visit.bookmark.marked = None;
+                }
+            }
+        }
+    }
+}
+
+pub(super) struct Pending {
+    bookmark: Bookmark,
+    target: Option<RowKey>,
+}
+
+pub(super) enum Arrival {
+    Regular,
+    Place(PathBuf),
+    File(Reveal),
+    Row(RowKey),
+    FolderChild(PathBuf),
+    Sequence(bool),
+}
+
+const SHELF_ROW_HEIGHT: f32 = 42.;
+
+impl Browser {
+    pub(crate) fn route(&self) -> Route {
+        Route::new(self.location.clone(), self.page.clone())
+    }
+
+    fn bookmark(&self, cx: &App) -> Bookmark {
+        if let Some(pending) = &self.pending {
+            return pending.bookmark.clone();
+        }
+        if self.listing_shelf() {
+            let table = self.discs.read(cx);
+            let key = |i| table.delegate().rows.get(i).map(Shelf::key);
+            Bookmark {
+                selected: table.selected_row().and_then(key),
+                marked: None,
+                viewport: Viewport::capture(table, SHELF_ROW_HEIGHT, key),
+            }
+        } else {
+            let table = self.table.read(cx);
+            let key = |i| table.delegate().selected_key(i);
+            Bookmark {
+                selected: table
+                    .selected_row()
+                    .and_then(key)
+                    .or_else(|| self.selected.clone()),
+                marked: table.delegate().marked_selection().map(Arc::new),
+                viewport: Viewport::capture(table, table.delegate().row_height(), key),
+            }
+        }
+    }
+
+    pub(crate) fn saved_visit(&self, cx: &App) -> SavedVisit {
+        let table = self.table.read(cx);
+        SavedVisit {
+            route: self.route(),
+            albums: self.prefs.albums,
+            query: self.search.read(cx).value().to_string(),
+            root: self.tree_root.clone(),
+            child: self.folder_child.clone(),
+            subfolders: self.location.is_folder().then_some(self.subfolders),
+            sort: table
+                .delegate()
+                .sort
+                .map(|(f, d)| (f, d == ColumnSort::Descending)),
+            bookmark: self.bookmark(cx),
+        }
+    }
+
+    pub(crate) fn saved_history(&self) -> (Vec<SavedVisit>, Vec<SavedVisit>, Vec<SavedVisit>) {
+        (
+            self.history.back.clone(),
+            self.history.forward.clone(),
+            self.history.recent.clone(),
+        )
+    }
+
+    pub(crate) fn restore_history(
         &mut self,
-        text: String,
+        back: Vec<SavedVisit>,
+        forward: Vec<SavedVisit>,
+        recent: Vec<SavedVisit>,
+    ) {
+        let bounded = |mut visits: Vec<SavedVisit>| {
+            let skip = visits.len().saturating_sub(HISTORY);
+            visits.drain(..skip);
+            visits
+        };
+        self.history = History {
+            back: bounded(back),
+            forward: bounded(forward),
+            recent: bounded(recent),
+        };
+        self.history.limit_selections();
+    }
+
+    pub(super) fn cancel_pending(&mut self) {
+        self.intent.next();
+        self.navigation += 1;
+        self.pending = None;
+    }
+
+    /// Supersedes destination lookups at the point of interaction. A history
+    /// bookmark still belongs to its visit when focus moves to another control.
+    pub fn begin_navigation(&mut self, cx: &mut Context<Self>) -> u64 {
+        let revision = self.intent.next();
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..))))
+        {
+            self.navigation += 1;
+            self.pending = None;
+            cx.notify();
+        }
+        revision
+    }
+
+    pub(crate) fn cancel_context_for_input(&mut self, cx: &mut Context<Self>) {
+        if self.waiting_for_context() {
+            self.cancel_pending();
+            cx.notify();
+        } else {
+            self.intent.next();
+            self.navigation += 1;
+        }
+    }
+
+    pub(crate) fn waiting_for_context(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| p.target.is_some() || p.bookmark.has_context())
+    }
+
+    pub(super) fn move_to(
+        &mut self,
+        route: Route,
+        arrival: Arrival,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Set both sides before the input event arrives, so restoring the
-        // filter doesn't look like a new edit that cancels the scroll bookmark.
-        self.query = text.trim().to_lowercase();
-        self.search
-            .update(cx, |input, cx| input.set_value(text, window, cx));
-        self.filter(cx);
-    }
-    /// Scrolls a restored view back to where it was, once it has listed.
-    pub fn restore_scroll(&mut self, offset: f32) {
-        if offset > 0. {
-            self.bookmark = Some(Bookmark {
-                selected: None,
-                marked: None,
-                offset: point(px(0.), px(-offset)),
-            });
-        }
-    }
-    /// How far the list is scrolled down.
-    pub fn scroll_offset(&self, cx: &App) -> f32 {
-        let offset = if self.listing_discs() {
-            self.discs
-                .read(cx)
-                .vertical_scroll_handle
-                .0
-                .borrow()
-                .base_handle
-                .offset()
-        } else {
-            self.table
-                .read(cx)
-                .vertical_scroll_handle
-                .0
-                .borrow()
-                .base_handle
-                .offset()
-        };
-        (-f32::from(offset.y)).max(0.)
-    }
-    pub(super) fn cancel_reveal(&mut self) {
-        self.navigation += 1;
-        self.bookmark = None;
-        self.reveal_key = None;
-    }
-    pub(super) fn push_visit(&mut self, cx: &App) {
-        self.cancel_reveal();
-        self.back.push(self.visit(cx));
-        if self.back.len() > HISTORY {
-            self.back.remove(0);
-        }
-        self.forward.clear();
-    }
-    pub(super) fn remember(&mut self, next: &Location, cx: &App) {
-        let same = match (&self.location, next) {
-            (Location::Folder(a), Location::Folder(b)) => {
-                a.as_os_str().is_empty() || (self.page.is_none() && crate::places::same_path(a, b))
-            }
-            (a, b) => a == b,
-        };
-        if !same {
-            self.push_visit(cx);
-        } else {
-            self.cancel_reveal();
-        }
-    }
-    pub(super) fn restore_bookmark(&mut self, cx: &mut App) {
-        let Some(mark) = self.bookmark.take() else {
+        let current = self.saved_visit(cx);
+        let same = current.route.same(&route);
+        if same && matches!(arrival, Arrival::Regular) {
+            self.begin_navigation(cx);
             return;
-        };
-        if self.listing_discs() {
-            self.discs.update(cx, |t, cx| {
-                let ix = mark
-                    .selected
-                    .and_then(|k| t.delegate().rows.iter().position(|r| r.key() == k));
-                reselect(t, ix, cx);
-                t.vertical_scroll_handle
-                    .0
-                    .borrow()
-                    .base_handle
-                    .set_offset(mark.offset);
-            });
+        }
+        if (!same || matches!(arrival, Arrival::Row(_) | Arrival::File(_)))
+            && !matches!(&current.route.location, Location::Folder(p) if p.as_os_str().is_empty())
+        {
+            self.history.record(current.clone());
+        }
+        let place = self.tree_root.as_ref().filter(|root| {
+            matches!(&route.location, Location::Folder(path) if library::within(path, root))
+        }).cloned();
+        let mut visit = if same {
+            current
         } else {
-            self.table.update(cx, |t, cx| {
-                let ix = mark.selected.and_then(|k| t.delegate().position(&k));
-                reselect(t, ix, cx);
-                if let Some(marked) = mark.marked {
-                    t.delegate_mut().restore_marks(marked);
+            self.history.find(&route).unwrap_or_else(|| {
+                let mut visit = SavedVisit::new(route.clone(), self.prefs.albums);
+                visit.root = place;
+                if matches!(&route.location, Location::Folder(path)
+                    if self.location.is_folder() && crate::places::same_path(path, &self.path))
+                {
+                    visit.subfolders = Some(self.subfolders);
                 }
-                t.vertical_scroll_handle
-                    .0
-                    .borrow()
-                    .base_handle
-                    .set_offset(mark.offset);
-            });
-        }
+                visit
+            })
+        };
+        // Names may change between visits to the same destination.
+        visit.route = route;
+        let (file, target) = match arrival {
+            Arrival::Place(root) => {
+                visit.root = Some(root);
+                (None, None)
+            }
+            Arrival::FolderChild(child) => {
+                visit.child = Some(child);
+                (None, None)
+            }
+            Arrival::Sequence(recursive) => {
+                visit.subfolders = Some(recursive);
+                (None, None)
+            }
+            Arrival::File(file) => (Some(file), None),
+            Arrival::Row(key) => {
+                if self.subfolders
+                    && self.page.is_some()
+                    && matches!(&visit.route.location, Location::Folder(path) if crate::places::same_path(path, &self.path))
+                    && matches!(key, RowKey::Disc(_) | RowKey::Release(_))
+                {
+                    visit.subfolders = Some(true);
+                }
+                (None, Some(key))
+            }
+            Arrival::Regular => (None, None),
+        };
+        self.apply_visit(visit, TreeReveal::Ancestors, (file, target), window, cx);
     }
-    fn restore_visit(&mut self, visit: Visit, w: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_reveal();
-        let dest = visit.destination;
-        let same_folder = dest.location.is_folder() && self.location == dest.location;
-        self.prefs.albums = dest.albums;
-        if !same_folder {
-            self.enter(dest.location, TreeReveal::PreserveExpansion, w, cx);
+
+    pub(super) fn up_to_collection(
+        &mut self,
+        location: Location,
+        albums: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let route = Route::new(location, None);
+        let current = self.saved_visit(cx);
+        self.history.record(current);
+        let mut visit = self
+            .history
+            .find(&route)
+            .unwrap_or_else(|| SavedVisit::new(route, albums));
+        if visit.albums != albums {
+            visit.albums = albums;
+            visit.bookmark = Bookmark::default();
         }
-        self.page = dest.page;
-        self.reset_table(cx);
-        self.table
-            .update(cx, |t, _| t.delegate_mut().sort = visit.sort);
-        self.query = dest.query;
+        self.restore_visit(visit, window, cx);
+    }
+
+    pub(crate) fn restore_visit(
+        &mut self,
+        visit: SavedVisit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_visit(
+            visit,
+            TreeReveal::PreserveExpansion,
+            (None, None),
+            window,
+            cx,
+        );
+    }
+
+    fn apply_visit(
+        &mut self,
+        mut visit: SavedVisit,
+        tree_reveal: TreeReveal,
+        (file, target): (Option<Reveal>, Option<RowKey>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let had_list_focus = self.list_focus(cx).is_focused(window);
+        self.cancel_pending();
+        self.page = visit
+            .route
+            .page
+            .filter(|_| visit.route.location.is_folder());
+        self.prefs.albums = visit.albums;
+        self.folder_child = visit.child.take();
+        let search = if file.is_some() {
+            String::new()
+        } else {
+            visit.query
+        };
+        self.query = search.trim().to_lowercase();
         self.search
-            .update(cx, |s, cx| s.set_value(self.query.clone(), w, cx));
-        self.bookmark = Some(visit.bookmark);
-        self.filter(cx);
-        if self.location.is_folder() && !self.busy {
-            self.restore_bookmark(cx);
+            .update(cx, |s, cx| s.set_value(search, window, cx));
+        self.reset_table(cx);
+        self.table.update(cx, |t, _| {
+            t.delegate_mut().sort = visit.sort.map(|(field, descending)| {
+                (
+                    field,
+                    if descending {
+                        ColumnSort::Descending
+                    } else {
+                        ColumnSort::Ascending
+                    },
+                )
+            });
+        });
+        self.pending = Some(Pending {
+            bookmark: visit.bookmark,
+            target,
+        });
+        let location = visit.route.location;
+        self.membership = None;
+        self.membership_pending = false;
+        self.notice = None;
+        if let Location::Folder(path) = location {
+            self.indexed_sequence.cancel();
+            let recursive = visit
+                .subfolders
+                .unwrap_or_else(|| self.prefs.includes_subfolders(&path));
+            if (self.folder_ready || self.busy)
+                && self.location.is_folder()
+                && crate::places::same_path(&self.path, &path)
+                && self.subfolders == recursive
+                && file.is_none()
+            {
+                self.location = Location::Folder(path);
+                self.tree_root = visit.root;
+                self.sync_tree_with(tree_reveal, cx);
+                self.filter(cx);
+                if !self.busy {
+                    if !self.page_available() {
+                        self.notice = Some("This CD or release is unavailable.".into());
+                    }
+                    self.refresh_folder_traversal(cx);
+                    self.finish_listing(cx);
+                }
+            } else {
+                self.subfolders = recursive;
+                self.load_from(path, file, visit.root, tree_reveal, window, cx);
+            }
+        } else {
+            self.folder_traversal = Default::default();
+            self.generation += 1;
+            if self.busy {
+                self.folder_ready = false;
+            }
+            self.task.take();
+            self.busy = false;
+            self.count = 0;
+            self.duration = None;
+            self.location = location;
+            self.sync_tree_with(TreeReveal::PreserveExpansion, cx);
+            self.load_indexed_sequence(cx);
+            self.filter(cx);
+            let catalog = self.catalog.read(cx);
+            let unavailable = self.location.unavailable(catalog).or_else(|| {
+                catalog
+                    .handle()
+                    .is_none()
+                    .then_some("The Library is unavailable.")
+            });
+            if let Some(notice) = unavailable {
+                self.notice = Some(notice.into());
+                self.finish_listing(cx);
+            }
         }
-        self.list_focus(cx).focus(w, cx);
+        if had_list_focus {
+            self.list_focus(cx).focus(window, cx);
+        }
         cx.emit(ViewChanged);
         cx.notify();
     }
-    pub(super) fn enter(
+
+    pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.saved_visit(cx);
+        if let Some(next) = self.history.step(current, false) {
+            self.restore_visit(next, window, cx);
+        } else {
+            self.begin_navigation(cx);
+        }
+    }
+
+    pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.saved_visit(cx);
+        if let Some(next) = self.history.step(current, true) {
+            self.restore_visit(next, window, cx);
+        } else {
+            self.begin_navigation(cx);
+        }
+    }
+
+    pub(crate) fn ancestors(&self) -> Vec<Route> {
+        let mut routes = vec![self.route()];
+        while let Some((parent, _)) = routes.last().unwrap().parent(self.membership.as_deref()) {
+            routes.push(parent);
+        }
+        routes.reverse();
+        routes
+    }
+
+    pub fn can_go_up(&self) -> bool {
+        !(self.membership_pending && self.membership.is_none()
+            || self.busy && matches!(self.page, Some(Page::Disc(_))))
+            && self.route().parent(self.membership.as_deref()).is_some()
+    }
+
+    pub(crate) fn open_ancestor(
         &mut self,
-        location: Location,
-        tree_reveal: TreeReveal,
+        route: Route,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match location {
-            Location::Folder(path) if self.folder_ready && self.path == path => {
-                self.location = Location::Folder(path.clone());
-                self.page = None;
-                self.notice = None;
-                self.reset_table(cx);
-                self.clear_search(window, cx);
-                if self.active {
-                    self.folders
-                        .update(cx, |f, cx| f.show(&path, None, tree_reveal, cx));
-                }
-                self.filter(cx);
-                self.list_focus(cx).focus(window, cx);
-                cx.emit(ViewChanged);
-                cx.notify();
-            }
-            Location::Folder(path) => self.load_from(path, None, None, tree_reveal, window, cx),
-            location => {
-                if self.location != location {
-                    self.page = None;
-                    self.search.update(cx, |s, cx| s.set_value("", window, cx));
-                    self.query.clear();
-                    self.table.update(cx, |t, _| scroll_to_top(t));
-                    self.discs.update(cx, |t, _| scroll_to_top(t));
-                }
-                self.task.take();
-                self.generation += 1;
-                self.busy = false;
-                self.notice = None;
-                self.membership = None;
-                if let Location::Album { id, .. } = location {
-                    self.load_membership(id, cx);
-                }
-                self.location = location;
-                self.count = 0;
-                self.duration = None;
-                // The tree keeps the last folder in view without marking it
-                // as the current location.
-                let path = self.path.clone();
-                if self.active {
-                    self.folders.update(cx, |f, cx| {
-                        if !path.as_os_str().is_empty() && f.is_empty() {
-                            f.show(&path, None, TreeReveal::PreserveExpansion, cx);
-                        }
-                        f.set_highlight(false, cx);
-                    });
-                }
-                cx.emit(ViewChanged);
-                self.filter(cx);
-                self.list_focus(cx).focus(window, cx);
-                cx.notify();
-            }
-        }
-    }
-    pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(l) = self.back.pop() {
-            self.forward.push(self.visit(cx));
-            self.restore_visit(l, window, cx);
-        }
-    }
-    pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(l) = self.forward.pop() {
-            self.back.push(self.visit(cx));
-            self.restore_visit(l, window, cx);
-        }
-    }
-    /// Goes up one level: from a CD to its release, from a release or a CD
-    /// to the collection, from a folder to its parent. When the level above
-    /// is the previous history entry, Back restores it as it was.
-    pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let release = self.membership.clone();
-        let target = match (&self.page, &self.location) {
-            (Some(Page::Disc(_)), location) if let Some(m) = &release => {
-                (location.clone(), Some(Page::Release(m.key.clone())))
-            }
-            (Some(_), location) => (location.clone(), None),
-            (None, Location::Album { root, .. }) => match &release {
-                Some(m) => match m.key {
-                    DiscId::Library(id) => (
-                        Location::Release {
-                            root: *root,
-                            id,
-                            title: m.title.clone(),
-                        },
-                        None,
-                    ),
-                    _ => (Location::Library(*root), None),
-                },
-                None => (Location::Library(*root), None),
-            },
-            (None, Location::Release { root, .. }) => (Location::Library(*root), None),
-            (None, Location::Folder(_)) => {
-                if let Some(parent) = self.path.parent().map(Path::to_owned) {
-                    self.open(parent, window, cx);
-                }
-                return;
-            }
-            _ => return,
-        };
-        if self
-            .back
-            .last()
-            .is_some_and(|v| v.destination.location == target.0 && v.destination.page == target.1)
+        if self.can_go_up()
+            && self
+                .route()
+                .parent(self.membership.as_deref())
+                .is_some_and(|(parent, _)| parent.same(&route))
         {
-            self.back(window, cx);
-        } else if target.0 == self.location {
-            self.push_visit(cx);
-            self.project_page(target.1, window, cx);
+            self.up(window, cx);
         } else {
-            self.show(target.0, window, cx);
+            self.move_to(route, Arrival::Regular, window, cx);
         }
     }
-    /// Returns from a CD or release page of a folder to its collection.
-    pub fn show_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page.is_none() {
+
+    pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_go_up() {
+            self.begin_navigation(cx);
             return;
         }
-        if self.back.last().is_some_and(|v| {
-            v.destination.location == self.location && v.destination.page.is_none()
-        }) {
-            self.back(window, cx);
-        } else {
-            self.push_visit(cx);
-            self.project_page(None, window, cx);
-        }
-    }
-    pub fn can_go_up(&self) -> bool {
-        match self.location {
-            Location::Folder(_) => self.page.is_some() || self.path.parent().is_some(),
-            Location::Album { .. } | Location::Release { .. } => true,
-            _ => self.page.is_some(),
-        }
-    }
-    pub(super) fn select_revealed(&mut self, cx: &mut App) -> bool {
-        let Some(key) = &self.reveal_key else {
-            return false;
+        let Some((parent, target)) = self.route().parent(self.membership.as_deref()) else {
+            return;
         };
-        let Some(i) = self.table.read(cx).delegate().position(key) else {
-            return false;
+        let arrival = match (&self.location, &parent.location, &self.page) {
+            (Location::Folder(path), Location::Folder(_), None) => {
+                Arrival::FolderChild(path.clone())
+            }
+            _ => target.map_or(Arrival::Regular, Arrival::Row),
         };
-        self.table.update(cx, |t, cx| {
-            t.set_selected_row(i, cx);
-            t.scroll_to_row(i, cx);
+        self.move_to(parent, arrival, window, cx);
+    }
+
+    pub(super) fn finish_listing(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let listing_shelf = self.listing_shelf();
+        let shelf_position =
+            |discs: &Discs, key: &RowKey| discs.rows.iter().position(|r| r.key() == *key);
+        let target = pending.target.as_ref().and_then(|key| {
+            if listing_shelf {
+                shelf_position(self.discs.read(cx).delegate(), key)
+            } else {
+                let table = self.table.read(cx).delegate();
+                table.position(key).or_else(|| match key {
+                    RowKey::Track(source, Some(disc)) => {
+                        let sheet = self.alternate_sheet(&disc.sheet).unwrap_or(&disc.sheet);
+                        (0..table.len()).find(|&i| {
+                            table.track(i).is_some_and(|t| {
+                                crate::places::same_path(source, &t.source)
+                                    && t.disc.as_ref().is_some_and(|d| {
+                                        (disc.number, disc.start, disc.end)
+                                            == (d.number, d.start, d.end)
+                                            && crate::places::same_path(sheet, &d.sheet)
+                                    })
+                            })
+                        })
+                    }
+                    RowKey::Track(source, None) => (0..table.len()).find(|&i| {
+                        table.track(i).is_some_and(|t| {
+                            t.disc.is_none() && crate::places::same_path(source, &t.source)
+                        })
+                    }),
+                    RowKey::Disc(id)
+                        if self.location.is_folder()
+                            && self.page.is_none()
+                            && !self.can_list_discs() =>
+                    {
+                        table.first_on_disc(id)
+                    }
+                    _ => None,
+                })
+            }
         });
-        self.reveal_key = None;
-        true
+        if let Some(key) = &pending.target
+            && target.is_none()
+        {
+            let view = match key {
+                RowKey::Release(_) if self.can_list_discs() && !listing_shelf => Some(true),
+                RowKey::Disc(_) if self.location == Location::Library(None) && !listing_shelf => {
+                    Some(true)
+                }
+                RowKey::Key(_) | RowKey::Track(..) if listing_shelf => Some(false),
+                _ => None,
+            };
+            let clear_sort = matches!(key, RowKey::Disc(_))
+                && !listing_shelf
+                && view.is_none()
+                && self.table.read(cx).delegate().sort.is_some();
+            let clear_search = view.is_none() && !clear_sort && !self.query.is_empty();
+            if view.is_some() || clear_sort || clear_search {
+                self.pending = Some(pending);
+                let browser = cx.entity();
+                let navigation = self.navigation;
+                let window = self.window;
+                cx.defer(move |cx| {
+                    let _ = window.update(cx, |_, window, cx| {
+                        browser.update(cx, |b, cx| {
+                            if b.navigation != navigation || b.pending.is_none() {
+                                return;
+                            }
+                            if clear_search {
+                                b.clear_search(window, cx);
+                            }
+                            if let Some(albums) = view {
+                                b.prefs.albums = albums;
+                            }
+                            if clear_sort {
+                                b.table.update(cx, |t, _| t.delegate_mut().sort = None);
+                            }
+                            b.filter(cx);
+                            if b.location.is_folder() && !b.busy {
+                                b.finish_listing(cx);
+                            }
+                        });
+                    });
+                });
+                return;
+            }
+        }
+        let mark = pending.bookmark;
+        let reveal = |scroll: &UniformListScrollHandle, row| {
+            scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        };
+        if listing_shelf {
+            self.discs.update(cx, |t, cx| {
+                let selected = target.or_else(|| {
+                    mark.selected
+                        .as_ref()
+                        .and_then(|key| shelf_position(t.delegate(), key))
+                });
+                reselect(t, selected, cx);
+                mark.viewport
+                    .restore(t, SHELF_ROW_HEIGHT, |key| shelf_position(t.delegate(), key));
+                if let Some(row) = target {
+                    reveal(&t.vertical_scroll_handle, row);
+                }
+                cx.notify();
+            });
+        } else {
+            self.table.update(cx, |t, cx| {
+                let height = MusicTable::sync_rows(t);
+                let selected = target.or_else(|| {
+                    mark.selected
+                        .as_ref()
+                        .and_then(|key| t.delegate().position(key))
+                });
+                if target.is_none()
+                    && let Some(marked) = mark.marked
+                {
+                    // Toolkit row selection emits SelectRow, which clears the
+                    // delegate's selection. A range owns its own cursor.
+                    reselect(t, None, cx);
+                    t.delegate_mut()
+                        .restore_marks(Arc::unwrap_or_clone(marked), !self.query.is_empty());
+                } else {
+                    reselect(t, selected, cx);
+                    t.delegate_mut().clear_marks();
+                }
+                mark.viewport
+                    .restore(t, height, |key| t.delegate().position(key));
+                if let Some(row) = target {
+                    reveal(&t.vertical_scroll_handle, row);
+                }
+                self.selected = selected.and_then(|row| t.delegate().selected_key(row));
+                if target.is_some() || !t.delegate().has_selection_cursor() {
+                    t.delegate_mut().set_primary(self.selected.clone());
+                }
+                cx.notify();
+            });
+        }
+        if target.is_none()
+            && matches!(pending.target, Some(RowKey::Key(_) | RowKey::Track(..)))
+            && self.notice.is_none()
+        {
+            self.notice = Some("This recording is unavailable.".into());
+        }
+        cx.emit(ViewChanged);
+        cx.notify();
     }
 
     pub fn locate(
         &mut self,
         track: Arc<Track>,
+        context: library::DiscContext,
         dest: Destination,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.cancel_reveal();
-        // Reuse a collection already on screen, including its unfinished scan.
-        if track.library_id.is_none()
-            && self.location.is_folder()
-            && self
-                .programs
-                .iter()
-                .any(|d| d.id.contains(&track) && d.tracks.iter().any(|t| t.same_item(&track)))
-            && (dest == Destination::Disc || self.can_list_discs())
-        {
-            self.reveal_folder(track, dest, self.path.clone(), w, cx);
+        let request = self.begin_navigation(cx);
+        if dest == Destination::Locations {
+            let Some((id, store)) = track.library_id.zip(self.catalog.read(cx).handle()) else {
+                self.reveal_folder(track, context, w, cx);
+                return;
+            };
+            let lookup = store.query(&self.intent, request, move |s| {
+                s.rows(Scope::Library(None), &[id])
+            });
+            cx.spawn_in(w, async move |this, cx| {
+                let current = lookup
+                    .await
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|row| row.available));
+                let _ = this.update_in(cx, |b, w, cx| {
+                    if b.navigation_is_current(request) {
+                        b.reveal_folder(current.map_or(track, |row| row.track), context, w, cx);
+                    }
+                });
+            })
+            .detach();
             return;
         }
-        let revision = self.navigation;
         let lookup = self.catalog.read(cx).handle().map(|store| {
             let target = track.clone();
-            store.call(move |s| s.registered_disc(&target))
+            store.query(&self.intent, request, move |s| s.registered_disc(&target))
         });
         cx.spawn_in(w, async move |this, cx| {
-            let indexed = match lookup {
-                Some(result) => result.await,
+            let result = match lookup {
+                Some(lookup) => lookup.await,
                 None => Ok(None),
             };
             let _ = this.update_in(cx, |b, w, cx| {
-                if b.navigation != revision {
+                if !b.navigation_is_current(request) {
                     return;
                 }
-                let indexed = match indexed {
-                    Ok(disc) => disc,
-                    Err(e) if track.library_id.is_some() => {
-                        b.notice = Some(format!("{e:#}"));
-                        cx.notify();
-                        return;
-                    }
-                    Err(_) => None,
-                };
-                if let Some(disc) = indexed {
-                    let location = match dest {
-                        Destination::Disc => Location::Album {
+                match result {
+                    Ok(Some(disc)) => {
+                        let location = Location::Album {
                             root: Some(disc.root),
                             id: disc.album,
                             title: disc.title,
-                        },
-                        Destination::Collection => Location::Library(Some(disc.root)),
-                    };
-                    b.remember(&location, cx);
-                    if dest == Destination::Collection {
-                        b.prefs.albums = false;
-                    }
-                    b.clear_search(w, cx);
-                    b.enter(location, TreeReveal::Ancestors, w, cx);
-                    b.reveal_key = Some(RowKey::Key(disc.track));
-                    // The key listing will reveal even an off-screen, unpaged chapter.
-                } else {
-                    let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
-                    let Some(parent) = anchor.parent() else {
-                        return;
-                    };
-                    let folder =
-                        if dest == Destination::Collection && b.prefs.includes_subfolders(parent) {
-                            b.prefs
-                                .subfolders
-                                .iter()
-                                .filter(|r| r.include && library::within(parent, &r.path))
-                                .max_by_key(|r| r.path.components().count())
-                                .map(|r| r.path.as_path())
-                                .unwrap_or(parent)
-                        } else {
-                            parent
                         };
-                    b.reveal_folder(track.clone(), dest, folder.into(), w, cx);
+                        b.move_to(
+                            Route::new(location, None),
+                            Arrival::Row(RowKey::Key(disc.track)),
+                            w,
+                            cx,
+                        );
+                    }
+                    Ok(None) => w.push_notification("This recording is outside the Library.", cx),
+                    Err(_) => {
+                        w.push_notification("This recording is unavailable in the Library.", cx)
+                    }
                 }
             });
         })
@@ -447,27 +879,41 @@ impl Browser {
     fn reveal_folder(
         &mut self,
         track: Arc<Track>,
-        dest: Destination,
-        folder: PathBuf,
+        context: library::DiscContext,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let page = (dest == Destination::Disc).then(|| Page::Disc(DiscId::of(&track)));
-        let same_folder = self.location == Location::Folder(folder.clone());
-        if !same_folder || self.page != page || self.listing_discs() || !self.query.is_empty() {
-            self.push_visit(cx);
-        }
-        if dest == Destination::Collection {
-            self.prefs.albums = false;
-        }
-        if !same_folder {
-            self.load(folder, None, w, cx);
-        }
-        self.project_page(page, w, cx);
-        self.reveal_key = Some(RowKey::Track(track.source.clone(), track.disc.clone()));
-        if !self.select_revealed(cx) && !self.busy {
-            self.notice = Some("This recording is unavailable.".into());
-        }
+        let disc = DiscId::of(&track);
+        let Some(parent) = disc.folder() else {
+            return;
+        };
+        let matches_disc =
+            |route: &Route| matches!(&route.page, Some(Page::Disc(id)) if id.same(&disc));
+        let current = self.route();
+        let scope = self.reveal_collection_scope(parent, cx);
+        let recent = self.history.recent.iter().rev().find(|visit| {
+            matches_disc(&visit.route)
+                && matches!(&visit.route.location, Location::Folder(path)
+                    if crate::places::same_path(path, scope.as_deref().unwrap_or(parent))
+                        && (crate::places::same_path(path, parent) || visit.subfolders == Some(true)))
+        });
+        let route = if matches_disc(&current)
+            || (self.location.is_folder()
+                && self.page.is_none()
+                && self
+                    .physical_sequence_disc()
+                    .is_some_and(|id| id.same(&disc)))
+        {
+            current
+        } else if let Some(visit) = recent {
+            visit.route.clone()
+        } else {
+            let folder = parent.to_owned();
+            let page = context.allows(&track).then_some(Page::Disc(disc));
+            Route::new(Location::Folder(folder), page)
+        };
+        let key = RowKey::Track(track.source.clone(), track.disc.clone());
+        self.move_to(route, Arrival::Row(key), w, cx);
     }
 
     pub fn continue_cd(&self, request: crate::queue::Entry, cx: &mut Context<Self>) {
@@ -545,4 +991,125 @@ pub fn continue_cd(
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf, PlaylistId, Route,
+        RowKey, SavedVisit, ShelfLink,
+    };
+    use crate::library::DiscTrack;
+
+    fn playlist(id: PlaylistId) -> SavedVisit {
+        SavedVisit::new(Route::new(Location::Playlist(id), None), false)
+    }
+
+    #[test]
+    fn history_steps_restore_snapshots_while_direct_navigation_uses_the_latest_visit() {
+        let mut history = History::default();
+        let mut first = playlist(1);
+        first.query = "Earlier filter".into();
+        first.bookmark.selected = Some(RowKey::Key(12));
+        first.sort = Some((Field::Title, true));
+        history.record(first.clone());
+        let mut second = playlist(2);
+        second.bookmark.selected = Some(RowKey::Key(22));
+        let mut previous = history.step(second.clone(), false).unwrap();
+        assert_eq!(previous.query, first.query);
+        assert_eq!(previous.sort, first.sort);
+        assert_eq!(previous.bookmark.selected, Some(RowKey::Key(12)));
+        previous.query = "Later filter".into();
+        let forward = history.step(previous.clone(), true).unwrap();
+        assert_eq!(forward.bookmark.selected, Some(RowKey::Key(22)));
+        assert_eq!(history.find(&first.route).unwrap().query, previous.query);
+        assert_eq!(history.step(forward, false).unwrap().query, previous.query);
+        history.record(playlist(3));
+        assert!(!history.can_step(true));
+        assert!(!History::default().can_step(false));
+    }
+
+    #[test]
+    fn up_uses_the_release_and_directory_hierarchy() {
+        let child = Route::new(
+            Location::Album {
+                root: Some(3),
+                id: 22,
+                title: "Album CD 2".into(),
+            },
+            None,
+        );
+        let membership = Membership {
+            key: DiscId::Library(21),
+            title: "Album".into(),
+            number: 2,
+            subtitle: String::new(),
+        };
+        let (release, reveal) = child.parent(Some(&membership)).unwrap();
+        assert_eq!(reveal, Some(RowKey::Disc(DiscId::Library(22))));
+        assert_eq!(
+            release.location,
+            Location::Release {
+                root: Some(3),
+                id: 21,
+                title: "Album".into()
+            }
+        );
+        let (collection, reveal) = release.parent(None).unwrap();
+        assert_eq!(reveal, Some(RowKey::Release(DiscId::Library(21))));
+        let (directory, reveal) = collection.parent(None).unwrap();
+        assert_eq!(directory.location, Location::Collections);
+        assert_eq!(reveal, Some(RowKey::Link(ShelfLink::Collection(3))));
+
+        let (directory, reveal) = playlist(8).route.parent(None).unwrap();
+        assert_eq!(directory.location, Location::Playlists);
+        assert_eq!(reveal, Some(RowKey::Link(ShelfLink::Playlist(8))));
+    }
+
+    #[test]
+    fn cue_chapters_on_one_file_remain_distinct_through_workspace_serialization() {
+        let directory = PathBuf::from(r"C:\Collection");
+        let source = directory.join(r"CD 2\program.wav");
+        let sheet = source.with_extension("cue");
+        let key = |number, start| {
+            RowKey::Track(
+                source.clone(),
+                Some(DiscTrack {
+                    sheet: sheet.clone(),
+                    number,
+                    start,
+                    end: Some(start + 60),
+                }),
+            )
+        };
+        let mut visit = SavedVisit::new(
+            Route::new(
+                Location::Folder(directory),
+                Some(Page::Disc(DiscId::Cue(sheet.clone()))),
+            ),
+            true,
+        );
+        visit.bookmark.selected = Some(key(32, 1860));
+        visit.subfolders = Some(true);
+        let encoded = serde_json::to_vec(&visit).unwrap();
+        let restored: SavedVisit = serde_json::from_slice(&encoded).unwrap();
+        assert!(visit.route.same(&restored.route));
+        assert_eq!(restored.subfolders, Some(true));
+        assert_eq!(restored.bookmark.selected, Some(key(32, 1860)));
+        assert_ne!(restored.bookmark.selected, Some(key(33, 1920)));
+    }
+
+    #[test]
+    fn history_and_last_visit_cache_are_bounded_independently_of_other_browsers() {
+        let mut a = History::default();
+        let mut b = History::default();
+        b.record(playlist(0));
+        for id in 0..HISTORY as i64 + 5 {
+            a.record(playlist(id));
+        }
+        assert_eq!(a.back.len(), HISTORY);
+        assert_eq!(a.recent.len(), HISTORY);
+        assert!(a.find(&playlist(0).route).is_none());
+        assert!(b.find(&playlist(0).route).is_some());
+    }
 }

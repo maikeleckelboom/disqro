@@ -13,7 +13,38 @@
 //! Volumes, editions and compilations in neighbouring folders never merge, and
 //! anything ambiguous stays a set of independent discs: a missed release is
 //! better than a wrong one.
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, hash::Hash, path::Path};
+
+/// The Albums / CDs order projected from an already ordered collection.
+/// A release occupies the position of its first authored disc. Its other
+/// discs are moved beneath it in authored order, regardless of their sort keys.
+pub enum Ordered {
+    Disc(usize),
+    Release(Vec<usize>),
+}
+
+pub fn ordered<K: Eq + Hash>(
+    membership: impl IntoIterator<Item = Option<(K, u32)>>,
+) -> Vec<Ordered> {
+    let mut groups = HashMap::<K, Vec<(u32, usize)>>::new();
+    let mut order = Vec::new();
+    for (index, member) in membership.into_iter().enumerate() {
+        if let Some((key, number)) = member {
+            groups.entry(key).or_default().push((number, index));
+            order.push(None);
+        } else {
+            order.push(Some(Ordered::Disc(index)));
+        }
+    }
+    for mut group in groups.into_values() {
+        group.sort_unstable();
+        let first = group[0].1;
+        order[first] = Some(Ordered::Release(
+            group.into_iter().map(|(_, index)| index).collect(),
+        ));
+    }
+    order.into_iter().flatten().collect()
+}
 
 /// What release detection needs to know about one disc.
 pub struct Candidate<'a> {
@@ -59,11 +90,12 @@ fn marker(s: &str) -> Option<(std::ops::Range<usize>, u32)> {
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
-        if i == digits || i - digits > 2 || (i < bytes.len() && bytes[i].is_ascii_alphanumeric()) {
+        if i == digits || (i < bytes.len() && bytes[i].is_ascii_alphanumeric()) {
             continue;
         }
-        let number: u32 = lower[digits..i].parse().ok()?;
-        if number > 0 {
+        if let Ok(number) = lower[digits..i].parse::<u32>()
+            && number > 0
+        {
             return Some((at..i, number));
         }
     }

@@ -2,7 +2,8 @@ use crate::{
     analysis::{Analysis, Shape, Update},
     artwork,
     audio::{Command, Status, Transport},
-    library::clock,
+    library::{DiscContext, clock},
+    location::ActivateLocationControl,
     queue::{Queue, Repeat},
     theme::materials,
     timeline::{Program, SECOND},
@@ -13,7 +14,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{ContextMenuExt, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         tooltip::Tooltip,
         v_flex,
     },
@@ -32,7 +33,11 @@ mod wave;
 use crate::level_meter::LevelMeter;
 
 pub enum PlayerEvent {
-    Locate(Arc<crate::library::Track>, crate::browser::Destination),
+    Locate(
+        Arc<crate::library::Track>,
+        DiscContext,
+        crate::browser::Destination,
+    ),
     ContinueCd(crate::queue::Entry),
     TrackChanged,
     PlaySelection,
@@ -41,6 +46,35 @@ pub enum PlayerEvent {
     StateChanged,
 }
 impl EventEmitter<PlayerEvent> for Player {}
+
+pub(crate) fn reveal_items(
+    mut menu: PopupMenu,
+    player: &Entity<Player>,
+    track: &Arc<crate::library::Track>,
+    context: DiscContext,
+) -> PopupMenu {
+    use crate::browser::Destination;
+    for (destination, label, icon) in [
+        (Destination::Library, "Show in Library", IconName::Library),
+        (
+            Destination::Locations,
+            "Show in Locations",
+            IconName::FolderOpen,
+        ),
+    ] {
+        let (player, track) = (player.clone(), track.clone());
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .icon(icon)
+                .on_click(move |_, _, cx| {
+                    player.update(cx, |_, cx| {
+                        cx.emit(PlayerEvent::Locate(track.clone(), context, destination))
+                    });
+                }),
+        );
+    }
+    menu
+}
 
 /// What the system media overlay and the tray describe.
 #[derive(Clone, Default, PartialEq)]
@@ -451,49 +485,74 @@ impl Render for Player {
             )
         };
 
-        let art = if let Some(track) = s.track.clone() {
-            use crate::browser::Destination;
+        use crate::browser::Destination;
+        let disc_context = self
+            .playing_entry()
+            .map_or_default(|entry| entry.disc_context);
+        let art = art
+            .id("playing-artwork")
+            .when_some(s.track.clone(), |art, track| {
+                let (destination, label) = if track.library_id.is_some() {
+                    (Destination::Library, "Show in Library")
+                } else {
+                    (Destination::Locations, "Show in Locations")
+                };
+                let keyboard_track = track.clone();
+                art.role(Role::Button)
+                    .aria_label(label)
+                    .tab_index(0)
+                    .key_context("LocationControl")
+                    .focus_visible(|d| d.border_1().border_color(m.accent))
+                    .cursor_pointer()
+                    .tooltip(move |w, cx| Tooltip::new(label).build(w, cx))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(PlayerEvent::Locate(
+                            track.clone(),
+                            disc_context,
+                            destination,
+                        ));
+                    }))
+                    .on_action(cx.listener(move |_, _: &ActivateLocationControl, _, cx| {
+                        cx.emit(PlayerEvent::Locate(
+                            keyboard_track.clone(),
+                            disc_context,
+                            destination,
+                        ));
+                    }))
+            });
+        let reveal_menu = s.track.clone().map(|track| {
             let player = cx.entity();
-            let click = track.clone();
             let entry = self
                 .playing_entry()
-                .filter(|e| e.disc_context.allows(&e.track))
+                .filter(|entry| entry.disc_context.allows(&entry.track))
                 .cloned();
-            let (destination, hint) = if entry.is_some() {
-                (Destination::Disc, "Open playing CD")
-            } else {
-                (Destination::Collection, "Show in Collection")
-            };
-            art.id("open-playing-cd")
-                .cursor_pointer()
-                .tooltip(move |w, cx| Tooltip::new(hint).build(w, cx))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    cx.emit(PlayerEvent::Locate(click.clone(), destination))
-                }))
-                .context_menu(move |menu, _, _| {
-                    let (p, t) = (player.clone(), track.clone());
-                    menu.item(
-                        PopupMenuItem::new("Show in Collection").on_click(move |_, _, cx| {
-                            p.update(cx, |_, cx| {
-                                cx.emit(PlayerEvent::Locate(t.clone(), Destination::Collection))
-                            })
-                        }),
+            Button::new("now-playing-menu")
+                .ghost()
+                .xsmall()
+                .icon(
+                    Icon::new(IconName::Ellipsis)
+                        .size(px(16.))
+                        .text_color(m.text_muted),
+                )
+                .accessibility_label("Now Playing actions")
+                .tooltip("Now Playing actions")
+                .dropdown_menu(move |menu, _, _| {
+                    reveal_items(menu, &player, &track, disc_context).when_some(
+                        entry.clone(),
+                        |menu, entry| {
+                            let player = player.clone();
+                            menu.item(PopupMenuItem::new("Continue This CD").on_click(
+                                move |_, _, cx| {
+                                    player.update(cx, |_, cx| {
+                                        cx.emit(PlayerEvent::ContinueCd(entry.clone()))
+                                    });
+                                },
+                            ))
+                        },
                     )
-                    .when_some(entry.clone(), |menu, entry| {
-                        let p = player.clone();
-                        menu.item(PopupMenuItem::new("Continue This CD").on_click(
-                            move |_, _, cx| {
-                                p.update(cx, |_, cx| {
-                                    cx.emit(PlayerEvent::ContinueCd(entry.clone()))
-                                })
-                            },
-                        ))
-                    })
                 })
-                .into_any_element()
-        } else {
-            art.into_any_element()
-        };
+        });
+
         let now = self.now_playing();
         let title = now
             .as_ref()
@@ -753,12 +812,20 @@ impl Render for Player {
                                     .min_w_0()
                                     .gap(px(1.))
                                     .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(14.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(m.text)
-                                            .child(title),
+                                        h_flex()
+                                            .min_w_0()
+                                            .gap(px(6.))
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(px(14.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(m.text)
+                                                    .child(title),
+                                            )
+                                            .children(reveal_menu),
                                     )
                                     .child(
                                         div()

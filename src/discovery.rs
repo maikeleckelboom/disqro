@@ -41,6 +41,7 @@ struct Request {
     recursive: bool,
     output: Sender<Batch>,
 }
+#[derive(Clone)]
 pub struct Scanner(Sender<Request>);
 
 impl Scanner {

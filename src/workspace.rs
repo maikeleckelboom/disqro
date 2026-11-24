@@ -54,6 +54,10 @@ gpui_kit::actions!(
         GoBack,
         GoForward,
         GoUp,
+        PreviousDestination,
+        NextDestination,
+        PreviousRelease,
+        NextRelease,
         FocusLocation,
         Refresh,
         NextTrack,
@@ -100,6 +104,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", GoBack, Some("Disqro && !Input")),
         KeyBinding::new("alt-right", GoForward, Some("Disqro")),
         KeyBinding::new("alt-up", GoUp, Some("Disqro && !Queue")),
+        KeyBinding::new(
+            "alt-pageup",
+            PreviousDestination,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-pagedown",
+            NextDestination,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-shift-pageup",
+            PreviousRelease,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-shift-pagedown",
+            NextRelease,
+            Some("Disqro && !Input && !Queue"),
+        ),
         KeyBinding::new("f5", Refresh, Some("Disqro")),
         KeyBinding::new("ctrl-right", NextTrack, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-left", PreviousTrack, Some("Disqro && !Input")),
@@ -311,10 +335,13 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&player, window, |s: &mut Self, _, e, w, cx| match e {
-                PlayerEvent::Locate(track, dest) => {
-                    let browser = s.ensure_browser(w, cx);
-                    s.reveal_active_browser(w, cx);
-                    browser.update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
+                PlayerEvent::Locate(track, context, dest) => {
+                    if let Some(browser) = s.browser(cx) {
+                        s.reveal_active_browser(w, cx);
+                        browser.update(cx, |b, cx| b.locate(track.clone(), *context, *dest, w, cx));
+                    } else {
+                        w.push_notification("Open a Music Browser to show this recording.", cx);
+                    }
                 }
                 PlayerEvent::ContinueCd(entry) => match s.browser(cx) {
                     Some(b) => b.update(cx, |b, cx| b.continue_cd(entry.clone(), cx)),
@@ -585,25 +612,15 @@ impl Workspace {
             PaneEvent::Duplicate => self.duplicate(&pane, window, cx),
         }
     }
-    /// New browsers start like the one last changed; the folders shown with
-    /// their subfolders are the same in every browser.
+    /// Seed future browsers from the most recently used browser.
     fn remember_browser(&mut self, browser: &Entity<Browser>, cx: &mut Context<Self>) {
         let b = browser.read(cx);
         let layouts = b.table.read(cx).delegate().layouts.clone();
         let prefs = b.prefs.clone();
         self.services.router.update(cx, |r, _| {
             r.template.layouts = layouts;
-            r.template.prefs = prefs.clone();
+            r.template.prefs = prefs;
         });
-        for pane in self.ordered(cx) {
-            if let Some(other) = browser_of(&pane, cx)
-                && other != *browser
-                && other.read(cx).prefs.subfolders != prefs.subfolders
-            {
-                let rules = prefs.subfolders.clone();
-                other.update(cx, |b, _| b.prefs.subfolders = rules);
-            }
-        }
     }
 
     fn new_pane(
@@ -1625,6 +1642,30 @@ impl Render for Workspace {
                     b.update(cx, |b, cx| b.up(w, cx))
                 }
             }))
+            .on_action(cx.listener(|s, _: &PreviousDestination, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| b.step_sequence(None, false, w, cx));
+                }
+            }))
+            .on_action(cx.listener(|s, _: &NextDestination, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| b.step_sequence(None, true, w, cx));
+                }
+            }))
+            .on_action(cx.listener(|s, _: &PreviousRelease, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.step_sequence(Some(crate::browser::SequenceKind::Release), false, w, cx)
+                    });
+                }
+            }))
+            .on_action(cx.listener(|s, _: &NextRelease, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.step_sequence(Some(crate::browser::SequenceKind::Release), true, w, cx)
+                    });
+                }
+            }))
             .on_action(cx.listener(|s, _: &Refresh, w, cx| {
                 if let Some(b) = s.browser(cx) {
                     b.update(cx, |b, cx| b.reload(w, cx))
@@ -1642,6 +1683,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
                 s.reveal_active_browser(w, cx);
                 if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.begin_navigation(cx);
+                    });
                     let search = b.read(cx).search.clone();
                     search.update(cx, |i, cx| {
                         i.focus(w, cx);
@@ -1717,7 +1761,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &Quit, w, cx| s.quit(w, cx)))
             .on_action(cx.listener(|s, _: &PlaySelected, w, cx| {
                 let Some(browser) = s.browser(cx) else { return };
-                if browser.read(cx).listing_discs() {
+                if browser.read(cx).listing_shelf() {
                     browser.update(cx, |b, cx| {
                         let ix = b.discs.read(cx).selected_row().unwrap_or(0);
                         b.show_disc(ix, w, cx);
@@ -1726,7 +1770,8 @@ impl Render for Workspace {
                     browser.update(cx, |b, cx| {
                         let t = b.table.read(cx);
                         b.activate(
-                            t.selected_row()
+                            t.delegate()
+                                .cursor_row(t.selected_row())
                                 .unwrap_or_else(|| t.delegate().first_track()),
                             w,
                             cx,

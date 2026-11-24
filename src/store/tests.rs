@@ -727,3 +727,84 @@ fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
     assert_eq!(s.disc_keys(Scope::Release(one.id)).unwrap()[2], liked);
     assert_eq!(all(&s, Scope::Liked)[0].id, liked);
 }
+
+#[test]
+fn indexed_navigation_uses_the_unfiltered_shelf_and_excludes_removed_media() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Collection");
+    let nested = root.join("Archive/Volumes/Early");
+    let other = dir.path().join("Another collection");
+    releases(&nested);
+    releases(&other);
+    fs::create_dir_all(root.join("Empty")).unwrap();
+    fs::write(root.join("Loose.wav"), b"loose").unwrap();
+    let mut s = Store::memory();
+    let root_id = s.add_root(&root).unwrap();
+    let other_id = s.add_root(&other).unwrap();
+    index(&mut s, root_id);
+    index(&mut s, other_id);
+
+    let albums = s.albums(Some(root_id), "").unwrap();
+    let start = albums
+        .iter()
+        .find(|album| album.title == "Vol I (CD1)")
+        .unwrap();
+    let (scope, nodes) = s.navigation_albums(None, start.id).unwrap().unwrap();
+    assert_eq!(scope, root_id);
+    assert_eq!(
+        nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+        albums.iter().map(|album| album.id).collect::<Vec<_>>()
+    );
+    assert_eq!(nodes.iter().filter(|node| node.is_disc).count(), 5);
+    assert!(nodes.iter().all(|node| node.title != "Empty"));
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node.id == start.id)
+            .unwrap()
+            .release
+            .as_ref()
+            .unwrap()
+            .number,
+        1
+    );
+
+    fs::remove_file(nested.join("Single/CD/disc.flac")).unwrap();
+    index(&mut s, root_id);
+    let (_, nodes) = s
+        .navigation_albums(Some(root_id), start.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(nodes.iter().filter(|node| node.is_disc).count(), 4);
+    assert!(nodes.iter().all(|node| node.title != "Single"));
+}
+
+#[test]
+fn collection_playback_keeps_release_discs_together_even_when_their_years_differ() {
+    let dir = tempfile::tempdir().unwrap();
+    releases(dir.path());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    index(&mut s, root);
+    s.db.execute(
+        "UPDATE albums SET year = CASE title WHEN 'Vol I (CD1)' THEN 1980 WHEN 'Vol I (CD2)' THEN 2010 ELSE 1995 END",
+        [],
+    ).unwrap();
+    let keys = s.collection_keys(Some(root), "two".into()).unwrap();
+    let titles: Vec<_> = s
+        .rows(Scope::Library(Some(root)), &keys)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.track.title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Vol I (CD1) two",
+            "Vol I (CD2) two",
+            "Single two",
+            "Vol II (CD1) two",
+            "Vol II (CD2) two"
+        ]
+    );
+}
