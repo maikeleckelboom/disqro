@@ -114,7 +114,15 @@ fn audio_headers_invalidate_without_changing_logical_identity() {
 #[test]
 #[ignore = "creates a 100,089-track synthetic collection for scale measurements"]
 fn six_figure_collection_projection() {
-    let dir = tempfile::tempdir().unwrap();
+    // An opt-in retained fixture lets the native player exercise the exact measured catalog.
+    let keep_in = std::env::var_os("DISQRO_SCALE_FIXTURES");
+    let dir = match &keep_in {
+        Some(parent) => tempfile::tempdir_in(parent),
+        None => tempfile::tempdir(),
+    }
+    .unwrap();
+    let media = dir.path().join("Discs");
+    fs::create_dir(&media).unwrap();
     let mut lines = String::new();
     for i in 1..=99 {
         let minute = i - 1;
@@ -123,7 +131,7 @@ fn six_figure_collection_projection() {
         ));
     }
     for i in 0..1011 {
-        let disc = dir.path().join(i.to_string());
+        let disc = media.join(i.to_string());
         fs::create_dir(&disc).unwrap();
         fs::write(disc.join("disc.wav"), []).unwrap();
         fs::write(
@@ -133,12 +141,12 @@ fn six_figure_collection_projection() {
         .unwrap();
     }
     let start = Instant::now();
-    let (rows, notices) = collect(dir.path(), true, None);
+    let (rows, notices) = collect(&media, true, None);
     let scan = start.elapsed();
     assert!(notices.is_empty());
     assert_eq!(rows.len(), 100089);
     let start = Instant::now();
-    let groups = crate::collection::Discs::group(&rows, &Default::default(), dir.path());
+    let groups = crate::collection::Discs::group(&rows, &Default::default(), &media);
     let grouping = start.elapsed();
     assert_eq!(groups.len(), 1011);
     let start = Instant::now();
@@ -155,6 +163,30 @@ fn six_figure_collection_projection() {
         grouping,
         start.elapsed()
     );
+    let mut store = crate::store::Store::open(&dir.path().join("library.sqlite3")).unwrap();
+    let root = store.add_root(&media).unwrap();
+    let indexed = crate::store::index_root(&mut store, root, None, &|| true, &mut |_| {}).unwrap();
+    assert_eq!(indexed.tracks, 100089);
+    for term in ["Volume 777", "Track 99", "Track"] {
+        let start = Instant::now();
+        let results = store.search_library(term, 5, 0).unwrap();
+        assert!(results.more);
+        assert!(
+            results
+                .hits
+                .iter()
+                .any(|h| matches!(h.target, crate::store::search::Target::Track(_)))
+        );
+        eprintln!(
+            "Catalog search {term:?}: {:?} ({} grouped hits)",
+            start.elapsed(),
+            results.hits.len()
+        );
+    }
+    drop(store);
+    if keep_in.is_some() {
+        eprintln!("Scale fixture profile: {}", dir.keep().display());
+    }
 }
 
 #[test]
@@ -251,6 +283,7 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
     assert!(
         local_program(dir.path(), first, Inferred, None)
             .unwrap()
+            .tracks
             .is_empty()
     );
 
@@ -262,7 +295,9 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
     assert!(queue.upcoming().is_empty());
     assert_eq!(queue.revision, revision);
 
-    let explicit = local_program(dir.path(), first, Selected, None).unwrap();
+    let explicit = local_program(dir.path(), first, Selected, None)
+        .unwrap()
+        .tracks;
     assert_eq!(&*explicit, tracks);
     let duplicates = queue.add(&[tracks[1].clone(), tracks[1].clone()]);
     assert!(queue.continue_disc(id, &explicit, Selected));
@@ -301,6 +336,8 @@ fn tagged_wavs_continue_in_track_order_within_the_same_album_and_disc() {
     let first = collect(dir.path(), false, None).0.remove(1);
     assert!(Inferred.allows(&first));
     let program = local_program(dir.path(), &first, Inferred, None).unwrap();
+    assert!(program.has_sibling_disc);
+    let program = program.tracks;
     assert_eq!(
         program.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
         ["b", "a"]

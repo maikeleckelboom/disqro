@@ -31,7 +31,6 @@ pub static TYPE: PanelType = PanelType {
     icon: IconName::AudioLines,
     instances: Instances::Multiple,
     home: Home::Main,
-    toolbar: false,
     build: |s, r, w, cx| Rc::new(cx.new(|cx| Spectrum::new(s, r.state(), w, cx))),
 };
 

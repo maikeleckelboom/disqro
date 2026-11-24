@@ -381,6 +381,25 @@ fn search_and_disc_playback_share_exact_chapter_identity_across_relocation() {
         (sections.len(), sections[0].count, listing.keys.len()),
         (1, 1, 1)
     );
+    // Filtering down to one file of a multi-file CUE does not turn its
+    // embedded art into the section's cover.
+    assert!(sections[0].cue_image.is_none());
+    let (_, image_section) = s
+        .table_listing(
+            &Query {
+                search: "title:two".into(),
+                ..query.clone()
+            },
+            true,
+        )
+        .unwrap();
+    assert_eq!(image_section.len(), 1);
+    assert_eq!(image_section[0].count, 1);
+    assert!(image_section[0].cover.is_none());
+    assert_eq!(
+        image_section[0].cue_image,
+        Some(root.join("Album A/a.flac"))
+    );
     let selected = s.rows(query.scope, &listing.keys).unwrap().pop().unwrap();
     let disc = s.registered_disc(&selected.track).unwrap().unwrap();
     assert_eq!(
@@ -707,7 +726,7 @@ fn indexed_releases_group_discs_of_one_folder_and_list_them_in_order() {
     // A release page groups its discs; a search keeps the matching disc.
     let query = Query {
         scope: Scope::Release(one.id),
-        search: "two".into(),
+        search: "title:two".into(),
         order: None,
     };
     let (listing, sections) = s.table_listing(&query, true).unwrap();
@@ -806,5 +825,59 @@ fn collection_playback_keeps_release_discs_together_even_when_their_years_differ
             "Vol II (CD1) two",
             "Vol II (CD2) two"
         ]
+    );
+}
+
+#[test]
+fn catalog_search_follows_cue_identity_and_catalog_edits() {
+    use search::Target;
+    let dir = tempfile::tempdir().unwrap();
+    collection(dir.path());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    index(&mut s, root);
+    let track = chapter(&all(&s, Scope::Library(Some(root))), "a.cue", 2).id;
+    let playlist = s.create_playlist("Two mixes", &[track, track]).unwrap();
+    let matches = s.search_library("Tw", 5, 0).unwrap().hits;
+    assert!(matches.iter().any(|h| h.target == Target::Track(track)
+        && h.detail.contains("a.cue")
+        && h.detail.contains("Chapter 2")));
+    assert!(
+        matches
+            .iter()
+            .any(|h| h.target == Target::Playlist(playlist))
+    );
+    assert!(
+        s.search_library("art", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Artist("Artist".into()))
+    );
+    fs::write(
+        dir.path().join("Album A/a.cue"),
+        ALBUM_A.replace("Two", "Deux"),
+    )
+    .unwrap();
+    index(&mut s, root);
+    assert!(
+        s.search_library("Deux", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Track(track))
+    );
+    assert!(
+        !s.search_library("Two", 5, 0)
+            .unwrap()
+            .hits
+            .iter()
+            .any(|h| h.target == Target::Track(track))
+    );
+    s.remove_root(root).unwrap();
+    assert!(s.search_library("Deux", 5, 0).unwrap().hits.is_empty());
+    assert_eq!(
+        s.search_library("Two", 5, 0).unwrap().hits[0].target,
+        Target::Playlist(playlist)
     );
 }

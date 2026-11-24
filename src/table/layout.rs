@@ -44,6 +44,10 @@ pub struct Layout {
     /// choice into the Cover column.
     #[serde(default, skip_serializing)]
     artwork: Option<bool>,
+    /// The column whose boundary is being dragged. It keeps its width while
+    /// the other text columns absorb the change.
+    #[serde(skip)]
+    pub(super) holding: Option<usize>,
 }
 fn adaptive() -> bool {
     true
@@ -62,6 +66,7 @@ impl Layout {
             adaptive: true,
             hidden: Vec::new(),
             artwork: None,
+            holding: None,
         }
     }
 
@@ -79,6 +84,32 @@ impl Layout {
 
     pub(super) fn has(&self, field: Field) -> bool {
         self.columns.iter().any(|c| c.field == field)
+    }
+
+    /// Title has room within its minimum width for hierarchy even when pinned
+    /// or when Cover and Number are hidden.
+    /// Where a group header places its artwork and title: the left edges of
+    /// the Cover and Title columns, when Cover precedes Title.
+    pub(super) fn header_lead(&self, widths: &[f32]) -> Option<(f32, f32, f32)> {
+        let title = self.columns.iter().position(|c| c.field == Field::Title)?;
+        let cover = self.columns[..title]
+            .iter()
+            .position(|c| c.field == Field::Cover)?;
+        let left = |ix: usize| widths[..ix].iter().sum::<f32>();
+        Some((left(cover), widths[cover], left(title)))
+    }
+
+    pub(super) fn content_inset(&self, col: usize, grouped: bool) -> f32 {
+        // A Cover column before Title already sets grouped tracks in from
+        // their header, whose artwork sits in that column.
+        if grouped
+            && self.columns[col].field == Field::Title
+            && !self.columns[..col].iter().any(|c| c.field == Field::Cover)
+        {
+            28.
+        } else {
+            0.
+        }
     }
 
     fn show_cover(&mut self, shown: bool) {
@@ -201,16 +232,68 @@ impl Layout {
                         .map(|i| (i, weight))
                 })
                 .collect();
-            let mut remaining_weight: f32 = eligible.iter().map(|(_, w)| w).sum();
-            let mut remaining = budget - total;
-            for (i, weight) in eligible {
-                let extra = (remaining * weight / remaining_weight).round();
-                widths[i] += extra;
-                remaining -= extra;
-                remaining_weight -= weight;
+            if !eligible.is_empty() {
+                distribute(&mut widths, &eligible, budget - total);
+                return widths;
             }
         }
+        // The text columns are the table's elastic part: they share the
+        // pane in the proportions the listener gave them, growing into spare
+        // room and giving way before the table scrolls. Fixed columns such
+        // as Time, Rating and Favorite keep their width. The column being
+        // resized holds still, so only its own boundary follows the pointer.
+        let elastic: Vec<(usize, f32)> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                matches!(c.field, Field::Title | Field::Artist | Field::Album)
+                    && Some(*i) != self.holding
+            })
+            .map(|(i, _)| (i, widths[i]))
+            .collect();
+        if total < budget {
+            distribute(&mut widths, &elastic, budget - total);
+        } else if total > budget {
+            let give: Vec<(usize, f32)> = elastic
+                .iter()
+                .map(|&(i, w)| (i, (w - self.columns[i].field.min_width()).max(0.)))
+                .filter(|(_, give)| *give > 0.)
+                .collect();
+            let capacity: f32 = give.iter().map(|(_, g)| g).sum();
+            let cut = (total - budget).min(capacity);
+            distribute(&mut widths, &give, -cut);
+        }
         widths
+    }
+
+    /// Fixes every column at the width it is shown at once a resize ends, so
+    /// the boundary stays where it was released.
+    pub(super) fn settle(&mut self, shown: &[f32]) {
+        self.holding = None;
+        if self.adaptive || shown.len() != self.columns.len() {
+            return;
+        }
+        for (column, width) in self.columns.iter_mut().zip(shown) {
+            column.width = width.round();
+        }
+        self.adaptive = false;
+    }
+}
+
+/// Adds `amount` whole pixels (negative to remove) across `weighted`
+/// columns in proportion to their weights, in column order.
+fn distribute(widths: &mut [f32], weighted: &[(usize, f32)], amount: f32) {
+    let mut remaining_weight: f32 = weighted.iter().map(|(_, w)| w).sum();
+    let mut remaining = amount;
+    for &(i, weight) in weighted {
+        if remaining_weight <= 0. {
+            break;
+        }
+        let extra = (remaining * weight / remaining_weight).round();
+        widths[i] += extra;
+        remaining -= extra;
+        remaining_weight -= weight;
     }
 }
 
@@ -235,7 +318,7 @@ pub struct Layouts {
 impl Default for Layouts {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             disc: Layout::new(ContextKind::Disc),
             mixed: Layout::new(ContextKind::Mixed),
             playlist: Layout::new(ContextKind::Playlist),
@@ -268,9 +351,12 @@ impl Layouts {
                     return false;
                 }
                 seen.push(c.field);
-                if (version < 2 && c.field == Field::Favorite && c.width == 34.)
-                    || !(24. ..=c.field.max_width()).contains(&c.width)
-                {
+                // Version 3 made Favorite a compact glyph column. Earlier
+                // widths were sized for its text heading.
+                let old_default = version < 3
+                    && c.field == Field::Favorite
+                    && (c.width == 88. || (version < 2 && c.width == 34.));
+                if old_default || !(24. ..=c.field.max_width()).contains(&c.width) {
                     c.width = c.field.width();
                 }
                 true
@@ -289,7 +375,7 @@ impl Layouts {
             }
             layout.normalize();
         }
-        self.version = 2;
+        self.version = 3;
         self
     }
 
@@ -429,7 +515,7 @@ mod tests {
             ]
         );
         let widths: Vec<f32> = layouts.disc.columns.iter().map(|c| c.width).collect();
-        assert_eq!(widths, [44., 40., 354., 81., 88.]);
+        assert_eq!(widths, [44., 40., 354., 81., 36.]);
         assert_eq!(
             fields(&layouts.mixed),
             [Field::Title, Field::Path, Field::Artist, Field::Favorite]
@@ -493,12 +579,14 @@ mod tests {
         layout.set_pin(Album, Pin::Right);
         layout.adaptive = false;
         let saved = serde_json::to_value(&layout).unwrap();
-        let widths = layout.widths(304.);
-        // The right pair fits. Neither left column fits beside it with room to scroll.
-        assert_eq!(layout.scrolling(&widths, 304.), 0..4);
-        assert_eq!(layout.scrolling(&widths, 420.), 1..4);
-        assert_eq!(layout.scrolling(&widths, 1000.), 2..4);
-        assert_eq!(layout.widths(1000.), widths);
+        let scrolling = |viewport: f32| layout.scrolling(&layout.widths(viewport), viewport);
+        // Text columns give way to their minimums first. Then the right pair
+        // still fits, and the inner left pin scrolls before the outer one.
+        assert_eq!(scrolling(200.), 0..4);
+        assert_eq!(scrolling(304.), 1..4);
+        assert_eq!(scrolling(420.), 2..4);
+        assert_eq!(scrolling(1000.), 2..4);
+        assert_eq!(layout.widths(200.), layout.widths(420.));
         assert_eq!(serde_json::to_value(layout).unwrap(), saved);
     }
     #[test]
@@ -569,7 +657,7 @@ mod tests {
             let last = cols.last().unwrap();
             assert_eq!(
                 (last.field, last.pin, last.width),
-                (Favorite, Pin::None, 88.)
+                (Favorite, Pin::None, 36.)
             );
         }
     }
@@ -592,8 +680,9 @@ mod tests {
         let disc = loaded.disc.columns.last().unwrap();
         assert_eq!(
             (disc.field, disc.width, disc.pin),
-            (Favorite, 88., Pin::Right)
+            (Favorite, 36., Pin::Right)
         );
+        // Explicit widths survive the glyph-heading migration, even when hidden.
         assert_eq!(loaded.mixed.columns[2].field, Favorite);
         assert_eq!(loaded.mixed.columns[2].width, 137.);
         assert!(!loaded.playlist.has(Favorite));
@@ -656,21 +745,31 @@ mod tests {
         // An untouched layout fills a wide table.
         let mut layout = Layout::new(ContextKind::Mixed);
         let shown = layout.widths(1200.);
-        assert!(shown.iter().sum::<f32>() > 1188.);
-        // The first resize keeps every column as shown...
+        assert_eq!(shown.iter().sum::<f32>(), 1200.);
+        // The first resize keeps every column as shown.
         layout.freeze(&shown);
         assert!(!layout.adaptive);
         assert_eq!(layout.widths(1200.), shown);
-        // ...so widening one column moves nothing else, and the table
-        // scrolls rather than squeezing its neighbours.
-        layout.columns[3].width += 120.;
-        let after = layout.widths(1200.);
-        for (ix, (before, now)) in shown.iter().zip(&after).enumerate() {
-            let expected = if ix == 3 { before + 120. } else { *before };
-            assert_eq!(*now, expected);
+        // While Artist is dragged wider it holds its width, and the other
+        // text columns give way in proportion. Fixed columns never move.
+        layout.holding = Some(2);
+        layout.columns[2].width += 120.;
+        let during = layout.widths(1200.);
+        assert_eq!(during[2], shown[2] + 120.);
+        assert_eq!(during.iter().sum::<f32>(), 1200.);
+        for ix in [0, 4, 5] {
+            assert_eq!(during[ix], shown[ix]);
         }
-        // A resized layout no longer stretches with the window.
-        assert_eq!(layout.widths(2400.), after);
+        assert!(during[1] < shown[1] && during[3] < shown[3]);
+        // Releasing keeps the boundary where it was let go.
+        layout.settle(&during);
+        assert_eq!(layout.holding, None);
+        assert_eq!(layout.widths(1200.), during);
+        // A wider pane is shared by the text columns, never left empty.
+        let wide = layout.widths(2400.);
+        assert_eq!(wide.iter().sum::<f32>(), 2400.);
+        assert_eq!(wide[0], during[0]);
+        assert!(wide[1] > during[1] && wide[2] > during[2] && wide[3] > during[3]);
         assert_eq!(serde_json::to_value(&layout).unwrap()["adaptive"], false);
         // Reset, and layouts saved before the flag existed, stay adaptive.
         assert!(Layout::new(ContextKind::Mixed).adaptive);
@@ -710,6 +809,42 @@ mod tests {
                 Field::Favorite
             ]
         );
+    }
+    #[test]
+    fn grouped_title_inset_stays_inside_its_own_column() {
+        let mut layout = Layout::new(ContextKind::Disc);
+        let check = |layout: &Layout, viewport: f32| {
+            let widths = layout.widths(viewport);
+            for (i, col) in layout.columns.iter().enumerate() {
+                assert_eq!(layout.content_inset(i, false), 0.);
+                let inset = layout.content_inset(i, true);
+                if col.field == Field::Title {
+                    assert_eq!(inset, 28.);
+                    assert!(widths[i] - 2. * col.field.padding() - inset >= 94.);
+                } else {
+                    assert_eq!(inset, 0.);
+                }
+            }
+            widths
+        };
+        check(&layout, 310.);
+        layout.show_cover(true);
+        assert!(layout.move_column(2, 1));
+        layout.set_pin(Field::Title, Pin::Left);
+        layout.set_pin(Field::Cover, Pin::Right);
+        let title = 0;
+        let cover = layout.columns.len() - 1;
+        layout.columns[title].width = Field::Title.min_width();
+        layout.columns[cover].width = Field::Cover.max_width();
+        let narrow = check(&layout, 240.);
+        assert_eq!(narrow[title], Field::Title.min_width());
+        assert_eq!(narrow[cover], Field::Cover.max_width());
+        assert!(layout.scrolling(&narrow, 240.).contains(&title));
+        let wide = check(&layout, 1040.);
+        let scrolling = layout.scrolling(&wide, 1040.);
+        assert!(!scrolling.contains(&title) && !scrolling.contains(&cover));
+        layout.show_cover(false);
+        check(&layout, 240.);
     }
     #[test]
     fn each_context_keeps_its_own_cover_size() {

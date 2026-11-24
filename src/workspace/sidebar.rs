@@ -41,7 +41,11 @@ impl SidebarAction {
 
 /// Only offer a shortcut for a pair already sharing a group or vertical
 /// divider. Other placements remain under the user's normal dock controls.
-fn arrangement(tree: &PaneTree, selected: PanelId, peer: PanelId) -> Option<SidebarAction> {
+pub(super) fn arrangement(
+    tree: &PaneTree,
+    selected: PanelId,
+    peer: PanelId,
+) -> Option<SidebarAction> {
     let group = tree.find_panel_node(selected)?;
     let node = tree.find_node(group)?;
     let PaneRef::Tabs { panels, .. } = node.kind() else {
@@ -84,6 +88,134 @@ fn arrangement(tree: &PaneTree, selected: PanelId, peer: PanelId) -> Option<Side
 }
 
 impl Workspace {
+    pub(super) fn sidebar_hidden(&self, side: Home) -> bool {
+        match side {
+            Home::Leading => self.left_hidden,
+            Home::Trailing => self.right_hidden,
+            Home::Main => false,
+        }
+    }
+    pub(super) fn sync_panel_display(&self, cx: &mut Context<Self>) {
+        // Mixed tab groups belong to the customized content area. Keep those tabs reachable.
+        let tree = self.center(cx);
+        tree.root().walk(&mut |node| {
+            let PaneRef::Tabs { panels, active_ix } = node.kind() else {
+                return;
+            };
+            let side = panels
+                .first()
+                .and_then(|id| self.panes.get(id))
+                .map(|t| t.pane.read(cx).ty.home);
+            let hidden = side.is_some_and(|side| {
+                self.sidebar_hidden(side)
+                    && panels.iter().all(|id| {
+                        self.panes
+                            .get(id)
+                            .is_some_and(|t| t.pane.read(cx).ty.home == side)
+                    })
+            });
+            for (ix, id) in panels.iter().enumerate() {
+                if let Some(t) = self.panes.get(id) {
+                    let presented =
+                        self.window_visible && !self.dock_covered && !hidden && ix == active_ix;
+                    t.pane
+                        .update(cx, |p, cx| p.sync_display(hidden, presented, cx));
+                }
+            }
+        });
+        self.sync_queue_button(cx);
+        self.dock.update(cx, |_, cx| cx.notify());
+    }
+    // A custom layout may place Queue among browsers or visualizers. In
+    // that case the control acts on Queue alone, preserving its companions.
+    fn queue_group(&self, cx: &App) -> Option<(Entity<Pane>, bool, bool)> {
+        let pane = self.pane_of_type(&panels::queue::QUEUE, cx)?;
+        let id = Self::panel_id(&pane);
+        let tree = self.center(cx);
+        let node = tree.find_node(tree.find_panel_node(id)?)?;
+        let PaneRef::Tabs { panels, active_ix } = node.kind() else {
+            return None;
+        };
+        let sidebar = panels.iter().all(|id| {
+            self.panes
+                .get(id)
+                .is_some_and(|p| p.pane.read(cx).ty.home == Home::Trailing)
+        });
+        Some((pane, sidebar, panels.get(active_ix) == Some(&id)))
+    }
+
+    pub(super) fn toggle_queue(&mut self, w: &mut Window, cx: &mut Context<Self>) {
+        match self.queue_group(cx) {
+            Some((_, true, _)) => self.toggle_sidebar(Home::Trailing, w, cx),
+            Some((pane, false, true)) => self.close_pane(&pane, w, cx),
+            Some((pane, false, false)) => self.reveal(&pane, w, cx),
+            None => {
+                self.open_panel(&panels::queue::QUEUE, None, w, cx);
+            }
+        }
+    }
+
+    pub(super) fn sync_queue_button(&self, cx: &mut Context<Self>) {
+        let shown = self
+            .queue_group(cx)
+            .is_some_and(|(_, sidebar, active)| if sidebar { !self.right_hidden } else { active });
+        self.services.player.update(cx, |p, cx| {
+            if p.queue_shown != shown {
+                p.queue_shown = shown;
+                cx.notify();
+            }
+        });
+    }
+    pub(super) fn toggle_sidebar(&mut self, side: Home, w: &mut Window, cx: &mut Context<Self>) {
+        match side {
+            Home::Leading => self.left_hidden = !self.left_hidden,
+            Home::Trailing => self.right_hidden = !self.right_hidden,
+            Home::Main => return,
+        }
+        self.sync_panel_display(cx);
+        if self.sidebar_hidden(side)
+            && let Some(b) = self.browser(cx)
+        {
+            b.read(cx).list_focus(cx).focus(w, cx);
+        }
+        self.schedule_save(cx);
+        cx.notify();
+    }
+    pub(super) fn sidebar_button(&self, side: Home, cx: &mut Context<Self>) -> impl IntoElement {
+        // The button says what pressing it will do.
+        let verb = if self.sidebar_hidden(side) {
+            "Show"
+        } else {
+            "Hide"
+        };
+        let (id, icon, label, keys) = if side == Home::Leading {
+            (
+                "toggle-left",
+                IconName::PanelLeft,
+                "left sidebar",
+                "Ctrl+Alt+Left",
+            )
+        } else {
+            (
+                "toggle-right",
+                IconName::PanelRight,
+                "right sidebar",
+                "Ctrl+Alt+Right",
+            )
+        };
+        let label = format!("{verb} {label}");
+        let tip = format!("{label} · {keys}");
+        div().occlude().child(
+            Button::new(id)
+                .ghost()
+                .small()
+                .icon(Icon::new(icon).text_color(materials(cx).text_muted))
+                .accessibility_label(label)
+                .tooltip(tip)
+                .on_click(cx.listener(move |s, _, w, cx| s.toggle_sidebar(side, w, cx))),
+        )
+    }
+
     pub(super) fn sidebar_action(&self, id: PanelId, cx: &App) -> Option<SidebarAction> {
         let home = self.panes.get(&id)?.pane.read(cx).ty.home;
         if home == Home::Main {

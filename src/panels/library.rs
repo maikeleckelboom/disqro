@@ -40,7 +40,6 @@ pub static TYPE: PanelType = PanelType {
     icon: IconName::Library,
     instances: super::Instances::Single,
     home: super::Home::Leading,
-    toolbar: false,
     build: |services, record, window, cx| {
         let state: LibraryState = record.state();
         let panel = cx.new(|cx| LibraryPanel::new(services, state, window, cx));
@@ -687,9 +686,6 @@ impl PaneContent for Entity<LibraryPanel> {
     }
     fn save(&self, cx: &App) -> serde_json::Value {
         serde_json::to_value(self.read(cx).state()).unwrap_or_default()
-    }
-    fn menu(&self, menu: PopupMenu, _: &mut Window, _: &mut App) -> PopupMenu {
-        LibraryPanel::library_menu(menu)
     }
     fn accepts_folder(&self) -> bool {
         true

@@ -15,11 +15,82 @@ use std::{
 };
 
 pub const SECOND: u64 = 1_000_000_000;
-/// Whether `track` comes from a CD: a CUE chapter, known before its program
-/// resolves, or one of several tracks that resolved as one CD. A recording
-/// that stands alone, including a one-track album, has no Full CD.
-pub fn from_cd(track: &Track, program: Option<&Program>) -> bool {
-    track.disc.is_some() || program.is_some_and(|p| p.full_cd && p.segments.len() > 1)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramKind {
+    Album,
+    Cd,
+    Disc,
+    Recording,
+    Other,
+}
+impl ProgramKind {
+    fn of(track: &Track, has_sibling_disc: bool) -> Self {
+        let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
+        let folder = anchor
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str());
+        if folder.is_some_and(|name| {
+            crate::release::disc_folder(name).is_some() && crate::release::names_cd(name)
+        }) || (track.disc.is_some()
+            && anchor
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::release::names_cd))
+        {
+            Self::Cd
+        } else if track.disc.is_some() {
+            Self::Recording
+        } else if folder.is_some_and(|name| crate::release::disc_folder(name).is_some())
+            || has_sibling_disc
+            || track.disc_number.is_some_and(|n| n > 1)
+        {
+            Self::Disc
+        } else if !track.album.trim().is_empty() {
+            Self::Album
+        } else {
+            Self::Other
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Album => "Album",
+            Self::Cd => "Full CD",
+            Self::Disc => "Disc",
+            Self::Recording => "Full Recording",
+            Self::Other => "Full Program",
+        }
+    }
+}
+
+/// The larger waveform perspective, including the disabled state while a
+/// known program is being resolved or could not be built.
+#[derive(Clone, Copy, Debug)]
+pub struct Overview {
+    pub label: &'static str,
+    pub enabled: bool,
+}
+impl Overview {
+    pub fn for_track(track: &Track, program: Option<&Program>) -> Option<Self> {
+        let kind = program.map_or_else(|| ProgramKind::of(track, false), |p| p.kind);
+        let authored = track.disc.is_some();
+        let enabled = program.is_some_and(|p| p.full_cd && (authored || p.segments.len() > 1));
+        let single = program.is_some_and(|p| p.full_cd && p.segments.len() == 1);
+        (enabled || authored || (!single && kind != ProgramKind::Other)).then_some(Self {
+            label: kind.label(),
+            enabled,
+        })
+    }
+
+    pub fn unavailable_tip(self, reason: Option<&str>, checking: bool) -> String {
+        let label = self.label;
+        match reason {
+            Some(reason) => format!("{label} waveform unavailable · {reason}"),
+            None if checking => format!("Checking {label} waveform availability"),
+            None => format!("{label} waveform unavailable"),
+        }
+    }
 }
 pub fn frame_time(frame: usize, rate: u32) -> u64 {
     ((frame as u128 * u128::from(SECOND) + u128::from(rate / 2)) / u128::from(rate)) as u64
@@ -68,6 +139,7 @@ pub struct Program {
     pub full_cd: bool,
     pub limitation: Option<String>,
     pub sheet: Option<(PathBuf, Stamp)>,
+    kind: ProgramKind,
     watch: Vec<(PathBuf, Option<Stamp>)>,
 }
 impl Program {
@@ -87,8 +159,9 @@ impl Program {
         cache: Option<&Cache>,
     ) -> Result<Self> {
         let mut watch = Vec::new();
-        let disc = (|| -> Result<Self> {
-            ensure!(context.allows(track), "No CD context");
+        let mut kind = ProgramKind::of(track, false);
+        let program = (|| -> Result<Self> {
+            ensure!(context.allows(track), "No program context");
             let (tracks, sheet): (TrackList, _) = if let Some(d) = &track.disc {
                 let stamp = Stamp::read(&d.sheet);
                 watch.push((d.sheet.clone(), stamp.clone()));
@@ -103,15 +176,16 @@ impl Program {
                 );
                 (list, Some((d.sheet.clone(), stamp)))
             } else {
-                (
-                    crate::discovery::local_program(
-                        track.source.parent().context("Missing folder")?,
-                        track,
-                        context,
-                        cache,
-                    )?,
-                    None,
-                )
+                let local = crate::discovery::local_program(
+                    track.source.parent().context("Missing folder")?,
+                    track,
+                    context,
+                    cache,
+                )?;
+                if let Some(actual) = local.tracks.iter().find(|t| t.same_item(track)) {
+                    kind = ProgramKind::of(actual, local.has_sibling_disc);
+                }
+                (local.tracks, None)
             };
             for t in tracks.iter() {
                 if watch.last().is_none_or(|(path, _)| path != &t.source) {
@@ -119,25 +193,26 @@ impl Program {
                 }
             }
             ensure!(
-                track.disc.is_some() || track.has_disc_context() || tracks.len() > 1,
-                "No authored CD"
+                !tracks.is_empty()
+                    && (track.disc.is_some() || track.has_disc_context() || tracks.len() > 1),
+                "No larger sequence was found"
             );
-            ensure!(tracks.len() <= 256, "CD exceeds the overview limit");
-            let p = Self::build(&tracks, sheet, cache, true)?;
+            ensure!(tracks.len() <= 256, "Program exceeds the overview limit");
+            let p = Self::build(&tracks, sheet, cache, true, kind)?;
             ensure!(
                 p.index(track).is_some(),
-                "Playing chapter differs from the current CD"
+                "Playing track differs from the current program"
             );
             Ok(p)
         })();
-        let failure = match disc {
+        let failure = match program {
             Ok(p) => return Ok(p),
             Err(e) => e,
         };
-        let mut p = Self::build(std::slice::from_ref(track), None, cache, false)?;
+        let mut p = Self::build(std::slice::from_ref(track), None, cache, false, kind)?;
         p.watch = watch;
         if context.allows(track) {
-            p.limitation = Some(format!("Full CD unavailable: {failure}"));
+            p.limitation = Some(failure.to_string());
         }
         Ok(p)
     }
@@ -146,6 +221,7 @@ impl Program {
         sheet: Option<(PathBuf, Stamp)>,
         cache: Option<&Cache>,
         full_cd: bool,
+        kind: ProgramKind,
     ) -> Result<Self> {
         let mut sources = HashMap::<PathBuf, Arc<Source>>::new();
         let mut segments = Vec::new();
@@ -171,7 +247,7 @@ impl Program {
             let start = duration;
             duration = duration
                 .checked_add(frame_time(end, source.rate) - frame_time(first, source.rate))
-                .context("CD duration overflow")?;
+                .context("Program duration overflow")?;
             segments.push(Segment {
                 track: t.clone(),
                 source,
@@ -186,6 +262,7 @@ impl Program {
             full_cd,
             limitation: None,
             sheet,
+            kind,
             watch: Vec::new(),
         })
     }

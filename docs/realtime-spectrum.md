@@ -1,6 +1,6 @@
 # Real-time spectrum and stereo measurements
 
-Open **+ → New Spectrum** in the title bar. Use the sliders button inside a Spectrum panel to choose its channels, presentation, frequency range, resolution and refresh rate. In **Workspace → Customize Layout**, split a tab group or drag a tab to another group. Each instance saves its settings with its dock placement. The thin gray trace or horizontal marker shows the held peak.
+Open **Workspace → New Spectrum** in the title bar. Use the sliders button inside a Spectrum panel to choose its channels, presentation, frequency range, resolution and refresh rate. In **Workspace → Customize Layout**, split a tab group or drag a tab to another group. Each instance saves its settings with its dock placement. The thin gray trace or horizontal marker shows the held peak.
 
 ## Signal path and ownership
 

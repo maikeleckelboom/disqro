@@ -23,6 +23,8 @@ pub enum Appearance {
 pub struct Materials {
     /// Title bar, navigation and sidebars: the frame around the content.
     pub chrome: Hsla,
+    /// Recess behind dock tabs. Selected tabs take their panel surface.
+    pub tab_well: Hsla,
     /// The main workspace behind tables and lists.
     pub canvas: Hsla,
     /// Surfaces that sit above the canvas, such as the player.
@@ -75,6 +77,7 @@ impl Materials {
     pub fn dark() -> Self {
         Self {
             chrome: hex(0x141416),
+            tab_well: hex(0x101012),
             canvas: hex(0x1b1b1e),
             raised: hex(0x202024),
             overlay: hex(0x242428),
@@ -105,10 +108,66 @@ impl Materials {
             Appearance::Dark => Self::dark(),
         }
     }
+    /// The outline of whatever holds keyboard focus. Rows and tabs reserve a
+    /// transparent border of the same width, so focus never moves content.
+    pub fn focus_line(&self) -> Hsla {
+        self.accent
+    }
+    /// The resting surface of a text field in the chrome, such as the
+    /// address and Library search.
+    pub fn field(&self) -> Hsla {
+        self.hover
+    }
+    /// Where a dragged tab or panel will land: a translucent ghost of the
+    /// resulting region with a hairline edge, quieter than a selection.
+    pub fn preview_fill(&self) -> Hsla {
+        self.accent.opacity(0.11)
+    }
+    pub fn preview_edge(&self) -> Hsla {
+        self.accent.opacity(0.55)
+    }
+}
+
+/// The geometry and type scale every panel shares.
+pub mod size {
+    /// Every panel header: tab strips, the browser bar and table headings
+    /// share one height, so their edges line up across the window.
+    pub const HEADER: f32 = 30.;
+    /// A content panel's own header, such as the Music Browser's: its
+    /// history, location and view controls in one row.
+    pub const BAR: f32 = 36.;
+    /// Minimum usable space for appending a dragged tab to a group.
+    pub const TAB_DROP: f32 = 8.;
+    pub const TAB_RADIUS: f32 = 4.;
+    /// Rows, tab labels and menus.
+    pub const TEXT: f32 = 13.;
+    /// Secondary text: artists beside titles, durations, counts and status.
+    pub const TEXT_SMALL: f32 = 12.;
+    /// Table column headings.
+    pub const LABEL: f32 = 12.;
+    /// The inset of a drop preview from the region it describes.
+    pub const PREVIEW_INSET: f32 = 4.;
 }
 
 pub fn materials(cx: &App) -> &Materials {
     cx.global::<Materials>()
+}
+
+/// Single-line text advance in the current interface font, in logical pixels.
+pub(crate) fn label_width(label: SharedString, size: Pixels, window: &Window) -> Pixels {
+    let run = TextRun {
+        len: label.len(),
+        font: window.text_style().font(),
+        color: window.text_style().color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(label, size, &[run], None)
+        .width
+        .ceil()
 }
 
 /// The interface font. Windows 11 ships Segoe UI Variable; older systems fall
@@ -198,7 +257,7 @@ pub fn install(appearance: Appearance, cx: &mut App) {
         c.sidebar_primary = m.accent;
         c.sidebar_primary_foreground = m.on_accent;
 
-        c.tab_bar = m.chrome;
+        c.tab_bar = m.tab_well;
         c.tab_bar_segmented = m.chrome;
         c.tab = hexa(0x000000, 0.);
         c.tab_active = m.canvas;

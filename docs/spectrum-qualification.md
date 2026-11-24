@@ -94,6 +94,7 @@ cargo test --locked --release
 cargo test --locked --release signal::tests::time_observation -- --ignored --nocapture
 
 $disc = 'D:\Music\disc.cue'
+cargo build --locked --release --features qualification
 python tools/qualifySpectrum.py two target/release/disqro.exe $disc .local/spectrum-two
 python tools/qualifySpectrum.py soak target/release/disqro.exe $disc .local/spectrum-soak
 $env:DISQRO_SOAK_SOURCE = $disc

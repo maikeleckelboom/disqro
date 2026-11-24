@@ -48,7 +48,7 @@ A phase-aligned comparison of 1,102,432 frames from the two captures differed by
 
 ## Repeating the checks
 
-The following commands run from the repository root on Windows. The codec fixture needs FFmpeg on PATH. The native transport fixture sends audio to the default endpoint. The longer soak expects one recording or a contiguous CUE program with at least ten minutes remaining. It uses the production streaming path and tap, then silences the test main fader before device output.
+The following commands run from the repository root on Windows. The codec fixture needs FFmpeg on PATH. The native transport fixture opens the default endpoint with the test main fader silenced downstream of the signal observer. The longer soak expects one recording or a contiguous CUE program with at least ten minutes remaining. It uses the production streaming path and tap, then silences the test main fader before device output.
 
 ```powershell
 .\build.ps1 -Release

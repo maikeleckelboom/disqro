@@ -306,14 +306,19 @@ fn scan_into(
     }
 }
 
-/// Resolve an unindexed CD away from the UI thread. Only its own directory
+pub struct LocalProgram {
+    pub tracks: crate::library::TrackList,
+    pub has_sibling_disc: bool,
+}
+
+/// Resolve an unindexed program away from the UI thread. Only its own directory
 /// is read. The discovery worker applies the same CUE and tag rules as browsing.
 pub fn local_program(
     folder: &Path,
     target: &Track,
     context: library::DiscContext,
     cache: Option<&Cache>,
-) -> anyhow::Result<crate::library::TrackList> {
+) -> anyhow::Result<LocalProgram> {
     let mut rows = Vec::new();
     scan_into(folder, false, cache, &|| true, &mut |batch| {
         for (index, track) in batch.rows {
@@ -330,9 +335,22 @@ pub fn local_program(
         .flatten()
         .find(|t| target.same_item(t) && context.allows(t))
     else {
-        return Ok(Arc::default());
+        return Ok(LocalProgram {
+            tracks: Arc::default(),
+            has_sibling_disc: false,
+        });
     };
     let disc = crate::collection::DiscId::of(actual);
+    // Number tags alone can be present on single-disc albums. Look for another
+    // disc of this album in the same listing without adding it to the program.
+    let has_sibling_disc = !actual.album.trim().is_empty()
+        && rows.iter().flatten().any(|t| {
+            t.disc.is_none()
+                && t.source.parent() == actual.source.parent()
+                && t.album == actual.album
+                && t.disc_number != actual.disc_number
+                && t.disc_number.is_some_and(|n| n > 0)
+        });
     let mut tracks: Vec<_> = rows
         .into_iter()
         .flatten()
@@ -341,5 +359,8 @@ pub fn local_program(
     if matches!(disc, crate::collection::DiscId::Album(..)) {
         tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
     }
-    Ok(tracks.into())
+    Ok(LocalProgram {
+        tracks: tracks.into(),
+        has_sibling_disc,
+    })
 }

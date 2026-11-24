@@ -11,7 +11,7 @@
 //!    rearranging, saving and restoring.
 //! 3. **Dock placement**: where the dock keeps the instance. The dock owns
 //!    that tree; nothing here duplicates it.
-//! 4. **Panel-local state**: navigation, scroll, toolbar visibility and view
+//! 4. **Panel-local state**: navigation, scroll and view
 //!    settings, owned by the instance's [`PaneContent`] and saved with it.
 //! 5. **Shared state** ([`Services`]): the catalog, playback and queue, and the
 //!    Locations tree. Closing or moving a panel never touches it.
@@ -33,15 +33,12 @@ use crate::{
     collection::ViewPrefs,
     player::Player,
     table::Layouts,
-    theme::materials,
 };
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable,
-        button::{Button, ButtonVariants},
+        Icon,
         dock::{BasePanel, PanelEvent, PanelInfo, PanelState, TabGroup},
-        h_flex,
         input::{InputEvent, InputState},
         menu::PopupMenu,
         v_flex,
@@ -95,8 +92,6 @@ pub struct PanelType {
     pub icon: IconName,
     pub instances: Instances,
     pub home: Home,
-    /// The type has contextual controls the listener can hide per instance.
-    pub toolbar: bool,
     /// Builds an instance from its saved record; a fresh one gets a default
     /// record.
     pub build: fn(&Services, &PanelRecord, &mut Window, &mut App) -> Rc<dyn PaneContent>,
@@ -127,7 +122,7 @@ pub struct PanelRecord {
     /// A name the listener gave the tab. `None` shows the content's title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Whether the contextual toolbar is hidden.
+    /// Legacy toolbar preference retained when round-tripping older layouts.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub toolbar_hidden: bool,
     /// The content's own state.
@@ -173,14 +168,6 @@ pub trait PaneContent: 'static {
     fn save(&self, cx: &App) -> serde_json::Value {
         serde_json::Value::Null
     }
-    /// Contextual controls, drawn above the content while the toolbar shows.
-    fn toolbar(&self, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
-        Vec::new()
-    }
-    /// Actions of this panel, for its tab menu and toolbar.
-    fn menu(&self, menu: PopupMenu, window: &mut Window, cx: &mut App) -> PopupMenu {
-        menu
-    }
     /// The listener brought the panel forward: clicked inside it or chose
     /// its tab.
     fn focused(&self, window: &mut Window, cx: &mut App) {}
@@ -192,7 +179,7 @@ pub trait PaneContent: 'static {
         false
     }
     fn drop_folder(&self, path: PathBuf, cx: &mut App) {}
-    /// Subscriptions that notify the pane when its title or toolbar changes,
+    /// Subscriptions that notify the pane when its title or content changes,
     /// so its tab follows even while another tab is displayed.
     fn watch(&self, cx: &mut Context<Pane>) -> Vec<Subscription> {
         Vec::new()
@@ -214,12 +201,15 @@ pub struct Pane {
     pub id: InstanceId,
     pub name: Option<String>,
     pub toolbar_hidden: bool,
+    sidebar_hidden: bool,
+    presented: bool,
     pub content: Rc<dyn PaneContent>,
     /// The tab group holding the pane, as the dock last reported it.
     pub group: Option<WeakEntity<TabGroup>>,
     /// The tab's name field while the listener renames it.
     pub renaming: Option<Entity<InputState>>,
     pub tab_focus: FocusHandle,
+    pub controls_focus: FocusHandle,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -237,16 +227,26 @@ impl Pane {
     ) -> Self {
         let content = (ty.build)(services, record, window, cx);
         let focus = cx.focus_handle();
-        let subscriptions = content.watch(cx);
+        let mut subscriptions = content.watch(cx);
+        let controls_focus = cx.focus_handle();
+        let tab_focus = cx.focus_handle();
+        for handle in [&focus, &controls_focus, &tab_focus] {
+            subscriptions.push(cx.on_focus_in(handle, window, |pane: &mut Self, w, cx| {
+                pane.content.focused(w, cx)
+            }));
+        }
         Self {
             ty,
             id,
             name: record.name.clone().filter(|n| !n.trim().is_empty()),
+            sidebar_hidden: false,
+            presented: false,
             toolbar_hidden: record.toolbar_hidden,
             content,
             group: None,
             renaming: None,
-            tab_focus: cx.focus_handle(),
+            tab_focus,
+            controls_focus,
             focus,
             _subscriptions: subscriptions,
         }
@@ -277,14 +277,14 @@ impl Pane {
             group.update(cx, |_, cx| cx.notify());
         }
     }
-    pub fn toolbar_shown(&self) -> bool {
-        self.ty.toolbar && !self.toolbar_hidden
-    }
-    pub fn set_toolbar(&mut self, shown: bool, cx: &mut Context<Self>) {
-        if self.ty.toolbar && self.toolbar_hidden == shown {
-            self.toolbar_hidden = !shown;
-            cx.emit(PaneEvent::Changed);
-            cx.notify();
+    pub fn sync_display(&mut self, hidden: bool, presented: bool, cx: &mut Context<Self>) {
+        if self.sidebar_hidden != hidden {
+            self.sidebar_hidden = hidden;
+            self.refresh(cx);
+        }
+        if self.presented != presented {
+            self.presented = presented;
+            self.content.set_presented(presented, cx);
         }
     }
     /// Turns the tab label into a name field.
@@ -304,7 +304,7 @@ impl Pane {
                     pane.content.focus_handle(cx).focus(window, cx);
                 }
                 cx.emit(PaneEvent::Changed);
-                cx.notify();
+                pane.refresh(cx);
             }
             _ => {}
         })
@@ -314,79 +314,63 @@ impl Pane {
             s.select_all(window, cx);
         });
         self.renaming = Some(input);
-        cx.notify();
+        self.refresh(cx);
     }
     pub fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.take().is_some() {
             self.content.focus_handle(cx).focus(window, cx);
-            cx.notify();
+            self.refresh(cx);
         }
     }
     pub fn reset_name(&mut self, cx: &mut Context<Self>) {
         if self.name.take().is_some() {
             cx.emit(PaneEvent::Changed);
-            cx.notify();
+            self.refresh(cx);
         }
     }
-    /// The panel's own actions and the ones every panel shares, as the tab
-    /// menu and the toolbar's menu list them.
-    pub fn menu(
-        this: &Entity<Self>,
-        menu: PopupMenu,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> PopupMenu {
+    /// Instance operations shared by tab menus.
+    pub fn menu(this: &Entity<Self>, menu: PopupMenu, cx: &mut App) -> PopupMenu {
         use gpui_kit::component::menu::PopupMenuItem;
         let pane = this.read(cx);
-        let content = pane.content.clone();
-        let (ty, shown, named) = (pane.ty, pane.toolbar_shown(), pane.name.is_some());
-        let menu = content.menu(menu, window, cx);
-        let (a, b, c, d) = (
-            this.downgrade(),
-            this.downgrade(),
-            this.downgrade(),
-            this.downgrade(),
-        );
-        menu.separator()
-            .when(ty.toolbar, |menu| {
-                menu.item(
-                    PopupMenuItem::new(if shown {
-                        "Hide Toolbar"
-                    } else {
-                        "Show Toolbar"
-                    })
-                    .on_click(move |_, _, cx| {
-                        let _ = a.update(cx, |p, cx| p.set_toolbar(!shown, cx));
-                    }),
-                )
-            })
-            .when(ty.instances == Instances::Multiple, |menu| {
-                menu.item(
-                    PopupMenuItem::new("Open in New Tab")
-                        .icon(IconName::Copy)
-                        .on_click(move |_, _, cx| {
-                            let _ = b.update(cx, |_, cx| cx.emit(PaneEvent::Duplicate));
-                        }),
-                )
-            })
-            .item(
-                PopupMenuItem::new("Rename Tab…")
-                    .icon(IconName::Pencil)
-                    .on_click(move |_, w, cx| {
-                        let _ = c.update(cx, |p, cx| p.rename(w, cx));
-                    }),
+        let (ty, named) = (pane.ty, pane.name.is_some());
+        // Only instances of a kind that can be opened several times need
+        // names of their own. A fixed panel such as Queue keeps its title.
+        if ty.instances != Instances::Multiple {
+            return menu;
+        }
+        let (b, c, d) = (this.downgrade(), this.downgrade(), this.downgrade());
+        menu.item(
+            PopupMenuItem::new("Open in New Tab")
+                .icon(IconName::Copy)
+                .on_click(move |_, _, cx| {
+                    let _ = b.update(cx, |_, cx| cx.emit(PaneEvent::Duplicate));
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Rename Tab…")
+                .icon(IconName::Pencil)
+                .on_click(move |_, w, cx| {
+                    let _ = c.update(cx, |p, cx| p.rename(w, cx));
+                }),
+        )
+        .when(named, |menu| {
+            menu.item(
+                PopupMenuItem::new("Reset Tab Name").on_click(move |_, _, cx| {
+                    let _ = d.update(cx, |p, cx| p.reset_name(cx));
+                }),
             )
-            .when(named, |menu| {
-                menu.item(
-                    PopupMenuItem::new("Reset Tab Name").on_click(move |_, _, cx| {
-                        let _ = d.update(cx, |p, cx| p.reset_name(cx));
-                    }),
-                )
-            })
+        })
     }
-    pub fn close_item(this: &Entity<Self>) -> gpui_kit::component::menu::PopupMenuItem {
+    /// Closing a browser tab discards that instance. A fixed panel is only
+    /// hidden: the workspace menu shows it again where it was.
+    pub fn close_item(this: &Entity<Self>, cx: &App) -> gpui_kit::component::menu::PopupMenuItem {
+        let ty = this.read(cx).ty;
+        let label = match ty.instances {
+            Instances::Multiple => "Close Tab".to_string(),
+            Instances::Single => format!("Hide {}", ty.title),
+        };
         let this = this.downgrade();
-        gpui_kit::component::menu::PopupMenuItem::new("Close")
+        gpui_kit::component::menu::PopupMenuItem::new(label)
             .icon(IconName::X)
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |_, cx| cx.emit(PaneEvent::Close));
@@ -401,6 +385,9 @@ impl Focusable for Pane {
 }
 
 impl BasePanel for Pane {
+    fn visible(&self, _: &App) -> bool {
+        !self.sidebar_hidden
+    }
     fn panel_name(&self) -> &'static str {
         self.ty.key
     }
@@ -412,53 +399,15 @@ impl BasePanel for Pane {
     }
     fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.group = None;
-        self.content.set_presented(false, cx);
+        self.sync_display(self.sidebar_hidden, false, cx);
     }
     fn dump(&self, cx: &App) -> PanelState {
         self.record(cx).to_state(self.ty.key)
     }
-    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
-        self.content.set_presented(active, cx);
-    }
 }
 
 impl Render for Pane {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let m = *materials(cx);
-        let controls = self
-            .toolbar_shown()
-            .then(|| self.content.toolbar(window, cx));
-        let toolbar = controls.filter(|items| !items.is_empty()).map(|items| {
-            h_flex()
-                .id("panel-toolbar")
-                .h(px(34.))
-                .flex_shrink_0()
-                .pl(px(10.))
-                .pr(px(6.))
-                .gap(px(4.))
-                .items_center()
-                .border_b_1()
-                .border_color(m.line)
-                .children(items)
-        });
-        // A hidden toolbar leaves a small handle to bring it back.
-        let handle = (self.ty.toolbar && self.toolbar_hidden).then(|| {
-            // Above the content, such as the end of a table heading.
-            div().absolute().occlude().top(px(2.)).right(px(6.)).child(
-                Button::new("show-toolbar")
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(IconName::ChevronDown)
-                            .size(px(12.))
-                            .text_color(m.text_faint),
-                    )
-                    .accessibility_label("Show Toolbar")
-                    .tooltip("Show Toolbar")
-                    .tab_stop(false)
-                    .on_click(cx.listener(|p, _, _, cx| p.set_toolbar(true, cx))),
-            )
-        });
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .track_focus(&self.focus)
             // Seen before the content handles the press, so a click anywhere in
@@ -469,9 +418,7 @@ impl Render for Pane {
             .size_full()
             .relative()
             .overflow_hidden()
-            .children(toolbar)
             .child(div().flex_1().min_h_0().child(self.content.view()))
-            .children(handle)
     }
 }
 
@@ -642,3 +589,11 @@ mod tests {
         }
     }
 }
+
+/// The commands a panel offers wherever it is named: its tab, or the header
+/// of a panel shown alone in its group. The workspace installs them.
+pub type PaneMenu =
+    dyn Fn(&Entity<Pane>, PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu;
+#[derive(Clone)]
+pub struct PaneMenus(pub Rc<PaneMenu>);
+impl Global for PaneMenus {}

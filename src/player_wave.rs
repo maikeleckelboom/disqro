@@ -1,5 +1,6 @@
 use super::*;
 use crate::theme::Materials;
+use crate::timeline::Overview;
 impl Player {
     pub(super) fn request_wave(&mut self) {
         self.program = None;
@@ -103,16 +104,14 @@ impl Player {
         }
         self.run = left..right;
     }
-    /// Only a track from a CD offers the Track and Full CD perspectives.
-    pub(super) fn on_cd(&self) -> bool {
+    pub(super) fn overview(&self) -> Option<Overview> {
         self.status
             .track
             .as_ref()
-            .is_some_and(|t| crate::timeline::from_cd(t, self.program.as_deref()))
+            .and_then(|t| Overview::for_track(t, self.program.as_deref()))
     }
-    /// Full CD is offered once the CD resolves to more than the track itself.
     fn full_cd_available(&self) -> bool {
-        self.on_cd() && self.program.as_ref().is_some_and(|p| p.full_cd)
+        self.overview().is_some_and(|overview| overview.enabled)
     }
     fn disc_view(&self) -> bool {
         self.full_cd && self.segment.is_some() && self.full_cd_available()
@@ -202,37 +201,53 @@ impl Player {
         self.scrub_entry = None;
         cx.notify();
     }
-    pub(super) fn perspectives(&self, m: &Materials, cx: &Context<Self>) -> impl IntoElement {
-        let enabled = self.full_cd_available();
+    /// Tabs on the timeline lane's upper edge name what the lane shows. The
+    /// selected perspective shares the lane's surface and opens into it. A
+    /// recording without a CD context offers only Track.
+    pub(super) fn perspectives(
+        &self,
+        overview: Option<Overview>,
+        m: &Materials,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let reason = self
             .unavailable
-            .as_ref()
-            .or_else(|| self.program.as_ref()?.limitation.as_ref());
-        let mut row = h_flex().items_center().rounded(px(4.)).bg(m.control);
-        for (id, label, full) in [
-            ("wave-track", "Track", false),
-            ("wave-disc", "Full CD", true),
-        ] {
+            .as_deref()
+            .or_else(|| self.program.as_ref()?.limitation.as_deref());
+        let mut row = h_flex()
+            .id("wave-perspectives")
+            .role(Role::TabList)
+            .aria_label("Waveform perspective")
+            .h(px(PERSPECTIVE_HEIGHT))
+            .items_end();
+        let choices = match &overview {
+            Some(overview) => vec![
+                ("wave-track", "Track", false),
+                ("wave-disc", overview.label, true),
+            ],
+            None => vec![("wave-track", "Track", false)],
+        };
+        for (id, label, full) in choices {
+            let enabled = !full || overview.as_ref().is_some_and(|o| o.enabled);
             let selected = self.disc_view() == full;
-            let tip = if full && !enabled {
-                reason.cloned().unwrap_or_else(|| {
-                    if self.status.track.is_some() && self.program.is_none() {
-                        "Checking CD availability".into()
-                    } else {
-                        "No authored CD is available".into()
-                    }
-                })
-            } else {
-                format!("{label} waveform · Alt+W")
+            let tip = match &overview {
+                Some(o) if full && !enabled => o.unavailable_tip(reason, self.program.is_none()),
+                Some(_) => format!("{label} waveform · Alt+W"),
+                None => "The waveform of this recording".into(),
             };
             row = row.child(
                 Button::new(id)
                     .ghost()
                     .xsmall()
+                    .h_full()
+                    .px(px(10.))
+                    .rounded(px(0.))
+                    .rounded_t(px(5.))
                     .label(label)
-                    .text_color(if selected { m.text } else { m.text_muted })
-                    .when(selected, |b| b.bg(m.control_hover))
-                    .disabled(full && !enabled)
+                    .text_size(px(crate::theme::size::TEXT_SMALL))
+                    .text_color(if selected { m.text } else { m.text_faint })
+                    .when(selected, |b| b.bg(m.canvas).hover(|b| b.bg(m.canvas)))
+                    .disabled(!enabled)
                     .tooltip(tip)
                     .on_click(cx.listener(move |p, _, _, cx| p.set_perspective(full, cx))),
             );

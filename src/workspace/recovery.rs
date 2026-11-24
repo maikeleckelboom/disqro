@@ -7,6 +7,7 @@ pub(super) struct Checkpoint {
     active: Option<Entity<Browser>>,
     closed: Vec<ClosedPanel>,
     pub closed_id: Option<InstanceId>,
+    pub sidebar_visibility: Option<(bool, bool)>,
 }
 
 fn live_layout(node: &PaneNode, measured: &PanelState, dock: &DockArea, cx: &App) -> DockLayout {
@@ -42,6 +43,7 @@ impl Workspace {
             active: self.browser(cx),
             closed: self.closed.clone(),
             closed_id,
+            sidebar_visibility: None,
         }
     }
 
@@ -74,6 +76,10 @@ impl Workspace {
         };
         self.dock
             .update(cx, |dock, cx| dock.set_center(before.layout, window, cx));
+        if let Some((left, right)) = before.sidebar_visibility {
+            self.left_hidden = left;
+            self.right_hidden = right;
+        }
         self.closed = before.closed;
         self.services
             .router

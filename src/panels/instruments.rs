@@ -30,7 +30,6 @@ pub static SPECTROGRAM: PanelType = PanelType {
     icon: IconName::Layers,
     instances: Instances::Multiple,
     home: Home::Main,
-    toolbar: false,
     build: |s, r, w, cx| {
         Rc::new(cx.new(|cx| Instrument::new(s, Config::Spectral(r.state()), w, cx)))
     },
@@ -41,7 +40,6 @@ pub static STEREO_FIELD: PanelType = PanelType {
     icon: IconName::Radar,
     instances: Instances::Multiple,
     home: Home::Main,
-    toolbar: false,
     build: |s, r, w, cx| Rc::new(cx.new(|cx| Instrument::new(s, Config::Field(r.state()), w, cx))),
 };
 #[derive(Clone, Copy, PartialEq)]

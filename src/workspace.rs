@@ -1,5 +1,5 @@
 //! The window owns the dock, the panel picker and the persistent player.
-//! Each Music Browser owns its navigation controls.
+//! The shell addresses the browser most recently activated in the dock.
 //!
 //! Every view in the dock is a [`Pane`]: an instance of a registered
 //! [`PanelType`](crate::panels::PanelType). The workspace creates, places,
@@ -8,6 +8,7 @@
 //! The player is not a dock panel: it is part of the window, so no
 //! arrangement of panels can close it or interrupt playback.
 mod recovery;
+mod search;
 mod sidebar;
 mod skin;
 
@@ -47,6 +48,9 @@ gpui_kit::actions!(
     [
         OpenFolder,
         FindTrack,
+        SearchLibrary,
+        ToggleLeftSidebar,
+        ToggleRightSidebar,
         PlayPause,
         ToggleWaveform,
         PlaySelected,
@@ -89,13 +93,20 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("alt-w", ToggleWaveform, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-o", OpenFolder, Some("Disqro")),
+        KeyBinding::new("ctrl-alt-left", ToggleLeftSidebar, Some("Disqro")),
+        KeyBinding::new("ctrl-alt-right", ToggleRightSidebar, Some("Disqro")),
+        KeyBinding::new("ctrl-k", SearchLibrary, Some("Disqro")),
         KeyBinding::new("ctrl-f", FindTrack, Some("Disqro")),
         KeyBinding::new("ctrl-l", FocusLocation, Some("Disqro")),
         KeyBinding::new("alt-d", FocusLocation, Some("Disqro")),
         KeyBinding::new("f4", FocusLocation, Some("Disqro")),
         KeyBinding::new("ctrl-t", NewBrowserTab, Some("Disqro")),
         KeyBinding::new("ctrl-w", CloseTab, Some("Disqro")),
-        KeyBinding::new("space", PlayPause, Some("Disqro && !Input")),
+        KeyBinding::new(
+            "space",
+            PlayPause,
+            Some("Disqro && !Input && !LibrarySection"),
+        ),
         KeyBinding::new("enter", PlaySelected, Some("DataTable")),
         KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
         KeyBinding::new("space", ActivateTrackLike, Some("TrackLike")),
@@ -159,8 +170,8 @@ pub fn bind_keys(cx: &mut App) {
 /// Layouts written with another version are replaced by the default layout;
 /// the rest of the profile is kept.
 const LAYOUT_VERSION: usize = 3;
-const PLAYER_HEIGHT: f32 = 104.;
-const PLAYER_MIN: f32 = 84.;
+const PLAYER_HEIGHT: f32 = 112.;
+const PLAYER_MIN: f32 = 96.;
 const PLAYER_MAX: f32 = 200.;
 const LEADING_WIDTH: f32 = 232.;
 const TRAILING_WIDTH: f32 = 300.;
@@ -201,6 +212,11 @@ pub struct Workspace {
     drag_checkpoint: Option<(PanelId, NodeId, usize, recovery::Checkpoint)>,
     /// Recent closed instances, with their former group companions.
     closed: Vec<ClosedPanel>,
+    search: Entity<search::LibrarySearch>,
+    search_visible: bool,
+    dock_covered: bool,
+    left_hidden: bool,
+    right_hidden: bool,
     player_height: f32,
     profile: Option<Arc<profile::ProfileFile>>,
     save_revision: u64,
@@ -210,6 +226,7 @@ pub struct Workspace {
     prefs: WindowPrefs,
     system: Option<System>,
     hwnd: isize,
+    window_visible: bool,
     hidden_to_tray: bool,
     save_pending: bool,
     focus: FocusHandle,
@@ -309,6 +326,7 @@ impl Workspace {
             }),
             cx.observe(&router, |s: &mut Self, _, cx| {
                 s.schedule_save(cx);
+                cx.notify();
             }),
             cx.subscribe_in(&router, window, |s: &mut Self, _, e, w, cx| match e {
                 RouterEvent::Open(destination) => {
@@ -358,10 +376,13 @@ impl Workspace {
                     s.update_system(cx);
                     s.schedule_save(cx);
                 }
+                PlayerEvent::ToggleQueue => s.toggle_queue(w, cx),
                 PlayerEvent::PlaySelection => {}
             }),
             cx.observe_window_visibility(window, |s: &mut Self, visibility, _, cx| {
                 let visible = visibility == WindowVisibility::Visible;
+                s.window_visible = visible;
+                s.sync_panel_display(cx);
                 s.services
                     .player
                     .update(cx, |p, cx| p.set_visible(visible, cx));
@@ -371,6 +392,16 @@ impl Workspace {
             }),
         ];
         let workspace = std::mem::take(&mut saved.workspace);
+        let owner = cx.weak_entity();
+        {
+            // Panels shown alone have no tab; their headers offer the same menu.
+            let workspace = owner.clone();
+            cx.set_global(panels::PaneMenus(Rc::new(move |pane, menu, w, cx| {
+                tab_menu(&workspace, pane, menu, w, cx)
+            })));
+        }
+        let search = cx.new(|cx| search::LibrarySearch::new(owner, catalog.clone(), window, cx));
+        cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let mut app = Self {
             services,
             dock,
@@ -378,6 +409,11 @@ impl Workspace {
             panes: HashMap::new(),
             undo: None,
             drag_checkpoint: None,
+            search,
+            search_visible: false,
+            dock_covered: false,
+            left_hidden: workspace.left_hidden,
+            right_hidden: workspace.right_hidden,
             closed: workspace.closed,
             player_height: workspace
                 .player_height
@@ -391,6 +427,7 @@ impl Workspace {
             prefs: saved.window,
             system,
             hwnd: native_handle(window),
+            window_visible: window.visibility() == WindowVisibility::Visible,
             hidden_to_tray: false,
             save_pending: false,
             focus: cx.focus_handle(),
@@ -579,6 +616,7 @@ impl Workspace {
             );
         }
         self.panes.retain(|id, _| ids.contains(id));
+        self.sync_panel_display(cx);
         // An identity appears once, even in a layout edited by hand.
         let mut seen = Vec::new();
         for pane in self.ordered(cx) {
@@ -605,6 +643,7 @@ impl Workspace {
                     self.remember_browser(&browser, cx);
                 }
                 self.schedule_save(cx);
+                cx.notify();
             }
             PaneEvent::Close => {
                 self.close_pane(&pane, window, cx);
@@ -739,6 +778,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<Pane> {
+        if self.sidebar_hidden(ty.home) {
+            self.toggle_sidebar(ty.home, window, cx);
+        }
         if ty.instances == Instances::Single
             && let Some(pane) = self.pane_of_type(ty, cx)
         {
@@ -939,8 +981,10 @@ impl Workspace {
     /// The pane holding keyboard focus.
     fn focused_pane(&self, window: &Window, cx: &App) -> Option<Entity<Pane>> {
         self.ordered(cx).into_iter().find(|p| {
-            p.read(cx).focus_handle(cx).contains_focused(window, cx)
-                || p.read(cx).focus_handle(cx).is_focused(window)
+            let p = p.read(cx);
+            p.focus_handle(cx).contains_focused(window, cx)
+                || p.tab_focus.contains_focused(window, cx)
+                || p.controls_focus.contains_focused(window, cx)
         })
     }
 
@@ -955,6 +999,11 @@ impl Workspace {
         use panels::{browser, library, locations, queue};
         if initial.is_none() {
             self.remember_layout(None, cx);
+            if let Some(before) = &mut self.undo {
+                before.sidebar_visibility = Some((self.left_hidden, self.right_hidden));
+            }
+            self.left_hidden = false;
+            self.right_hidden = false;
         }
         let mut initial = initial;
         let mut get = |s: &mut Self, ty: &'static PanelType, cx: &mut Context<Self>| {
@@ -1058,6 +1107,8 @@ impl Workspace {
             show_levels: p.show_levels,
             layout: Some(self.dock.read(cx).dump(cx)),
             workspace: WorkspaceState {
+                left_hidden: self.left_hidden,
+                right_hidden: self.right_hidden,
                 active,
                 closed: self.closed.clone(),
                 player_height: Some(self.player_height),
@@ -1330,14 +1381,16 @@ impl Workspace {
         let tray = self.tray_available();
         let locked = self.dock.read(cx).is_locked();
         let can_undo = self.undo.is_some();
+        let can_reopen = !self.closed.is_empty();
         Button::new("workspace")
             .ghost()
             .small()
-            .icon(Icon::new(IconName::Ellipsis))
+            .icon(Icon::new(IconName::Ellipsis).text_color(materials(cx).text_muted))
             .accessibility_label("Workspace")
             .tooltip("Workspace")
             .dropdown_menu(move |mut menu, _, cx| {
                 menu = menu
+                    .menu("Go to Folder or File…", Box::new(FocusLocation))
                     .menu("Open Folder…", Box::new(OpenFolder))
                     .menu("Add Music Folder to Library…", Box::new(AddMusicFolder))
                     .menu("New Playlist", Box::new(NewPlaylist))
@@ -1346,16 +1399,20 @@ impl Workspace {
                 for ty in panels::TYPES
                     .iter()
                     .copied()
-                    .filter(|t| t.instances == Instances::Single)
+                    .filter(|t| t.key != panels::browser::TYPE.key)
                 {
                     let s = shell.clone();
                     let open = shell.upgrade().is_some_and(|w| w.read(cx).is_open(ty, cx));
                     menu = menu.item(
-                        PopupMenuItem::new(format!("Show {}", ty.title))
-                            .checked(open)
-                            .on_click(move |_, w, cx| {
-                                let _ = s.update(cx, |s, cx| s.open_panel(ty, None, w, cx));
-                            }),
+                        PopupMenuItem::new(match ty.instances {
+                            Instances::Single => format!("Show {}", ty.title),
+                            Instances::Multiple => format!("New {}", ty.title),
+                        })
+                        .icon(ty.icon)
+                        .when(ty.instances == Instances::Single, |item| item.checked(open))
+                        .on_click(move |_, w, cx| {
+                            let _ = s.update(cx, |s, cx| s.open_panel(ty, None, w, cx));
+                        }),
                     );
                 }
                 let levels = shell.clone();
@@ -1377,61 +1434,79 @@ impl Workspace {
                 let (s1, s3, s4, s5) = (shell.clone(), shell.clone(), shell.clone(), shell.clone());
                 let customize = shell.clone();
                 let undo = shell.clone();
-                menu.separator()
-                    .item(
-                        PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" })
-                            .on_click(move |_, w, cx| {
-                                let _ =
-                                    customize.update(cx, |s, cx| s.set_customizing(locked, w, cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Undo Layout Change")
-                            .disabled(!can_undo)
-                            .on_click(move |_, w, cx| {
-                                let _ = undo.update(cx, |s, cx| s.undo_layout(w, cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
-                            let _ = s1.update(cx, |s, cx| s.reset(None, w, cx));
+                let reopen = shell.clone();
+                menu.item(
+                    PopupMenuItem::new("Reopen Closed Panel")
+                        .disabled(!can_reopen)
+                        .on_click(move |_, w, cx| {
+                            let _ = reopen.update(cx, |s, cx| s.reopen_closed(w, cx));
                         }),
-                    )
-                    .separator()
-                    .item(
-                        PopupMenuItem::new("Close to Tray")
-                            .checked(prefs.close_to_tray)
-                            .disabled(!tray)
-                            .on_click(move |_, _, cx| {
-                                let _ = s3.update(cx, |s, cx| {
-                                    s.prefs.close_to_tray = !s.prefs.close_to_tray;
-                                    s.schedule_save(cx);
-                                    cx.notify();
-                                });
-                            }),
-                    )
-                    .separator()
-                    .item(PopupMenuItem::new("Hide to Tray").disabled(!tray).on_click(
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(if locked { "Customize Layout" } else { "Done" }).on_click(
                         move |_, w, cx| {
-                            let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
+                            let _ = customize.update(cx, |s, cx| s.set_customizing(locked, w, cx));
                         },
-                    ))
-                    .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, w, cx| {
-                        let _ = s5.update(cx, |s, cx| s.quit(w, cx));
-                    }))
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new("Undo Layout Change")
+                        .disabled(!can_undo)
+                        .on_click(move |_, w, cx| {
+                            let _ = undo.update(cx, |s, cx| s.undo_layout(w, cx));
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Restore Default Layout").on_click(move |_, w, cx| {
+                        let _ = s1.update(cx, |s, cx| s.reset(None, w, cx));
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Close to Tray")
+                        .checked(prefs.close_to_tray)
+                        .disabled(!tray)
+                        .on_click(move |_, _, cx| {
+                            let _ = s3.update(cx, |s, cx| {
+                                s.prefs.close_to_tray = !s.prefs.close_to_tray;
+                                s.schedule_save(cx);
+                                cx.notify();
+                            });
+                        }),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Hide to Tray").disabled(!tray).on_click(
+                    move |_, w, cx| {
+                        let _ = s4.update(cx, |s, cx| s.hide_to_tray(w, cx));
+                    },
+                ))
+                .item(PopupMenuItem::new("Quit Disqro").on_click(move |_, w, cx| {
+                    let _ = s5.update(cx, |s, cx| s.quit(w, cx));
+                }))
             })
             .into_any_element()
     }
-    fn title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .px(px(6.))
-            .gap(px(7.))
-            .items_center()
-            .child(img("brand/compact.png").size(px(18.)).flex_shrink_0())
-            .child(div().flex_1().h_full())
+    /// The frame holds what belongs to the whole window: the Library
+    /// sidebar, Library search and the workspace menu. Navigation belongs to
+    /// each browser and lives in its header; the queue belongs to playback
+    /// and is shown from the player.
+    fn title_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // Kit marks its underlying title bar as native caption. Occlude only
+        // the client controls, leaving the flexible space between them draggable.
+        let client = || {
+            h_flex()
+                .h_full()
+                .items_center()
+                .gap(px(4.))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        };
+        let leading = client()
+            .flex_shrink_0()
+            .child(self.sidebar_button(Home::Leading, cx));
+        let trailing = client()
+            .flex_shrink_0()
             .when(!self.dock.read(cx).is_locked(), |d| {
                 d.child(
                     div().occlude().child(
@@ -1444,15 +1519,47 @@ impl Workspace {
                     ),
                 )
             })
+            .child(div().occlude().child(self.workspace_menu(cx)));
+        // Equal flexible sides keep the search field centred in the window.
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .px(px(6.))
             .child(
-                div()
-                    .occlude()
-                    .child(skin::add_button(&self.skin, None, cx)),
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .items_center()
+                    .child(
+                        h_flex()
+                            .w(px(38.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .items_center()
+                            .child(img("brand/compact.png").size(px(18.))),
+                    )
+                    .child(leading),
             )
-            .child(div().occlude().child(self.workspace_menu(cx)))
+            .child(
+                client()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .child(self.search_field(window, cx)),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .items_center()
+                    .justify_end()
+                    .child(trailing),
+            )
             .into_any_element()
     }
-    /// Shown when every panel is closed. Playback continues below it.
+    /// Recovery when the center contains no visible panels.
     fn empty_state(&self, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let workspace = cx.weak_entity();
@@ -1468,12 +1575,13 @@ impl Workspace {
                     .size(px(28.))
                     .text_color(m.text_faint),
             )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(m.text_muted)
-                    .child("No panels are open"),
-            )
+            .child(div().text_size(px(13.)).text_color(m.text_muted).child(
+                if self.panes.is_empty() {
+                    "No panels are open"
+                } else {
+                    "No panels are visible"
+                },
+            ))
             .child(
                 Button::new("empty-open")
                     .small()
@@ -1524,13 +1632,9 @@ fn tab_menu(
     workspace: &WeakEntity<Workspace>,
     pane: &Entity<Pane>,
     menu: PopupMenu,
-    window: &mut Window,
+    _: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    let node = workspace
-        .upgrade()
-        .and_then(|w| w.read(cx).node_of(pane, cx));
-    let picker = workspace.clone();
     let editing = workspace
         .upgrade()
         .is_some_and(|w| !w.read(cx).dock.read(cx).is_locked());
@@ -1539,24 +1643,36 @@ fn tab_menu(
         w.node_of(pane, cx)
             .is_none_or(|node| w.group_members(node, cx).len() < 2)
     });
-    let (a, b, c) = (workspace.clone(), workspace.clone(), workspace.clone());
-    let (p1, p2, p3) = (pane.clone(), pane.clone(), pane.clone());
+    let (a, b) = (workspace.clone(), workspace.clone());
+    let (p1, p2) = (pane.clone(), pane.clone());
     let id = Workspace::panel_id(pane);
     let arrangement = workspace
         .upgrade()
         .and_then(|w| w.read(cx).sidebar_action(id, cx));
     let sidebar = workspace.clone();
-    Pane::menu(pane, menu, window, cx)
-        .separator()
+    let instance = pane.read(cx).ty.instances == Instances::Multiple;
+    let address = browser_of(pane, cx).and_then(|b| {
+        let b = b.read(cx);
+        crate::location::physical_address(&b.location, b.page.as_ref())
+            .map(|p| p.display().to_string())
+    });
+    Pane::menu(pane, menu, cx)
+        .when_some(address, |menu, path| {
+            menu.item(
+                PopupMenuItem::new("Copy Address")
+                    .icon(IconName::Copy)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(path.clone()))
+                    }),
+            )
+        })
+        .when(instance, |menu| menu.separator())
         .when_some(arrangement, |menu, action| {
             menu.item(
                 PopupMenuItem::new(action.label()).on_click(move |_, w, cx| {
                     let _ = sidebar.update(cx, |s, cx| s.arrange_sidebar(id, action, w, cx));
                 }),
             )
-        })
-        .submenu("Open Panel Here", window, cx, move |menu, _, cx| {
-            picker_menu(&picker, node, menu, cx)
         })
         .when(editing, |menu| {
             menu.item(
@@ -1580,34 +1696,22 @@ fn tab_menu(
                     }),
             )
         })
-        .separator()
-        .item(Pane::close_item(pane))
-        .item(
-            PopupMenuItem::new("Close Other Tabs")
-                .disabled(alone)
-                .on_click(move |_, w, cx| {
-                    let _ = c.update(cx, |s, cx| {
-                        let others: Vec<_> = s
-                            .node_of(&p3, cx)
-                            .map(|node| s.group_members(node, cx))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|p| *p != p3)
-                            .collect();
-                        s.remember_layout(None, cx);
-                        for pane in others {
-                            s.remove_pane(&pane, w, cx);
-                        }
-                    });
-                }),
-        )
+        .when(instance || arrangement.is_some() || editing, |menu| {
+            menu.separator()
+        })
+        .item(Pane::close_item(pane, cx))
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let full_results = self.search_visible && self.search.read(cx).full_results();
+        if self.dock_covered != full_results {
+            self.dock_covered = full_results;
+            self.sync_panel_display(cx);
+        }
         let m = *materials(cx);
-        let empty = self.center(cx).panels().next().is_none();
-        let title = self.title_bar(cx);
+        let empty = self.dock.read(cx).is_empty(DockPlacement::Center, cx);
+        let title = self.title_bar(window, cx);
         let player_height = self.player_height;
         let dock = AnyView::from(self.dock.clone());
         // Cached drawing omits descendants from subsequent accessibility trees.
@@ -1629,16 +1733,19 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|s, _: &GoBack, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.back(w, cx))
                 }
             }))
             .on_action(cx.listener(|s, _: &GoForward, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.forward(w, cx))
                 }
             }))
             .on_action(cx.listener(|s, _: &GoUp, w, cx| {
                 if let Some(b) = s.browser(cx) {
+                    s.reveal_active_browser(w, cx);
                     b.update(cx, |b, cx| b.up(w, cx))
                 }
             }))
@@ -1671,27 +1778,26 @@ impl Render for Workspace {
                     b.update(cx, |b, cx| b.reload(w, cx))
                 }
             }))
+            .on_action(
+                cx.listener(|s, _: &ToggleLeftSidebar, w, cx| {
+                    s.toggle_sidebar(Home::Leading, w, cx)
+                }),
+            )
+            .on_action(cx.listener(|s, _: &ToggleRightSidebar, w, cx| s.toggle_queue(w, cx)))
             .on_action(cx.listener(|s, _: &FocusLocation, w, cx| {
+                s.hide_suggestions(cx);
+                s.ensure_browser(w, cx);
                 s.reveal_active_browser(w, cx);
-                if let Some(pane) = s.active_browser_pane(cx)
-                    && let Some(b) = pane.read(cx).content.as_any().downcast_ref::<BrowserPane>()
-                {
-                    let bar = b.location.clone();
-                    bar.update(cx, |l, cx| l.edit(w, cx))
+                let address = s
+                    .browser(cx)
+                    .and_then(|b| b.read(cx).address.as_ref()?.upgrade());
+                if let Some(bar) = address {
+                    bar.update(cx, |bar, cx| bar.edit(w, cx));
                 }
             }))
+            .on_action(cx.listener(|s, _: &SearchLibrary, w, cx| s.open_search(w, cx)))
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
-                s.reveal_active_browser(w, cx);
-                if let Some(b) = s.browser(cx) {
-                    b.update(cx, |b, cx| {
-                        b.begin_navigation(cx);
-                    });
-                    let search = b.read(cx).search.clone();
-                    search.update(cx, |i, cx| {
-                        i.focus(w, cx);
-                        i.select_all(w, cx);
-                    });
-                }
+                s.open_filter(w, cx);
             }))
             .on_action(cx.listener(|s, _: &NewBrowserTab, w, cx| {
                 let state = s
@@ -1789,14 +1895,14 @@ impl Render for Workspace {
                 }
             }))
             .child(TitleBar::new().h(px(40.)).pl(px(10.)).child(title))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .child(dock)
-                    .when(empty, |d| d.child(self.empty_state(cx))),
-            )
+            .child(div().flex_1().min_h_0().relative().map(|area| {
+                if full_results {
+                    area.bg(m.canvas).child(self.search.clone())
+                } else {
+                    area.child(dock)
+                        .when(empty, |d| d.child(self.empty_state(cx)))
+                }
+            }))
             .child(
                 div()
                     .id("player")

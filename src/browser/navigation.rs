@@ -808,6 +808,29 @@ impl Browser {
         cx.notify();
     }
 
+    pub fn show_search_track(
+        &mut self,
+        id: crate::store::TrackId,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(
+            Route::new(Location::Library(None), None),
+            Arrival::Row(RowKey::Key(id)),
+            w,
+            cx,
+        );
+    }
+
+    pub fn show_search_artist(&mut self, name: String, w: &mut Window, cx: &mut Context<Self>) {
+        let current = self.saved_visit(cx);
+        self.history.record(current);
+        let mut visit = SavedVisit::new(Route::new(Location::Library(None), None), false);
+        visit.query = format!("artist:={name}");
+        self.filter_open = true;
+        self.restore_visit(visit, w, cx);
+    }
+
     pub fn locate(
         &mut self,
         track: Arc<Track>,

@@ -496,6 +496,7 @@ impl Catalog {
         cx.background_spawn(async move {
             let cache = cache_dir.and_then(|dir| Cache::open(&dir).ok());
             crate::discovery::local_program(&folder, &track, context, cache.as_ref())
+                .map(|program| program.tracks)
         })
         .await
     }

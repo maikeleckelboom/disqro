@@ -1,5 +1,42 @@
-use crate::{audio::tests::fixture, cache::Cache, library::DiscContext, timeline::*, waveform};
-use std::{fs, sync::Arc};
+use crate::{
+    audio::tests::fixture,
+    cache::Cache,
+    library::{DiscContext, Track},
+    timeline::*,
+    waveform,
+};
+use lofty::{
+    config::WriteOptions,
+    prelude::*,
+    tag::{Tag, TagType},
+};
+use std::{fs, path::Path, sync::Arc};
+
+fn overview(track: &Track, program: Option<&Program>) -> Option<(&'static str, bool)> {
+    Overview::for_track(track, program).map(|o| (o.label, o.enabled))
+}
+
+fn tagged_mp3(dir: &Path, name: &str, album: &str, disc: u32, number: u32) -> Arc<Track> {
+    let path = dir.join(name);
+    // Silent MPEG-1 Layer III frames at 44.1 kHz and 128 kbit/s.
+    let mut frame = [0; 417];
+    frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+    let mut info = frame;
+    info[36..40].copy_from_slice(b"Info");
+    info[40..44].copy_from_slice(&1_u32.to_be_bytes());
+    info[44..48].copy_from_slice(&8_u32.to_be_bytes());
+    let mut bytes = info.to_vec();
+    bytes.extend_from_slice(&frame.repeat(8));
+    fs::write(&path, bytes).unwrap();
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.set_album(album.into());
+    tag.set_disk(disc);
+    tag.set_track(number);
+    tag.save_to_path(&path, WriteOptions::default()).unwrap();
+    let mut track = Track::file(path);
+    assert!(track.read_tags());
+    Arc::new(track)
+}
 
 #[test]
 fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
@@ -43,42 +80,100 @@ fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
     assert_eq!(p.locate(p.duration), None);
 }
 #[test]
-fn only_tracks_from_a_cd_offer_full_cd() {
+fn standalone_recordings_and_one_track_albums_have_no_second_perspective() {
     let dir = tempfile::tempdir().unwrap();
-    let resolve = |track: &Arc<crate::library::Track>| {
-        Program::resolve(track, DiscContext::Selected, None).unwrap()
-    };
-    // A lone recording, even when chosen from a CD context, and a one-track
-    // album both play as themselves.
-    let lone = dir.path().join("lone");
-    fs::create_dir(&lone).unwrap();
-    fixture(&lone.join("single.wav"), 32000, 32000);
-    let single = Arc::new(crate::library::Track::file(lone.join("single.wav")));
-    let p = resolve(&single);
+    let wav = dir.path().join("single.wav");
+    fixture(&wav, 32000, 32000);
+    let single = Arc::new(Track::file(wav));
+    let p = Program::resolve(&single, DiscContext::Selected, None).unwrap();
     assert!(!p.full_cd && p.limitation.is_some());
-    assert!(!from_cd(&single, Some(&p)));
-    let album = dir.path().join("CD1");
-    fs::create_dir(&album).unwrap();
-    fixture(&album.join("only.wav"), 32000, 32000);
-    let only = Arc::new(crate::library::Track::file(album.join("only.wav")));
+    assert_eq!(overview(&single, None), None);
+    assert_eq!(overview(&single, Some(&p)), None);
+
+    let only = tagged_mp3(dir.path(), "only.mp3", "Single", 1, 1);
     let p = Program::resolve(&only, DiscContext::Inferred, None).unwrap();
     assert!(p.full_cd && p.segments.len() == 1);
-    assert!(!from_cd(&only, Some(&p)));
-    // Several tracks of one CD do, and so does a CUE chapter before its
-    // program resolves.
-    fixture(&album.join("two.wav"), 32000, 32000);
-    let p = Program::resolve(&only, DiscContext::Inferred, None).unwrap();
+    assert_eq!(overview(&only, Some(&p)), None);
+}
+
+#[test]
+fn tagged_album_overview_follows_track_numbers_and_stays_on_the_playing_disc() {
+    let dir = tempfile::tempdir().unwrap();
+    let album = "Serato Scratch Beats";
+    let two = tagged_mp3(dir.path(), "a.mp3", album, 1, 2);
+    let one = tagged_mp3(dir.path(), "b.mp3", album, 1, 1);
+    tagged_mp3(dir.path(), "other.mp3", "Other Album", 1, 1);
+
+    let resolve = || Program::resolve(&two, DiscContext::Inferred, None).unwrap();
+    assert_eq!(overview(&two, None), Some(("Album", false)));
+    let p = resolve();
+    assert_eq!(overview(&two, Some(&p)), Some(("Album", true)));
     assert_eq!(p.segments.len(), 2);
-    assert!(from_cd(&only, Some(&p)));
-    fs::write(
-        dir.path().join("set.cue"),
-        "FILE lone/single.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00",
-    )
-    .unwrap();
-    let chapter = crate::cue::read(&dir.path().join("set.cue"))
-        .unwrap()
-        .remove(0);
-    assert!(from_cd(&chapter, None));
+    assert_eq!(p.index(&one), Some(0));
+    assert_eq!(p.index(&two), Some(1));
+
+    let unrelated = tagged_mp3(dir.path(), "disc2.mp3", album, 2, 1);
+    let p = resolve();
+    assert_eq!(overview(&two, Some(&p)), Some(("Disc", true)));
+    assert_eq!(p.segments.len(), 2);
+    assert_eq!(p.index(&unrelated), None);
+    assert_eq!(p.locate(p.segments[1].time.start), Some((1, 0)));
+}
+
+#[test]
+fn explicit_cd_cue_and_other_authored_recordings_label_the_same_timeline_differently() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(&dir.path().join("session.wav"), 48000, 96000);
+    for (name, label) in [
+        ("Live (CD1).cue", "Full CD"),
+        ("Live.cue", "Full Recording"),
+    ] {
+        let path = dir.path().join(name);
+        fs::write(
+            &path,
+            "FILE session.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+        )
+        .unwrap();
+        let chapter = Arc::new(crate::cue::read(&path).unwrap().pop().unwrap());
+        let p = Program::resolve(&chapter, DiscContext::Inferred, None).unwrap();
+        assert_eq!(overview(&chapter, None), Some((label, false)));
+        assert_eq!(overview(&chapter, Some(&p)), Some((label, true)));
+        assert_eq!(p.index(&chapter), Some(1));
+        assert_eq!(p.locate(SECOND), Some((1, 48000)));
+        assert_eq!(p.duration, 2 * SECOND);
+    }
+}
+
+#[test]
+fn selecting_loose_files_can_resolve_a_program_without_claiming_cd_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["one.wav", "two.wav"] {
+        fixture(&dir.path().join(name), 32000, 32000);
+    }
+    let one = Arc::new(Track::file(dir.path().join("one.wav")));
+    let p = Program::resolve(&one, DiscContext::Inferred, None).unwrap();
+    assert_eq!(overview(&one, Some(&p)), None);
+    let p = Program::resolve(&one, DiscContext::Selected, None).unwrap();
+    assert_eq!(overview(&one, Some(&p)), Some(("Full Program", true)));
+    assert_eq!(p.segments.len(), 2);
+}
+
+#[test]
+fn stale_tagged_album_context_has_a_disabled_album_overview() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut track = Track::file(dir.path().join("unretagged.wav"));
+    fixture(&track.source, 32000, 32000);
+    // A restored queue can still know the album after its file loses the tag.
+    track.album = "Old Album".into();
+    let track = Arc::new(track);
+    let p = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let o = Overview::for_track(&track, Some(&p)).unwrap();
+    assert_eq!((o.label, o.enabled), ("Album", false));
+    assert_eq!(
+        o.unavailable_tip(p.limitation.as_deref(), false),
+        "Album waveform unavailable · No larger sequence was found"
+    );
+    assert_eq!(p.segments.len(), 1);
 }
 #[test]
 fn missing_recording_requires_a_verified_duration_for_this_sheet_revision() {
@@ -92,13 +187,22 @@ fn missing_recording_requires_a_verified_duration_for_this_sheet_revision() {
     let track = Arc::new(crate::cue::read(&cue).unwrap().pop().unwrap());
     let db = Cache::open(dir.path()).unwrap();
     let resolve = || Program::resolve(&track, DiscContext::Inferred, Some(&db)).unwrap();
-    assert!(!resolve().full_cd);
+    let incomplete = resolve();
+    assert!(!incomplete.full_cd);
+    assert_eq!(
+        overview(&track, Some(&incomplete)),
+        Some(("Full Recording", false))
+    );
     fixture(&b, 48000, 24111);
     let present = resolve();
     assert!(present.full_cd);
     fs::remove_file(&b).unwrap();
     let offline = resolve();
     assert!(offline.full_cd);
+    assert_eq!(
+        overview(&track, Some(&offline)),
+        Some(("Full Recording", true))
+    );
     assert_eq!(present.duration, offline.duration);
     assert!(!offline.segments[0].source.available);
     fs::write(&cue, format!("REM changed\n{text}")).unwrap();

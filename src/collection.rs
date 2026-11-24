@@ -1,6 +1,7 @@
 //! A disc has an authored CUE program, or a tagged album in one folder.
 //! Two identically titled rips in different folders remain distinct.
 use crate::{
+    artwork::{CoverFile, CoverThumbnail, TrackCover},
     library::{self, Track},
     store::{AlbumId, AlbumRow, Mark, PlaylistId, RootId, Term},
     theme::materials,
@@ -69,7 +70,7 @@ impl ViewPrefs {
         self.subfolders.drain(..excess);
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DiscId {
     Cue(PathBuf),
     Album(PathBuf, String, Option<u32>),
@@ -144,7 +145,8 @@ pub struct Disc {
     pub root: Option<RootId>,
     pub title: String,
     pub folder: PathBuf,
-    pub cover: Option<crate::artwork::CoverFile>,
+    pub cover: Option<CoverFile>,
+    cue_image: Option<PathBuf>,
     year: Option<u32>,
     number: Option<u32>,
     format: String,
@@ -227,9 +229,17 @@ pub struct Discs {
     pub tracks: Option<WeakEntity<TableState<crate::table::MusicTable>>>,
 }
 impl Discs {
-    /// The discs, with each release's discs placed beneath it, where its
-    /// lowest-numbered disc would be. A year that differs between the sheets
-    /// of one release then cannot move the release.
+    pub fn new(
+        browser: WeakEntity<crate::browser::Browser>,
+        tracks: WeakEntity<TableState<crate::table::MusicTable>>,
+    ) -> Self {
+        Self {
+            browser: Some(browser),
+            tracks: Some(tracks),
+            ..Default::default()
+        }
+    }
+    /// Top-level albums and releases. Each release owns its numbered discs.
     pub fn shelve(discs: Vec<Arc<Disc>>) -> Vec<Shelf> {
         let order = crate::release::ordered(
             discs
@@ -256,11 +266,14 @@ impl Discs {
                 title: m.title.clone(),
                 folder: first
                     .folder
-                    .parent()
-                    .map(Path::to_owned)
-                    .unwrap_or_default(),
+                    .ancestors()
+                    .find(|dir| found.iter().all(|d| d.folder.starts_with(dir)))
+                    .unwrap_or(Path::new(""))
+                    .to_owned(),
                 cover: found.iter().find_map(|d| d.cover.clone()),
-                year: first.year,
+                year: first
+                    .year
+                    .filter(|y| found.iter().all(|disc| disc.year == Some(*y))),
                 format: if found.iter().all(|d| d.format == first.format) {
                     first.format.clone()
                 } else {
@@ -315,6 +328,7 @@ impl Discs {
                     title,
                     folder: folder.strip_prefix(root).unwrap_or(folder).into(),
                     cover: covers.get(folder).cloned(),
+                    cue_image: None,
                     year: t.year,
                     number: t.disc_number,
                     format: t.format(),
@@ -358,6 +372,10 @@ impl Discs {
             .map(|mut disc| {
                 if matches!(disc.id, DiscId::Album(..)) {
                     disc.tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
+                } else if let Some(first) = disc.tracks.first()
+                    && disc.tracks.iter().all(|t| t.source == first.source)
+                {
+                    disc.cue_image = Some(first.source.clone());
                 }
                 Arc::new(disc)
             })
@@ -388,7 +406,8 @@ impl Disc {
             root: a.root,
             title: a.title,
             folder: a.folder,
-            cover: a.cover.and_then(crate::artwork::CoverFile::new),
+            cover: a.cover.and_then(CoverFile::new),
+            cue_image: a.cue_image,
             year: a.year,
             number: a.disc_number,
             format: a.format,
@@ -410,64 +429,138 @@ impl Disc {
         let m = self.release.as_ref()?;
         Some((format!("CD {}", m.number), m.subtitle.as_str()))
     }
-    /// The header of a CD within a track table. Its cover follows the row
-    /// height, which grows with the table's Cover column.
-    pub fn section(&self, row_height: f32, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let m = *materials(cx);
-        let size = row_height - 6.;
-        let cover = self
-            .cover
-            .as_ref()
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, size, window, cx).flatten());
-        let mut detail = Vec::new();
-        if let Some(year) = self.year {
-            detail.push(year.to_string());
+    /// Artwork owned by the group: a shared CUE image or the group's sidecar.
+    pub(crate) fn section_cover(
+        &self,
+        settled_cover: f32,
+        listing: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(CoverFile, Arc<RenderImage>)> {
+        let size = section_cover_edge(settled_cover);
+        if let Some(source) = &self.cue_image {
+            return TrackCover {
+                source: source.clone(),
+                authored_folder: match &self.id {
+                    DiscId::Cue(sheet) => sheet.parent().map(Path::to_owned),
+                    _ => None,
+                },
+                disc_cover: self.cover.as_ref().map(|file| file.path().to_owned()),
+                listing,
+            }
+            .image(size, window, cx);
         }
-        detail.push(self.format.clone());
-        if let Some(number) = self.number {
+        let file = self.cover.as_ref()?;
+        CoverThumbnail::get(file, size, window, cx)
+            .flatten()
+            .map(|image| (file.clone(), image))
+    }
+
+    /// The album or disc heading spans the visible table. Its artwork sits in
+    /// the Cover column, above the tracks it describes, and its title lines
+    /// up with theirs. Without a Cover column both lead the row.
+    ///
+    /// `lead` is the left edge and width of the Cover column and the left
+    /// edge of Title; `cover_edge` is the size tracks draw covers at.
+    pub fn section(
+        &self,
+        cover_edge: f32,
+        lead: Option<(f32, f32, f32)>,
+        settled_cover: f32,
+        listing: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        let m = *materials(cx);
+        let cover = self
+            .section_cover(settled_cover, listing, window, cx)
+            .map(|(_, image)| image);
+        let mut detail = Vec::new();
+        if let Some(number) = self.release.as_ref().map(|m| m.number).or(self.number) {
             let normalized = self.title.replace(' ', "").to_lowercase();
             if !normalized.contains(&format!("cd{number}"))
                 && !normalized.contains(&format!("disc{number}"))
             {
-                detail.insert(0, format!("CD {number}"));
+                detail.push(format!("Disc {number}"));
             }
         }
+        if let Some(member) = &self.release
+            && !member.subtitle.is_empty()
+            && !self
+                .title
+                .to_lowercase()
+                .contains(&member.subtitle.to_lowercase())
+        {
+            detail.push(member.subtitle.clone());
+        }
+        if let Some(year) = self.year {
+            detail.push(year.to_string());
+        }
+        if self.count > 0 {
+            detail.push(format!(
+                "{} {}",
+                self.count,
+                if self.count == 1 { "track" } else { "tracks" }
+            ));
+        }
+        if self.complete && self.duration > 0. {
+            detail.push(crate::library::clock(self.duration));
+        }
+        detail.push(self.format.clone());
+        let (edge, tile_x, title_x) = match lead {
+            Some((cover_x, cover_w, title_x)) => {
+                let edge = cover_edge.min(cover_w - 2. * crate::table::COVER_X);
+                (
+                    edge,
+                    cover_x + ((cover_w - edge) / 2.).floor(),
+                    title_x + 10.,
+                )
+            }
+            None => {
+                let edge = section_cover_edge(cover_edge);
+                (edge, 10., 10. + edge + 10.)
+            }
+        };
         h_flex()
             .w_full()
             .h_full()
             .flex_shrink_0()
             .min_w_0()
-            .gap(px(8.))
-            .px(px(9.))
+            .relative()
+            .items_center()
+            .pl(px(title_x))
+            .pr(px(10.))
+            .gap(px(10.))
             .border_t_1()
-            .border_color(m.control_line)
+            .border_color(m.line)
             .child(
                 div()
-                    .size(px(size))
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .rounded(px(2.))
-                    .when_some(cover, |d, cover| {
-                        d.child(img(cover).size_full().object_fit(ObjectFit::Cover))
-                    }),
+                    .absolute()
+                    .left(px(tile_x))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(crate::table::cover_tile(edge, cover, cx)),
             )
             .child(
                 div()
                     .min_w_0()
+                    .flex_shrink(1.)
                     .truncate()
                     .text_ellipsis_middle()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
                     .text_color(m.text)
                     .child(self.title.clone()),
             )
             .child(
                 div()
                     .min_w_0()
-                    .truncate()
-                    .text_ellipsis_middle()
                     .flex_shrink_0()
-                    .text_size(px(11.))
+                    .max_w(relative(0.45))
+                    .truncate()
+                    .text_size(px(crate::theme::size::TEXT_SMALL))
                     .text_color(m.text_faint)
                     .child(detail.join("  ·  ")),
             )
@@ -699,6 +792,10 @@ impl TableDelegate for Discs {
     }
 }
 
+fn section_cover_edge(edge: f32) -> f32 {
+    (edge - 4.).clamp(20., 36.)
+}
+
 /// Whether a folder track matches every search term. The same terms filter
 /// library views in SQL; `mark` is only consulted for `rating:` and `liked:`.
 pub fn matches(t: &Track, terms: &[Term], mark: impl Fn() -> Mark) -> bool {
@@ -757,7 +854,7 @@ mod release_tests {
     }
 
     #[test]
-    fn a_release_lists_its_discs_beneath_it_at_its_first_disc() {
+    fn overview_keeps_release_order_and_owns_both_discs() {
         // Discovery or a year typo can put the second disc first.
         let rows = [
             track(r"M:\Live\CD2\a.wav", "Live (CD2)"),

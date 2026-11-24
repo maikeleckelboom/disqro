@@ -59,6 +59,7 @@ pub enum Term {
     Any(String),
     Title(String),
     Artist(String),
+    ExactArtist(String),
     Album(String),
     Format(String),
     Year(u32),
@@ -67,6 +68,9 @@ pub enum Term {
 }
 impl Term {
     pub fn parse(search: &str) -> Vec<Self> {
+        if let Some(name) = search.strip_prefix("artist:=").filter(|v| !v.is_empty()) {
+            return vec![Self::ExactArtist(name.to_lowercase())];
+        }
         search
             .split_whitespace()
             .map(|word| {
@@ -104,6 +108,7 @@ impl Term {
                     || has(&t.source.to_string_lossy(), v)
             }
             Self::Title(v) => has(&t.title, v),
+            Self::ExactArtist(v) => t.artist.to_lowercase() == *v,
             Self::Artist(v) => has(&t.artist, v),
             Self::Album(v) => has(&t.album, v),
             Self::Format(v) => t.format() == *v,
@@ -124,6 +129,7 @@ impl Term {
                 format!("(instr(t.search, {p}) > 0 OR instr(s.path_key, {p}) > 0)")
             }
             Self::Title(v) => format!("instr(t.title_key, {}) > 0", arg(Box::new(v.clone()))),
+            Self::ExactArtist(v) => format!("t.artist_key = {}", arg(Box::new(v.clone()))),
             Self::Artist(v) => format!("instr(t.artist_key, {}) > 0", arg(Box::new(v.clone()))),
             Self::Album(v) => format!("instr(t.album_key, {}) > 0", arg(Box::new(v.clone()))),
             Self::Format(v) => format!("t.format = {}", arg(Box::new(v.clone()))),
@@ -162,6 +168,8 @@ pub struct AlbumRow {
     /// The folder, relative to its collection.
     pub folder: PathBuf,
     pub cover: Option<PathBuf>,
+    /// A CUE program whose chapters all use the same audio image.
+    pub cue_image: Option<PathBuf>,
     pub count: usize,
     pub duration: f64,
     pub complete: bool,
@@ -191,6 +199,7 @@ pub struct AlbumStructure {
 /// Which discs an album query reads.
 #[derive(Clone)]
 enum Albums<'a> {
+    Disc(AlbumId),
     Root(Option<RootId>),
     Release(&'a ReleaseContents),
 }
@@ -390,6 +399,10 @@ impl Store {
                     self.album_rows(Albums::Release(&release), &query.search)?,
                 )
             }
+            Scope::Album(id) if grouped => (
+                self.listing(query)?,
+                self.album_rows(Albums::Disc(id), &query.search)?,
+            ),
             _ => (self.listing(query)?, vec![]),
         };
         snapshot.commit()?;
@@ -546,7 +559,7 @@ impl Store {
 
     /// The release memberships of a collection's discs, from all of its
     /// available discs whatever a view's search shows.
-    fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
+    pub(super) fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
         Ok(self
             .album_structure(root)?
             .into_iter()
@@ -575,13 +588,13 @@ impl Store {
         // One indexed look-up per disc rather than a pass over every track.
         let sql = format!(
             "SELECT al.id, al.folder, al.title,
-                (SELECT min(t.disc_number) FROM tracks t
+                (SELECT min(t.disc_number) FROM tracks t INDEXED BY tracks_album
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id),
-                al.key LIKE 'sheet:%' OR EXISTS(SELECT 1 FROM tracks t
+                al.key LIKE 'sheet:%' OR EXISTS(SELECT 1 FROM tracks t INDEXED BY tracks_album
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id
                    AND trim(t.album) <> '')
              FROM albums al
-             WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t
+             WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t INDEXED BY tracks_album
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
              ORDER BY coalesce(al.year, 4294967295), al.sort_key, al.id"
         );
@@ -637,6 +650,10 @@ impl Store {
     fn album_rows(&self, albums: Albums, search: &str) -> Result<Vec<AlbumRow>> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let mut filter = vec![match &albums {
+            Albums::Disc(id) => {
+                args.push(Box::new(*id));
+                format!("t.album_id = ?{} AND t.present = 1", args.len())
+            }
             Albums::Root(Some(root)) => {
                 args.push(Box::new(*root));
                 format!("t.root_id = ?{} AND t.present = 1", args.len())
@@ -653,11 +670,18 @@ impl Store {
             ),
         }];
         filter.extend(Term::parse(search).iter().map(|t| t.sql(&mut args)));
+        // Section artwork belongs to the complete CUE, independent of
+        // which chapters pass the outer query's filter.
         let sql = format!(
             "SELECT al.id, al.title, al.year, al.folder, al.cover, count(t.id),
                 total(t.duration), count(t.duration) = count(t.id),
                 CASE WHEN min(t.format) = max(t.format) THEN min(t.format) ELSE 'Mixed' END,
-                ro.path, min(t.disc_number), ro.id
+                ro.path, min(t.disc_number), ro.id,
+                CASE WHEN min(t.first_tick) IS NOT NULL THEN (
+                    SELECT CASE WHEN min(ch.source) = max(ch.source) THEN min(audio.path) END
+                    FROM tracks ch JOIN files audio ON audio.id = ch.source
+                    WHERE ch.album_id = al.id AND ch.present = 1
+                ) END
              FROM tracks t JOIN albums al ON al.id = t.album_id
              JOIN files s ON s.id = t.source
              LEFT JOIN roots ro ON ro.id = t.root_id
@@ -682,6 +706,7 @@ impl Store {
                 folder,
                 disc_number: r.get(10)?,
                 cover: r.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                cue_image: r.get::<_, Option<String>>(12)?.map(PathBuf::from),
                 count: r.get::<_, i64>(5)? as usize,
                 duration: r.get(6)?,
                 complete: r.get(7)?,
@@ -691,6 +716,7 @@ impl Store {
         })?;
         let mut rows: Vec<AlbumRow> = rows.collect::<rusqlite::Result<_>>()?;
         let mut releases = match albums {
+            Albums::Disc(id) => self.releases(self.album_root(id)?)?,
             Albums::Root(root) => self.releases(root)?,
             Albums::Release(release) => {
                 let order: HashMap<AlbumId, usize> = release

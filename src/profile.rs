@@ -30,6 +30,8 @@ pub struct SavedQueue {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceState {
+    pub left_hidden: bool,
+    pub right_hidden: bool,
     /// The destination for navigation from Library and Locations.
     pub active: Option<InstanceId>,
     /// The most recently closed instance of each type, in closing order.
@@ -274,6 +276,7 @@ mod tests {
                 active: Some(InstanceId(2)),
                 closed: vec![closed.clone()],
                 player_height: Some(120.),
+                ..Default::default()
             },
             expanded: vec!["c:/music".into()],
             ..Default::default()

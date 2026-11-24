@@ -47,7 +47,7 @@ pub struct LocationBar {
 
 /// Only a physical folder view has a filesystem address. A CD page can be
 /// projected from a folder while its navigation identity is the CD itself.
-fn physical_address<'a>(
+pub(crate) fn physical_address<'a>(
     location: &'a Location,
     page: Option<&crate::collection::Page>,
 ) -> Option<&'a Path> {

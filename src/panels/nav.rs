@@ -90,7 +90,10 @@ pub fn nav_row(
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(m.selected))
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        .focus_visible(|d| d.bg(m.hover).text_color(m.text))
+        // Keyboard focus outlines the row inside a border it always reserves.
+        .border_1()
+        .border_color(transparent_black())
+        .focus_visible(|d| d.text_color(m.text).border_color(m.focus_line()))
         .child(
             icon.size(px(16.))
                 .flex_shrink_0()

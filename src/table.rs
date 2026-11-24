@@ -45,10 +45,64 @@ const ROW_HEIGHT: f32 = 28.;
 const CELL_X: f32 = 10.;
 /// Cover thumbnails fill the column between its padding, from compact to
 /// large. Rows grow to keep a larger cover whole.
-const COVER_X: f32 = 8.;
+pub(crate) const COVER_X: f32 = 8.;
 const THUMBNAIL: f32 = 24.;
 const LARGE_THUMBNAIL: f32 = 96.;
 const COVER_Y: f32 = 2.;
+pub(crate) const COVER_WIDTH: f32 = THUMBNAIL + 2. * COVER_X;
+pub(crate) const COVER_MAX_WIDTH: f32 = LARGE_THUMBNAIL + 2. * COVER_X;
+/// The like control is a 14-pixel glyph; its column needs no more than a
+/// comfortable hit target. The heading draws the same glyph.
+pub(crate) const FAVORITE_WIDTH: f32 = 36.;
+
+pub(crate) fn cover_edge(width: f32) -> f32 {
+    (width - 2. * COVER_X)
+        .clamp(THUMBNAIL, LARGE_THUMBNAIL)
+        .round()
+}
+
+/// Keep the same top row when a different thumbnail size changes the row pitch.
+pub(crate) fn cover_row_height<D: TableDelegate>(
+    table: &TableState<D>,
+    previous: f32,
+    edge: f32,
+) -> f32 {
+    let height = |edge: f32| (edge + 2. * COVER_Y).max(ROW_HEIGHT);
+    let (old, new) = (height(previous), height(edge));
+    if old != new {
+        let scroll = table.vertical_scroll_handle.0.borrow();
+        let offset = scroll.base_handle.offset();
+        scroll
+            .base_handle
+            .set_offset(point(offset.x, offset.y * (new / old)));
+    }
+    new
+}
+
+/// A cover thumbnail, or the one fallback every artwork slot shares: a quiet
+/// tile with a disc glyph. A slot is never left blank, whether the release has
+/// no artwork or its image is still loading.
+pub(crate) fn cover_tile(edge: f32, image: Option<Arc<RenderImage>>, cx: &App) -> Div {
+    let m = materials(cx);
+    div()
+        .size(px(edge))
+        .flex_shrink_0()
+        .rounded(px(if edge > 40. { 4. } else { 2. }))
+        .overflow_hidden()
+        .map(|d| match image {
+            Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+            None => d
+                .bg(m.control)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Disc3)
+                        .size(px((edge * 0.5).clamp(12., 40.).round()))
+                        .text_color(m.text_faint),
+                ),
+        })
+}
 /// Library rows kept in memory beyond the visible range.
 const ROW_CACHE: usize = 4096;
 const PREFETCH: usize = 64;
@@ -102,6 +156,12 @@ impl Field {
             Self::Favorite => "Favorite",
         }
     }
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Cover | Self::Favorite => "",
+            f => f.label(),
+        }
+    }
     fn menu_label(self) -> &'static str {
         match self {
             Self::Number => "Track Number",
@@ -111,9 +171,9 @@ impl Field {
     }
     fn width(self) -> f32 {
         match self {
-            Self::Cover => THUMBNAIL + 2. * COVER_X,
+            Self::Cover => COVER_WIDTH,
             Self::Number => 40.,
-            Self::Favorite => 88.,
+            Self::Favorite => FAVORITE_WIDTH,
             Self::Title => 200.,
             Self::Artist => 135.,
             Self::Album => 148.,
@@ -126,6 +186,7 @@ impl Field {
     fn min_width(self) -> f32 {
         match self {
             Self::Cover => self.width(),
+            Self::Favorite => FAVORITE_WIDTH,
             Self::Number => 36.,
             Self::Title => 142.,
             Self::Year | Self::Disc => 48.,
@@ -136,7 +197,7 @@ impl Field {
     }
     fn max_width(self) -> f32 {
         match self {
-            Self::Cover => LARGE_THUMBNAIL + 2. * COVER_X,
+            Self::Cover => COVER_MAX_WIDTH,
             _ => 1200.,
         }
     }
@@ -192,6 +253,9 @@ impl Field {
         self.order().is_some()
     }
 }
+/// What an empty table says when its filter matched nothing.
+pub const NO_MATCHES: &str = "No matching tracks";
+
 /// A row's identity for selection: a physical file or authored segment in a
 /// folder, or a library view key. Tags and positions are deliberately
 /// absent, so a refresh or sort keeps the same selection.
@@ -228,7 +292,12 @@ enum Contents {
 }
 /// Section offsets are in the displayed table; track keys and pages stay dense.
 #[derive(Clone, Default)]
-pub struct Sections(Arc<[(usize, Arc<Disc>)]>);
+pub struct Sections(Arc<[Section]>);
+struct Section {
+    header: usize,
+    end: usize,
+    disc: Arc<Disc>,
+}
 impl Sections {
     pub fn new(groups: impl IntoIterator<Item = (Arc<Disc>, usize)>) -> Self {
         let mut row = 0;
@@ -239,25 +308,31 @@ impl Sections {
                 .map(|(disc, count)| {
                     let header = row;
                     row += 1 + count;
-                    (header, disc)
+                    Section {
+                        header,
+                        end: row,
+                        disc,
+                    }
                 })
                 .collect(),
         )
     }
     fn header(&self, row: usize) -> Option<&Arc<Disc>> {
-        self.0
-            .binary_search_by_key(&row, |(ix, _)| *ix)
-            .ok()
-            .map(|i| &self.0[i].1)
+        let section = self.0.get(self.preceding(row))?;
+        (section.header == row).then_some(&section.disc)
+    }
+    fn parent(&self, row: usize) -> Option<&Disc> {
+        let section = self.0.get(self.preceding(row).checked_sub(1)?)?;
+        (row < section.end).then_some(&section.disc)
     }
     fn preceding(&self, row: usize) -> usize {
-        self.0.partition_point(|(ix, _)| *ix < row)
+        self.0.partition_point(|section| section.header < row)
     }
     fn data_index(&self, row: usize) -> Option<usize> {
         let count = self.preceding(row);
         self.0
             .get(count)
-            .is_none_or(|(ix, _)| *ix != row)
+            .is_none_or(|section| section.header != row)
             .then(|| row - count)
     }
     fn display_index(&self, index: usize) -> usize {
@@ -265,7 +340,7 @@ impl Sections {
         let mut hi = self.0.len();
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if self.0[mid].0 - mid <= index {
+            if self.0[mid].header - mid <= index {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -302,8 +377,8 @@ impl Rows {
                 .sections
                 .0
                 .iter()
-                .find(|(_, d)| d.id == *id)
-                .map(|(i, _)| *i);
+                .find(|section| section.disc.id == *id)
+                .map(|section| section.header);
         }
         let ix = match (&self.data, k) {
             (Contents::Folder { sorted, .. }, RowKey::Track(source, disc)) => sorted
@@ -780,24 +855,13 @@ impl MusicTable {
             .and_then(|ix| table.col_width(ix))
             .map(f32::from)
             .or(settled);
-        let edge = |width: f32| {
-            (width - 2. * COVER_X)
-                .clamp(THUMBNAIL, LARGE_THUMBNAIL)
-                .round()
-        };
-        let cover = live.map_or(THUMBNAIL, edge);
-        let row = (cover + 2. * COVER_Y).max(ROW_HEIGHT);
-        if row != d.row_height {
-            let scroll = table.vertical_scroll_handle.0.borrow();
-            let offset = scroll.base_handle.offset();
-            let y = offset.y * (row / d.row_height);
-            scroll.base_handle.set_offset(point(offset.x, y));
-        }
+        let cover = live.map_or(THUMBNAIL, cover_edge);
+        let row = cover_row_height(table, d.cover, cover);
         let d = table.delegate_mut();
         d.cover = cover;
         d.row_height = row;
         if d.resizing.is_none() {
-            d.settled_cover = settled.map_or(THUMBNAIL, edge);
+            d.settled_cover = settled.map_or(THUMBNAIL, cover_edge);
         }
         row
     }
@@ -836,18 +900,29 @@ impl MusicTable {
     }
     fn end_resize(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
         if table.delegate_mut().resizing.take().is_some() {
+            let d = table.delegate();
+            let shown = d.layout().widths(d.viewport);
+            table.delegate_mut().layout_mut().settle(&shown);
+            table.refresh(cx);
             table.delegate().save_layout(cx);
             cx.notify();
         }
     }
-    pub fn fit(table: &mut TableState<Self>, width: f32, cx: &mut Context<TableState<Self>>) {
-        if table.delegate().viewport != width {
-            let scroll = table.horizontal_scroll_handle.clone();
-            table.delegate_mut().horizontal_scroll = Some(scroll);
-            table.delegate_mut().viewport = width;
-            table.refresh(cx);
-            cx.notify();
+    /// Lays the columns out for the table's width; `true` when it changed.
+    pub fn fit(
+        table: &mut TableState<Self>,
+        width: f32,
+        cx: &mut Context<TableState<Self>>,
+    ) -> bool {
+        if table.delegate().viewport == width {
+            return false;
         }
+        let scroll = table.horizontal_scroll_handle.clone();
+        table.delegate_mut().horizontal_scroll = Some(scroll);
+        table.delegate_mut().viewport = width;
+        table.refresh(cx);
+        cx.notify();
+        true
     }
     fn save_layout(&self, cx: &mut App) {
         let _ = self
@@ -1304,20 +1379,17 @@ impl MusicTable {
     }
     /// A stable element id for the cells of row `ix`.
     fn cell_id(&self, ix: usize) -> u64 {
-        use std::hash::BuildHasher;
-        FIXED.hash_one(self.rows.key(ix))
+        stable_element_key(self.rows.key(ix))
     }
-    /// A painted Cover cell. A missing or pending image keeps a faint tile
-    /// in the same place, so the column stays aligned without repeating an
-    /// icon on every row. The texture is decoded for the settled size, so
-    /// dragging the column boundary scales it without decoding again.
+    /// Flat rows use the regular placeholder. In a section, only a track
+    /// image that adds to the header's artwork needs a tile of its own.
     fn render_cover(
         &self,
         row: usize,
         t: &Track,
         window: &mut Window,
         cx: &mut App,
-    ) -> impl IntoElement {
+    ) -> Option<Div> {
         let folder = t.disc.as_ref().and_then(|d| d.sheet.parent());
         let fallback = match &self.rows.data {
             Contents::Library(_) => self.rows.row(row).and_then(|r| r.cover.as_ref()).cloned(),
@@ -1330,7 +1402,7 @@ impl MusicTable {
                 )
                 .map(|cover| cover.path().to_owned()),
         };
-        let image = crate::artwork::TrackCover {
+        let cover = crate::artwork::TrackCover {
             source: t.source.clone(),
             authored_folder: folder
                 .filter(|f| Some(*f) != t.source.parent())
@@ -1339,16 +1411,17 @@ impl MusicTable {
             listing: self.artwork_revision,
         }
         .image(self.settled_cover, window, cx);
-        div()
-            .size(px(self.cover))
-            .flex_shrink_0()
-            .rounded(px(2.))
-            .overflow_hidden()
-            .map(|d| match image {
-                Some(image) => d.child(img(image).size_full().object_fit(ObjectFit::Cover)),
-                // Fainter than row hover, so even large empty tiles recede.
-                None => d.bg(materials(cx).hover.opacity(0.4)),
-            })
+        if let Some(disc) = self.rows.sections.parent(row) {
+            let (file, image) = cover?;
+            if disc
+                .section_cover(self.settled_cover, self.artwork_revision, window, cx)
+                .is_some_and(|(shared, _)| shared == file)
+            {
+                return None;
+            }
+            return Some(cover_tile(self.cover, Some(image), cx));
+        }
+        Some(cover_tile(self.cover, cover.map(|(_, image)| image), cx))
     }
     fn render_like(
         &self,
@@ -1386,7 +1459,9 @@ impl MusicTable {
             .when(!liked, |d| {
                 d.opacity(0.).group_hover("track-row", |s| s.opacity(1.))
             })
-            .focus_visible(|s| s.opacity(1.).bg(m.hover))
+            .border_1()
+            .border_color(transparent_black())
+            .focus_visible(|s| s.opacity(1.).border_color(m.focus_line()))
             .hover(|d| d.bg(m.hover))
             .child(
                 if liked {
@@ -1459,6 +1534,7 @@ impl MusicTable {
                         (scrolling.end < widths.len() && ix + 1 >= scrolling.end && gap >= -1.)
                             .then(|| gap.clamp(0., scroll_tail(&scrolling, widths.len())));
                     let width = t.col_width(ix).map(f32::from);
+                    t.delegate_mut().layout_mut().holding = width.map(|_| ix);
                     t.delegate_mut().resizing = width.map(|width| Resize {
                         ix,
                         x: e.position.x,
@@ -1521,6 +1597,45 @@ impl MusicTable {
 /// Element ids must not change between frames, so the hasher is fixed.
 const FIXED: std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher> =
     std::hash::BuildHasherDefault::new();
+
+pub(crate) fn stable_element_key(key: impl std::hash::Hash) -> u64 {
+    use std::hash::BuildHasher;
+    FIXED.hash_one(key)
+}
+
+pub(crate) fn sort_heading(
+    col_ix: usize,
+    label: &'static str,
+    right_aligned: bool,
+    sorted: Option<ColumnSort>,
+    cx: &App,
+) -> Stateful<Div> {
+    let m = *materials(cx);
+    h_flex()
+        .id(("sort", col_ix))
+        .size_full()
+        .gap_1()
+        .when(right_aligned, |d| d.justify_end())
+        .text_size(px(crate::theme::size::LABEL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(if sorted.is_some() {
+            m.text_muted
+        } else {
+            m.text_faint
+        })
+        .whitespace_nowrap()
+        .child(label)
+        .when_some(sorted, |d, dir| {
+            d.child(
+                Icon::new(if dir == ColumnSort::Ascending {
+                    IconName::ChevronUp
+                } else {
+                    IconName::ChevronDown
+                })
+                .size(px(12.)),
+            )
+        })
+}
 
 impl TableDelegate for MusicTable {
     fn rows_count(&self, _: &App) -> usize {
@@ -1605,28 +1720,15 @@ impl TableDelegate for MusicTable {
         };
         let leading = grip(true, cx);
         let trailing = grip(false, cx);
-        h_flex()
-            .id(("sort", col_ix))
-            .size_full()
-            .gap_1()
-            .when(field.right_aligned(), |d| d.justify_end())
-            .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(if sorted.is_some() {
-                m.text_muted
-            } else {
-                m.text_faint
-            })
-            .whitespace_nowrap()
-            .child(field.label())
-            .when_some(sorted, |d, dir| {
-                d.child(
-                    Icon::new(if dir == ColumnSort::Ascending {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .size(px(12.)),
+        // Artwork explains itself. Its heading keeps the name for assistive
+        // technology and the column menu, without printing it.
+        sort_heading(col_ix, field.heading(), field.right_aligned(), sorted, cx)
+            .aria_label(field.label())
+            .when(field == Field::Favorite, |d| {
+                d.justify_center().child(
+                    Icon::new(IconName::Heart)
+                        .size(px(13.))
+                        .text_color(m.text_faint),
                 )
             })
             .children(trailing)
@@ -1781,13 +1883,17 @@ impl TableDelegate for MusicTable {
                 .into_any_element(),
             Field::Cover => cell
                 .justify_center()
-                .child(self.render_cover(row, &t, window, cx))
+                .children(self.render_cover(row, &t, window, cx))
                 .into_any_element(),
             Field::Favorite => cell
                 .justify_center()
                 .child(self.render_like(row, mark, cx))
                 .into_any_element(),
             Field::Title => cell
+                .pl(px(self.layout().content_inset(
+                    col,
+                    self.rows.sections.parent(row).is_some(),
+                )))
                 .text_color(if playing { m.accent } else { m.text })
                 .child(
                     div()
@@ -1806,7 +1912,9 @@ impl TableDelegate for MusicTable {
                     Field::Number | Field::Format => m.text_faint,
                     _ => m.text_muted,
                 })
-                .when(f == Field::Format, |d| d.text_size(px(11.5)))
+                .when(f == Field::Format, |d| {
+                    d.text_size(px(crate::theme::size::TEXT_SMALL))
+                })
                 .child(div().min_w_0().truncate().child(f.value(&t, mark)))
                 .into_any_element(),
         }
@@ -1846,6 +1954,8 @@ impl TableDelegate for MusicTable {
         };
         if let Some(d) = self.header(row) {
             let disc = d.clone();
+            let layout = self.layout();
+            let lead = layout.header_lead(&layout.widths(self.viewport));
             return div()
                 .id(("cd-section", row))
                 .overflow_hidden()
@@ -1855,7 +1965,14 @@ impl TableDelegate for MusicTable {
                 })
                 .when(focused && cursor, |d| d.child(focus_indicator()))
                 .cursor_pointer()
-                .child(d.section(self.row_height, window, cx))
+                .child(d.section(
+                    self.cover,
+                    lead,
+                    self.settled_cover,
+                    self.artwork_revision,
+                    window,
+                    cx,
+                ))
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(format!(
                         "{}  ·  {}",
@@ -1944,12 +2061,16 @@ impl TableDelegate for MusicTable {
     ) -> impl IntoElement {
         let m = materials(cx);
         let browser = self.browser.clone();
+        // The icon names what is empty: a filter that matched nothing, or
+        // the kind of place being shown.
         let icon = match &self.rows.data {
+            _ if self.empty.as_ref() == NO_MATCHES => Icon::new(IconName::ListFilter),
             Contents::Library(Paged {
-                scope: Scope::Playlist(_),
+                scope: Scope::Liked,
                 ..
-            }) => IconName::Music2,
-            _ => IconName::FolderOpen,
+            }) => Icon::default().path(crate::assets::HEART_FILL),
+            Contents::Library(_) => Icon::new(IconName::Music2),
+            _ => Icon::new(IconName::FolderOpen),
         };
         gpui_kit::component::v_flex()
             .size_full()
@@ -1958,19 +2079,18 @@ impl TableDelegate for MusicTable {
             .gap(px(8.))
             .px(px(24.))
             .when(!self.empty.is_empty() && !self.is_loading(), |d| {
-                d.child(Icon::new(icon).size(px(24.)).text_color(m.text_faint))
-                    .child(
-                        div()
-                            .id("empty-table-message")
-                            .w_full()
-                            .max_w(px(320.))
-                            .text_center()
-                            .text_size(px(13.))
-                            .text_color(m.text_muted)
-                            .role(Role::Label)
-                            .aria_value(self.empty.clone())
-                            .child(self.empty.clone()),
-                    )
+                d.child(icon.size(px(24.)).text_color(m.text_faint)).child(
+                    div()
+                        .id("empty-table-message")
+                        .w_full()
+                        .max_w(px(320.))
+                        .text_center()
+                        .text_size(px(13.))
+                        .text_color(m.text_muted)
+                        .role(Role::Label)
+                        .aria_value(self.empty.clone())
+                        .child(self.empty.clone()),
+                )
             })
             .when(self.offer_subfolders, |d| {
                 d.child(
@@ -2247,6 +2367,136 @@ mod tests {
         assert_eq!(rows.adjacent_track(Some(1), -1), Some(1));
         assert_eq!(rows.adjacent_track(Some(2), 1), Some(4));
         assert_eq!(rows.adjacent_track(Some(4), -1), Some(2));
+        for (row, disc) in [(1, &discs[0]), (2, &discs[0]), (4, &discs[1])] {
+            assert_eq!(rows.sections.parent(row).unwrap().id, disc.id);
+        }
+        for (row, disc) in [(0, &discs[0]), (3, &discs[1])] {
+            assert!(rows.sections.parent(row).is_none());
+            assert_eq!(rows.key(row), Some(RowKey::Disc(disc.id.clone())));
+            assert_eq!(rows.position(&RowKey::Disc(disc.id.clone())), Some(row));
+            assert!(rows.track(row).is_none());
+        }
+    }
+    #[test]
+    fn filtering_preserves_chapter_keys_and_indents_only_visible_children() {
+        use crate::collection::{Discs, matches};
+        use crate::store::Term;
+        use std::{fs, path::Path};
+        let dir = tempfile::tempdir().unwrap();
+        let sheet = dir.path().join("Set.cue");
+        fs::write(
+            &sheet,
+            "FILE image.wav WAVE\nTRACK 01 AUDIO\nTITLE One\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE Two\nINDEX 01 00:01:00",
+        )
+        .unwrap();
+        let chapters: Vec<_> = crate::cue::read(&sheet)
+            .unwrap()
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        let discs = Discs::group(&chapters, &Default::default(), dir.path());
+        let disc = &discs[0];
+        assert!(disc.cover.is_none());
+        let standalone = Arc::new(Track::file(Path::new("Unattached.wav").into()));
+        let project = |tracks: Vec<Arc<Track>>| {
+            let sections = Sections::new([(disc.clone(), tracks.len())]);
+            Rows {
+                sections,
+                data: Contents::Folder {
+                    original: Arc::default(),
+                    sorted: tracks.into_iter().chain([standalone.clone()]).collect(),
+                },
+            }
+        };
+        let all = project(chapters.clone());
+        assert_eq!(all.sections.parent(2).unwrap().id, disc.id);
+        assert!(all.sections.parent(3).is_none());
+        let mut selection = Selection::default();
+        selection.modify(&all, None, 2, false, true);
+        let selected = all.key(2).unwrap();
+        let terms = Term::parse("title:two");
+        let visible = project(
+            chapters
+                .into_iter()
+                .filter(|t| matches(t, &terms, Default::default))
+                .collect(),
+        );
+        assert_eq!(visible.key(0), all.key(0));
+        assert_eq!(visible.position(&selected), Some(1));
+        assert!(selection.marked.contains(&visible.key(1).unwrap()));
+        assert_eq!(visible.track(1).unwrap().display_number(), Some(2));
+        assert_eq!(visible.sections.parent(1).unwrap().id, disc.id);
+        assert_eq!(visible.adjacent_track(Some(1), 1), Some(2));
+        assert_eq!(visible.key(2), Some(key(&standalone)));
+        assert!(visible.sections.parent(2).is_none());
+        let no_matches = project(vec![]);
+        assert_eq!(no_matches.len(), 1);
+        assert_eq!(no_matches.key(0), Some(key(&standalone)));
+        assert!(no_matches.sections.parent(0).is_none());
+    }
+    #[test]
+    fn indexed_tagged_album_projects_the_same_track_keys_with_or_without_a_header() {
+        use crate::store::{Order, Query, Scope, Store, index_root};
+        use lofty::{
+            config::WriteOptions,
+            prelude::*,
+            tag::{Tag, TagType},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        for (name, title, number) in [("a.wav", "Second", 2), ("b.wav", "First", 1)] {
+            let path = dir.path().join(name);
+            crate::audio::tests::fixture(&path, 44100, 441);
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.set_album("Scratch Beats".into());
+            tag.set_title(title.into());
+            tag.set_track(number);
+            tag.save_to_path(path, WriteOptions::default()).unwrap();
+        }
+        let mut store = Store::memory();
+        let root = store.add_root(dir.path()).unwrap();
+        index_root(&mut store, root, None, &|| true, &mut |_| {}).unwrap();
+        let project = |search: &str, order| {
+            let scope = Scope::Library(Some(root));
+            let query = Query {
+                scope,
+                search: search.into(),
+                order,
+            };
+            let (listing, albums) = store.table_listing(&query, order.is_none()).unwrap();
+            let sections = Sections::new(albums.into_iter().map(|a| {
+                let count = a.count;
+                (Arc::new(super::Disc::from_album(a)), count)
+            }));
+            let cache = store
+                .rows(scope, &listing.keys)
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.key, row))
+                .collect();
+            Rows {
+                sections,
+                data: Contents::Library(super::Paged {
+                    scope,
+                    search: query.search,
+                    keys: listing.keys.into(),
+                    cache,
+                    loaded: true,
+                    grouped: order.is_none(),
+                }),
+            }
+        };
+        let grouped = project("", None);
+        assert_eq!(grouped.track(1).unwrap().title, "First");
+        assert_eq!(grouped.track(2).unwrap().title, "Second");
+        assert_eq!(grouped.sections.parent(2).unwrap().title, "Scratch Beats");
+        let filtered = project("title:second", None);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.key(0), grouped.key(0));
+        assert_eq!(filtered.key(1), grouped.key(2));
+        assert!(filtered.sections.parent(1).unwrap().cover.is_none());
+        let sorted = project("", Some((Order::Title, false)));
+        assert_eq!(sorted.key(1), grouped.key(2));
+        assert!(sorted.sections.parent(1).is_none());
     }
     #[test]
     fn additive_selection_survives_reorder_and_shift_uses_logical_anchor() {

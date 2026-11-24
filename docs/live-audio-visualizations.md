@@ -1,6 +1,6 @@
 # Reading the live mix
 
-Choose **+ → New Spectrogram** or **+ → New Stereo Field**. Both open as ordinary workspace tabs. Use **Workspace → Customize Layout** to split or drag them beside the Music Browser. Each tab saves its own settings through its sliders button.
+Choose **Workspace → New Spectrogram** or **Workspace → New Stereo Field**. Both open as ordinary workspace tabs. Use **Workspace → Customize Layout** to split or drag them beside the Music Browser. Each tab saves its own settings through its sliders button.
 
 ## Spectrogram
 

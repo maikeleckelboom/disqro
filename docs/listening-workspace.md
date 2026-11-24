@@ -6,17 +6,14 @@ Disqro opens a folder or a CUE album directly. Browsing never changes what is pl
 
 ## Workspace
 
-Every view in the window is a panel in one dock: **Music Browser**, **Library**, **Locations**, **Queue** and **History**. The default workspace puts Library and Locations together on the left, a Music Browser in the middle, and Queue and History together on the right. The player along the bottom of the window is not a panel: no arrangement of panels closes it or changes what is playing.
+The default layout places Library and Locations on the left, Music Browser in the middle, and Queue and History on the right. Spectrum, Spectrogram (including Waterfall) and Stereo Field can share any group. The player stays below the dock.
 
-- **Tabs.** A single Music Browser uses its address row and icon. Browsers sharing a group have tabs directly above that row. Library and Locations share a connected header, as do Queue and History. The title bar uses only the app icon for branding and holds the panel picker and workspace menu.
-- **Show both sidebar panels.** Choose **Stack Vertically** from the tab you want on top, or from its **···** menu. Drag the horizontal divider to share the sidebar height. **Group as Tabs** reconnects the two headers in their current order. Both commands work while the layout is locked.
-- **Narrow headers.** Utility tabs keep a single row. When their names no longer fit beside the menu, each tab shows its icon and offers its name on hover or through assistive technology. Use Left and Right on a focused utility tab to switch. If the whole set of icons cannot fit, the panel menu lists the tabs and marks the current one.
-- **Arranging.** The layout starts locked every time you open Disqro. You can switch tabs, drag music and resize a boundary while listening. Choose **Customize Layout** in the workspace menu to drag a tab onto another group, change tab order, or drop at a group edge to split it. The tab menu also offers **Split Right** and **Split Down** during editing. Choose **Done** in the title bar to lock the arrangement.
-- **Opening and closing.** **+** lists every panel type and offers **Reopen Closed Panel**. Immediately after a close, reopening restores the exact arrangement. The picker remembers the most recently closed instance of each type across restarts and uses surviving tab companions when available. Closing every panel leaves **Open a Panel** above the player.
-- **Recovery.** **Undo Layout Change** in the workspace menu restores the preceding panel arrangement during this session. **Restore Default Layout** returns to the three columns with your active browser. Undo can bring the preceding layout back. Both commands leave the queue, library and playlists alone.
-- **Music Browsers.** Each browser has its own breadcrumb, search, history, table and view settings. Click a browser to direct Library and Locations navigation there. Its navigation row takes on a steel-blue accent. **Open in New Tab** and Ctrl-click create a browser in the active group. **Open Beside** opens one to its right when the group has room for two readable tables, or in the same tab group at smaller widths. Ctrl+T opens another browser at the current view.
-- **Toolbars.** A browser's toolbar holds **All Tracks** and **Albums / CDs** for a collection, **Subfolders** for a folder, the way back from a CD or release page, and the browser's menu. **Hide Toolbar** in the tab menu hides it for that browser only, and the small arrow left in its corner brings it back. Hiding the toolbar leaves the view as it was.
-- **Saved workspace.** The profile saves the arrangement, active browser, closed panels and player height. Each browser restores its current page, search and Back/Forward destinations. A layout saved by a build with the fixed Sidebar, Recordings, Queue and Now Playing panels is replaced once by the default workspace. The first browser restores the previous folder or collection view. Expanded folders, Places, playlists, table preferences, volume and the queue carry forward.
+- **Navigation.** Each browser has Back, Forward, Up, its address, a local filter and view controls. The current CD or release also has previous and next actions. Clicking a browser makes it the destination for Library and Locations. Ctrl+T opens another browser at that view. **Open Beside** uses an adjacent split when there is room.
+- **Library search.** Ctrl+K searches the indexed catalog across tracks, artists, albums, releases, collections and playlists. Selecting a track reveals its catalog identity. Its play button plays the track. Ctrl+F filters the current browser.
+- **Tabs and splits.** Groups with several panels show tabs. Choose **Workspace → Customize Layout** to show single-panel drag handles, move a panel, or use **Split Right** or **Split Down**. Choose **Done** to lock the arrangement. A tab's context menu offers **Stack Vertically** or **Group as Tabs** for eligible sidebar pairs.
+- **Opening and closing.** Workspace lists the registered panel types. **Reopen Closed Panel** uses the saved instance and surviving companions. Closing all panels leaves **Open a Panel** above the player.
+- **Queue.** Use the button beside volume or Ctrl+Alt+Right to toggle the playback sidebar. In a group shared with other panel types it acts on Queue alone.
+- **Restoration.** The profile saves the dock arrangement, sidebar visibility, player height, browser history, table preferences and visualization settings. **Undo Layout Change** restores the preceding arrangement during the session.
 
 ### Adding music by dragging
 
@@ -119,7 +116,7 @@ On a normal close, and shortly after any change to the queue or Places, Disqro s
 - The tray icon lives on a hidden window owned by the interface thread, created with the Win32 API from the `windows` crate that GPUI already depends on. No second UI toolkit is involved. The media session uses `ISystemMediaTransportControlsInterop` on the same window.
 - The read-only Dekzer review covered its playback crate, native player integration, CUE handling, player qualification, and waveform research. Disqro adopted source-frame addressing, decoder preroll, a buffered boundary between decoding and output, and sample-oracle checks. It has its own implementation and no Dekzer source or runtime dependency.
 
-## Approved next mission — shared navigation and music search
+## Historical Mission 10 proposal for navigation and search
 
 Place a shared navigation row directly below the title bar, with Back, Forward, Up, editable address or semantic breadcrumbs, and **Search Library**. The active Music Browser owns the location and history shown in that row. Switching browsers updates the controls to reflect that browser's context.
 

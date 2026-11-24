@@ -121,6 +121,7 @@ pub struct Browser {
     pub subfolders: bool,
     pub folders: Entity<Folders>,
     pub table: Entity<TableState<MusicTable>>,
+    pub filter_open: bool,
     pub search: Entity<InputState>,
     pub catalog: Entity<Catalog>,
     /// The Place the open folder is shown under in Locations, when one was chosen.
@@ -157,6 +158,10 @@ pub struct Browser {
     generation: u64,
     query: String,
     albums: Ticket,
+    /// The path editor Ctrl+L opens in this browser's header.
+    pub address: Option<WeakEntity<crate::location::LocationBar>>,
+    /// The dock panel showing this browser, whose commands its header offers.
+    pub pane: Option<WeakEntity<crate::panels::Pane>>,
 }
 pub fn music_home() -> PathBuf {
     crate::places::known_path(crate::places::Known::Music)
@@ -164,6 +169,31 @@ pub fn music_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 impl Browser {
+    /// Empties the filter, shows every row again and returns to the table.
+    pub fn dismiss_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.query.is_empty() {
+            self.begin_navigation(cx);
+            self.clear_search(window, cx);
+            self.filter(cx);
+        }
+        self.set_filter_open(false, window, cx);
+    }
+    pub fn set_filter_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_open != open {
+            self.filter_open = open;
+            cx.emit(ViewChanged);
+        }
+        if open {
+            self.search.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        } else {
+            self.list_focus(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
     pub fn new(
         player: Entity<Player>,
         catalog: Entity<Catalog>,
@@ -189,14 +219,8 @@ impl Browser {
             table
         });
         let discs = cx.new(|cx| {
-            let discs = Discs {
-                browser: Some(this.clone()),
-                tracks: Some(table.downgrade()),
-                ..Default::default()
-            };
-            TableState::new(discs, window, cx)
-                .col_selectable(false)
-                .sortable(false)
+            let discs = Discs::new(this.clone(), table.downgrade());
+            TableState::new(discs, window, cx).col_selectable(false)
         });
         cx.subscribe_in(
             &discs,
@@ -208,7 +232,7 @@ impl Browser {
             },
         )
         .detach();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             // Only the active browser starts playback from its selection.
             if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
@@ -228,6 +252,13 @@ impl Browser {
         })
         .detach();
         cx.subscribe(&search, |s: &mut Self, e, ev, cx| {
+            // An empty filter folds back into its button when left.
+            if matches!(ev, InputEvent::Blur) && s.filter_open && e.read(cx).value().is_empty() {
+                s.filter_open = false;
+                cx.emit(ViewChanged);
+                cx.notify();
+                return;
+            }
             if matches!(ev, InputEvent::Change) {
                 cx.emit(ViewChanged);
                 let query = e.read(cx).value().trim().to_lowercase();
@@ -310,6 +341,7 @@ impl Browser {
             album: None,
             folders,
             table,
+            filter_open: false,
             search,
             catalog,
             tree_root: None,
@@ -347,6 +379,8 @@ impl Browser {
             subfolders: false,
             folder_count: 0,
             albums: Ticket::default(),
+            address: None,
+            pane: None,
         }
     }
     pub fn navigation_is_current(&self, revision: u64) -> bool {
@@ -479,7 +513,7 @@ impl Browser {
             _ => false,
         }
     }
-    /// What a CD page is called beneath its release in the address bar:
+    /// What a CD page is called beneath its release in the local trail:
     /// `CD 2` rather than the full title the panel already shows.
     pub fn crumb_title(&self, cx: &App) -> String {
         match &self.membership {
@@ -648,8 +682,8 @@ impl Browser {
                 .is_some_and(|track| track.has_disc_context());
         let grouped = match &self.page {
             None => self.can_list_discs(),
-            Some(Page::Release(_)) => true,
-            Some(Page::Disc(_)) => false,
+            // A disc page is one group, headed once by its artwork.
+            Some(Page::Release(_) | Page::Disc(_)) => true,
         };
         let mut groups = Vec::new();
         let mut rows = Vec::new();
@@ -713,7 +747,7 @@ impl Browser {
                 SharedString::default()
             }
         } else if !self.query.is_empty() {
-            "No matching tracks".into()
+            crate::table::NO_MATCHES.into()
         } else if self.notice.is_some() && self.raw.is_empty() && self.folder_count == 0 {
             SharedString::default()
         } else if only_folders {
@@ -841,7 +875,7 @@ impl Browser {
         self.album = None;
         self.busy = false;
         let empty: SharedString = if !self.query.is_empty() {
-            "No matching tracks".into()
+            crate::table::NO_MATCHES.into()
         } else {
             match &self.location {
                 Location::Liked => {
@@ -868,8 +902,10 @@ impl Browser {
         if self.listing_discs() {
             self.load_albums(cx);
         }
-        let grouped =
-            matches!(scope, Scope::Library(Some(_)) | Scope::Release(_)) && !self.listing_discs();
+        let grouped = matches!(
+            scope,
+            Scope::Library(Some(_)) | Scope::Release(_) | Scope::Album(_)
+        ) && !self.listing_discs();
         self.table.update(cx, |t, cx| {
             let context = match scope {
                 Scope::Playlist(_) => ContextKind::Playlist,
