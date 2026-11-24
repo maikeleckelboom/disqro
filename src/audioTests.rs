@@ -136,7 +136,7 @@ fn check_chapter_render(silent: bool) {
 #[test]
 fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
     let dir = tempfile::tempdir().unwrap();
-    for truncated in [false, true] {
+    for (truncated, failed_before_eof) in [(false, false), (true, false), (false, true)] {
         let path = dir.path().join("source.wav");
         let available = 30_041;
         let expected = if truncated { 96_000 } else { available };
@@ -165,6 +165,11 @@ fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
             })
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
+        if failed_before_eof {
+            // Exercise a terminal state with a completed decoded extent
+            // and an earlier error. The stopped state cannot prove a drain.
+            voice.state.decode_failed.store(true, Ordering::Release);
+        }
         let mut consumed = 0;
         while voice.state() != PlaybackState::Stopped {
             render(&mut output, &mut [0.; 256]);
@@ -179,6 +184,8 @@ fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
         assert_eq!(voice.pop_error().is_some(), truncated);
         if truncated {
             assert!(consumed > 0 && consumed <= actual);
+        } else if failed_before_eof {
+            assert!(consumed > 0 && consumed < actual);
         } else {
             assert_eq!(consumed, actual);
         }

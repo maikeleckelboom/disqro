@@ -436,6 +436,7 @@ struct OutputState {
     last_advance: AtomicI64,
     // The actual contiguous decoded extent, including the voice's seek origin.
     decoded: AtomicUsize,
+    decode_failed: AtomicBool,
     error: Mutex<Option<io::Error>>,
 }
 
@@ -491,6 +492,12 @@ impl StreamDecoder for ObservedDecoder {
         Ok(self.cursor)
     }
     fn decode(&mut self) -> io::Result<Vec<kira::Frame>> {
+        if self.failed {
+            // Kira's scheduler can retry until its renderer observes the
+            // failure. The failed voice cannot recover or busy-loop on I/O.
+            std::thread::sleep(Duration::from_millis(1));
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
         match self.recording.decode() {
             Ok(frames) => {
                 self.cursor += frames.len();
@@ -498,11 +505,10 @@ impl StreamDecoder for ObservedDecoder {
                 Ok(frames)
             }
             Err(error) => {
-                if !self.failed {
-                    self.failed = true;
-                    *self.state.error.lock().unwrap() =
-                        Some(io::Error::new(error.kind(), error.to_string()));
-                }
+                self.failed = true;
+                self.state.decode_failed.store(true, Ordering::Release);
+                *self.state.error.lock().unwrap() =
+                    Some(io::Error::new(error.kind(), error.to_string()));
                 Err(error)
             }
         }
@@ -566,7 +572,11 @@ impl kira::sound::Sound for ObservedSound {
         // the last block. The immutable voice has no Kira stop or seek command.
         // Only a renderer transition to Stopped with every frame decoded
         // proves that the ring drained naturally.
-        let frame = if !was_finished && state == PlaybackState::Stopped && frames == self.frames {
+        let frame = if !was_finished
+            && state == PlaybackState::Stopped
+            && frames == self.frames
+            && !self.state.decode_failed.load(Ordering::Acquire)
+        {
             frames
         } else {
             ((self.handle.position() * self.rate + 1e-6).floor() as usize).min(frames)
