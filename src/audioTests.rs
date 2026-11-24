@@ -394,6 +394,53 @@ fn delayed_transport_estimates_only_missing_committed_progress_after_overflow() 
 }
 
 #[test]
+fn delayed_transport_keeps_render_timestamps_when_a_cue_limit_is_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = 30 * listening::MINUTE_US;
+    let (mut engine, writer, mut publish, state) =
+        delayed_transport_fixture(dir.path(), boundary - 100_000, 2);
+    state.publish_cursor(
+        20_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 0,
+                to: 20_000,
+                at: boundary - 100_000,
+            },
+        )),
+        || {},
+    );
+    state.publish_cursor(
+        30_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 20_000,
+                to: 30_000,
+                at: boundary + 10_000,
+            },
+        )),
+        || {},
+    );
+    engine.limit = 0.01;
+    assert_eq!(engine.credit_output(), 0.03);
+    assert_eq!(engine.credit_output(), 0.03);
+    assert_eq!(engine.credit.as_ref().unwrap().cursor, 10_000);
+    engine.limit = 0.03;
+    assert_eq!(engine.credit_output(), 0.03);
+    engine.end_voice(End::Stopped);
+    writer.barrier().unwrap();
+    assert_delayed_credit(
+        dir.path(),
+        &[
+            (boundary - listening::MINUTE_US, 20_000),
+            (boundary, 10_000),
+        ],
+    );
+}
+
+#[test]
 fn cue_queue_edit_uses_the_same_completed_block_for_the_playhead_and_credit() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("library.sqlite3");

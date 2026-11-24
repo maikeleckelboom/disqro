@@ -783,23 +783,30 @@ impl Engine {
         // program effective after that boundary.
         let position = voice.position();
         let cursor = position_us(position);
-        let limit = position_us(self.limit);
+        let target = cursor.min(position_us(self.limit));
         while let Some(block) = self.credit.as_mut().and_then(|c| {
-            let next = c.progress.peek().ok()?;
-            (next.to <= cursor).then(|| c.progress.pop().unwrap())
+            let block = *c.progress.peek().ok()?;
+            if c.cursor >= target || block.to > cursor {
+                return None;
+            }
+            // A queue edit can restore a previously shortened CUE program.
+            // Keep the timestamp until the entire block is eligible.
+            if block.to <= target {
+                c.progress.pop().unwrap();
+            }
+            Some(block)
         }) {
             // Overflow can leave a gap before the next recorded block. Place
             // only the missing duration against the nearest available edge.
-            let before = block.from.min(limit);
+            let before = block.from.min(target);
             if self.credit.as_ref().is_some_and(|c| c.cursor < before) {
                 self.credit_progress(before, block.at - (block.from - before));
             }
-            let position = block.to.min(limit);
+            let position = block.to.min(target);
             self.credit_progress(position, block.at + position - block.from);
         }
         // A trailing overflow has no later timing evidence. Extend the last
         // accounted edge by at most the uncredited, committed source advance.
-        let target = cursor.min(limit);
         if let Some(credit) = &self.credit
             && target > credit.cursor
         {
