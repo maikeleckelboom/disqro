@@ -1,0 +1,117 @@
+{
+  "native-final-control": {
+    "dpi": 144,
+    "duration_seconds": 4.814041899997392,
+    "process_cpu_seconds": 3.15625,
+    "ui_cpu_seconds": 2.96875,
+    "max_private_mib": 183.11328125,
+    "busiest_gpu_engine_percent": 13.659,
+    "gpu_memory_at_detail": {
+      "dedicated_bytes": 5505024,
+      "shared_bytes": 105086976
+    },
+    "callbacks": 571,
+    "max_callback_permille": 6,
+    "max_wave_paint_us": 2704,
+    "first_data_us": 10398,
+    "first_wave_to_paint_us": 16265,
+    "max_retained_geometry_bytes": 138240,
+    "page_misses": 6,
+    "page_hits": 6,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "discarded_device_errors": 0
+  },
+  "native-final-disc-cold": {
+    "dpi": 144,
+    "duration_seconds": 5.281408499999088,
+    "process_cpu_seconds": 7.5,
+    "ui_cpu_seconds": 3.40625,
+    "max_private_mib": 196.703125,
+    "busiest_gpu_engine_percent": 12.184,
+    "gpu_memory_at_detail": {
+      "dedicated_bytes": 10756096,
+      "shared_bytes": 100368384
+    },
+    "callbacks": 567,
+    "max_callback_permille": 6,
+    "max_wave_paint_us": 4161,
+    "first_data_us": 14873,
+    "first_wave_to_paint_us": 20174,
+    "max_retained_geometry_bytes": 1172880,
+    "page_misses": 1125,
+    "page_hits": 7,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "discarded_device_errors": 0
+  },
+  "native-final-disc-warm": {
+    "dpi": 144,
+    "duration_seconds": 5.363351599997259,
+    "process_cpu_seconds": 3.453125,
+    "ui_cpu_seconds": 3.28125,
+    "max_private_mib": 203.140625,
+    "busiest_gpu_engine_percent": 10.488,
+    "gpu_memory_at_detail": {
+      "dedicated_bytes": 8134656,
+      "shared_bytes": 105611264
+    },
+    "callbacks": 568,
+    "max_callback_permille": 5,
+    "max_wave_paint_us": 4015,
+    "first_data_us": 9036,
+    "first_wave_to_paint_us": 15204,
+    "max_retained_geometry_bytes": 1172880,
+    "page_misses": 0,
+    "page_hits": 1132,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "discarded_device_errors": 0
+  },
+  "native-archive-hardcore": {
+    "dpi": 144,
+    "duration_seconds": 5.199773399996047,
+    "process_cpu_seconds": 3.40625,
+    "ui_cpu_seconds": 3.109375,
+    "max_private_mib": 196.8984375,
+    "busiest_gpu_engine_percent": 16.072,
+    "gpu_memory_at_detail": {
+      "dedicated_bytes": 6299648,
+      "shared_bytes": 107708416
+    },
+    "callbacks": 571,
+    "max_callback_permille": 5,
+    "max_wave_paint_us": 2731,
+    "first_data_us": 10445,
+    "first_wave_to_paint_us": 13747,
+    "max_retained_geometry_bytes": 145440,
+    "page_misses": 61,
+    "page_hits": 7,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "discarded_device_errors": 0
+  },
+  "native-archive-vocal": {
+    "dpi": 144,
+    "duration_seconds": 5.1208325999978115,
+    "process_cpu_seconds": 3.296875,
+    "ui_cpu_seconds": 3.015625,
+    "max_private_mib": 196.15625,
+    "busiest_gpu_engine_percent": 16.304,
+    "gpu_memory_at_detail": {
+      "dedicated_bytes": 8421376,
+      "shared_bytes": 111640576
+    },
+    "callbacks": 572,
+    "max_callback_permille": 6,
+    "max_wave_paint_us": 2498,
+    "first_data_us": 8384,
+    "first_wave_to_paint_us": 11315,
+    "max_retained_geometry_bytes": 146784,
+    "page_misses": 58,
+    "page_hits": 7,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "discarded_device_errors": 0
+  }
+}

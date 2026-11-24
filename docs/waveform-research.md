@@ -66,7 +66,7 @@ Local Dekzer evidence is indexed by `docs/waveform-visual-excellence.md`, `docs/
 
 ### Serato Studio control session
 
-Serato Studio 2.5.0, build 2.5.0.52, ran on the 2560 × 1600, 240 Hz Radeon 780M display at 150% Windows scale. The captured window was 1707 × 1019 logical pixels and the Sample Deck detail was about 772 × 426 logical pixels. The project read 120 BPM. The deck showed 123 BPM with sync controls highlighted. Captures used stopped transport and source events known from `control.wav` (SHA-256 `9d267a5f6b8f5662ea1be9c6caa8227c8d2dcff9f79be926c1662e5814daed72`). The capture tool produced original JPEGs archived under `.local/waveform-mission/serato-studio/`. Use the crops only for qualitative color and approximate pixel measurements.
+Serato Studio 2.5.0, build 2.5.0.52, ran on the 2560 × 1600, 240 Hz Radeon 780M display at 150% Windows scale. The captured window was 1707 × 1019 logical pixels and the Sample Deck detail was about 772 × 426 logical pixels. The project read 120 BPM. The deck showed 123 BPM with sync controls highlighted. Captures used stopped transport and source events known from `control.wav`. The imported WAV and a regenerated original had identical decoded PCM (SHA-256 `27b7e62e9818042b54c09150cbd5f13c36ab6a5f5c9f95a0aae66bce8afca1b2`). The capture tool produced original JPEGs archived under `.local/waveform-mission/serato-studio/`. Use them for qualitative color and approximate pixel measurements.
 
 | Control | Direct observation | Capture ID |
 | --- | --- | --- |
@@ -77,6 +77,19 @@ Serato Studio 2.5.0, build 2.5.0.52, ran on the 2560 × 1600, 240 Hz Radeon 780M
 
 Registered by the source control, the closest 70 Hz view corresponds to roughly 24 source frames per captured logical pixel. Thus the capture supports oscillation-level inspection. It cannot establish exact sample-level display or distinguish sample interpolation methods. A difference between the high-amplitude gray impulse and the red tail shows why amplitude and color should be independently inspectable in Disqro. Neither the pixel snapshots nor the advertised display refresh rate measure presentation cadence.
 
+### November 16 Serato archive
+
+The existing `Serato-Studio-Waveform-Research-2026-11-16` collection supplies 70 original 2560 × 1528 RGB PNGs from Studio 2.5.0. All 70 PNGs independently matched their adjacent SHA-256 records and passed an image-integrity and dimension check. The archive contains full-source strips and multiple views of 19 identified sources plus one existing CD2 session. Capture provenance, source checks and acquisition limitations are recorded in `capture-manifest.md`, `visual-research-report.md` and `capture-index.csv` in the archive. The originals and working audio are retained there.
+
+| Corpus | Observation from selected archived frames | Comparison boundary |
+| --- | --- | --- |
+| Thunderdome III CD2, Oldskool Fire and The Project | The CD's thin overview remains colored. Dense blocks can fill nearly all of the detail pane. A closer frame exposes the attack and decay beside a dense block. The Project shows a diminishing tail after high-energy peaks. | The CD file, sample position and load timing are unverified. Visual saturation alone says little about clipping. |
+| Techno, hip-hop, house and DnB | Magnification exposes contours around repeated attacks and their tails. The closest techno frame shows a thin oscillating contour. DnB can retain strong hue changes inside a dense envelope. | Dates and displayed positions are recorded. Zoom labels are descriptive and per-capture PCM registration is unavailable. |
+| Acoustic, rock/metal, ambient and classical | Acoustic attacks remain separate from quieter intervals. Rock and ambient examples retain local color changes. Classical examples are comparatively dim at both archived scales. | Individual recordings provide regressions to inspect. The captures cannot establish a genre-wide rule or a defensible gain curve. Several working sources are decoded from lossy originals. |
+| Breathe and Baddadan stem sequences | When all stems were muted, the gray contour in the detail pane visually corresponded to the full mix's outer silhouette. With a subset active, colored structures remained inside and alongside the gray. The thin strip kept original color in these frames. | The comparison supports preserving original context for future stem surfaces. It cannot determine the underlying geometry algorithm or sample alignment. |
+
+Re-use the archived musical passages to check visual readability. Use the generated PCM fixtures to verify exact geometry, stable timing and zoom registration. Preserve the classical case as a contrast check at the same fixed gain and panel height as dense material. Keep stems and original context as separate visual semantics in any future stem-specific surface.
+
 ## GPU candidates
 
 1. Measure a GPUI-native scene built from exact, reusable projected data. The pinned Windows build already renders quads on D3D11. Its renderer uploads scene buffers, so measure CPU primitive construction, per-frame upload and presentation separately. This sets the integration and performance floor.
@@ -84,6 +97,8 @@ Registered by the source control, the closest 70 Hz view corresponds to roughly 
 3. Hold cross-device shared textures as a secondary experiment if the same-device host fails qualification. `wgpu` uses DX12 on the Windows Direct3D path. D3D11 composition via sharing would introduce a second device and synchronization. The atlas image path would add a GPU-to-CPU readback for computed pixels and a CPU-to-GPU upload. Exclude that transfer path from interactive candidates. [wgpu backend documentation](https://wgpu.rs/doc/wgpu_types/backend/enum.Backend.html)
 
 Grade candidates together on source truth, musical readability, loading and native presentation latency, memory at several source lengths, resource recovery, and maintenance cost. Share source identity, reuse cached CPU data across device recreation, and share uploaded read-only facts per device and source revision. Keep viewport, style and interaction state per view. Preserve old behavior through commits, fixtures and capture provenance.
+
+The retained Dekzer native offscreen executable rendered the 24-second control on the Radeon 780M with DX12. At 2560 × 420, the 1-to-64-second zoom sweep used 0.312 ms median, 0.571 ms p95, 0.602 ms p99 and 0.903 ms maximum GPU pass time over 1,200 submissions. The 8-second scrolling workload used 0.543/0.771/1.194/1.263 ms. The source allocated 3.42 MiB of GPU facts and uploaded 0.76 MiB. CPU page submission ranged up to 4.360 ms over two samples. The run produced nine local renders with no GPU validation errors. These numbers characterize an offscreen Dekzer pass on a prebuilt historical binary (SHA-256 `a6359687d8a1cf51acf446dd21a5179a9cef3d6ee579f167b6292e7e7cdf66f8`). They establish the potential cost of a native shader on this adapter. They do not qualify a Disqro host change or displayed-frame cadence.
 
 ## Findings ledger
 

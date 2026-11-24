@@ -50,7 +50,7 @@ Open a music folder and choose **Add Folder to Library** in the Music Browser me
 - **First-class CUE support** — Browse and play individual tracks from single-file and multi-file CD images without
   splitting the audio.
 - **Music organization** — Playlists, favorites, ratings, and track metadata, including individual CUE tracks.
-- **Detailed waveforms** — High-quality, cached, interactive waveforms with smooth, continuous zoom.
+- **Detailed waveforms** — Shared spectral analysis in the compact player and docked Waveform views, with pointer-anchored zoom and stereo sample inspection. [Waveform controls and qualification](docs/waveform-candidate.md)
 - **Modular visualizers** — Waveforms, spectrum analyzers, spectrograms, and experimental music visualizations. Open
   multiple simultaneously or create new ones over time.
 - **Customizable workspace** — GPUI Kit Dock with movable, resizable panels, saved layouts, and native application
