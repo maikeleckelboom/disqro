@@ -167,6 +167,24 @@ pub fn release_discs(discs: &[Arc<Disc>], key: &DiscId) -> Vec<Arc<Disc>> {
     found
 }
 
+/// Which programs supply rows for this physical folder projection.
+pub fn folder_discs(programs: &[Arc<Disc>], page: Option<&Page>, grouped: bool) -> Vec<Arc<Disc>> {
+    match page {
+        Some(Page::Disc(id)) => programs.iter().filter(|d| d.id.same(id)).cloned().collect(),
+        Some(Page::Release(key)) => release_discs(programs, key),
+        None if grouped || is_single_disc(programs) => programs.to_vec(),
+        None => vec![],
+    }
+}
+
+pub fn is_single_disc(programs: &[Arc<Disc>]) -> bool {
+    programs.len() == 1
+        && programs[0]
+            .tracks
+            .first()
+            .is_some_and(|t| t.has_disc_context())
+}
+
 /// A row in a browser directory.
 #[derive(Clone)]
 pub enum Shelf {

@@ -650,3 +650,199 @@ fn queue_heading_tracks_pause_finish_stop_and_restoration() {
     s.position = 0.;
     assert_eq!(s.playback_state(), TransportState::Stopped);
 }
+
+#[test]
+fn stale_context_cannot_replace_a_later_play_pause_or_media_stop() {
+    let (commands, rx) = Commands::channel(
+        Arc::new(Mutex::new(Shared {
+            queue: Default::default(),
+            status: Default::default(),
+        })),
+        4,
+    );
+    let play = || Command::Play(Arc::default(), 0);
+    let first = commands.play_request.next();
+    let second = commands.play_request.next();
+    assert!(!commands.play_if_current(play(), first).unwrap());
+    assert!(commands.play_if_current(play(), second).unwrap());
+    for interrupt in [Command::SetPlaying(false), Command::Stop] {
+        let request = commands.play_request.next();
+        commands.send(interrupt).unwrap();
+        assert!(!commands.play_if_current(play(), request).unwrap());
+    }
+    assert_eq!(rx.try_iter().count(), 3);
+}
+
+#[test]
+fn recording_recovery_is_bounded_and_interruptible() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = Track::file(root.path().join("absent.wav"));
+    let mut e = Engine::default();
+    e.queue.replace(&vec![missing; 40], 0);
+    e.queue.set_repeat(Repeat::All);
+    e.advance(true).unwrap();
+    assert!(e.retry_next);
+    e.command(Command::Stop).unwrap();
+    e.tick().unwrap();
+    assert_eq!(e.queue.current, Some(1));
+    e.queue.set_current(Some(38));
+    e.advance(true).unwrap();
+    for _ in 1..31 {
+        e.tick().unwrap();
+    }
+    assert!(e.tick().unwrap_err().is::<RecordingFailure>());
+    assert!(!e.retry_next && e.voice.is_none());
+    assert_eq!(e.consecutive_failures, 32);
+    e.queue.set_repeat(Repeat::One);
+    e.consecutive_failures = 0;
+    e.queue.set_current(Some(37));
+    e.advance(true).unwrap();
+    assert_eq!(e.queue.current, Some(37));
+    e.tick().unwrap();
+    assert_eq!(e.queue.current, Some(38));
+    e.command(Command::SetPlaying(false)).unwrap();
+    e.tick().unwrap();
+    assert_eq!(e.queue.current, Some(38));
+    e.command(Command::SetPlaying(true)).unwrap();
+    assert!(e.tick().is_err());
+    assert_eq!(e.queue.current, Some(39));
+}
+
+#[test]
+#[ignore = "requires a Windows output device; physical output is muted after the PCM observer"]
+fn separate_files_continue_past_source_and_decoder_failures() {
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let files: crate::library::TrackList = [
+        "first.wav",
+        "absent.wav",
+        "invalid.wav",
+        "broken.wav",
+        "last.wav",
+    ]
+    .iter()
+    .map(|name| Arc::new(Track::file(dir.path().join(name))))
+    .collect();
+    fixture(&files[0].source, 48000, 24000);
+    std::fs::write(&files[2].source, b"unsupported file").unwrap();
+    // The PCM container opens, then our streaming decoder rejects three channels.
+    fixture(&files[3].source, 48000, 48000);
+    let mut wav = std::fs::read(&files[3].source).unwrap();
+    wav[22..24].copy_from_slice(&3u16.to_le_bytes());
+    wav[28..32].copy_from_slice(&(48000u32 * 6).to_le_bytes());
+    wav[32..34].copy_from_slice(&6u16.to_le_bytes());
+    std::fs::write(&files[3].source, wav).unwrap();
+    let mut decoder = Recording::open(&files[3], None).unwrap();
+    assert!(decoder.decode().is_err());
+    fixture(&files[4].source, 48000, 24000);
+    let mut e = Engine {
+        volume: 0.5,
+        ..Default::default()
+    };
+    let reader = e.signal.subscribe();
+    e.command(Command::Play(files.clone(), 0)).unwrap();
+    let mut heard_last = false;
+    let mut failed = Vec::new();
+    let begin = Instant::now();
+    while e.status.playing || e.retry_next {
+        assert!(begin.elapsed() < Duration::from_secs(6), "{:?}", e.status);
+        e.tick().unwrap();
+        if let Some((id, _)) = &e.status.skipped
+            && failed.last() != Some(id)
+        {
+            failed.push(*id);
+        }
+        if e.queue.current == Some(4) && reader.latest().is_some_and(|m| m.peak[0] > 0.) {
+            heard_last = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(heard_last);
+    assert_eq!(e.queue.current, Some(4));
+    assert_eq!(
+        failed,
+        e.queue.entries[1..4]
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(e.status.playback_state(), TransportState::Finished);
+}
+
+#[test]
+#[ignore = "measures separate WAV joins on the silent Windows endpoint"]
+fn separate_file_transition_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let tracks: crate::library::TrackList = (0..4)
+        .map(|i| {
+            let path = dir.path().join(format!("{i}.wav"));
+            fixture(&path, 48000, 24000);
+            let mut wav = std::fs::read(&path).unwrap();
+            let value = if i % 2 == 0 { 8000i16 } else { -8000 };
+            for sample in wav[44..].as_chunks_mut::<2>().0 {
+                sample.copy_from_slice(&value.to_le_bytes());
+            }
+            std::fs::write(&path, wav).unwrap();
+            Arc::new(Track::file(path))
+        })
+        .collect();
+    let t = Transport::new(0.5);
+    let capture = t.signal.pcm();
+    let _demand = capture.subscribe();
+    t.send(Command::Play(tracks, 0), None).unwrap();
+    let mut sign = 0;
+    let mut last_signal = 0;
+    let mut next_block = None;
+    let mut gaps = vec![];
+    let deadline = std::time::Instant::now() + Duration::from_secs(7);
+    while gaps.len() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "missing transition: {:?}",
+            t.state().0
+        );
+        capture.drain(|b| {
+            assert!(
+                next_block.is_none_or(|end| end == b.start),
+                "capture lost frames"
+            );
+            next_block = Some(b.start + b.frames.len() as u64);
+            for (i, frame) in b.frames.iter().enumerate() {
+                if frame.left.abs() < 0.01 {
+                    continue;
+                }
+                let next = if frame.left > 0. { 1 } else { -1 };
+                let index = b.start + i as u64;
+                if sign != 0 && sign != next {
+                    gaps.push((index - last_signal - 1) as f64 * 1000. / f64::from(b.rate));
+                }
+                sign = next;
+                last_signal = index;
+            }
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    t.send(Command::Stop, None).unwrap();
+    eprintln!("Separate WAV transitions, below-threshold PCM milliseconds: {gaps:.2?}");
+}
+
+#[test]
+fn losing_output_during_recovery_keeps_the_occurrence_and_cancels_skips() {
+    use kira::backend::cpal::cpal::{Error, ErrorKind};
+    let track = Track::file("absent.wav".into());
+    let mut e = Engine::default();
+    e.queue.replace(&[track.clone(), track], 0);
+    e.select(Some(0), 0.);
+    e.retry_next = true;
+    e.status.playing = true;
+    e.output_error(Error::new(ErrorKind::Xrun)).unwrap();
+    assert!(e.retry_next);
+    let err = e
+        .output_error(Error::new(ErrorKind::DeviceNotAvailable))
+        .unwrap_err();
+    assert!(!err.is::<RecordingFailure>());
+    assert!(!e.retry_next && !e.status.playing);
+    e.tick().unwrap();
+    assert_eq!(e.queue.current, Some(0));
+    assert!(e.status.skipped.is_none());
+}

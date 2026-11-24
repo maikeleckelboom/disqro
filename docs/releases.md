@@ -35,7 +35,7 @@ A release page lists every CD of the release under its section headers, in the s
 
 | Action | Result |
 | --- | --- |
-| Double-click a chapter | Play from it within its own CD. The queue ends with that CD. |
+| Double-click a chapter | On a CD page the queue follows that CD. On a release page it continues across discs. In a track list it follows the displayed order. |
 | **Play CD** | Play the CD from its recorded lead-in, in authored order. |
 | **Play Release** | Play CD 1, then CD 2 and any further CDs, each in authored order with its own lead-in, then stop. Offered on a release, its CDs, their section headers and the release page, and only where a release of several CDs exists. |
 | **Play Collection** | Play the whole collection as displayed: several releases and loose recordings. Liked Tracks, playlists and single folders call it **Play All**. |

@@ -18,9 +18,9 @@ Each step records the outgoing visit in the same browser. Back and Forward follo
 
 | Action | Result |
 | --- | --- |
-| Double-click a chapter, including a filtered or globally sorted result | Start at that chapter in the complete authored CD sequence. Previous reaches earlier chapters and Up Next contains the remainder of that CD. |
-| Double-click a loose file | Play the single file. Album tags, a disc tag, a CUE program or a numbered CD folder supply disc context. Opening a disc page also explicitly selects that scope. |
-| Choose **Play Only This Track** from a CD or playlist row | Replace the queue with just the clicked track or playlist occurrence. The ordinary **Play** and double-click actions keep their CD or playlist behavior. |
+| Double-click a recording or press Enter in a track list | Start at the selected occurrence. Queue follows the complete filtered, sorted list, including nonconsecutive liked CUE chapters. Browsing elsewhere leaves that sequence intact. |
+| Activate a chapter on its CD or release page | Start at that chapter in the authored program. A release continues onto its following discs. |
+| Choose **Play Only This Track** from any track row | Replace the queue with the selected recording alone. |
 | Choose **Play CD** from a CD row, section or page menu | Start the whole CD at the beginning, including a recorded lead-in. Disc playback uses authored order and clears shuffle and repeat-one. The queue ends with the CD. |
 | Choose **Play Release** from a release, one of its CDs, or the release page | Start CD 1, then each following CD of the release in authored order, then stop. Only CDs that belong to a release of several discs offer it. [Releases](releases.md) |
 | Choose **Play Collection** from a collection | Start with the first matching recording and follow the shelf's release and disc order, including loose recordings. The current search limits the queue. Column sorting affects the displayed rows. Liked Tracks, playlists and single folders call their corresponding action **Play All**. |
@@ -30,6 +30,8 @@ Each step records the outgoing visit in the same browser. Back and Forward follo
 | Click the player artwork | **Go to Playing Track** selects the exact chapter in the active browser’s existing results. On an Albums / CDs shelf it opens All Tracks in that collection. If the recording is outside the results, it opens its indexed disc or physical location. |
 | Choose **Show in Library** or **Show in Locations** from a queue or history entry | Select that entry’s exact chapter. The playback indicator stays on the active recording. A live indexed entry can also resolve the current path after a verified move. |
 | Choose **Continue This CD** from the Now Playing menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
+
+When automatic continuation encounters an unavailable source or decoder failure, the player reports it and tries the next queued occurrence. Recovery stops at the end with Repeat Off, after one unsuccessful pass, or after 32 consecutive failures. An output-device failure stops the transport on the affected occurrence.
 
 Continue reuses the first available queued occurrence of each required chapter and creates only missing entries. All other upcoming entries keep their relative order, including intentional repeats. If the continuation is already correct, a second invocation leaves the queue revision unchanged. When there are chapters to continue, the operation disables shuffle and repeat-one. Saved playlists keep their entries and ordering.
 

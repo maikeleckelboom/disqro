@@ -90,13 +90,11 @@ impl Mode {
     }
 }
 
-/// The queue indices a panel lists, in the order it lists them.
-pub fn rows(mode: Mode, q: &Queue) -> Vec<usize> {
-    let indices = mode.indices(q);
+/// Map a virtual row directly to its occurrence, including reverse history.
+fn row_index(mode: Mode, indices: &std::ops::Range<usize>, row: usize) -> usize {
     match mode {
-        // Before anything plays, everything is still to come.
-        Mode::Queue => indices.collect(),
-        Mode::History => indices.rev().collect(),
+        Mode::Queue => indices.start + row,
+        Mode::History => indices.end - 1 - row,
     }
 }
 
@@ -379,7 +377,8 @@ impl Render for Entries {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
         let q = self.queue(cx);
-        let order = rows(self.mode, &q);
+        let mode = self.mode;
+        let order = mode.indices(&q);
         let view = cx.entity();
         let listed = q.clone();
         let end_drop = cx.listener(|s, d: &DraggedEntry, _, cx| {
@@ -415,7 +414,7 @@ impl Render for Entries {
                     uniform_list("queue-rows", order.len(), move |range, _, cx| {
                         view.update(cx, |v, cx| {
                             range
-                                .map(|i| v.render_row(order[i], &listed, cx))
+                                .map(|i| v.render_row(row_index(mode, &order, i), &listed, cx))
                                 .collect::<Vec<_>>()
                         })
                     })
@@ -448,12 +447,18 @@ impl Render for Entries {
                 let Some(id) = s.selected else { return };
                 let q = s.queue(cx);
                 // Keep a selection so Delete can be pressed repeatedly.
-                let listed = rows(s.mode, &q);
-                let ids: Vec<u64> = listed.iter().map(|&i| q.entries[i].id).collect();
-                s.selected = ids.iter().position(|&e| e == id).and_then(|i| {
-                    ids.get(i + 1)
-                        .or_else(|| i.checked_sub(1).and_then(|i| ids.get(i)))
-                        .copied()
+                let indices = s.mode.indices(&q);
+                s.selected = q.index_of(id).and_then(|ix| {
+                    let row = match s.mode {
+                        Mode::Queue => ix.checked_sub(indices.start)?,
+                        Mode::History => indices.end.checked_sub(ix + 1)?,
+                    };
+                    let neighbor = if row + 1 < indices.len() {
+                        row + 1
+                    } else {
+                        row.checked_sub(1)?
+                    };
+                    Some(q.entries[row_index(s.mode, &indices, neighbor)].id)
                 });
                 s.send(Command::Remove(vec![id]), cx);
             }))
@@ -507,7 +512,13 @@ impl PaneContent for Entity<Entries> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, rows};
+    use super::{Mode, row_index};
+    fn rows(mode: Mode, queue: &Queue) -> Vec<usize> {
+        let indices = mode.indices(queue);
+        (0..indices.len())
+            .map(|i| row_index(mode, &indices, i))
+            .collect()
+    }
     use crate::{library::Track, queue::Queue};
 
     fn queue(n: usize, current: Option<usize>) -> Queue {

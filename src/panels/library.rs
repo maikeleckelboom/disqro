@@ -547,6 +547,17 @@ fn playlist_menu(
         let Some(store) = catalog_.read(cx).handle() else {
             return;
         };
+        let Some(next) = next else {
+            crate::table::play_library(
+                &catalog_,
+                &player,
+                crate::catalog::ListeningList::Playlist(id),
+                None,
+                Command::Play,
+                cx,
+            );
+            return;
+        };
         let keys = store.call(move |s| {
             Ok(s.entries(id)?
                 .into_iter()
@@ -557,11 +568,12 @@ fn playlist_menu(
             let Ok(keys) = keys.await else { return };
             cx.update(|cx| {
                 let targets = Targets::Keys(Scope::Playlist(id), keys);
-                match next {
-                    None => queue_targets(&catalog_, &player, targets, |t| Command::Play(t, 0), cx),
-                    Some(true) => queue_targets(&catalog_, &player, targets, Command::PlayNext, cx),
-                    Some(false) => queue_targets(&catalog_, &player, targets, Command::Enqueue, cx),
-                }
+                let command = if next {
+                    Command::PlayNext
+                } else {
+                    Command::Enqueue
+                };
+                queue_targets(&catalog_, &player, targets, command, cx);
             });
         })
         .detach();

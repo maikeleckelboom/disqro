@@ -1,5 +1,31 @@
 # Windows playback qualification
 
+## Contextual playback on Windows
+
+The release player ran on a private Windows desktop with a fresh profile, the `qualification` feature and `--qualify-silent`. The main output fader was silent before WASAPI initialization. The level and PCM observers remained upstream of that fader.
+
+| Activation | Observed result |
+| --- | --- |
+| Press Enter on the second of four liked recordings | Queue showed Chapter One, Chapter Three and a standalone WAV. Opening All Music left that order intact. Chapter Two shared the CUE image and stayed outside the queue. Playback finished on the WAV. |
+| Double-click the third row of a four-entry playlist | This row was the second occurrence of the same WAV. Only the fourth entry followed it. |
+| Open the second WAV in a physical folder | Playback skipped an invalid upcoming WAV, continued to the final file and stopped. Relaunching restored the final occurrence and position. The startup trace recorded zero voices. |
+| Choose **Play Only This Track** on the liked CUE chapter | The queue contained that chapter alone and stopped at its end. |
+| Open the CUE sheet alongside an unrelated WAV | Its three chapters formed the queue. Chapter Two followed Chapter One on the original voice. |
+
+![The selected liked chapter, its nonconsecutive successor and a standalone recording in Queue](evidence/contextual-playback/liked-start.webp)
+
+Three transitions between separate local WAVs produced **30.67, 20.00 and 9.33 ms** below the PCM observer's 0.01 amplitude threshold. The fixture alternates positive and negative constant samples at the production transport cadence. An observer epoch change can discard a partial 128-frame block. These figures describe the internal mix on this run. The contiguous CUE fixture separately checked decoder reuse and stereo signal across the chapter boundary.
+
+A release fixture resolved **100,001** ordered recording keys into an independent queue source in **182 ms** on this laptop. It started at zero-based position 60,000 and retained all entries. Timing begins after generating the catalog and sorting the keys and ends before opening an audio source. A separate recovery fixture exercised a missing file, an invalid container and a valid WAV with an unsupported channel layout. The final playable file produced stereo signal.
+
+Run the instrumented checks from the repository root on Windows.
+
+```powershell
+cargo test --locked --release --features qualification separate_file -- --ignored --nocapture --test-threads=1
+cargo test --locked --release --features qualification output_levels_follow_transport -- --ignored
+cargo test --locked --release --features qualification six_figure_listening_snapshot -- --ignored --nocapture
+```
+
 ## Optimized desktop comparison
 
 The untapped control was built from production `main` after PR #10. The candidate used the same Rust 1.99.1 release profile, Cargo.lock, Kira 0.12.6, Symphonia 0.6.1, CPAL 0.18.2, Windows 11 Pro build 26300, Ryzen 7 8845HS and default WASAPI endpoint. Both used fresh profiles, 150% display scale, a 1,240 × 780 logical window and an uninterrupted 44.1 kHz stereo FLAC with varying channel amplitudes at 45% player volume. Every run enabled the same one-second playback trace.

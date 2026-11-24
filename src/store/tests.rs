@@ -54,6 +54,95 @@ fn collection(root: &Path) {
 }
 
 #[test]
+fn listening_list_keeps_the_displayed_occurrences_after_navigation() {
+    use crate::catalog::ListeningList;
+    use gpui_kit::block_on;
+
+    let dir = tempfile::tempdir().unwrap();
+    let music = dir.path().join("Music");
+    collection(&music);
+    let handle = Handle::spawn(dir.path().join("library.sqlite3"));
+    let (liked, playlist, occurrences, filtered, one, three, single) =
+        block_on(handle.call(move |s| {
+            let root = s.add_root(&music)?;
+            index(s, root);
+            let scope = Scope::Library(Some(root));
+            let rows = all(s, scope);
+            let one = chapter(&rows, "a.cue", 1).id;
+            let three = chapter(&rows, "a.cue", 3).id;
+            let single = titled(&rows, "x").id;
+            s.set_liked(&[one, three, single], true)?;
+            let keys = |scope, search: &str, descending| {
+                s.keys(&Query {
+                    scope,
+                    search: search.into(),
+                    order: Some((Order::Title, descending)),
+                })
+            };
+            let liked = keys(Scope::Liked, "", true)?;
+            let filtered = keys(scope, "artist:artist", true)?;
+            let playlist = s.create_playlist("Repeats", &[single, one, single, three])?;
+            let occurrences = s.keys(&Query {
+                scope: Scope::Playlist(playlist),
+                search: String::new(),
+                order: Some((Order::Title, true)),
+            })?;
+            Ok((liked, playlist, occurrences, filtered, one, three, single))
+        }))
+        .unwrap();
+    let resolve = |list: ListeningList, key| {
+        block_on(list.resolve(
+            handle.clone(),
+            Some(key),
+            Ticket::default(),
+            0,
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    // The browser can issue another query and the listener can even unlike
+    // a row after activation. The captured occurrence keys still own order.
+    block_on(handle.call(move |s| s.set_liked(&[one], false))).unwrap();
+    let (tracks, start, skipped) = resolve(
+        ListeningList::for_row(Scope::Liked, &liked.clone().into(), three, false),
+        three,
+    );
+    let ids = |tracks: &crate::library::TrackList| {
+        tracks
+            .iter()
+            .map(|t| t.library_id.unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        (ids(&tracks), start, skipped),
+        (vec![single, three, one], 1, 0)
+    );
+    assert!(tracks[1].disc.is_some() && tracks[2].disc.is_some());
+    let chosen = occurrences[1];
+    let (tracks, start, _) = resolve(
+        ListeningList::for_row(
+            Scope::Playlist(playlist),
+            &occurrences.into(),
+            chosen,
+            false,
+        ),
+        chosen,
+    );
+    assert_eq!((ids(&tracks), start), (vec![single, single, three, one], 1));
+    let (tracks, start, _) = resolve(
+        ListeningList::Displayed(Scope::Library(None), filtered.clone().into()),
+        three,
+    );
+    assert_eq!(ids(&tracks), filtered);
+    assert_eq!(tracks[start].library_id, Some(three));
+    let (tracks, start, _) = resolve(
+        ListeningList::for_row(Scope::Liked, &liked.into(), three, true),
+        three,
+    );
+    assert_eq!((ids(&tracks), start), (vec![three], 0));
+}
+
+#[test]
 fn identities_survive_rescans_sheet_edits_and_verified_moves() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("Music");
@@ -536,6 +625,9 @@ fn replacing_pending_queries_keeps_the_new_read_after_an_intervening_edit() {
         result.send(s.playlists()?)?;
         Ok(())
     });
+    // A delayed hydration batch from an older view must not evict the winner.
+    let stale = worker.query(&ticket, 0, |_| Ok(()));
+    assert!(is_cancelled(&gpui_kit::block_on(stale).unwrap_err()));
     release.send(()).unwrap();
     assert_eq!(observed.recv_timeout(timeout).unwrap()[0].name, "Saved");
 }
@@ -907,5 +999,45 @@ fn catalog_search_follows_cue_identity_and_catalog_edits() {
     assert_eq!(
         s.search_library("Two", 5, 0).unwrap().hits[0].target,
         Target::Playlist(playlist)
+    );
+}
+
+#[test]
+#[ignore = "six-figure catalog playback qualification"]
+fn six_figure_listening_snapshot() {
+    use crate::catalog::ListeningList;
+    use gpui_kit::block_on;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Handle::spawn(dir.path().join("library.sqlite3"));
+    let path = dir.path().to_owned();
+    let keys = block_on(store.call(move |s|{
+        let root=s.add_root(&path)?;
+        let tx=s.db.transaction()?;
+        tx.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100001)
+          INSERT INTO files(id,path,path_key,name,kind,root_id,size,modified)
+          SELECT i,printf('music/%06d.wav',i),printf('music/%06d.wav',i),'fixture.wav',0,?1,400,1 FROM n",[root])?;
+        tx.execute("INSERT INTO tracks(anchor,part,source,root_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+          SELECT id,0,id,root_id,path,'','','WAV',path,'','',path,1 FROM files",[])?;
+        tx.commit()?;
+        s.keys(&Query {scope:Scope::Library(None),search:String::new(),order:Some((Order::Title,true))})
+    })).unwrap();
+    assert_eq!(keys.len(), 100001);
+    let chosen = keys[60000];
+    let start = std::time::Instant::now();
+    let (tracks, i, skipped) = block_on(
+        ListeningList::Displayed(Scope::Library(None), keys.into()).resolve(
+            store,
+            Some(chosen),
+            Ticket::default(),
+            0,
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    assert_eq!((tracks.len(), i, skipped), (100001, 60000, 0));
+    assert_eq!(tracks[i].library_id, Some(chosen));
+    eprintln!(
+        "100,001 sorted recordings resolved in {:?}",
+        start.elapsed()
     );
 }

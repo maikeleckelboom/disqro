@@ -455,11 +455,14 @@ impl LibrarySearch {
                                     .on_click(cx.listener(move |s, _, _, cx| {
                                         if let Some(workspace) = s.workspace.upgrade() {
                                             let player = workspace.read(cx).services.player.clone();
-                                            crate::table::queue_targets(
+                                            crate::table::play_library(
                                                 &s.catalog,
                                                 &player,
-                                                Targets::Keys(Scope::Library(None), vec![id]),
-                                                |tracks| Command::Play(tracks, 0),
+                                                crate::catalog::ListeningList::Search(
+                                                    s.input.read(cx).value().to_string(),
+                                                ),
+                                                Some(id),
+                                                Command::Play,
                                                 cx,
                                             );
                                         }

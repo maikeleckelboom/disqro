@@ -123,7 +123,7 @@ impl Handle {
 
     fn submit<T, F>(
         &self,
-        ticket: Option<Ticket>,
+        request: Option<(Ticket, u64)>,
         f: F,
     ) -> impl Future<Output = Result<T>> + use<T, F>
     where
@@ -133,15 +133,20 @@ impl Handle {
         let (tx, rx) = async_channel::bounded(1);
         let mailbox = &self.0.mailbox;
         let mut state = mailbox.state.lock().unwrap();
-        if let Some(ticket) = &ticket {
+        let stale = request
+            .as_ref()
+            .is_some_and(|(ticket, g)| !ticket.is_current(*g));
+        if let Some((ticket, _)) = &request
+            && !stale
+        {
             state
                 .jobs
                 .retain(|(older, _)| !older.as_ref().is_some_and(|t| Arc::ptr_eq(&t.0, &ticket.0)));
         }
         let full = state.jobs.len() >= MAX_PENDING;
-        if !full {
+        if !full && !stale {
             state.jobs.push_back((
-                ticket,
+                request.map(|(ticket, _)| ticket),
                 Box::new(move |store| {
                     let _ = tx.try_send(f(store));
                 }),
@@ -149,6 +154,7 @@ impl Handle {
             mailbox.ready.notify_one();
         }
         async move {
+            anyhow::ensure!(!stale, Cancelled);
             anyhow::ensure!(!full, "The library is busy. Try the action again.");
             rx.recv().await.map_err(|_| Cancelled)?
         }
@@ -165,7 +171,7 @@ impl Handle {
         F: FnOnce(&Store) -> Result<T> + Send + 'static,
     {
         let ticket = ticket.clone();
-        self.submit(Some(ticket.clone()), move |store| {
+        self.submit(Some((ticket.clone(), generation)), move |store| {
             let store = store.map_err(|e| anyhow!("The library is unavailable: {e}"))?;
             if !ticket.is_current(generation) {
                 return Err(Cancelled.into());

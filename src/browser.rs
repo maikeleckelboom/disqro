@@ -92,7 +92,7 @@ impl Location {
 /// What to do with a file once its folder is open.
 #[derive(Clone)]
 pub enum Reveal {
-    Play(PathBuf),
+    Play(PathBuf, u64),
     Select(PathBuf),
     Track(Arc<Track>),
 }
@@ -684,11 +684,7 @@ impl Browser {
     fn filter_folder(&mut self, discovered: bool, cx: &mut App) {
         let terms = Term::parse(&self.query);
         let catalog = self.catalog.read(cx);
-        let single_disc = self.programs.len() == 1
-            && self.programs[0]
-                .tracks
-                .first()
-                .is_some_and(|track| track.has_disc_context());
+        let single_disc = crate::collection::is_single_disc(&self.programs);
         let grouped = match &self.page {
             None => self.can_list_discs(),
             // A disc page is one group, headed once by its artwork.
@@ -698,17 +694,7 @@ impl Browser {
         let mut rows = Vec::new();
         let matches =
             |t: &&Arc<Track>| crate::collection::matches(t, &terms, || catalog.mark_of(t));
-        let discs: Vec<Arc<Disc>> = match &self.page {
-            None if !grouped && !single_disc => vec![],
-            None => self.programs.to_vec(),
-            Some(Page::Disc(id)) => self
-                .programs
-                .iter()
-                .filter(|d| d.id.same(id))
-                .cloned()
-                .collect(),
-            Some(Page::Release(key)) => crate::collection::release_discs(&self.programs, key),
-        };
+        let discs = crate::collection::folder_discs(&self.programs, self.page.as_ref(), grouped);
         if !grouped && !single_disc && self.page.is_none() {
             rows.extend(self.raw.iter().flatten().filter(matches).cloned());
         } else {
@@ -793,7 +779,13 @@ impl Browser {
             t.delegate_mut().artwork_revision = self.generation;
             t.delegate_mut().folder_covers = self.covers.clone();
             t.delegate_mut().programs = self.programs.clone();
-            t.delegate_mut().folder_cd = self.page.is_some();
+            t.delegate_mut().folder_page = self.page.clone();
+            t.delegate_mut().scanning_folder = self.busy.then(|| crate::table::ScanningFolder {
+                path: self.path.clone(),
+                recursive: self.subfolders,
+                grouped,
+                search: self.query.clone(),
+            });
             t.delegate_mut().empty = empty;
             t.delegate_mut().offer_subfolders = only_folders;
             t.delegate_mut().offer_library = false;
@@ -1321,7 +1313,7 @@ impl Browser {
             .filter_map(|i| table.track(i))
             .find(|t| match request {
                 Reveal::Track(wanted) => wanted.same_item(t),
-                Reveal::Select(path) | Reveal::Play(path) => {
+                Reveal::Select(path) | Reveal::Play(path, _) => {
                     let path = self.alternate_sheet(path).unwrap_or(path);
                     crate::places::same_path(&t.source, path)
                         || t.disc
@@ -1345,8 +1337,21 @@ impl Browser {
             if let Some(i) = found {
                 t.set_selected_row(i, cx);
                 t.scroll_to_row(i, cx);
-                if matches!(request, Reveal::Play(_)) {
-                    t.delegate().play(i, cx);
+                if let Reveal::Play(path, generation) = request
+                    && t.delegate()
+                        .player
+                        .read(cx)
+                        .play_request
+                        .is_current(*generation)
+                {
+                    if path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+                    {
+                        t.delegate().play_page(&Page::Disc(DiscId::of(&item)), cx);
+                    } else {
+                        t.delegate().play(i, cx);
+                    }
                 }
             }
         });

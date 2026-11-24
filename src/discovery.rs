@@ -306,6 +306,26 @@ fn scan_into(
     }
 }
 
+pub fn folder_tracks(
+    folder: &Path,
+    recursive: bool,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+) -> Vec<Option<Arc<Track>>> {
+    let mut rows = Vec::new();
+    scan_into(folder, recursive, cache, alive, &mut |batch| {
+        for (index, track) in batch.rows {
+            if index == rows.len() {
+                rows.push(track);
+            } else {
+                rows[index] = track;
+            }
+        }
+        true
+    });
+    rows
+}
+
 pub struct LocalProgram {
     pub tracks: crate::library::TrackList,
     pub has_sibling_disc: bool,
@@ -319,17 +339,7 @@ pub fn local_program(
     context: library::DiscContext,
     cache: Option<&Cache>,
 ) -> anyhow::Result<LocalProgram> {
-    let mut rows = Vec::new();
-    scan_into(folder, false, cache, &|| true, &mut |batch| {
-        for (index, track) in batch.rows {
-            if index == rows.len() {
-                rows.push(track);
-            } else {
-                rows[index] = track;
-            }
-        }
-        true
-    });
+    let rows = folder_tracks(folder, false, cache, &|| true);
     let Some(actual) = rows
         .iter()
         .flatten()

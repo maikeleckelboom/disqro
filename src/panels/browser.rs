@@ -9,9 +9,7 @@ use crate::{
     assets::FileIcon,
     audio::Command,
     browser::{Bookmark, Browser, Location, Route, SavedVisit, SequenceKind, music_home},
-    catalog::Targets,
     collection::{Page, ViewPrefs},
-    library::TrackList,
     location::LocationBar,
     player::Player,
     table::{Layouts, queue_targets},
@@ -219,8 +217,7 @@ fn browser_menu(
     use crate::collection::{DiscId, Page};
     let b = browser.read(cx);
     let table = b.table.read(cx).delegate();
-    let all = table.all_targets();
-    let empty = all.is_empty();
+    let empty = table.is_empty();
     let location = b.location.clone();
     let catalog = b.catalog.clone();
     let in_library = catalog
@@ -248,25 +245,10 @@ fn browser_menu(
     } else {
         menu
     };
-    let send = {
-        let (catalog, player) = (catalog.clone(), player.clone());
-        move |targets: Targets, shuffle: Option<bool>, cx: &mut App| {
-            let command: Box<dyn FnOnce(TrackList) -> Command> = match shuffle {
-                None => Box::new(Command::Enqueue),
-                Some(false) => Box::new(|t| Command::Play(t, 0)),
-                Some(true) => Box::new(|t: TrackList| {
-                    let start = fastrand::usize(..t.len());
-                    Command::Play(t, start)
-                }),
-            };
-            if let Some(on) = shuffle {
-                player.update(cx, |p, cx| p.command(Command::Shuffle(on), cx));
-            }
-            queue_targets(&catalog, &player, targets, command, cx);
-        }
-    };
-    let (s1, s2, s3) = (send.clone(), send.clone(), send);
-    let (t1, t2, t3) = (all.clone(), all.clone(), all);
+    let shuffle_table = b.table.clone();
+    let add_table = b.table.clone();
+    let add_player = player.clone();
+    let add_catalog = catalog.clone();
     let refresh = browser.clone();
     let folder = b.path.clone();
     // The page shown: a CD, or every CD of a release.
@@ -318,7 +300,7 @@ fn browser_menu(
                     None if collection => {
                         cd_table.update(cx, |t, cx| t.delegate().play_collection(cx))
                     }
-                    None => s1(t1.clone(), Some(false), cx),
+                    None => cd_table.update(cx, |t, cx| t.delegate().play_all(false, cx)),
                 }),
         )
         .when_some(release, |menu, release| {
@@ -332,13 +314,23 @@ fn browser_menu(
             PopupMenuItem::new("Shuffle All")
                 .icon(IconName::Shuffle)
                 .disabled(empty)
-                .on_click(move |_, _, cx| s2(t2.clone(), Some(true), cx)),
+                .on_click(move |_, _, cx| {
+                    shuffle_table.update(cx, |t, cx| t.delegate().play_all(true, cx))
+                }),
         )
         .item(
             PopupMenuItem::new("Add All to Queue")
                 .icon(IconName::ListEnd)
                 .disabled(empty)
-                .on_click(move |_, _, cx| s3(t3.clone(), None, cx)),
+                .on_click(move |_, _, cx| {
+                    queue_targets(
+                        &add_catalog,
+                        &add_player,
+                        add_table.read(cx).delegate().all_targets(),
+                        Command::Enqueue,
+                        cx,
+                    )
+                }),
         )
         .separator();
     match location {

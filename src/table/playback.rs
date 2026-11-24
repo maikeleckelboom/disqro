@@ -1,111 +1,149 @@
-//! Resolve listening intent independently of display order and filtering.
+//! Take playback order from the activated list or authored page.
 use super::*;
-use crate::{collection::release_discs, library::DiscContext};
+use crate::catalog::ListeningList;
 
-impl MusicTable {
-    pub fn play_collection(&self, cx: &mut App) {
-        let player = self.player.clone();
-        let request = player.read(cx).play_request.clone();
-        let generation = request.next();
-        match &self.rows.data {
-            Contents::Folder { original, .. } => {
-                let visible: HashSet<_> = original.iter().map(Arc::as_ptr).collect();
-                let ordered = crate::release::ordered(
-                    self.programs
+pub(crate) fn play_library(
+    catalog: &Entity<Catalog>,
+    player: &Entity<Player>,
+    list: ListeningList,
+    chosen: Option<i64>,
+    command: impl FnOnce(TrackList, usize) -> Command + 'static,
+    cx: &mut App,
+) {
+    let ticket = player.read(cx).play_request.clone();
+    let generation = ticket.next();
+    let pending = catalog
+        .read(cx)
+        .listening_list(list, chosen, ticket.clone(), generation, cx);
+    let catalog = catalog.clone();
+    let sender = player.read(cx).sender();
+    cx.spawn(async move |cx| {
+        let result = pending.await;
+        if !ticket.is_current(generation) {
+            return;
+        }
+        let notice = match result {
+            Ok((tracks, start, skipped)) => {
+                match sender.play_if_current(command(tracks, start), generation) {
+                    Ok(true) if skipped > 0 => {
+                        Some(format!("{skipped} unavailable queue entries omitted."))
+                    }
+                    Ok(_) => None,
+                    Err(e) => Some(e.to_string()),
+                }
+            }
+            Err(e) => Some(format!("{e:#}")),
+        };
+        if let Some(text) = notice {
+            catalog.update(cx, |_, cx| {
+                cx.emit(crate::catalog::CatalogEvent::Notice(text))
+            });
+        }
+    })
+    .detach();
+}
+
+fn from_chapter(tracks: TrackList, start: usize) -> Command {
+    Command::PlayDisc {
+        tracks,
+        from_chapter: Some(start),
+    }
+}
+
+#[derive(Clone)]
+pub struct ScanningFolder {
+    pub path: PathBuf,
+    pub recursive: bool,
+    pub grouped: bool,
+    pub search: String,
+}
+
+enum FolderAction {
+    Row(Arc<Track>),
+    Program(Page, Option<Arc<Track>>),
+    All(bool),
+    Collection,
+}
+
+impl FolderAction {
+    fn command(&self, displayed: &TrackList, programs: &[Arc<Disc>]) -> Option<Command> {
+        match self {
+            Self::Row(chosen) => Some(Command::Play(
+                displayed.clone(),
+                displayed.iter().position(|t| t.same_item(chosen))?,
+            )),
+            Self::Program(page, chosen) => {
+                let discs = crate::collection::folder_discs(programs, Some(page), true);
+                let tracks: TrackList = discs
+                    .iter()
+                    .flat_map(|d| d.tracks.iter().cloned())
+                    .collect();
+                let from_chapter = match chosen {
+                    Some(t) => Some(tracks.iter().position(|r| r.same_item(t))?),
+                    None => None,
+                };
+                (!tracks.is_empty()).then_some(Command::PlayDisc {
+                    tracks,
+                    from_chapter,
+                })
+            }
+            Self::All(shuffle) => {
+                (!displayed.is_empty()).then(|| Command::PlayList(displayed.clone(), *shuffle))
+            }
+            Self::Collection => {
+                let visible: HashSet<_> = displayed.iter().map(Arc::as_ptr).collect();
+                let order = crate::release::ordered(
+                    programs
                         .iter()
                         .map(|d| d.release.as_ref().map(|m| (&m.key, m.number))),
                 );
-                let mut tracks = Vec::with_capacity(original.len());
-                let mut append = |index: usize| {
+                let mut tracks = Vec::with_capacity(displayed.len());
+                let mut append = |i: usize| {
                     tracks.extend(
-                        self.programs[index]
+                        programs[i]
                             .tracks
                             .iter()
                             .filter(|t| visible.contains(&Arc::as_ptr(t)))
                             .cloned(),
-                    );
+                    )
                 };
-                for item in ordered {
+                for item in order {
                     match item {
-                        crate::release::Ordered::Disc(index) => append(index),
+                        crate::release::Ordered::Disc(i) => append(i),
                         crate::release::Ordered::Release(discs) => {
                             discs.into_iter().for_each(&mut append)
                         }
                     }
                 }
-                if !tracks.is_empty() {
-                    player.update(cx, |p, cx| {
-                        p.command(Command::Shuffle(false), cx);
-                        p.command(Command::Play(tracks.into(), 0), cx);
-                    });
-                }
+                (!tracks.is_empty()).then(|| Command::PlayList(tracks.into(), false))
+            }
+        }
+    }
+}
+impl MusicTable {
+    pub fn play_collection(&self, cx: &mut App) {
+        match &self.rows.data {
+            Contents::Folder { original, .. } => {
+                self.play_folder(FolderAction::Collection, original, cx);
             }
             Contents::Library(p) => {
                 let Scope::Library(root) = p.scope else {
                     return;
                 };
-                let catalog = self.catalog.clone();
-                let search = p.search.clone();
-                let Some(store) = catalog.read(cx).handle() else {
-                    return;
-                };
-                let keys = store.query(&request, generation, move |s| {
-                    s.collection_keys(root, search)
-                });
-                cx.spawn(async move |cx| {
-                    let tracks: anyhow::Result<TrackList> = async {
-                        let keys = keys.await?;
-                        let rows = catalog
-                            .read_with(cx, |c, cx| {
-                                c.rows(Scope::Library(root), keys, &request, generation, cx)
-                            })
-                            .await?;
-                        Ok(rows
-                            .into_iter()
-                            .filter(|r| r.available)
-                            .map(|r| r.track)
-                            .collect())
-                    }
-                    .await;
-                    if !request.is_current(generation) {
-                        return;
-                    }
-                    match tracks {
-                        Ok(tracks) if !tracks.is_empty() => player.update(cx, |p, cx| {
-                            p.command(Command::Shuffle(false), cx);
-                            p.command(Command::Play(tracks, 0), cx);
-                        }),
-                        result => catalog.update(cx, |_, cx| {
-                            cx.emit(crate::catalog::CatalogEvent::Notice(
-                                result.err().map_or_else(
-                                    || "No available tracks in this collection.".into(),
-                                    |e| format!("{e:#}"),
-                                ),
-                            ))
-                        }),
-                    }
-                })
-                .detach();
+                play_library(
+                    &self.catalog,
+                    &self.player,
+                    ListeningList::Collection(root, p.search.clone()),
+                    None,
+                    |tracks, _| Command::PlayList(tracks, false),
+                    cx,
+                );
             }
         }
     }
 
     pub fn play(&self, row: usize, cx: &mut App) {
         self.play_row(row, false, cx);
-    }
-
-    pub(super) fn can_play_track_only(&self, row: usize) -> bool {
-        let scoped = match &self.rows.data {
-            Contents::Folder { .. } => self.folder_cd,
-            Contents::Library(page) => matches!(
-                page.scope,
-                Scope::Album(_) | Scope::Release(_) | Scope::Playlist(_)
-            ),
-        };
-        scoped
-            || self
-                .track(row)
-                .is_some_and(|track| track.has_disc_context())
     }
 
     pub(super) fn play_track(&self, row: usize, cx: &mut App) {
@@ -119,173 +157,148 @@ impl MusicTable {
         match &self.rows.data {
             Contents::Folder { sorted, .. } => {
                 let Some(track) = sorted.get(ix) else { return };
-                let context = if self.folder_cd {
-                    DiscContext::Selected
+                if track_only {
+                    let single = Command::Play(Arc::from([track.clone()]), 0);
+                    self.player.update(cx, |p, cx| p.command(single, cx));
                 } else {
-                    DiscContext::Inferred
-                };
-                if track_only || !context.allows(track) {
-                    let single = Arc::from([track.clone()]);
-                    self.player
-                        .update(cx, |p, cx| p.command(Command::Play(single, 0), cx));
-                    return;
-                }
-                if let Some(disc) = self.programs.iter().find(|d| d.id.contains(track))
-                    && let Some(i) = disc.tracks.iter().position(|t| t.same_item(track))
-                {
-                    let tracks = disc.tracks.clone().into();
-                    self.player.update(cx, |p, cx| {
-                        p.command(Command::PlayDisc(tracks, i, context), cx)
-                    });
+                    let action = match &self.folder_page {
+                        Some(page) => FolderAction::Program(page.clone(), Some(track.clone())),
+                        None => FolderAction::Row(track.clone()),
+                    };
+                    self.play_folder(action, sorted, cx);
                 }
             }
             Contents::Library(p) => {
                 let Some(&chosen) = p.keys.get(ix) else {
                     return;
                 };
-                let catalog = self.catalog.clone();
-                let player = self.player.clone();
-                let scope = p.scope;
-                let search = p.search.clone();
-                let request = player.read(cx).play_request.clone();
-                let generation = request.next();
-                cx.spawn(async move |cx| {
-                    let result: anyhow::Result<Command> = async {
-                        if !track_only && scope.keys_are_entries() {
-                            let store = catalog
-                                .read_with(cx, |c, _| c.handle())
-                                .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
-                            let keys = store
-                                .query(&request, generation, move |store| {
-                                    Ok(store
-                                        .listing(&store::Query {
-                                            scope,
-                                            search,
-                                            order: None,
-                                        })?
-                                        .keys)
-                                })
-                                .await?;
-                            let rows = catalog
-                                .read_with(cx, |c, cx| {
-                                    c.rows(scope, keys, &request, generation, cx)
-                                })
-                                .await?;
-                            let mut start = None;
-                            let tracks = rows
-                                .into_iter()
-                                .filter(|r| r.available)
-                                .enumerate()
-                                .map(|(i, r)| {
-                                    if r.key == chosen {
-                                        start = Some(i);
-                                    }
-                                    r.track
-                                })
-                                .collect();
-                            let i = start.ok_or_else(|| {
-                                anyhow::anyhow!("The selected playlist entry is unavailable.")
-                            })?;
-                            return Ok(Command::Play(tracks, i));
-                        }
-                        let mut rows = catalog
-                            .read_with(cx, |c, cx| {
-                                c.rows(scope, vec![chosen], &request, generation, cx)
-                            })
-                            .await?;
-                        let target = rows
-                            .pop()
-                            .filter(|r| r.available)
-                            .ok_or_else(|| anyhow::anyhow!("The selected track is unavailable."))?
-                            .track;
-                        let context = if matches!(scope, Scope::Album(_) | Scope::Release(_)) {
-                            DiscContext::Selected
-                        } else {
-                            DiscContext::Inferred
-                        };
-                        if track_only || !context.allows(&target) {
-                            return Ok(Command::Play(Arc::from([target]), 0));
-                        }
-                        let tracks =
-                            Catalog::program(catalog.clone(), target.clone(), context, cx).await?;
-                        let i = tracks
-                            .iter()
-                            .position(|t| target.same_item(t))
-                            .ok_or_else(|| anyhow::anyhow!("The selected track is unavailable."))?;
-                        Ok(Command::PlayDisc(tracks, i, context))
-                    }
-                    .await;
-                    if request.is_current(generation) {
-                        match result {
-                            Ok(command) => player.update(cx, |p, cx| p.command(command, cx)),
-                            Err(e) => catalog.update(cx, |_, cx| {
-                                cx.emit(crate::catalog::CatalogEvent::Notice(format!("{e:#}")))
-                            }),
-                        }
-                    }
-                })
-                .detach();
+                let list = ListeningList::for_row(p.scope, &p.keys, chosen, track_only);
+                let command = if matches!(list, ListeningList::Disc(_)) {
+                    from_chapter
+                } else {
+                    Command::Play
+                };
+                play_library(&self.catalog, &self.player, list, Some(chosen), command, cx);
             }
+        }
+    }
+
+    pub fn play_all(&self, shuffle: bool, cx: &mut App) {
+        match &self.rows.data {
+            Contents::Folder { sorted, .. } if !sorted.is_empty() => {
+                self.play_folder(FolderAction::All(shuffle), sorted, cx);
+            }
+            Contents::Library(p) => play_library(
+                &self.catalog,
+                &self.player,
+                ListeningList::Displayed(p.scope, p.keys.clone()),
+                None,
+                move |tracks, _| Command::PlayList(tracks, shuffle),
+                cx,
+            ),
+            _ => {}
         }
     }
     /// Plays one CD, or every CD of a release, from the beginning in authored
     /// order. The queue then ends with it.
     pub fn play_page(&self, page: &Page, cx: &mut App) {
-        let player = self.player.clone();
-        let unavailable = match page {
-            Page::Disc(_) => "This CD is unavailable.",
-            Page::Release(_) => "This release is unavailable.",
-        };
         let scope = match page {
             Page::Disc(DiscId::Library(album)) => Some(Scope::Album(*album)),
             Page::Release(DiscId::Library(album)) => Some(Scope::Release(*album)),
             _ => None,
         };
         if let Some(scope) = scope {
-            let catalog = self.catalog.clone();
-            let request = player.read(cx).play_request.clone();
-            let generation = request.next();
-            cx.spawn(async move |cx| {
-                let tracks = Catalog::authored_tracks(catalog.clone(), scope, cx).await;
-                if !request.is_current(generation) {
-                    return;
-                }
-                match tracks {
-                    Ok(tracks) if !tracks.is_empty() => player.update(cx, |p, cx| {
-                        p.command(Command::PlayDisc(tracks, 0, DiscContext::Selected), cx)
-                    }),
-                    other => catalog.update(cx, |_, cx| {
-                        cx.emit(crate::catalog::CatalogEvent::Notice(
-                            other
-                                .err()
-                                .map_or_else(|| unavailable.into(), |e| format!("{e:#}")),
-                        ))
-                    }),
-                }
-            })
-            .detach();
+            play_library(
+                &self.catalog,
+                &self.player,
+                ListeningList::Disc(scope),
+                None,
+                |tracks, _| Command::PlayDisc {
+                    tracks,
+                    from_chapter: None,
+                },
+                cx,
+            );
             return;
         }
-        let tracks: Vec<Arc<Track>> = match page {
-            Page::Disc(id) => self
-                .programs
-                .iter()
-                .filter(|d| &d.id == id)
-                .flat_map(|d| d.tracks.iter().cloned())
-                .collect(),
-            Page::Release(key) => release_discs(&self.programs, key)
-                .iter()
-                .flat_map(|d| d.tracks.iter().cloned())
-                .collect(),
-        };
-        if !tracks.is_empty() {
-            self.player.update(cx, |p, cx| {
-                p.command(
-                    Command::PlayDisc(tracks.into(), 0, DiscContext::Selected),
-                    cx,
-                )
-            });
+        if let Contents::Folder { sorted, .. } = &self.rows.data {
+            self.play_folder(FolderAction::Program(page.clone(), None), sorted, cx);
         }
+    }
+
+    fn play_folder(&self, action: FolderAction, displayed: &TrackList, cx: &mut App) {
+        let Some(ScanningFolder {
+            path,
+            recursive,
+            grouped,
+            search,
+        }) = self.scanning_folder.clone()
+        else {
+            if let Some(command) = action.command(displayed, &self.programs) {
+                self.player.update(cx, |p, cx| p.command(command, cx));
+            }
+            return;
+        };
+        // The browser scanner may still be enriching tags or walking subfolders.
+        // Finish this activation's projection even if the listener navigates away.
+        let player = self.player.read(cx);
+        let ticket = player.play_request.clone();
+        let generation = ticket.next();
+        let sender = player.sender();
+        let marks = self.catalog.read(cx).folder_marks();
+        let sort = self.sort;
+        let page = self.folder_page.clone();
+        let catalog = self.catalog.clone();
+        cx.spawn(async move |cx| {
+            let work = ticket.clone();
+            let command = cx
+                .background_spawn(async move {
+                    let cache = crate::profile::location()
+                        .and_then(|p| crate::cache::Cache::open(&p.with_file_name("Cache")).ok());
+                    let raw =
+                        crate::discovery::folder_tracks(&path, recursive, cache.as_ref(), &|| {
+                            work.is_current(generation)
+                        });
+                    if !work.is_current(generation) {
+                        return None;
+                    }
+                    let programs = crate::collection::Discs::group(
+                        raw.iter().flatten(),
+                        &HashMap::new(),
+                        &path,
+                    );
+                    if matches!(action, FolderAction::Program(..)) {
+                        return action.command(&Arc::default(), &programs);
+                    }
+                    let discs = crate::collection::folder_discs(&programs, page.as_ref(), grouped);
+                    let terms = store::Term::parse(&search);
+                    let keep = |t: &&Arc<Track>| crate::collection::matches(t, &terms, || marks(t));
+                    let mut tracks: TrackList = if discs.is_empty() && page.is_none() {
+                        raw.iter().flatten().filter(keep).cloned().collect()
+                    } else {
+                        discs
+                            .iter()
+                            .flat_map(|d| &d.tracks)
+                            .filter(keep)
+                            .cloned()
+                            .collect()
+                    };
+                    sort_folder(&mut tracks, sort, marks);
+                    action.command(&tracks, &programs)
+                })
+                .await;
+            if ticket.is_current(generation) {
+                let result = command
+                    .ok_or_else(|| anyhow::anyhow!("The selected recording is unavailable."))
+                    .and_then(|c| sender.play_if_current(c, generation));
+                if let Err(e) = result {
+                    catalog.update(cx, |_, cx| {
+                        cx.emit(crate::catalog::CatalogEvent::Notice(e.to_string()))
+                    });
+                }
+            }
+        })
+        .detach();
     }
     pub(crate) fn recording_key(&self, track: &Track, library_id: Option<i64>) -> Option<RowKey> {
         self.rows.recording_key(track, library_id)
@@ -307,6 +320,51 @@ impl MusicTable {
                 .next()
                 .is_some_and(|r| DiscId::of(&r.track).contains(track)),
             _ => disc.contains(track),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, FolderAction, Page, Track, TrackList};
+    use crate::collection::Discs;
+    use std::{collections::HashMap, path::Path, sync::Arc};
+
+    #[test]
+    fn folder_activation_distinguishes_the_list_cd_and_release() {
+        let root = Path::new("Music");
+        let all: TrackList = (1..=2)
+            .flat_map(|disc| {
+                (1..=2).map(move |n| {
+                    let mut t = Track::file(root.join(format!("Release/CD{disc}/track{n}.wav")));
+                    t.disc_number = Some(disc);
+                    t.number = Some(n);
+                    t.album = format!("Release (CD{disc})");
+                    Arc::new(t)
+                })
+            })
+            .collect();
+        let discs = Discs::group(all.iter(), &HashMap::new(), root);
+        let chosen = all[1].clone();
+        let filtered: TrackList = [all[3].clone(), chosen.clone(), all[2].clone()].into();
+        let Some(Command::Play(tracks, start)) =
+            FolderAction::Row(chosen.clone()).command(&filtered, &discs)
+        else {
+            panic!("expected list")
+        };
+        assert_eq!((tracks, start), (filtered.clone(), 1));
+        let page = Page::Disc(discs[0].id.clone());
+        let release = Page::Release(discs[0].release.as_ref().unwrap().key.clone());
+        for (page, expected) in [(page, &all[..2]), (release, &all[..])] {
+            let action = FolderAction::Program(page, Some(chosen.clone()));
+            let Some(Command::PlayDisc {
+                tracks,
+                from_chapter,
+            }) = action.command(&filtered, &discs)
+            else {
+                panic!("expected authored program")
+            };
+            assert_eq!((&tracks[..], from_chapter), (expected, Some(1)));
         }
     }
 }

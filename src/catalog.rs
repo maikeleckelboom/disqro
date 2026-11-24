@@ -51,6 +51,86 @@ impl Targets {
     }
 }
 
+/// Source of the ordered occurrence keys for a playback request.
+pub enum ListeningList {
+    Displayed(Scope, Arc<[i64]>),
+    Disc(Scope),
+    Collection(Option<RootId>, String),
+    Playlist(PlaylistId),
+    Search(String),
+}
+
+impl ListeningList {
+    pub fn for_row(scope: Scope, keys: &Arc<[i64]>, chosen: i64, track_only: bool) -> Self {
+        if track_only {
+            Self::Displayed(scope, Arc::from([chosen]))
+        } else if matches!(scope, Scope::Album(_) | Scope::Release(_)) {
+            Self::Disc(scope)
+        } else {
+            Self::Displayed(scope, keys.clone())
+        }
+    }
+
+    pub(crate) async fn resolve(
+        self,
+        store: Handle,
+        chosen: Option<i64>,
+        ticket: store::Ticket,
+        generation: u64,
+        offline: HashSet<RootId>,
+    ) -> anyhow::Result<(TrackList, usize, usize)> {
+        let (scope, keys) = store
+            .query(&ticket, generation, move |s| self.keys(s))
+            .await?;
+        let mut tracks = Vec::with_capacity(keys.len());
+        let mut start = None;
+        for chunk in keys.chunks(500) {
+            let batch = chunk.to_vec();
+            let rows = store
+                .query(&ticket, generation, move |s| s.rows(scope, &batch))
+                .await?;
+            let mut files = store::DetachedFiles::default();
+            for row in rows {
+                anyhow::ensure!(ticket.is_current(generation), store::Cancelled);
+                if Catalog::available(&row, &offline, &mut files) {
+                    if Some(row.key) == chosen {
+                        start = Some(tracks.len());
+                    }
+                    tracks.push(row.track);
+                }
+            }
+        }
+        let start = if chosen.is_some() {
+            start.ok_or_else(|| anyhow::anyhow!("The selected recording is unavailable."))?
+        } else {
+            0
+        };
+        anyhow::ensure!(!tracks.is_empty(), "No available tracks in this list.");
+        let skipped = keys.len() - tracks.len();
+        Ok((tracks.into(), start, skipped))
+    }
+
+    fn keys(self, store: &Store) -> anyhow::Result<(Scope, Arc<[i64]>)> {
+        Ok(match self {
+            Self::Displayed(scope, keys) => (scope, keys),
+            Self::Disc(scope) => (scope, store.disc_keys(scope)?.into()),
+            Self::Collection(root, search) => (
+                Scope::Library(root),
+                store.collection_keys(root, search)?.into(),
+            ),
+            Self::Playlist(id) => (
+                Scope::Playlist(id),
+                store
+                    .entries(id)?
+                    .into_iter()
+                    .map(|(entry, _)| entry)
+                    .collect(),
+            ),
+            Self::Search(text) => (Scope::Library(None), store.search_track_keys(&text)?.into()),
+        })
+    }
+}
+
 pub struct Collection {
     pub root: store::Root,
     pub online: bool,
@@ -77,8 +157,8 @@ pub struct Catalog {
     cache_dir: Option<PathBuf>,
     pub collections: Vec<Collection>,
     pub playlists: Vec<store::Playlist>,
-    marks: HashMap<TrackId, Mark>,
-    located: HashMap<Locator, TrackId>,
+    marks: Arc<HashMap<TrackId, Mark>>,
+    located: Arc<HashMap<Locator, TrackId>>,
     scanning: Option<(RootId, Arc<AtomicBool>)>,
     pending: VecDeque<RootId>,
     pub loaded: bool,
@@ -95,8 +175,8 @@ impl Catalog {
             cache_dir: crate::profile::location().map(|p| p.with_file_name("Cache")),
             collections: vec![],
             playlists: vec![],
-            marks: HashMap::new(),
-            located: HashMap::new(),
+            marks: Arc::default(),
+            located: Arc::default(),
             scanning: None,
             pending: VecDeque::new(),
             loaded: false,
@@ -179,21 +259,21 @@ impl Catalog {
             .collect();
     }
     fn set_marks(&mut self, marks: Vec<store::TrackMark>) {
-        self.marks.clear();
-        self.located.clear();
+        self.marks = Arc::default();
+        self.located = Arc::default();
         self.apply_marks(marks);
     }
     fn apply_marks(&mut self, marks: Vec<store::TrackMark>) {
         for (id, locator, mark) in marks {
             if mark == Mark::default() {
-                self.marks.remove(&id);
+                Arc::make_mut(&mut self.marks).remove(&id);
                 if let Some(locator) = locator {
-                    self.located.remove(&locator);
+                    Arc::make_mut(&mut self.located).remove(&locator);
                 }
             } else {
-                self.marks.insert(id, mark);
+                Arc::make_mut(&mut self.marks).insert(id, mark);
                 if let Some(locator) = locator {
-                    self.located.insert(locator, id);
+                    Arc::make_mut(&mut self.located).insert(locator, id);
                 }
             }
         }
@@ -252,6 +332,17 @@ impl Catalog {
         self.located
             .get(&Locator::of(t))
             .map_or_else(Mark::default, |id| self.mark(*id))
+    }
+
+    pub fn folder_marks(&self) -> impl Fn(&Track) -> Mark + use<> {
+        let (located, marks) = (self.located.clone(), self.marks.clone());
+        move |t| {
+            located
+                .get(&Locator::of(t))
+                .and_then(|id| marks.get(id))
+                .copied()
+                .unwrap_or_default()
+        }
     }
 
     /// Runs a write on the library worker against the identities of
@@ -452,12 +543,7 @@ impl Catalog {
             .store
             .as_ref()
             .map(|s| s.query(ticket, generation, move |s| s.rows(scope, &keys)));
-        let offline: HashSet<RootId> = self
-            .collections
-            .iter()
-            .filter(|c| !c.online)
-            .map(|c| c.root.id)
-            .collect();
+        let offline = self.offline_roots();
         let ticket = ticket.clone();
         let background = cx.background_executor().clone();
         async move {
@@ -471,14 +557,46 @@ impl Catalog {
                         if !ticket.is_current(generation) {
                             return Err(store::Cancelled.into());
                         }
-                        row.available &= !row.root.is_some_and(|id| offline.contains(&id))
-                            && !row.source_root.is_some_and(|id| offline.contains(&id));
-                        row.available = row.available && files.available(row);
+                        row.available = Self::available(row, &offline, &mut files);
                     }
                     Ok(rows)
                 })
                 .await
         }
+    }
+
+    /// Capture order once. Only one batch of database rows and availability
+    /// evidence is retained alongside the queue's shared track descriptors.
+    pub fn listening_list(
+        &self,
+        list: ListeningList,
+        chosen: Option<i64>,
+        ticket: store::Ticket,
+        generation: u64,
+        cx: &App,
+    ) -> impl Future<Output = anyhow::Result<(TrackList, usize, usize)>> + use<> {
+        let handle = self.handle();
+        let offline = self.offline_roots();
+        cx.background_spawn(async move {
+            let store = handle.ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
+            list.resolve(store, chosen, ticket, generation, offline)
+                .await
+        })
+    }
+
+    fn offline_roots(&self) -> HashSet<RootId> {
+        self.collections
+            .iter()
+            .filter(|c| !c.online)
+            .map(|c| c.root.id)
+            .collect()
+    }
+
+    fn available(row: &Row, offline: &HashSet<RootId>, files: &mut store::DetachedFiles) -> bool {
+        row.available
+            && !row.root.is_some_and(|id| offline.contains(&id))
+            && !row.source_root.is_some_and(|id| offline.contains(&id))
+            && files.available(row)
     }
 
     pub fn tracks(

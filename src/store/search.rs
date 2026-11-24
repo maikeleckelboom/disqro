@@ -39,34 +39,47 @@ pub struct Matches {
     pub more: bool,
 }
 
+fn search_expression(text: &str) -> String {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .take(16)
+        .map(|word| format!("\"{word}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
 impl Store {
-    pub fn search_library(&self, text: &str, limit: usize, offset: usize) -> Result<Matches> {
-        let expression = text
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty())
-            .take(16)
-            .map(|word| format!("\"{word}\"*"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        let mut result = Matches::default();
-        if expression.is_empty() {
-            return Ok(result);
-        }
-        let snapshot = self.db.unchecked_transaction()?;
-        let args = params![
-            expression,
-            i64::try_from(limit)? + 1,
-            i64::try_from(offset)?
-        ];
-        let mut ids: Vec<i64> = self
+    fn ranked_tracks(&self, expression: &str, limit: i64, offset: i64) -> Result<Vec<TrackId>> {
+        Ok(self
             .db
             .prepare_cached(
                 "SELECT t.id FROM tracks_fts(?1) JOIN tracks t ON t.id=tracks_fts.rowid
              WHERE t.present=1 AND t.root_id IS NOT NULL
              ORDER BY rank, t.id LIMIT ?2 OFFSET ?3",
             )?
-            .query_map(args, |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            .query_map(params![expression, limit, offset], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn search_track_keys(&self, text: &str) -> Result<Vec<TrackId>> {
+        let expression = search_expression(text);
+        if expression.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ranked_tracks(&expression, -1, 0)
+    }
+
+    pub fn search_library(&self, text: &str, limit: usize, offset: usize) -> Result<Matches> {
+        let expression = search_expression(text);
+        let mut result = Matches::default();
+        if expression.is_empty() {
+            return Ok(result);
+        }
+        let snapshot = self.db.unchecked_transaction()?;
+        let count = i64::try_from(limit)? + 1;
+        let offset = i64::try_from(offset)?;
+        let args = params![expression, count, offset];
+        let mut ids = self.ranked_tracks(&expression, count, offset)?;
         result.more = ids.len() > limit;
         ids.truncate(limit);
         for row in self.rows(Scope::Library(None), &ids)? {

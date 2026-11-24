@@ -45,6 +45,7 @@ pub enum PlayerEvent {
     ),
     ContinueCd(crate::queue::Entry),
     TrackChanged,
+    Notice(String),
     PlaySelection,
     ToggleQueue,
     QueueChanged,
@@ -172,7 +173,7 @@ impl Player {
         Self {
             can_start: false,
             spectra: crate::spectrum_worker::Hub::new(transport.signal.pcm()),
-            play_request: Default::default(),
+            play_request: transport.sender().play_request,
             transport,
             meter,
             wave_strip,
@@ -205,16 +206,6 @@ impl Player {
         }
     }
     pub fn command(&mut self, c: Command, cx: &mut Context<Self>) {
-        if matches!(
-            c,
-            Command::Play(..)
-                | Command::PlayDisc(..)
-                | Command::Jump(_)
-                | Command::Stop
-                | Command::Step(_)
-        ) {
-            self.play_request.next();
-        }
         if matches!(c, Command::Toggle | Command::SetPlaying(true))
             && self.status.track.is_none()
             && self.queue.entries.is_empty()
@@ -287,6 +278,11 @@ impl Player {
         let (status, queue) = self.transport.state();
         if status == self.status {
             return;
+        }
+        if status.skipped != self.status.skipped
+            && let Some((_, text)) = &status.skipped
+        {
+            cx.emit(PlayerEvent::Notice(text.clone()));
         }
         let old_context = self.playing_entry().map(|e| e.disc_context);
         let new_context = queue.current_entry().map(|e| e.disc_context);

@@ -2,7 +2,7 @@ use crate::{
     library::{DiscContext, Track},
     queue::{Queue, Repeat},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use kira::{
     AudioManager, AudioManagerSettings, Decibels, DefaultBackend, Tween,
     sound::{
@@ -35,6 +35,7 @@ pub struct Status {
     pub previous: bool,
     pub next: bool,
     pub error: Option<String>,
+    pub skipped: Option<(u64, String)>,
     pub shuffle: bool,
     pub repeat: Repeat,
     pub queue_revision: u64,
@@ -68,7 +69,11 @@ impl Status {
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
     Play(crate::library::TrackList, usize),
-    PlayDisc(crate::library::TrackList, usize, DiscContext),
+    PlayDisc {
+        tracks: crate::library::TrackList,
+        from_chapter: Option<usize>,
+    },
+    PlayList(crate::library::TrackList, bool),
     Toggle,
     SetPlaying(bool),
     Stop,
@@ -99,6 +104,23 @@ pub enum Command {
     /// Bring back a saved queue, paused at the saved position.
     Restore(Box<Queue>, f64),
     Snapshot(mpsc::SyncSender<Option<crate::profile::SavedQueue>>),
+}
+
+impl Command {
+    fn supersedes_play(&self) -> bool {
+        matches!(
+            self,
+            Self::Play(..)
+                | Self::PlayDisc { .. }
+                | Self::PlayList(..)
+                | Self::Toggle
+                | Self::SetPlaying(_)
+                | Self::Jump(_)
+                | Self::Stop
+                | Self::Step(_)
+                | Self::Restore(..)
+        )
+    }
 }
 
 struct Shared {
@@ -135,6 +157,7 @@ impl Pending {
 
 #[derive(Clone)]
 pub struct Commands {
+    pub play_request: crate::store::Ticket,
     tx: mpsc::SyncSender<Slot>,
     tail: Arc<Mutex<std::sync::Weak<Mutex<Option<Pending>>>>>,
     shared: Arc<Mutex<Shared>>,
@@ -146,6 +169,7 @@ impl Commands {
             Self {
                 tx,
                 shared,
+                play_request: Default::default(),
                 tail: Default::default(),
             },
             rx,
@@ -173,13 +197,28 @@ impl Commands {
         self.send_for(command, entry)
     }
     fn send_for(&self, command: Command, entry: Option<u64>) -> Result<()> {
-        let pending = Pending { command, entry };
+        self.enqueue(command, entry, None).map(|_| ())
+    }
+    pub fn play_if_current(&self, command: Command, generation: u64) -> Result<bool> {
+        self.enqueue(command, None, Some(generation))
+    }
+    fn enqueue(
+        &self,
+        command: Command,
+        entry: Option<u64>,
+        generation: Option<u64>,
+    ) -> Result<bool> {
         let mut tail = self.tail.lock().unwrap();
+        if generation.is_some_and(|g| !self.play_request.is_current(g)) {
+            return Ok(false);
+        }
+        let supersedes = command.supersedes_play();
+        let pending = Pending { command, entry };
         if let Some(slot) = tail.upgrade() {
             let mut last = slot.lock().unwrap();
             if last.as_ref().is_some_and(|old| pending.replaces(old)) {
                 *last = Some(pending);
-                return Ok(());
+                return Ok(true);
             }
         }
         let slot = Arc::new(Mutex::new(Some(pending)));
@@ -192,7 +231,10 @@ impl Commands {
             }
         })?;
         *tail = Arc::downgrade(&slot);
-        Ok(())
+        if supersedes {
+            self.play_request.next();
+        }
+        Ok(true)
     }
 }
 pub struct Transport {
@@ -227,7 +269,9 @@ impl Transport {
                 let interval = Duration::from_millis(40);
                 let mut next_tick = std::time::Instant::now() + interval;
                 loop {
-                    let command = if engine.status.playing && std::time::Instant::now() >= next_tick
+                    let command = if engine.status.playing
+                        && !engine.retry_next
+                        && std::time::Instant::now() >= next_tick
                     {
                         None
                     } else if engine.status.playing {
@@ -260,6 +304,7 @@ impl Transport {
                         }
                     };
                     if let Err(error) = result {
+                        engine.retry_next = false;
                         engine.stop_voice();
                         engine.status.error = Some(format!("{error:#}"));
                     }
@@ -316,6 +361,16 @@ struct Chapter {
     offset: f64,
 }
 
+/// Only errors carrying this context are eligible for automatic skipping.
+#[derive(Debug)]
+struct RecordingFailure(String);
+
+impl std::fmt::Display for RecordingFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cannot play {}", self.0)
+    }
+}
+
 #[derive(Default)]
 struct Engine {
     signal: crate::signal::SignalMonitor,
@@ -336,6 +391,8 @@ struct Engine {
     // advancing voice, including contiguous CUE chapter boundaries.
     position_probe: Option<(std::time::Instant, f64)>,
     discarded_errors: u64,
+    consecutive_failures: usize,
+    retry_next: bool,
     volume: f32,
     status: Status,
 }
@@ -430,13 +487,33 @@ impl Engine {
                 last += 1;
             }
         }
-        let end = self.queue.entries[last]
+        let mut end = self.queue.entries[last]
             .track
             .disc
             .as_ref()
             .and_then(|d| d.end);
-        let mut recording = Recording::open(&entry.track, end)
-            .with_context(|| format!("Cannot play {}", entry.track.title))?;
+        let open = |end| Recording::open(&entry.track, end);
+        let grouped = open(end).and_then(|recording| {
+            let rate = recording.sample_rate();
+            let offset =
+                crate::recording::disc_frame(disc_start(&self.queue.entries[last].track), rate)
+                    .saturating_sub(crate::recording::disc_frame(disc_start(&entry.track), rate));
+            anyhow::ensure!(
+                offset < recording.num_frames(),
+                "A CUE track begins beyond the recording"
+            );
+            Ok(recording)
+        });
+        // A malformed later chapter must not make an earlier playable one fail.
+        let mut recording = match grouped {
+            Err(_) if last != index => {
+                group.truncate(1);
+                end = entry.track.disc.as_ref().and_then(|d| d.end);
+                open(end)
+            }
+            result => result,
+        }
+        .with_context(|| RecordingFailure(entry.track.title.clone()))?;
         if let Some(d) = crate::diagnostics::get() {
             d.opens.fetch_add(1, Ordering::Relaxed);
             recording.playback_probe = Some(std::time::Instant::now());
@@ -450,10 +527,6 @@ impl Engine {
         }
         self.decoder_end = end;
         self.length = recording.num_frames() as f64 / f64::from(recording.sample_rate());
-        ensure!(
-            group.last().unwrap().offset < self.length,
-            "A CUE track begins beyond the recording"
-        );
         let start =
             ((position * f64::from(self.rate)).round() as usize).min(recording.num_frames() - 1);
         let data = StreamingSoundData::from_decoder(recording)
@@ -472,7 +545,18 @@ impl Engine {
             );
         }
         self.signal.reset();
-        self.voice = Some(self.device.as_mut().unwrap().play(data)?);
+        self.voice = Some(
+            self.device
+                .as_mut()
+                .unwrap()
+                .play(data)
+                .map_err(|e| match e {
+                    kira::PlaySoundError::IntoSoundError(e) => {
+                        anyhow::Error::new(e).context(RecordingFailure(entry.track.title.clone()))
+                    }
+                    other => anyhow::Error::new(other).context("Cannot start the output voice"),
+                })?,
+        );
         if let Some(d) = crate::diagnostics::get() {
             d.voices.fetch_add(1, Ordering::Relaxed);
         }
@@ -558,9 +642,34 @@ impl Engine {
         s.previous = self.queue.current.is_some()
             && (self.queue.previous_index().is_some() || s.position > 0.);
     }
+    /// Try at most one occurrence per tick so controls can interrupt recovery.
+    /// Preserve the count across voices that open but fail during decoding.
+    fn recording_failed(&mut self, error: anyhow::Error) -> Result<()> {
+        self.stop_voice();
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= self.queue.entries.len().min(32)
+            || self.queue.next_index(false).is_none()
+        {
+            return Err(error);
+        }
+        self.status.skipped = self
+            .status
+            .entry
+            .map(|id| (id, format!("Skipped recording · {error:#}")));
+        self.retry_next = true;
+        self.status.playing = true;
+        Ok(())
+    }
+
+    fn play_eligible(&mut self, index: usize) -> Result<()> {
+        match self.play(index, 0.) {
+            Err(e) if e.is::<RecordingFailure>() => self.recording_failed(e),
+            result => result,
+        }
+    }
     fn advance(&mut self, ended: bool) -> Result<()> {
         match self.queue.next_index(ended) {
-            Some(i) => self.play(i, 0.),
+            Some(i) => self.play_eligible(i),
             None => {
                 self.stop_voice();
                 self.status.position = self.status.duration;
@@ -600,24 +709,58 @@ impl Engine {
         {
             v.pause(Tween::default());
             self.position_probe = None;
-            self.status.playing = false;
         }
+        self.status.playing = false;
     }
     fn command(&mut self, c: Command) -> Result<()> {
         if let Some(d) = crate::diagnostics::get() {
             d.commands.fetch_add(1, Ordering::Relaxed);
         }
-        match c {
-            Command::PlayDisc(tracks, i, context) => {
-                self.queue.shuffle = false;
-                if self.queue.repeat == Repeat::One {
-                    self.queue.set_repeat(Repeat::Off);
+        if self.retry_next {
+            match c {
+                Command::Toggle => {
+                    self.status.playing = !self.status.playing;
+                    return Ok(());
                 }
+                Command::SetPlaying(on) => {
+                    self.status.playing = on;
+                    return Ok(());
+                }
+                Command::Seek(_) | Command::SeekTo(_) | Command::SeekOnDisc { .. } => return Ok(()),
+                _ => {}
+            }
+        }
+        if c.supersedes_play() {
+            if self.retry_next {
+                self.status.playing = false;
+            }
+            self.retry_next = false;
+            self.consecutive_failures = 0;
+        }
+        match c {
+            Command::PlayDisc {
+                tracks,
+                from_chapter,
+            } => {
+                if from_chapter.is_none() {
+                    self.queue.shuffle = false;
+                    if self.queue.repeat == Repeat::One {
+                        self.queue.set_repeat(Repeat::Off);
+                    }
+                }
+                let i = from_chapter.unwrap_or(0);
                 self.queue.replace(&tracks, i);
-                for entry in &mut self.queue.entries {
-                    entry.disc_context = context;
+                for entry in Arc::make_mut(&mut self.queue.entries) {
+                    entry.disc_context = DiscContext::Selected;
                 }
                 self.play(i, 0.)?;
+            }
+            Command::PlayList(tracks, shuffle) => {
+                self.queue.shuffle = shuffle;
+                // Shuffle the entire list before selecting the first occurrence.
+                self.queue
+                    .replace(&tracks, if shuffle { tracks.len() } else { 0 });
+                self.play(0, 0.)?;
             }
             Command::Play(tracks, i) => {
                 self.queue.replace(&tracks, i);
@@ -650,7 +793,11 @@ impl Engine {
                     self.queue.next_index(false)
                 };
                 if let Some(i) = target {
-                    self.play(i, 0.)?;
+                    if delta > 0 {
+                        self.play_eligible(i)?;
+                    } else {
+                        self.play(i, 0.)?;
+                    }
                 }
             }
             Command::Jump(id) => {
@@ -708,9 +855,10 @@ impl Engine {
             Command::Remove(ids) => {
                 if self.queue.remove(&ids) {
                     let resume = self.status.playing;
+                    self.retry_next = false;
                     self.stop_voice();
                     match self.queue.current {
-                        Some(i) if resume => self.play(i, 0.)?,
+                        Some(i) if resume => self.play_eligible(i)?,
                         current => self.select(current, 0.),
                     }
                 } else {
@@ -723,6 +871,10 @@ impl Engine {
                 }
             }
             Command::ClearUpcoming => {
+                if self.retry_next {
+                    self.retry_next = false;
+                    self.stop_voice();
+                }
                 self.queue.clear_upcoming();
                 self.revalidate();
             }
@@ -748,8 +900,9 @@ impl Engine {
             }
             Command::Restore(queue, position) => {
                 self.stop_voice();
+                let revision = self.queue.revision + 1;
                 self.queue = *queue;
-                self.queue.revision += 1;
+                self.queue.revision = revision;
                 self.select(self.queue.current, position);
             }
         }
@@ -777,7 +930,37 @@ impl Engine {
         }
         Ok(())
     }
+    fn output_error(&mut self, error: kira::backend::cpal::cpal::Error) -> Result<()> {
+        use kira::backend::cpal::cpal::ErrorKind;
+        if let Some(d) = crate::diagnostics::get() {
+            d.device_errors.fetch_add(1, Ordering::Relaxed);
+        }
+        if matches!(
+            error.kind(),
+            ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+        ) {
+            return Ok(());
+        }
+        self.retry_next = false;
+        self.stop_voice();
+        self.device = None;
+        self.discarded_errors = 0;
+        Err(error).context("Windows audio output failed")
+    }
     fn tick(&mut self) -> Result<()> {
+        while let Some(error) = self
+            .device
+            .as_mut()
+            .and_then(|d| d.backend_mut().pop_error())
+        {
+            self.output_error(error)?;
+        }
+        if !self.status.playing {
+            return Ok(());
+        }
+        if std::mem::take(&mut self.retry_next) {
+            return self.advance(false);
+        }
         let Some(v) = &mut self.voice else {
             return Ok(());
         };
@@ -788,9 +971,6 @@ impl Engine {
                     d.callbacks.fetch_add(1, Ordering::Relaxed);
                     d.cpu_permille
                         .fetch_max((ratio * 1000.) as u64, Ordering::Relaxed);
-                }
-                while backend.pop_error().is_some() {
-                    d.device_errors.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Some(total) = backend.num_stream_errors_discarded() {
                     d.discarded_errors.fetch_add(
@@ -818,17 +998,27 @@ impl Engine {
                 d.stalls.fetch_add(1, Ordering::Relaxed);
             }
         }
+        let stopped = v.state() == PlaybackState::Stopped;
         if let Some(error) = v.pop_error() {
             if let Some(d) = crate::diagnostics::get() {
                 d.decode_errors.fetch_add(1, Ordering::Relaxed);
             }
-            return Err(error.into());
+            let position = v.position();
+            self.update_position(position.min(self.limit));
+            let title = self
+                .status
+                .track
+                .as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_default();
+            return self
+                .recording_failed(anyhow::Error::new(error).context(RecordingFailure(title)));
         }
-        let stopped = v.state() == PlaybackState::Stopped;
         let position = if stopped { self.limit } else { v.position() };
         let ended = stopped || position >= self.limit;
         self.update_position(position.min(self.limit));
         if ended {
+            self.consecutive_failures = 0;
             self.stop_voice();
             self.advance(true)?;
         }

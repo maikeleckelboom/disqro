@@ -31,6 +31,7 @@ use gpui_kit::{
 };
 pub use layout::{ContextKind, Layouts, LegacyColumn};
 use layout::{Layout, Pin};
+pub(crate) use playback::{ScanningFolder, play_library};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -572,7 +573,8 @@ pub struct MusicTable {
     rows: Rows,
     folder_sections: Sections,
     pub programs: Arc<[Arc<Disc>]>,
-    pub folder_cd: bool,
+    pub folder_page: Option<Page>,
+    pub scanning_folder: Option<ScanningFolder>,
     pub layouts: Layouts,
     context: ContextKind,
     viewport: f32,
@@ -809,6 +811,31 @@ pub fn queue_targets(
     .detach();
 }
 
+fn sort_folder(
+    sorted: &mut TrackList,
+    sort: Option<(Field, ColumnSort)>,
+    marks: impl Fn(&Track) -> Mark,
+) {
+    if let Some((f, order)) = sort {
+        let rows = Arc::make_mut(sorted);
+        match f {
+            Field::Length => rows.sort_by(|a, b| {
+                a.duration
+                    .partial_cmp(&b.duration)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            Field::Disc => rows.sort_by_key(|t| t.disc_number),
+            Field::Year => rows.sort_by_key(|t| t.year),
+            Field::Number => rows.sort_by_key(|t| t.display_number()),
+            Field::Rating => rows.sort_by_cached_key(|t| marks(t).rating),
+            _ => rows.sort_by_cached_key(|t| f.value(t, Mark::default()).to_lowercase()),
+        }
+        if order == ColumnSort::Descending {
+            rows.reverse();
+        }
+    }
+}
+
 impl MusicTable {
     pub fn new(
         player: Entity<Player>,
@@ -828,7 +855,8 @@ impl MusicTable {
                 },
             },
             programs: Arc::default(),
-            folder_cd: false,
+            folder_page: None,
+            scanning_folder: None,
             folder_sections: Sections::default(),
             layouts,
             context: ContextKind::Mixed,
@@ -1203,24 +1231,7 @@ impl MusicTable {
             Sections::default()
         };
         *sorted = original.clone();
-        if let Some((f, order)) = self.sort {
-            let rows = Arc::make_mut(sorted);
-            match f {
-                Field::Length => rows.sort_by(|a, b| {
-                    a.duration
-                        .partial_cmp(&b.duration)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                }),
-                Field::Disc => rows.sort_by_key(|t| t.disc_number),
-                Field::Year => rows.sort_by_key(|t| t.year),
-                Field::Number => rows.sort_by_key(|t| t.display_number()),
-                Field::Rating => rows.sort_by_cached_key(|t| marks(t).rating),
-                _ => rows.sort_by_cached_key(|t| f.value(t, Mark::default()).to_lowercase()),
-            }
-            if order == ColumnSort::Descending {
-                rows.reverse();
-            }
-        }
+        sort_folder(sorted, self.sort, marks);
     }
     /// Header clicks cycle ascending, descending, and the view's own order.
     fn cycle_sort(&mut self, field: Field, cx: &mut Context<TableState<Self>>) {
@@ -2316,7 +2327,6 @@ impl TableDelegate for MusicTable {
         let this = cx.entity().downgrade();
         let clicked = self.rows.key(ix);
         let view = self.view;
-        let only_this_track = self.can_play_track_only(ix);
         let (track_table, track_key) = (this.clone(), clicked.clone());
         menu.item(
             PopupMenuItem::new("Play")
@@ -2332,20 +2342,18 @@ impl TableDelegate for MusicTable {
                     });
                 }),
         )
-        .when(only_this_track, |menu| {
-            menu.item(
-                PopupMenuItem::new("Play Only This Track").on_click(move |_, _, cx| {
-                    let _ = track_table.update(cx, |t, cx| {
-                        let d = t.delegate();
-                        if d.view == view
-                            && let Some(i) = track_key.as_ref().and_then(|k| d.rows.position(k))
-                        {
-                            d.play_track(i, cx);
-                        }
-                    });
-                }),
-            )
-        })
+        .item(
+            PopupMenuItem::new("Play Only This Track").on_click(move |_, _, cx| {
+                let _ = track_table.update(cx, |t, cx| {
+                    let d = t.delegate();
+                    if d.view == view
+                        && let Some(i) = track_key.as_ref().and_then(|k| d.rows.position(k))
+                    {
+                        d.play_track(i, cx);
+                    }
+                });
+            }),
+        )
         .item(
             PopupMenuItem::new(plural("Play Next", format!("Play {count} Tracks Next")))
                 .icon(IconName::ListStart)

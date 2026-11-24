@@ -303,10 +303,17 @@ mod imp {
             Ok(media)
         }
         fn update(&mut self, now: Option<&NowPlaying>, s: &Status) -> windows::core::Result<()> {
-            let status = match (&s.track, s.playing) {
-                (None, _) => MediaPlaybackStatus::Closed,
-                (Some(_), true) => MediaPlaybackStatus::Playing,
-                (Some(_), false) => MediaPlaybackStatus::Paused,
+            use crate::audio::TransportState;
+            let status = if s.track.is_none() {
+                MediaPlaybackStatus::Closed
+            } else {
+                match s.playback_state() {
+                    TransportState::Playing => MediaPlaybackStatus::Playing,
+                    TransportState::Paused => MediaPlaybackStatus::Paused,
+                    TransportState::Stopped | TransportState::Finished => {
+                        MediaPlaybackStatus::Stopped
+                    }
+                }
             };
             if self.status != Some(status) {
                 self.smtc.SetPlaybackStatus(status)?;

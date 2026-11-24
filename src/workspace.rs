@@ -386,6 +386,9 @@ impl Workspace {
                     s.update_system(cx);
                     s.schedule_save(cx);
                 }
+                PlayerEvent::Notice(text) => {
+                    w.push_notification(text.clone(), cx);
+                }
                 PlayerEvent::ToggleQueue => s.toggle_queue(w, cx),
                 PlayerEvent::PlaySelection => {}
             }),
@@ -534,7 +537,9 @@ impl Workspace {
         };
         let browser = self.ensure_browser(window, cx);
         browser.update(cx, |b, cx| {
-            b.open_revealing(folder, is_file.then_some(Reveal::Play(target)), window, cx)
+            let request = is_file
+                .then(|| Reveal::Play(target, self.services.player.read(cx).play_request.next()));
+            b.open_revealing(folder, request, window, cx)
         });
     }
 

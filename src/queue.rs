@@ -37,12 +37,12 @@ impl Repeat {
 #[serde(default)]
 pub struct Queue {
     /// Entries in play order. Those before `current` are this session's history.
-    pub entries: Vec<Entry>,
+    pub entries: Arc<Vec<Entry>>,
     pub current: Option<usize>,
     pub shuffle: bool,
     pub repeat: Repeat,
     /// The order of upcoming entries before shuffle was switched on.
-    unshuffled: Vec<u64>,
+    unshuffled: Arc<Vec<u64>>,
     next_id: u64,
     #[serde(skip)]
     pub revision: u64,
@@ -106,9 +106,9 @@ impl Queue {
     /// Starts a new queue from a table, beginning at `start`. The tracks before
     /// it become history, so Previous moves back through the album.
     pub fn replace(&mut self, tracks: &[impl Clone + Into<Arc<Track>>], start: usize) {
-        self.entries = tracks.iter().cloned().map(|t| self.entry(t)).collect();
+        self.entries = Arc::new(tracks.iter().cloned().map(|t| self.entry(t)).collect());
         self.current = (start < self.entries.len()).then_some(start);
-        self.unshuffled.clear();
+        self.unshuffled = Arc::default();
         if self.shuffle {
             self.shuffle_upcoming();
         }
@@ -119,9 +119,9 @@ impl Queue {
         let at = self.upcoming_start().min(self.entries.len());
         let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
-        self.entries.splice(at..at, new);
+        Arc::make_mut(&mut self.entries).splice(at..at, new);
         if self.shuffle {
-            self.unshuffled.splice(0..0, ids.iter().copied());
+            Arc::make_mut(&mut self.unshuffled).splice(0..0, ids.iter().copied());
         }
         self.touch();
         ids
@@ -129,9 +129,9 @@ impl Queue {
     pub fn add(&mut self, tracks: &[impl Clone + Into<Arc<Track>>]) -> Vec<u64> {
         let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
-        self.entries.extend(new);
+        Arc::make_mut(&mut self.entries).extend(new);
         if self.shuffle {
-            self.unshuffled.extend(ids.iter().copied());
+            Arc::make_mut(&mut self.unshuffled).extend(ids.iter().copied());
         }
         self.touch();
         ids
@@ -177,12 +177,13 @@ impl Queue {
         // This explicit listening action establishes authored order. Keep the
         // existing order of unrelated upcoming entries, even when shuffled.
         self.shuffle = false;
-        self.unshuffled.clear();
+        self.unshuffled = Arc::default();
         if self.repeat == Repeat::One {
             self.repeat = Repeat::Off;
         }
         if !ordered {
-            let upcoming = self.entries.split_off(self.upcoming_start());
+            let start = self.upcoming_start();
+            let upcoming = Arc::make_mut(&mut self.entries).split_off(start);
             let mut upcoming: Vec<_> = upcoming.into_iter().map(Some).collect();
             for track in remaining {
                 let found = upcoming
@@ -190,12 +191,12 @@ impl Queue {
                     .find(|slot| slot.as_ref().is_some_and(|e| e.track.same_item(track)))
                     .and_then(Option::take);
                 let next = found.unwrap_or_else(|| self.entry(track.clone()));
-                self.entries.push(next);
+                Arc::make_mut(&mut self.entries).push(next);
             }
-            self.entries.extend(upcoming.into_iter().flatten());
+            Arc::make_mut(&mut self.entries).extend(upcoming.into_iter().flatten());
         }
         if context == DiscContext::Selected {
-            for entry in &mut self.entries[start..=start + remaining.len()] {
+            for entry in &mut Arc::make_mut(&mut self.entries)[start..=start + remaining.len()] {
                 entry.disc_context = context;
             }
         }
@@ -212,10 +213,10 @@ impl Queue {
                 .filter(|e| ids.contains(&e.id))
                 .count()
         });
-        self.entries.retain(|e| !ids.contains(&e.id));
+        Arc::make_mut(&mut self.entries).retain(|e| !ids.contains(&e.id));
         // When the current entry went, the one that followed slid into its slot.
         self.current = current.filter(|&c| c < self.entries.len());
-        self.unshuffled.retain(|id| !ids.contains(id));
+        Arc::make_mut(&mut self.unshuffled).retain(|id| !ids.contains(id));
         self.touch();
         removed_current
     }
@@ -229,21 +230,21 @@ impl Queue {
             return;
         }
         let current_id = self.current_entry().map(|e| e.id);
-        let entry = self.entries.remove(from);
+        let entry = Arc::make_mut(&mut self.entries).remove(from);
         let to = if to > from { to - 1 } else { to };
-        self.entries.insert(to, entry);
+        Arc::make_mut(&mut self.entries).insert(to, entry);
         self.current = current_id.and_then(|id| self.index_of(id));
         self.touch();
     }
     pub fn clear_upcoming(&mut self) {
         let start = self.upcoming_start().min(self.entries.len());
-        self.entries.truncate(start);
-        self.unshuffled.clear();
+        Arc::make_mut(&mut self.entries).truncate(start);
+        self.unshuffled = Arc::default();
         self.touch();
     }
     pub fn clear_history(&mut self) {
         if let Some(c) = self.current {
-            self.entries.drain(..c);
+            Arc::make_mut(&mut self.entries).drain(..c);
             self.current = Some(0);
             self.touch();
         }
@@ -270,20 +271,21 @@ impl Queue {
             self.shuffle_upcoming();
         } else {
             let start = self.upcoming_start().min(self.entries.len());
-            let order = std::mem::take(&mut self.unshuffled);
-            self.entries[start..].sort_by_key(|e| {
-                order
-                    .iter()
-                    .position(|id| *id == e.id)
-                    .unwrap_or(usize::MAX)
-            });
+            let order: std::collections::HashMap<_, _> = std::mem::take(&mut self.unshuffled)
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, id)| (id, i))
+                .collect();
+            Arc::make_mut(&mut self.entries)[start..]
+                .sort_by_key(|e| order.get(&e.id).copied().unwrap_or(usize::MAX));
         }
         self.touch();
     }
     fn shuffle_upcoming(&mut self) {
         let start = self.upcoming_start().min(self.entries.len());
-        self.unshuffled = self.entries[start..].iter().map(|e| e.id).collect();
-        fastrand::shuffle(&mut self.entries[start..]);
+        self.unshuffled = Arc::new(self.entries[start..].iter().map(|e| e.id).collect());
+        fastrand::shuffle(&mut Arc::make_mut(&mut self.entries)[start..]);
     }
 
     /// The entry that follows the current one. `ended` is true when the
