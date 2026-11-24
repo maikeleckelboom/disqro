@@ -1,17 +1,12 @@
+use crate::waveform_render::{self, Mode, Page, Role, Style as DrawStyle, View};
 use gpui_kit::{prelude::*, *};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, atomic::Ordering};
-
-#[derive(Clone, Copy)]
-pub struct Bin {
-    pub end_frame: usize,
-    pub low: f32,
-    pub high: f32,
-    pub low_at: usize,
-    pub high_at: usize,
-    pub mean_square: f32,
-    pub band_rms: [f32; 3],
-}
+use std::{
+    cell::RefCell,
+    ops::Range,
+    rc::Rc,
+    sync::{Arc, atomic::Ordering},
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Style {
@@ -26,9 +21,22 @@ impl Style {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Spectral => "Spectral",
+            Self::Spectral => "Stroke",
             Self::Bands => "Three-band",
             Self::Precision => "Precision",
+        }
+    }
+
+    pub fn drawing(self, light: bool) -> DrawStyle {
+        DrawStyle {
+            mode: match self {
+                Self::Spectral => Mode::Stroke,
+                Self::Bands => Mode::ThreeBand,
+                Self::Precision => Mode::Precision,
+            },
+            gain: 1.0,
+            intensity: 1.0,
+            light,
         }
     }
 }
@@ -74,153 +82,111 @@ impl Viewport {
     }
 }
 
-// Low, mid, high. The shared palette applies to the compact and detailed views.
-const BAND_COLORS: [u32; 3] = [0xe5875e, 0xc78ccb, 0x6acbdc];
-
-fn spectral_color(power: [f64; 3]) -> Option<Hsla> {
-    let strength = power.map(|b| b.sqrt());
-    let total = strength.iter().sum::<f64>();
-    if !total.is_finite() || total == 0. {
-        return None;
-    }
-    let mut color = Rgba {
-        a: 1.,
-        ..Rgba::default()
-    };
-    for (band, color_hex) in strength.into_iter().zip(BAND_COLORS) {
-        let weight = (band / total) as f32;
-        let tone = rgb(color_hex);
-        color.r += tone.r * weight;
-        color.g += tone.g * weight;
-        color.b += tone.b * weight;
-    }
-    Some(color.into())
-}
-/// Draws the overview with the played part in the waveform's own colors.
-pub fn paint(bins: Arc<[Bin]>, position: f32, wave: crate::theme::Wave) -> impl IntoElement {
-    let total = bins.last().map_or(0, |b| b.end_frame);
-    paint_range(
-        bins,
-        0,
-        Viewport::fit(total),
-        position as f64 * total as f64,
-        Style::Spectral,
-        wave,
-    )
+#[derive(Clone)]
+pub struct Surface {
+    pub role: Role,
+    pub style: DrawStyle,
+    pub rate: u32,
+    pub playable: Range<usize>,
+    pub viewport: Viewport,
 }
 
-pub fn paint_range(
-    bins: Arc<[Bin]>,
-    first_frame: usize,
-    viewport: Viewport,
-    position: f64,
-    style: Style,
-    wave: crate::theme::Wave,
+impl Surface {
+    pub fn view(&self, width: usize, height: usize) -> View {
+        let pixels_per_second = width as f64 * f64::from(self.rate) / self.viewport.span;
+        View {
+            role: self.role,
+            style: self.style,
+            rate: self.rate,
+            origin: self.playable.start,
+            frame_count: self.playable.len(),
+            first: (self.viewport.first * pixels_per_second / f64::from(self.rate)).round() as i64,
+            pixels_per_second,
+            width,
+            height,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct Texture(Rc<RefCell<Option<Painted>>>);
+
+struct Painted {
+    view: View,
+    pages: Vec<Arc<Page>>,
+    image: Arc<RenderImage>,
+    refine: Vec<Range<usize>>,
+}
+
+impl Texture {
+    pub fn clear(&self, cx: &mut App) {
+        if let Some(held) = self.0.borrow_mut().take() {
+            cx.drop_image(held.image, None);
+        }
+    }
+}
+
+pub fn paint(
+    pages: Vec<Arc<Page>>,
+    surface: Surface,
+    texture: Texture,
+    refinement: impl Fn(&[Range<usize>], &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| {
+        move |bounds, _, window, cx| {
             let _timer = crate::diagnostics::Timer::measure(|d| &d.paint_us);
             if let Some(d) = crate::diagnostics::get() {
                 d.frames.fetch_add(1, Ordering::Relaxed);
             }
-            let logical_width = f32::from(bounds.size.width);
-            let first_visible =
-                bins.partition_point(|bin| bin.end_frame <= viewport.first.floor() as usize);
-            let end_visible =
-                bins.partition_point(|bin| bin.end_frame < viewport.frame_at(1.).ceil() as usize);
-            let bins_visible = end_visible.saturating_add(1).saturating_sub(first_visible);
-            let width =
-                ((logical_width * window.scale_factor()).floor() as usize).min(bins_visible);
-            let height = f32::from(bounds.size.height);
-            if width == 0 || bins.is_empty() {
+            let scale = window.scale_factor();
+            let left = (f32::from(bounds.origin.x) * scale).round();
+            let top = (f32::from(bounds.origin.y) * scale).round();
+            let right = (f32::from(bounds.right()) * scale).round();
+            let bottom = (f32::from(bounds.bottom()) * scale).round();
+            let (width, height) = ((right - left) as usize, (bottom - top) as usize);
+            if width == 0 || height == 0 || surface.playable.is_empty() {
                 return;
             }
-            let center = height / 2.;
-            let step = logical_width / width as f32;
-            let frame = |x: usize| viewport.column_edge(x, width);
-            let mut index = first_visible;
-            for x in 0..width {
-                let first = frame(x);
-                let end = frame(x + 1);
-                if first == end || first < first_frame {
-                    continue;
+            let target = Bounds::new(
+                point(px(left / scale), px(top / scale)),
+                size(px(width as f32 / scale), px(height as f32 / scale)),
+            );
+            let view = surface.view(width, height);
+            let mut held = texture.0.borrow_mut();
+            if !held.as_ref().is_some_and(|old| {
+                old.view == view
+                    && old.pages.len() == pages.len()
+                    && old.pages.iter().zip(&pages).all(|(a, b)| Arc::ptr_eq(a, b))
+            }) {
+                let source = pages.iter().map(Arc::as_ref).collect::<Vec<_>>();
+                let (mut pixels, geometry) = waveform_render::render(&source, &view);
+                for pixel in pixels.as_chunks_mut::<4>().0 {
+                    pixel.swap(0, 2);
                 }
-                while bins.get(index).is_some_and(|b| b.end_frame <= first) {
-                    index += 1;
+                let bitmap = image::RgbaImage::from_raw(width as u32, height as u32, pixels)
+                    .expect("complete waveform texture");
+                let image = Arc::new(RenderImage::new([image::Frame::new(bitmap)]));
+                if let Some(old) = held.take() {
+                    let _ = window.drop_image(old.image);
                 }
-                let (mut lo, mut hi, mut energy) = (0f32, 0f32, 0f64);
-                let mut bands = [0.; 3];
-                let mut cursor = first;
-                for b in &bins[index..] {
-                    let next = b.end_frame.min(end);
-                    let frames = (next - cursor) as f64;
-                    energy += f64::from(b.mean_square) * frames;
-                    for (sum, rms) in bands.iter_mut().zip(b.band_rms) {
-                        *sum += f64::from(rms).powi(2) * frames;
-                    }
-                    if (first..end).contains(&b.low_at) {
-                        lo = lo.min(b.low);
-                    }
-                    if (first..end).contains(&b.high_at) {
-                        hi = hi.max(b.high);
-                    }
-                    cursor = next;
-                    if cursor == end {
-                        break;
-                    }
-                }
-                if cursor != end || !energy.is_finite() {
-                    continue;
-                }
-                let rms = (energy / (end - first) as f64).sqrt() as f32;
-                let top = center * (1. - hi.clamp(0., 1.));
-                let bottom = center + center * (-lo).clamp(0., 1.);
-                let x0 = x as f32 * step;
-                let is_played = (first as f64) < position;
-                let column = |a: f32, b: f32| {
-                    Bounds::new(
-                        bounds.origin + point(px(x0), px(a)),
-                        size(px(step), px(b - a)),
-                    )
-                };
-                if style == Style::Bands {
-                    for (band, (power, color)) in bands.into_iter().zip(BAND_COLORS).enumerate() {
-                        let lane = center * (band as f32 * 2. + 1.) / 3.;
-                        let radius =
-                            ((power / (end - first) as f64).sqrt() as f32).min(1.) * center / 3.;
-                        if radius > 0. && rms > 0. {
-                            let hue: Hsla = rgb(color).into();
-                            window.paint_quad(fill(column(lane - radius, lane + radius), hue));
-                        }
-                    }
-                    continue;
-                }
-                let hue = (style == Style::Spectral && rms > 0.)
-                    .then(|| spectral_color(bands))
-                    .flatten();
-                let (peak, body) = match hue {
-                    Some(hue) if is_played => (hue.opacity(0.62), hue),
-                    Some(hue) => (hue.opacity(0.43), hue.opacity(0.76)),
-                    None if is_played => (wave.played_peak, wave.played_body),
-                    None => (wave.ahead_peak, wave.ahead_body),
-                };
-                // Keep silence visible as a hairline so the track stays legible.
-                let (top, bottom) = if rms == 0. {
-                    (center - 0.5, center + 0.5)
-                } else {
-                    (top, bottom)
-                };
-                if top < bottom {
-                    window.paint_quad(fill(column(top, bottom), peak));
-                }
-                let r = rms.clamp(0., 1.) * center;
-                if style != Style::Precision && r >= 0.5 && top < bottom {
-                    window.paint_quad(fill(
-                        column((center - r).max(top), (center + r).min(bottom)),
-                        body,
-                    ));
-                }
+                *held = Some(Painted {
+                    view,
+                    pages: pages.clone(),
+                    image,
+                    refine: geometry.refinement(&view),
+                });
+            }
+            if let Some(held) = held.as_ref() {
+                let _ = window.paint_image(
+                    target,
+                    bounds,
+                    Default::default(),
+                    held.image.clone(),
+                    0,
+                    false,
+                );
+                refinement(&held.refine, window, cx);
             }
         },
     )

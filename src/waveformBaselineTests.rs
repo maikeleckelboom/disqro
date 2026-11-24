@@ -16,19 +16,20 @@ fn geometry(shapes: &[Shape]) -> Geometry {
     };
     let mut bytes = 0;
     for shape in shapes {
-        for bins in [&shape.track, &shape.disc] {
-            hash(bins.len() as u64);
-            bytes += std::mem::size_of_val(&**bins);
-            for bin in bins.iter() {
-                hash(bin.end_frame as u64);
-                hash(u64::from(bin.low.to_bits()));
-                hash(u64::from(bin.high.to_bits()));
-                hash(bin.low_at as u64);
-                hash(bin.high_at as u64);
-                hash(u64::from(bin.mean_square.to_bits()));
-                for band in bin.band_rms {
-                    hash(u64::from(band.to_bits()));
-                }
+        let page = &shape.track;
+        bytes += page.bytes();
+        hash(page.frame_count as u64);
+        hash(page.frames_per_column as u64);
+        for &fact in &page.facts {
+            hash(u64::from(fact.to_bits()));
+        }
+        for &witness in &page.extrema {
+            hash(witness as u64);
+        }
+        if let Some(power) = &page.spectrum {
+            // Compare the spectrally relevant precision across JSON cache reopen.
+            for &value in power {
+                hash(u64::from((value as f32).to_bits()));
             }
         }
     }
@@ -68,7 +69,7 @@ fn timeline_waveform_baseline() {
             RefCell::new((vec![Shape::default(); program.segments.len()], None, None));
         analyse(
             &program,
-            (active, 2.0),
+            active,
             &focus,
             DecoderSession {
                 cache: Some(&cache),
@@ -82,10 +83,10 @@ fn timeline_waveform_baseline() {
                 let (shapes, first, active_complete) = &mut *observations.borrow_mut();
                 let elapsed = began.elapsed();
                 if index == active {
-                    if shape.track.iter().any(|bin| bin.mean_square.is_finite()) {
+                    if shape.track.frame_count > 0 {
                         first.get_or_insert(elapsed);
                     }
-                    if complete(&shape) {
+                    if shape.track.frame_count == program.segments[index].frames.len() {
                         active_complete.get_or_insert(elapsed);
                     }
                 }
@@ -96,11 +97,18 @@ fn timeline_waveform_baseline() {
         );
         let finished = began.elapsed();
         let (shapes, first, active_complete) = observations.into_inner();
-        assert!(shapes.iter().all(complete));
+        assert!(
+            shapes
+                .iter()
+                .zip(&program.segments)
+                .all(|(s, segment)| s.track.frame_count == segment.frames.len())
+        );
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_pages_v2", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM wave_evidence_v1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let ms = |time: Duration| time.as_secs_f64() * 1000.0;
         println!(
@@ -120,10 +128,4 @@ fn timeline_waveform_baseline() {
             cold_geometry = Some(geometry);
         }
     }
-}
-
-fn complete(shape: &Shape) -> bool {
-    [&shape.track, &shape.disc]
-        .into_iter()
-        .all(|bins| !bins.is_empty() && bins.iter().all(|bin| bin.mean_square.is_finite()))
 }

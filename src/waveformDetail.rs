@@ -2,7 +2,9 @@
 use crate::{
     cache::Cache,
     timeline::Source,
-    waveform::{self, Measure, Reader},
+    waveform::{self, Evidence, Reader},
+    waveform_port_analysis::{EVIDENCE_FRAMES, LEAF, Plan, Spectrum},
+    waveform_render::Page,
 };
 use hashlink::LinkedHashMap;
 use kira::Frame;
@@ -13,52 +15,168 @@ use std::{
 };
 
 const SAMPLES: usize = 8192;
-const RESIDENT: usize = 32;
-pub const VIEW_TILES: usize = 8;
+const RESIDENT: usize = 64;
+const VIEW_TILES: usize = 32;
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum Resolution {
-    Cells,
-    Samples,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Request {
+    Samples(usize),
+    Evidence(Evidence),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     source: Arc<Source>,
-    resolution: Resolution,
-    number: usize,
+    request: Request,
 }
 
 pub enum Tile {
-    Cells { first: usize, cells: Vec<Measure> },
+    Evidence(Arc<Page>),
     Samples { first: usize, samples: Vec<Frame> },
 }
 
 impl Key {
-    pub fn covering(
-        source: &Arc<Source>,
-        range: Range<usize>,
-        resolution: Resolution,
-    ) -> Vec<Self> {
-        let end = range.end.min(source.frames);
-        if range.start >= end || !source.available {
+    pub fn samples(source: &Arc<Source>, range: Range<usize>) -> Vec<Self> {
+        let range = range.start.min(source.frames)..range.end.min(source.frames);
+        if range.is_empty() || !source.available {
             return vec![];
         }
-        let (first, last) = match resolution {
-            Resolution::Cells => (
-                (waveform::ceil_cell(range.start + 1, source.rate) - 1) / waveform::PAGE,
-                (waveform::ceil_cell(end, source.rate) - 1) / waveform::PAGE,
-            ),
-            Resolution::Samples => (range.start / SAMPLES, (end - 1) / SAMPLES),
-        };
-        (first..=last)
-            .take(VIEW_TILES)
+        (range.start / SAMPLES..=(range.end - 1) / SAMPLES)
+            .take(8)
             .map(|number| Self {
                 source: source.clone(),
-                resolution,
-                number,
+                request: Request::Samples(number),
             })
             .collect()
+    }
+
+    pub fn geometry(
+        source: &Arc<Source>,
+        playable: Range<usize>,
+        range: Range<usize>,
+        pixels: f64,
+        seconds: f64,
+        stroke: bool,
+    ) -> Vec<Self> {
+        let range = range.start.min(playable.len())..range.end.min(playable.len());
+        if range.is_empty() || !source.available {
+            return vec![];
+        }
+        let fitted = matches!(source.rate, 44_100 | 48_000);
+        let columns = if stroke {
+            let close = (8.0 / seconds).log2().clamp(0.0, 1.0);
+            ((pixels * 10.0).clamp(128.0, 16384.0) * (1.0 + 3.0 * close))
+                .ceil()
+                .min(49152.0)
+        } else {
+            (pixels * 2.0).max(128.0)
+        };
+        let tier = (seconds * f64::from(source.rate) / (columns - 1.0))
+            .ceil()
+            .max(1.0) as usize;
+        let tier = tier.next_power_of_two();
+        let mut keys = Vec::new();
+        if stroke && fitted {
+            keys.extend(Self::pages(
+                source,
+                &playable,
+                range.clone(),
+                Plan {
+                    start_frame: 0,
+                    end_frame: 0,
+                    frames_per_column: 256,
+                    leaf_frames: Some(LEAF),
+                    octave: Spectrum::available(source.rate, true),
+                    overview: false,
+                    with_bands: false,
+                },
+                EVIDENCE_FRAMES,
+            ));
+            if tier < LEAF {
+                keys.extend(Self::pages(
+                    source,
+                    &playable,
+                    range,
+                    Plan {
+                        start_frame: 0,
+                        end_frame: 0,
+                        frames_per_column: tier,
+                        leaf_frames: Some(tier),
+                        octave: None,
+                        overview: false,
+                        with_bands: false,
+                    },
+                    (tier * 8192).min(EVIDENCE_FRAMES),
+                ));
+            }
+        } else {
+            let tier = tier.min(if stroke { 1024 } else { EVIDENCE_FRAMES });
+            keys.extend(Self::pages(
+                source,
+                &playable,
+                range,
+                Plan {
+                    start_frame: 0,
+                    end_frame: 0,
+                    frames_per_column: tier,
+                    leaf_frames: stroke.then_some(tier.min(LEAF)),
+                    octave: if stroke {
+                        Spectrum::available(source.rate, false)
+                    } else {
+                        None
+                    },
+                    overview: false,
+                    with_bands: true,
+                },
+                tier * 1024,
+            ));
+        }
+        keys
+    }
+
+    pub fn refine(source: &Arc<Source>, playable: &Range<usize>, range: Range<usize>) -> Vec<Self> {
+        Self::pages(
+            source,
+            playable,
+            range,
+            Plan {
+                start_frame: 0,
+                end_frame: 0,
+                frames_per_column: 1,
+                leaf_frames: Some(1),
+                octave: None,
+                overview: false,
+                with_bands: false,
+            },
+            1024,
+        )
+        .collect()
+    }
+
+    fn pages(
+        source: &Arc<Source>,
+        playable: &Range<usize>,
+        range: Range<usize>,
+        plan: Plan,
+        size: usize,
+    ) -> impl Iterator<Item = Self> {
+        let first = range.start / size;
+        let last = (range.end - 1) / size;
+        let centre = (first + last) / 2;
+        (centre..=last)
+            .chain((first..centre).rev())
+            .take(VIEW_TILES)
+            .map(move |tile| Self {
+                source: source.clone(),
+                request: Request::Evidence(Evidence {
+                    playable: playable.clone(),
+                    plan: Plan {
+                        start_frame: tile * size,
+                        end_frame: ((tile + 1) * size).min(playable.len()),
+                        ..plan
+                    },
+                }),
+            })
     }
 
     pub fn load(
@@ -67,13 +185,16 @@ impl Key {
         reader: &mut Option<Reader>,
         current: &impl Fn() -> bool,
     ) -> anyhow::Result<Tile> {
-        Ok(match self.resolution {
-            Resolution::Cells => Tile::Cells {
-                first: self.number * waveform::PAGE,
-                cells: waveform::load(&self.source, self.number, cache, reader, current)?,
-            },
-            Resolution::Samples => {
-                let first = self.number * SAMPLES;
+        Ok(match &self.request {
+            Request::Evidence(request) => Tile::Evidence(Arc::new(waveform::load(
+                &self.source,
+                request,
+                cache,
+                reader,
+                current,
+            )?)),
+            Request::Samples(number) => {
+                let first = number * SAMPLES;
                 let end = (first + SAMPLES).min(self.source.frames);
                 Tile::Samples {
                     first,
@@ -160,7 +281,8 @@ impl View {
             .filter_map(|key| store.entries.get(key)?.clone())
             .collect();
         tiles.sort_unstable_by_key(|tile| match tile.as_ref() {
-            Tile::Cells { first, .. } | Tile::Samples { first, .. } => *first,
+            Tile::Evidence(page) => (page.start_frame, page.frames_per_column),
+            Tile::Samples { first, .. } => (*first, 0),
         });
         if store.views.get(&self.id) != Some(&keys) {
             if keys.is_empty() {
@@ -212,7 +334,7 @@ mod tests {
             View::new(0, shared.clone(), wake.clone()),
             View::new(1, shared.clone(), wake),
         );
-        let keys = Key::covering(&source(), 0..SAMPLES, Resolution::Samples);
+        let keys = Key::samples(&source(), 0..SAMPLES);
         shared.lock().unwrap().reset(1);
         assert!(first.tiles(1, keys.clone()).is_empty());
         assert!(second.tiles(1, keys.clone()).is_empty());
@@ -244,14 +366,11 @@ mod tests {
             View::new(1, shared.clone(), wake),
         );
         let source = source();
-        let visible = Key::covering(&source, 0..SAMPLES, Resolution::Samples);
+        let visible = Key::samples(&source, 0..SAMPLES);
         first.tiles(0, visible.clone());
         for number in 0..RESIDENT * 2 {
             let start = number * SAMPLES;
-            second.tiles(
-                0,
-                Key::covering(&source, start..start + SAMPLES, Resolution::Samples),
-            );
+            second.tiles(0, Key::samples(&source, start..start + SAMPLES));
             let mut store = shared.lock().unwrap();
             let key = store.next(0).unwrap();
             assert!(store.publish(0, key, None));

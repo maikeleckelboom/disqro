@@ -1,16 +1,18 @@
 use super::*;
 use crate::theme::Materials;
 use crate::{
-    overview::Bin,
+    overview::{self, Style, Surface, Texture, Viewport},
     timeline::{Overview, Source},
+    waveform_render::{Page, Role as WaveRole},
 };
 use gpui_kit::component::Selectable;
+use std::collections::BTreeMap;
 
 pub(crate) struct WaveTrack {
     pub generation: u64,
     pub source: Arc<Source>,
     pub range: std::ops::Range<usize>,
-    pub bins: Arc<[Bin]>,
+    pub overview: Arc<Page>,
     pub position: usize,
 }
 
@@ -26,7 +28,7 @@ impl Player {
             generation: self.generation,
             source: segment.source.clone(),
             range: segment.frames.clone(),
-            bins: self.shapes.get(index)?.track.clone(),
+            overview: self.shapes.get(index)?.track.clone(),
             position: segment.elapsed_frame(self.status.position) - segment.frames.start,
         })
     }
@@ -54,11 +56,9 @@ impl Player {
             .set(crate::diagnostics::get().map(|_| std::time::Instant::now()));
         self.view_trace.first_paint.set(None);
         if let Some(entry) = self.playing_entry() {
-            self.generation = self.analysis.request(
-                entry.track.clone(),
-                entry.disc_context,
-                self.status.position,
-            );
+            self.generation = self
+                .analysis
+                .request(entry.track.clone(), entry.disc_context);
         } else {
             self.analysis.cancel();
         }
@@ -105,13 +105,7 @@ impl Player {
                                 .fetch_max(start.elapsed().as_micros() as u64, Ordering::Relaxed);
                             self.view_trace.first_paint.set(Some(start));
                         }
-                        let bytes = self
-                            .shapes
-                            .iter()
-                            .map(|s| {
-                                std::mem::size_of_val(&*s.track) + std::mem::size_of_val(&*s.disc)
-                            })
-                            .sum::<usize>();
+                        let bytes = self.shapes.iter().map(|s| s.track.bytes()).sum::<usize>();
                         d.geometry_bytes.fetch_max(bytes as u64, Ordering::Relaxed);
                     }
                 }
@@ -313,6 +307,7 @@ impl Player {
         active: bool,
         m: &Materials,
         cx: &Context<Self>,
+        images: &mut BTreeMap<usize, Texture>,
     ) -> impl IntoElement {
         let bounds = self.seek_bounds.clone();
         let trace = self.view_trace.clone();
@@ -342,11 +337,7 @@ impl Player {
                 } else {
                     (0., 1.)
                 };
-                let bins = if full {
-                    &self.shapes[i].disc
-                } else {
-                    &self.shapes[i].track
-                };
+                let page = &self.shapes[i].track;
                 let can_seek = s.source.available && self.run.contains(&i);
                 let mut part = div()
                     .id(("wave-segment", i))
@@ -356,12 +347,31 @@ impl Player {
                     .w(relative(width))
                     .when(full && i == k, |d| d.bg(m.selected.opacity(0.65)))
                     .when(can_seek, |d| d.cursor_pointer());
-                if !bins.is_empty() {
-                    part = part.child(crate::overview::paint(
-                        bins.clone(),
-                        (progress - left) / width,
-                        m.wave,
+                if page.frame_count > 0 {
+                    let surface = Surface {
+                        role: WaveRole::Overview,
+                        style: Style::Spectral.drawing(false),
+                        rate: s.source.rate,
+                        playable: s.frames.clone(),
+                        viewport: Viewport::fit(s.frames.len()),
+                    };
+                    part = part.child(overview::paint(
+                        vec![page.clone()],
+                        surface,
+                        images.entry(i).or_default().clone(),
+                        |_, _, _| {},
                     ));
+                    if full && i == k {
+                        part = part.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(m.selected),
+                        );
+                    }
                 }
                 if full {
                     let mut label = s.track.title.clone();
@@ -436,27 +446,54 @@ impl Player {
 
 /// Reuse the waveform scene on meter-only redraws. Player notifications still
 /// invalidate it for transport, scrubbing, perspective and analysis updates.
-pub(super) struct WaveStrip(WeakEntity<Player>);
+pub(super) struct WaveStrip {
+    player: WeakEntity<Player>,
+    images: BTreeMap<usize, Texture>,
+    generation: u64,
+}
 
 impl WaveStrip {
     pub(super) fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
-        Self(player.downgrade())
+        cx.on_release(|strip, cx| strip.clear(cx)).detach();
+        Self {
+            player: player.downgrade(),
+            images: BTreeMap::new(),
+            generation: 0,
+        }
+    }
+
+    fn clear(&mut self, cx: &mut App) {
+        for image in self.images.values() {
+            image.clear(cx);
+        }
+        self.images.clear();
     }
 }
 
 impl Render for WaveStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.0
+        self.player
+            .clone()
             .update(cx, |p, cx| {
+                if self.generation != p.generation {
+                    self.clear(cx);
+                    self.generation = p.generation;
+                }
                 let (position, duration) = p.wave_time();
                 let progress = p.scrub.unwrap_or(if duration > 0. {
                     (position / duration).clamp(0., 1.) as f32
                 } else {
                     0.
                 });
-                p.waveform(progress, p.status.track.is_some(), materials(cx), cx)
-                    .into_any_element()
+                p.waveform(
+                    progress,
+                    p.status.track.is_some(),
+                    materials(cx),
+                    cx,
+                    &mut self.images,
+                )
+                .into_any_element()
             })
             .unwrap_or_else(|_| Empty.into_any_element())
     }

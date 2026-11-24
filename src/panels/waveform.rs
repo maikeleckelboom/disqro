@@ -1,11 +1,12 @@
 //! A dock viewport over the player's shared, source-owned waveform facts.
 use super::{Home, Instances, Pane, PaneContent, PaneEvent, PanelType, Services};
 use crate::{
-    overview::{self, Bin, Style, Viewport},
+    overview::{self, Style, Surface, Texture, Viewport},
     player::{Player, WaveTrack},
     theme::materials,
-    waveform,
-    waveform_detail::{Key, Resolution, Tile, View},
+    waveform_detail::{Key, Tile, View},
+    waveform_port_analysis::DETAIL_SECONDS,
+    waveform_render::Role,
 };
 use gpui_kit::{
     assets::IconName,
@@ -19,7 +20,13 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+    sync::Arc,
+    time::Instant,
+};
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.waveform",
@@ -60,6 +67,8 @@ struct Waveform {
     zoom: Option<Zoom>,
     style: Style,
     presented: bool,
+    texture: Texture,
+    refine: Rc<RefCell<Vec<Range<usize>>>>,
 }
 
 impl EventEmitter<StyleChanged> for Waveform {}
@@ -72,6 +81,7 @@ impl Waveform {
             }
         })
         .detach();
+        cx.on_release(|panel, cx| panel.texture.clear(cx)).detach();
         Self {
             player: services.player.clone(),
             detail: services.player.read(cx).wave_view(),
@@ -82,6 +92,8 @@ impl Waveform {
             zoom: None,
             style,
             presented: false,
+            texture: Default::default(),
+            refine: Default::default(),
         }
     }
 
@@ -89,6 +101,7 @@ impl Waveform {
         let key = (track.generation, track.source.clone(), track.range.clone());
         if self.identity.as_ref() != Some(&key) {
             self.identity = Some(key);
+            self.refine.borrow_mut().clear();
             self.viewport = Viewport::fit(track.range.len());
             self.zoom = None;
         }
@@ -148,20 +161,57 @@ impl Waveform {
         cx.notify();
     }
 
+    fn surface(&self, track: &WaveTrack, viewport: Viewport) -> Surface {
+        let detail = viewport.span < track.range.len() as f64
+            && viewport.span <= f64::from(track.source.rate) * DETAIL_SECONDS;
+        Surface {
+            role: if detail { Role::Detail } else { Role::Overview },
+            style: self.style.drawing(false),
+            rate: track.source.rate,
+            playable: track.range.clone(),
+            viewport,
+        }
+    }
+
     fn keys(&self, track: &WaveTrack, viewport: Viewport, device_width: f64) -> Vec<Key> {
+        let surface = self.surface(track, viewport);
+        if surface.role == Role::Overview {
+            return vec![];
+        }
         let first = track.range.start + viewport.first.floor() as usize;
         let end = track.range.start + viewport.frame_at(1.).ceil() as usize;
-        let span = viewport.span;
-        let mut keys = Vec::new();
-        if span < device_width * 14. && span < 40_960. {
-            keys.extend(Key::covering(
+        if viewport.span < device_width * 1.8 && viewport.span < 40_960. {
+            return Key::samples(
                 &track.source,
                 first.saturating_sub(1)..end.saturating_add(1),
-                Resolution::Samples,
-            ));
+            );
         }
-        if span <= f64::from(track.source.rate) * 24. {
-            keys.extend(Key::covering(&track.source, first..end, Resolution::Cells));
+        let view = surface.view(device_width.round() as usize, 1);
+        let range = if self.style == Style::Spectral {
+            view.required_range()
+        } else {
+            first - track.range.start..end - track.range.start
+        };
+        let mut keys = Key::geometry(
+            &track.source,
+            track.range.clone(),
+            range,
+            device_width,
+            viewport.span / f64::from(track.source.rate),
+            self.style == Style::Spectral,
+        );
+        if self.style == Style::Spectral {
+            let refine = self.refine.borrow();
+            for range in refine
+                .iter()
+                .filter(|r| r.start < end - track.range.start && r.end > first - track.range.start)
+            {
+                for key in Key::refine(&track.source, &track.range, range.clone()) {
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
         }
         keys
     }
@@ -201,13 +251,14 @@ impl PaneContent for Entity<Waveform> {
 
 impl Render for Waveform {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let material = materials(cx);
+        let material = *materials(cx);
         let mut layout = v_flex()
             .size_full()
             .bg(material.canvas)
             .track_focus(&self.focus);
         let Some(track) = self.player.read(cx).wave_track() else {
             self.detail.clear();
+            self.texture.clear(cx);
             self.identity = None;
             return layout.child(
                 div()
@@ -239,30 +290,32 @@ impl Render for Waveform {
             self.detail.clear();
             vec![]
         };
-        let exact = view.span < device_width * 14. && samples_cover(&tiles, &track, view);
-        let trace = exact && view.span < device_width * 1.8;
-        let mut envelope = (!trace).then(|| cell_bins(&tiles, &track, view)).flatten();
-        if exact && !trace {
-            envelope = Some(sample_bins(
-                &tiles,
-                &track,
-                view,
-                device_width.floor() as usize,
-                envelope.as_ref(),
-            ));
+        let trace = view.span < device_width * 1.8 && samples_cover(&tiles, &track, view);
+        let surface = self.surface(&track, view);
+        let pages = if surface.role == Role::Overview {
+            vec![track.overview.clone()]
+        } else {
+            tiles
+                .iter()
+                .filter_map(|tile| match tile.as_ref() {
+                    Tile::Evidence(page) => Some(page.clone()),
+                    Tile::Samples { .. } => None,
+                })
+                .collect::<Vec<_>>()
         };
-        let (first, bins) = envelope.unwrap_or_else(|| (0, track.bins.clone()));
-        let position = track.position as f64;
-        let cursor = view.x(position);
+        let cursor = view.x(track.position as f64);
         let bounds = self.bounds.clone();
         let style = self.style;
         let panel = cx.weak_entity();
+        let refining = self.refine.clone();
+        let refinement_panel = panel.clone();
+        let bounds_panel = panel.clone();
         let title = if trace {
             format!(
                 "Stereo · {} samples",
                 view.column_edge(1, 1) - view.column_edge(0, 1)
             )
-        } else if bins.is_empty() || (!exact && view.span < device_width * 1.8) {
+        } else if pages.iter().all(|page| page.frame_count == 0) {
             "Preparing waveform".to_string()
         } else {
             format!("{:.3} s visible", view.span / f64::from(track.source.rate))
@@ -319,16 +372,50 @@ impl Render for Waveform {
                 .overflow_hidden()
                 .cursor_pointer()
                 .child(
-                    canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                        .absolute()
-                        .size_full(),
+                    canvas(
+                        move |b, window, _| {
+                            let previous = bounds.replace(b);
+                            if previous.size != b.size {
+                                let panel = bounds_panel.clone();
+                                window.on_next_frame(move |_, cx| {
+                                    let _ = panel.update(cx, |_, cx| cx.notify());
+                                });
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
                 )
                 .child(if trace {
                     paint_samples(tiles, track.range.clone(), view, material.wave)
                         .into_any_element()
                 } else {
-                    overview::paint_range(bins, first, view, position, style, material.wave)
-                        .into_any_element()
+                    overview::paint(
+                        pages,
+                        surface,
+                        self.texture.clone(),
+                        move |ranges, window, _| {
+                            let mut held = refining.borrow_mut();
+                            if ranges.iter().any(|range| !held.contains(range)) {
+                                let first = view.first.floor() as usize;
+                                let end = view.frame_at(1.).ceil() as usize;
+                                held.retain(|range| range.start < end && range.end > first);
+                                for range in ranges {
+                                    if !held.contains(range) {
+                                        held.push(range.clone());
+                                    }
+                                }
+                                let excess = held.len().saturating_sub(24);
+                                held.drain(..excess);
+                                let panel = refinement_panel.clone();
+                                window.on_next_frame(move |_, cx| {
+                                    let _ = panel.update(cx, |_, cx| cx.notify());
+                                });
+                            }
+                        },
+                    )
+                    .into_any_element()
                 })
                 .when((0. ..=1.).contains(&cursor), |parent| {
                     parent.child(
@@ -359,57 +446,6 @@ impl Render for Waveform {
     }
 }
 
-fn cell_bins(
-    tiles: &[Arc<Tile>],
-    track: &WaveTrack,
-    view: Viewport,
-) -> Option<(usize, Arc<[Bin]>)> {
-    let rate = track.source.rate;
-    let range_start = track.range.start;
-    let first_frame = range_start + view.first.floor() as usize;
-    let end_frame = (range_start + view.frame_at(1.).ceil() as usize).min(track.range.end);
-    let first = waveform::ceil_cell(first_frame + 1, rate).saturating_sub(1);
-    let end = waveform::ceil_cell(end_frame, rate);
-    let mut bins = Vec::new();
-    let mut cursor = first;
-    for tile in tiles {
-        let Tile::Cells {
-            first: start,
-            cells,
-        } = tile.as_ref()
-        else {
-            continue;
-        };
-        if *start > cursor || *start + cells.len() <= cursor {
-            continue;
-        }
-        let count = (end - cursor).min(start + cells.len() - cursor);
-        for (index, cell) in (cursor..cursor + count).zip(&cells[cursor - start..]) {
-            let from = waveform::edge(index, rate);
-            let to = waveform::edge(index + 1, rate).min(track.range.end);
-            let frames = (to - from) as f64;
-            let [(low, low_at), (high, high_at)] = cell.extrema();
-            bins.push(Bin {
-                end_frame: to - range_start,
-                low,
-                high,
-                low_at: low_at.saturating_sub(range_start),
-                high_at: high_at.saturating_sub(range_start),
-                mean_square: (cell.energy / frames) as f32,
-                band_rms: cell.bands.map(|sum| (sum / frames).sqrt() as f32),
-            });
-        }
-        cursor += count;
-        if cursor == end {
-            return Some((
-                waveform::edge(first, rate).saturating_sub(range_start),
-                bins.into(),
-            ));
-        }
-    }
-    None
-}
-
 fn samples_cover(tiles: &[Arc<Tile>], track: &WaveTrack, viewport: Viewport) -> bool {
     let first = track.range.start + viewport.first.floor() as usize;
     let end = (track.range.start + viewport.frame_at(1.).ceil() as usize).min(track.range.end);
@@ -422,63 +458,6 @@ fn samples_cover(tiles: &[Arc<Tile>], track: &WaveTrack, viewport: Viewport) -> 
         }
     }
     cursor >= end
-}
-
-fn sample_bins(
-    tiles: &[Arc<Tile>],
-    track: &WaveTrack,
-    view: Viewport,
-    width: usize,
-    spectral: Option<&(usize, Arc<[Bin]>)>,
-) -> (usize, Arc<[Bin]>) {
-    let base = track.range.start;
-    let mut bins = Vec::with_capacity(width);
-    for x in 0..width {
-        let first = view.column_edge(x, width);
-        let end = view.column_edge(x + 1, width).min(track.range.len());
-        let mut measure = waveform::Measure::default();
-        for tile in tiles {
-            let Tile::Samples {
-                first: start,
-                samples,
-            } = tile.as_ref()
-            else {
-                continue;
-            };
-            let begin = (first + base).max(*start);
-            let limit = (end + base).min(start + samples.len());
-            for frame in begin..limit {
-                measure.add(frame - base, samples[frame - start], [0.; 3]);
-            }
-        }
-        let [(low, low_at), (high, high_at)] = measure.extrema();
-        let band_rms = spectral.map_or([0.; 3], |(_, cells)| {
-            let start = cells.partition_point(|bin| bin.end_frame <= first);
-            let mut start_frame = first;
-            let mut power = [0.; 3];
-            for cell in &cells[start..] {
-                let through = end.min(cell.end_frame);
-                for (sum, rms) in power.iter_mut().zip(cell.band_rms) {
-                    *sum += f64::from(rms).powi(2) * (through - start_frame) as f64;
-                }
-                start_frame = through;
-                if through == end {
-                    break;
-                }
-            }
-            power.map(|energy| (energy / (end - first) as f64).sqrt() as f32)
-        });
-        bins.push(Bin {
-            end_frame: end,
-            low,
-            high,
-            low_at,
-            high_at,
-            mean_square: (measure.energy / (end - first) as f64) as f32,
-            band_rms,
-        });
-    }
-    (view.column_edge(0, width), bins.into())
 }
 
 fn paint_samples(

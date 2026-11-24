@@ -44,6 +44,13 @@ mod timeline;
 mod waveform;
 #[path = "waveformDetail.rs"]
 mod waveform_detail;
+#[path = "waveformPortAnalysis.rs"]
+mod waveform_port_analysis;
+#[cfg(feature = "qualification")]
+#[path = "waveformPortQualification.rs"]
+mod waveform_port_qualification;
+#[path = "waveformRender.rs"]
+mod waveform_render;
 mod workspace;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};
@@ -51,6 +58,10 @@ use workspace::*;
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut source = args.next();
+    #[cfg(feature = "qualification")]
+    if source.as_deref() == Some(std::ffi::OsStr::new("--waveform-parity")) {
+        std::process::exit(waveform_port_qualification::run(args));
+    }
     if source.as_deref() == Some(std::ffi::OsStr::new("--qualify-silent")) {
         if !cfg!(feature = "qualification") || std::env::var_os("DISQRO_PROFILE_DIR").is_none() {
             std::process::exit(2);

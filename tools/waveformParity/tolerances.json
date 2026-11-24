@@ -1,0 +1,15 @@
+{
+  "sourceBoundaryFrames": 0,
+  "witnessFrames": 0,
+  "amplitudeAbsolute": 0,
+  "bandFactsAbsolute": 0.00000012,
+  "octavePowerAbsolute": 0.00000000005,
+  "octavePowerRelative": 0.00000000002,
+  "geometryDevicePixels": 0.002,
+  "strokeRgbCodes": 0.005,
+  "strokePixelMaximumCodes": 2,
+  "strokePixelMeanCodes": 0.08,
+  "canvasPixelMaximumCodes": 64,
+  "canvasActiveMeanCodes": 2,
+  "canvasActiveP99Codes": 18
+}
