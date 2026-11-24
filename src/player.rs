@@ -13,7 +13,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         tooltip::Tooltip,
         v_flex,
     },
@@ -41,6 +41,34 @@ pub enum PlayerEvent {
     StateChanged,
 }
 impl EventEmitter<PlayerEvent> for Player {}
+
+pub(crate) fn reveal_items(
+    mut menu: PopupMenu,
+    player: &Entity<Player>,
+    track: &Arc<crate::library::Track>,
+) -> PopupMenu {
+    use crate::browser::Destination;
+    for (destination, label, icon) in [
+        (Destination::Library, "Show in Library", IconName::Library),
+        (
+            Destination::Locations,
+            "Show in Locations",
+            IconName::FolderOpen,
+        ),
+    ] {
+        let (player, track) = (player.clone(), track.clone());
+        menu = menu.item(
+            PopupMenuItem::new(label)
+                .icon(icon)
+                .on_click(move |_, _, cx| {
+                    player.update(cx, |_, cx| {
+                        cx.emit(PlayerEvent::Locate(track.clone(), destination))
+                    });
+                }),
+        );
+    }
+    menu
+}
 
 /// What the system media overlay and the tray describe.
 #[derive(Clone, Default, PartialEq)]
@@ -483,25 +511,8 @@ impl Render for Player {
                 )
                 .accessibility_label("Now Playing actions")
                 .tooltip("Now Playing actions")
-                .dropdown_menu(move |mut menu, _, _| {
-                    for (destination, label, icon) in [
-                        (Destination::Library, "Show in Library", IconName::Library),
-                        (
-                            Destination::Locations,
-                            "Show in Locations",
-                            IconName::FolderOpen,
-                        ),
-                    ] {
-                        let (player, track) = (player.clone(), track.clone());
-                        menu = menu.item(PopupMenuItem::new(label).icon(icon).on_click(
-                            move |_, _, cx| {
-                                player.update(cx, |_, cx| {
-                                    cx.emit(PlayerEvent::Locate(track.clone(), destination))
-                                });
-                            },
-                        ));
-                    }
-                    menu.when_some(entry.clone(), |menu, entry| {
+                .dropdown_menu(move |menu, _, _| {
+                    reveal_items(menu, &player, &track).when_some(entry.clone(), |menu, entry| {
                         let player = player.clone();
                         menu.item(PopupMenuItem::new("Continue This CD").on_click(
                             move |_, _, cx| {

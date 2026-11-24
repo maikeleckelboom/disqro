@@ -180,11 +180,30 @@ pub struct AlbumRelease {
     pub subtitle: String,
 }
 
+/// The unfiltered collection shelf, without track rows, covers or durations.
+pub struct AlbumStructure {
+    pub id: AlbumId,
+    pub title: String,
+    pub is_disc: bool,
+    pub release: Option<AlbumRelease>,
+}
+
 /// Which discs an album query reads.
 #[derive(Clone)]
 enum Albums<'a> {
     Root(Option<RootId>),
-    Ids(&'a [AlbumId]),
+    Release(&'a ReleaseContents),
+}
+
+struct ReleaseContents {
+    discs: Vec<AlbumId>,
+    membership: HashMap<AlbumId, AlbumRelease>,
+}
+
+enum ListingContext<'a> {
+    Default,
+    Release(&'a [AlbumId]),
+    Collection(&'a HashMap<AlbumId, usize>),
 }
 
 pub struct RegisteredDisc {
@@ -208,12 +227,58 @@ impl Store {
         Ok(self.listing(q)?.keys)
     }
     pub fn listing(&self, q: &Query) -> Result<Listing> {
+        self.listing_in_order(q, ListingContext::Default)
+    }
+
+    /// Follow the same structural order as the collection shelf, retaining
+    /// its search and including loose recordings in authored collection play.
+    pub fn collection_keys(&self, root: Option<RootId>, search: String) -> Result<Vec<i64>> {
+        let snapshot = self.db.unchecked_transaction()?;
+        let albums = self.album_structure(root)?;
+        let mut ranks = HashMap::with_capacity(albums.len());
+        for item in crate::release::ordered(
+            albums
+                .iter()
+                .map(|a| a.release.as_ref().map(|m| (m.first, m.number))),
+        ) {
+            match item {
+                crate::release::Ordered::Disc(i) => {
+                    ranks.insert(albums[i].id, ranks.len());
+                }
+                crate::release::Ordered::Release(discs) => {
+                    for i in discs {
+                        ranks.insert(albums[i].id, ranks.len());
+                    }
+                }
+            }
+        }
+        let keys = self
+            .listing_in_order(
+                &Query {
+                    scope: Scope::Library(root),
+                    search,
+                    order: None,
+                },
+                ListingContext::Collection(&ranks),
+            )?
+            .keys;
+        snapshot.commit()?;
+        Ok(keys)
+    }
+
+    fn listing_in_order(&self, q: &Query, context: ListingContext<'_>) -> Result<Listing> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let release_order;
         let (key, from, mut filter, default) = match q.scope {
             Scope::Release(first) => {
                 // Album ids come from the database, so they are inlined.
-                let discs = self.release_discs(first)?;
+                let resolved;
+                let discs = if let ListingContext::Release(discs) = context {
+                    discs
+                } else {
+                    resolved = self.release_discs(first)?;
+                    &resolved
+                };
                 let ids = discs.iter().map(i64::to_string).collect::<Vec<_>>();
                 release_order = format!(
                     "CASE t.album_id {} END, t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
@@ -280,7 +345,7 @@ impl Store {
             None => default.into(),
         };
         let sql = format!(
-            "SELECT {key}, t.duration FROM {from}
+            "SELECT {key}, t.duration, t.album_id FROM {from}
              JOIN files s ON s.id = t.source
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
@@ -290,9 +355,23 @@ impl Store {
         let mut stmt = self.db.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(args.iter()))?;
         let mut listing = Listing::default();
+        let mut ranked = Vec::new();
         while let Some(r) = rows.next()? {
-            listing.keys.push(r.get(0)?);
+            let key = r.get(0)?;
+            if let ListingContext::Collection(ranks) = context {
+                let album: Option<AlbumId> = r.get(2)?;
+                let rank = album
+                    .and_then(|id| ranks.get(&id).copied())
+                    .unwrap_or(usize::MAX);
+                ranked.push((rank, key));
+            } else {
+                listing.keys.push(key);
+            }
             listing.duration += r.get::<_, Option<f64>>(1)?.unwrap_or(0.);
+        }
+        if matches!(context, ListingContext::Collection(_)) {
+            ranked.sort_by_key(|(rank, _)| *rank);
+            listing.keys = ranked.into_iter().map(|(_, key)| key).collect();
         }
         Ok(listing)
     }
@@ -300,14 +379,18 @@ impl Store {
     /// Read keys and section counts from the same SQLite snapshot during indexing.
     pub fn table_listing(&self, query: &Query, grouped: bool) -> Result<(Listing, Vec<AlbumRow>)> {
         let snapshot = self.db.unchecked_transaction()?;
-        let listing = self.listing(query)?;
-        let sections = match query.scope {
-            Scope::Library(root) if grouped => self.albums(root, &query.search)?,
-            Scope::Release(first) if grouped => {
-                let discs = self.release_discs(first)?;
-                self.album_rows(Albums::Ids(&discs), &query.search)?
+        let (listing, sections) = match query.scope {
+            Scope::Library(root) if grouped => {
+                (self.listing(query)?, self.albums(root, &query.search)?)
             }
-            _ => vec![],
+            Scope::Release(first) if grouped => {
+                let release = self.release_contents(first)?;
+                (
+                    self.listing_in_order(query, ListingContext::Release(&release.discs))?,
+                    self.album_rows(Albums::Release(&release), &query.search)?,
+                )
+            }
+            _ => (self.listing(query)?, vec![]),
         };
         snapshot.commit()?;
         Ok((listing, sections))
@@ -431,6 +514,7 @@ impl Store {
     }
 
     /// Whether an indexed disc belongs to a release of several discs.
+    #[cfg(test)]
     pub fn membership(&self, album: AlbumId) -> Result<Option<AlbumRelease>> {
         Ok(match self.album_root(album)? {
             Some(root) => self.releases(Some(root))?.remove(&album),
@@ -440,25 +524,50 @@ impl Store {
 
     /// The discs of one release in disc order, or the album alone.
     pub fn release_discs(&self, album: AlbumId) -> Result<Vec<AlbumId>> {
-        let Some(root) = self.album_root(album)? else {
-            return Ok(vec![album]);
+        Ok(self.release_contents(album)?.discs)
+    }
+
+    fn release_contents(&self, album: AlbumId) -> Result<ReleaseContents> {
+        let mut membership = match self.album_root(album)? {
+            Some(root) => self.releases(Some(root))?,
+            None => HashMap::new(),
         };
-        let releases = self.releases(Some(root))?;
-        let Some(first) = releases.get(&album).map(|r| r.first) else {
-            return Ok(vec![album]);
-        };
-        let mut discs: Vec<_> = releases
-            .iter()
-            .filter(|(_, r)| r.first == first)
-            .map(|(id, r)| (r.number, *id))
-            .collect();
+        let first = membership.get(&album).map(|r| r.first);
+        membership.retain(|_, r| Some(r.first) == first);
+        let mut discs: Vec<_> = membership.iter().map(|(id, r)| (r.number, *id)).collect();
         discs.sort();
-        Ok(discs.into_iter().map(|(_, id)| id).collect())
+        let discs = if discs.is_empty() {
+            vec![album]
+        } else {
+            discs.into_iter().map(|(_, id)| id).collect()
+        };
+        Ok(ReleaseContents { discs, membership })
     }
 
     /// The release memberships of a collection's discs, from all of its
     /// available discs whatever a view's search shows.
     fn releases(&self, root: Option<RootId>) -> Result<HashMap<AlbumId, AlbumRelease>> {
+        Ok(self
+            .album_structure(root)?
+            .into_iter()
+            .filter_map(|album| Some((album.id, album.release?)))
+            .collect())
+    }
+
+    pub fn navigation_albums(
+        &self,
+        root: Option<RootId>,
+        album: AlbumId,
+    ) -> Result<Option<(RootId, Vec<AlbumStructure>)>> {
+        let root = match root {
+            Some(root) => Some(root),
+            None => self.album_root(album)?,
+        };
+        root.map(|root| Ok((root, self.album_structure(Some(root))?)))
+            .transpose()
+    }
+
+    fn album_structure(&self, root: Option<RootId>) -> Result<Vec<AlbumStructure>> {
         let (filter, args): (&str, Vec<RootId>) = match root {
             Some(root) => ("al.root_id = ?1", vec![root]),
             None => ("al.root_id IS NOT NULL", vec![]),
@@ -467,11 +576,14 @@ impl Store {
         let sql = format!(
             "SELECT al.id, al.folder, al.title,
                 (SELECT min(t.disc_number) FROM tracks t
-                 WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
+                 WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id),
+                al.key LIKE 'sheet:%' OR EXISTS(SELECT 1 FROM tracks t
+                 WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id
+                   AND trim(t.album) <> '')
              FROM albums al
              WHERE {filter} AND EXISTS(SELECT 1 FROM tracks t
                  WHERE t.album_id = al.id AND t.present = 1 AND t.root_id = al.root_id)
-             ORDER BY al.id"
+             ORDER BY coalesce(al.year, 4294967295), al.sort_key, al.id"
         );
         let mut stmt = self.db.prepare_cached(&sql)?;
         let discs = stmt
@@ -481,30 +593,42 @@ impl Store {
                     PathBuf::from(r.get::<_, String>(1)?),
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<u32>>(3)?,
+                    r.get::<_, bool>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let candidates: Vec<_> = discs
             .iter()
-            .map(|(_, folder, title, number)| crate::release::Candidate {
+            .map(|(_, folder, title, number, _)| crate::release::Candidate {
                 folder,
                 title,
                 number: *number,
             })
             .collect();
-        let mut out = HashMap::new();
+        let mut out: Vec<_> = discs
+            .iter()
+            .map(|(id, folder, title, number, authored)| AlbumStructure {
+                id: *id,
+                title: title.clone(),
+                is_disc: *authored
+                    || number.is_some_and(|n| n > 0)
+                    || folder
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(crate::release::disc_folder)
+                        .is_some(),
+                release: None,
+            })
+            .collect();
         for g in crate::release::releases(&candidates) {
             let first = discs[g.discs[0]].0;
             for (n, &i) in g.discs.iter().enumerate() {
-                out.insert(
-                    discs[i].0,
-                    AlbumRelease {
-                        first,
-                        title: g.title.clone(),
-                        number: n as u32 + 1,
-                        subtitle: g.subtitles[n].clone(),
-                    },
-                );
+                out[i].release = Some(AlbumRelease {
+                    first,
+                    title: g.title.clone(),
+                    number: n as u32 + 1,
+                    subtitle: g.subtitles[n].clone(),
+                });
             }
         }
         Ok(out)
@@ -518,9 +642,14 @@ impl Store {
                 format!("t.root_id = ?{} AND t.present = 1", args.len())
             }
             Albums::Root(None) => "t.root_id IS NOT NULL AND t.present = 1".into(),
-            Albums::Ids(ids) => format!(
+            Albums::Release(release) => format!(
                 "t.album_id IN ({}) AND t.present = 1",
-                ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+                release
+                    .discs
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
             ),
         }];
         filter.extend(Term::parse(search).iter().map(|t| t.sql(&mut args)));
@@ -563,17 +692,15 @@ impl Store {
         let mut rows: Vec<AlbumRow> = rows.collect::<rusqlite::Result<_>>()?;
         let mut releases = match albums {
             Albums::Root(root) => self.releases(root)?,
-            Albums::Ids(ids) => {
-                let order: HashMap<AlbumId, usize> =
-                    ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+            Albums::Release(release) => {
+                let order: HashMap<AlbumId, usize> = release
+                    .discs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| (*id, i))
+                    .collect();
                 rows.sort_by_key(|r| order.get(&r.id).copied());
-                match ids.first() {
-                    Some(&id) => match self.album_root(id)? {
-                        Some(root) => self.releases(Some(root))?,
-                        None => HashMap::new(),
-                    },
-                    None => HashMap::new(),
-                }
+                release.membership.clone()
             }
         };
         for row in &mut rows {

@@ -1,4 +1,5 @@
 mod navigation;
+mod sequential;
 use crate::{
     catalog::{Catalog, CatalogEvent},
     collection::{Disc, DiscId, Discs, Membership, Page, Shelf, ShelfLink, ViewPrefs},
@@ -24,6 +25,7 @@ use gpui_kit::{
 pub use navigation::continue_cd;
 use navigation::{Arrival, History, Pending};
 pub(crate) use navigation::{Bookmark, Route, SavedVisit};
+pub(crate) use sequential::SequenceKind;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -127,6 +129,8 @@ pub struct Browser {
     window: AnyWindowHandle,
     navigation: u64,
     programs: Arc<[Arc<Disc>]>,
+    folder_sequence: sequential::Sequence,
+    indexed_sequence: sequential::IndexedSequence,
     folder_ready: bool,
     raw: Vec<Option<Arc<Track>>>,
     pub prefs: ViewPrefs,
@@ -259,6 +263,7 @@ impl Browser {
         .detach();
         cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
             CatalogEvent::Content => b.library_changed(cx),
+            CatalogEvent::Structure(root) => b.refresh_indexed_sequence(*root, cx),
             CatalogEvent::Changed => {
                 if let Some(notice) = b.location.unavailable(b.catalog.read(cx)) {
                     b.notice = Some(notice.into());
@@ -303,6 +308,8 @@ impl Browser {
             generation: Default::default(),
             query: String::new(),
             programs: Arc::default(),
+            folder_sequence: Default::default(),
+            indexed_sequence: Default::default(),
             history: History::default(),
             pending: None,
             folder_child: None,
@@ -507,7 +514,6 @@ impl Browser {
             );
             // Known from the list it was opened from; the store confirms it.
             self.membership = d.release.clone();
-            self.membership_pending = false;
         } else {
             self.show_page(Page::Disc(d.id.clone()), w, cx);
         }
@@ -535,38 +541,6 @@ impl Browser {
         } else {
             self.show_page(Page::Release(key.clone()), w, cx);
         }
-    }
-    /// Finds out whether an indexed CD belongs to a release.
-    fn load_membership(&mut self, album: crate::store::AlbumId, cx: &mut Context<Self>) {
-        let Some(store) = self.catalog.read(cx).handle() else {
-            return;
-        };
-        self.membership_pending = true;
-        let generation = self.generation;
-        let found = store.call(move |s| s.membership(album));
-        cx.spawn(async move |this, cx| {
-            let found = found.await;
-            let _ = this.update(cx, |b, cx| {
-                if b.generation == generation
-                    && matches!(b.location, Location::Album { id, .. } if id == album)
-                {
-                    b.membership_pending = false;
-                    if let Ok(membership) = found {
-                        b.membership = membership.map(|m| {
-                            Arc::new(Membership {
-                                key: DiscId::Library(m.first),
-                                title: m.title,
-                                number: m.number,
-                                subtitle: m.subtitle,
-                            })
-                        });
-                    }
-                    cx.emit(ViewChanged);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         let route = Route::new(self.location.clone(), Some(page));
@@ -1108,6 +1082,7 @@ impl Browser {
         self.slow = false;
         self.raw.clear();
         self.programs = Arc::default();
+        self.folder_sequence = Default::default();
         self.covers = Default::default();
         self.unreadable = Default::default();
         self.equivalent_sheets.clear();
@@ -1197,6 +1172,7 @@ impl Browser {
                 if b.generation == revision {
                     b.busy = false;
                     b.folder_ready = b.notice.is_none();
+                    b.folder_sequence = sequential::Sequence::folder(&b.programs);
                     if let Some(start) = timing {
                         eprintln!(
                             "Discovery {revision} finished {:?} ({} tracks; {} batches, interface {:?}, longest {:?})",

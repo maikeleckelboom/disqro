@@ -8,7 +8,7 @@ use super::{Pane, PaneContent, PanelType, Router, Services};
 use crate::{
     assets::FileIcon,
     audio::Command,
-    browser::{Bookmark, Browser, Location, Route, SavedVisit, music_home},
+    browser::{Bookmark, Browser, Location, Route, SavedVisit, SequenceKind, music_home},
     catalog::Targets,
     collection::{Page, ViewPrefs},
     library::TrackList,
@@ -183,7 +183,7 @@ impl BrowserPane {
         let (can_back, can_forward, has_parent) =
             (b.can_go_back(), b.can_go_forward(), b.can_go_up());
         let search = b.search.clone();
-        let (back, forward, up) = (browser.clone(), browser.clone(), browser);
+        let (back, forward, up) = (browser.clone(), browser.clone(), browser.clone());
         h_flex()
             .id("address-bar")
             .h_full()
@@ -237,6 +237,42 @@ impl BrowserPane {
                     ),
             )
             .child(div().flex_1().min_w_0().child(location))
+            .when_some(b.sequence_kind(), |bar, kind| {
+                bar.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap(px(2.))
+                        .children([false, true].map(|next| {
+                            let browser = browser.clone();
+                            let target = b.sequence_label(kind, next);
+                            let action = kind.action(next);
+                            let shortcut = if next { "Alt+Page Down" } else { "Alt+Page Up" };
+                            let tooltip = target.as_ref().map_or_else(
+                                || action.to_owned(),
+                                |title| format!("{action} · {title} · {shortcut}"),
+                            );
+                            Self::nav_button(
+                                if next {
+                                    "sequence-next"
+                                } else {
+                                    "sequence-previous"
+                                },
+                                if next {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronLeft
+                                },
+                                action,
+                                target.is_some(),
+                                cx,
+                            )
+                            .tooltip(tooltip)
+                            .on_click(move |_, w, cx| {
+                                browser.update(cx, |b, cx| b.step_sequence(Some(kind), next, w, cx))
+                            })
+                        })),
+                )
+            })
             .child(
                 div()
                     .flex_shrink_0()
@@ -305,6 +341,26 @@ fn browser_menu(
         .collections
         .iter()
         .any(|c| b.path.starts_with(&c.root.path));
+    let menu = if b.sequence_kind() == Some(SequenceKind::Disc) {
+        let mut menu = menu;
+        for next in [false, true] {
+            let kind = SequenceKind::Release;
+            let Some(target) = b.sequence_label(kind, next) else {
+                continue;
+            };
+            let browser = browser.clone();
+            menu = menu.item(
+                PopupMenuItem::new(format!("{} · {target}", kind.action(next))).on_click(
+                    move |_, w, cx| {
+                        browser.update(cx, |b, cx| b.step_sequence(Some(kind), next, w, cx));
+                    },
+                ),
+            );
+        }
+        menu
+    } else {
+        menu
+    };
     let send = {
         let (catalog, player) = (catalog.clone(), player.clone());
         move |targets: Targets, shuffle: Option<bool>, cx: &mut App| {
@@ -347,6 +403,7 @@ fn browser_menu(
         .cloned();
     let cd_table = b.table.clone();
     let release_table = b.table.clone();
+    let collection = b.can_list_discs();
     let play_label = match &page {
         Some(Page::Disc(_)) => "Play CD",
         Some(Page::Release(_)) => "Play Release",
@@ -371,6 +428,9 @@ fn browser_menu(
                 .disabled(empty && page.is_none())
                 .on_click(move |_, _, cx| match &page {
                     Some(page) => cd_table.update(cx, |t, cx| t.delegate().play_page(page, cx)),
+                    None if collection => {
+                        cd_table.update(cx, |t, cx| t.delegate().play_collection(cx))
+                    }
                     None => s1(t1.clone(), Some(false), cx),
                 }),
         )
@@ -561,6 +621,11 @@ impl Render for Browser {
         let mut view = v_flex()
             .size_full()
             .bg(m.canvas)
+            .capture_any_mouse_down(cx.listener(|b, e: &MouseDownEvent, _, cx| {
+                if e.button == MouseButton::Left {
+                    b.cancel_context_for_click(cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
                 cx.listener(|b, _, w, cx| b.back(w, cx)),

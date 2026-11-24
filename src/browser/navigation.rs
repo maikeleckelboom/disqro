@@ -236,9 +236,7 @@ impl History {
         for visit in visits {
             if let Some(marked) = &visit.bookmark.marked {
                 let keep = *decisions.entry(Arc::as_ptr(marked)).or_insert_with(|| {
-                    if retained == 0
-                        || marked.len() <= HISTORY_SELECTION_KEYS.saturating_sub(retained)
-                    {
+                    if marked.len() <= HISTORY_SELECTION_KEYS.saturating_sub(retained) {
                         retained = retained.saturating_add(marked.len());
                         true
                     } else {
@@ -346,6 +344,15 @@ impl Browser {
     pub(super) fn cancel_pending(&mut self) {
         self.navigation += 1;
         self.pending = None;
+    }
+
+    pub(crate) fn cancel_context_for_click(&mut self, cx: &mut Context<Self>) {
+        if self.waiting_for_context() {
+            self.cancel_pending();
+            cx.notify();
+        } else {
+            self.navigation += 1;
+        }
     }
 
     pub(crate) fn waiting_for_context(&self) -> bool {
@@ -498,6 +505,7 @@ impl Browser {
         self.membership_pending = false;
         self.notice = None;
         if let Location::Folder(path) = location {
+            self.indexed_sequence.cancel();
             let recursive = visit
                 .subfolders
                 .unwrap_or_else(|| self.prefs.includes_subfolders(&path));
@@ -512,6 +520,9 @@ impl Browser {
                 self.sync_tree_with(tree_reveal, cx);
                 self.filter(cx);
                 if !self.busy {
+                    if !self.page_available() {
+                        self.notice = Some("This CD or release is unavailable.".into());
+                    }
                     self.finish_listing(cx);
                 }
             } else {
@@ -529,9 +540,7 @@ impl Browser {
             self.duration = None;
             self.location = location;
             self.sync_tree_with(TreeReveal::PreserveExpansion, cx);
-            if let Location::Album { id, .. } = self.location {
-                self.load_membership(id, cx);
-            }
+            self.load_indexed_sequence(cx);
             self.filter(cx);
             let catalog = self.catalog.read(cx);
             let unavailable = self.location.unavailable(catalog).or_else(|| {
@@ -576,7 +585,9 @@ impl Browser {
     }
 
     pub fn can_go_up(&self) -> bool {
-        !self.membership_pending && self.route().parent(self.membership.as_deref()).is_some()
+        !(self.membership_pending && self.membership.is_none()
+            || self.busy && matches!(self.page, Some(Page::Disc(_))))
+            && self.route().parent(self.membership.as_deref()).is_some()
     }
 
     pub(crate) fn open_ancestor(
@@ -585,7 +596,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.membership_pending
+        if self.can_go_up()
             && self
                 .route()
                 .parent(self.membership.as_deref())
@@ -598,7 +609,7 @@ impl Browser {
     }
 
     pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.membership_pending {
+        if !self.can_go_up() {
             return;
         }
         let Some((parent, target)) = self.route().parent(self.membership.as_deref()) else {
@@ -716,13 +727,16 @@ impl Browser {
                         .as_ref()
                         .and_then(|key| t.delegate().position(key))
                 });
-                reselect(t, selected, cx);
                 if target.is_none()
                     && let Some(marked) = mark.marked
                 {
+                    // Toolkit row selection emits SelectRow, which clears the
+                    // delegate's selection. A range owns its own cursor.
+                    reselect(t, None, cx);
                     t.delegate_mut()
                         .restore_marks(Arc::unwrap_or_clone(marked), !self.query.is_empty());
                 } else {
+                    reselect(t, selected, cx);
                     t.delegate_mut().clear_marks();
                 }
                 mark.viewport
@@ -755,7 +769,25 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         if dest == Destination::Locations {
-            self.reveal_folder(track, w, cx);
+            let Some((id, store)) = track.library_id.zip(self.catalog.read(cx).handle()) else {
+                self.reveal_folder(track, w, cx);
+                return;
+            };
+            self.navigation += 1;
+            let request = self.navigation;
+            let lookup = store.call(move |s| s.rows(Scope::Library(None), &[id]));
+            cx.spawn_in(w, async move |this, cx| {
+                let current = lookup
+                    .await
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|row| row.available));
+                let _ = this.update_in(cx, |b, w, cx| {
+                    if b.navigation == request {
+                        b.reveal_folder(current.map_or(track, |row| row.track), w, cx);
+                    }
+                });
+            })
+            .detach();
             return;
         }
         let request = self.navigation + 1;

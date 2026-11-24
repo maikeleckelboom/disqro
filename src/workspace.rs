@@ -54,6 +54,10 @@ gpui_kit::actions!(
         GoBack,
         GoForward,
         GoUp,
+        PreviousDestination,
+        NextDestination,
+        PreviousRelease,
+        NextRelease,
         FocusLocation,
         Refresh,
         NextTrack,
@@ -100,6 +104,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", GoBack, Some("Disqro && !Input")),
         KeyBinding::new("alt-right", GoForward, Some("Disqro")),
         KeyBinding::new("alt-up", GoUp, Some("Disqro && !Queue")),
+        KeyBinding::new(
+            "alt-pageup",
+            PreviousDestination,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-pagedown",
+            NextDestination,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-shift-pageup",
+            PreviousRelease,
+            Some("Disqro && !Input && !Queue"),
+        ),
+        KeyBinding::new(
+            "alt-shift-pagedown",
+            NextRelease,
+            Some("Disqro && !Input && !Queue"),
+        ),
         KeyBinding::new("f5", Refresh, Some("Disqro")),
         KeyBinding::new("ctrl-right", NextTrack, Some("Disqro && !Input")),
         KeyBinding::new("ctrl-left", PreviousTrack, Some("Disqro && !Input")),
@@ -582,25 +606,15 @@ impl Workspace {
             PaneEvent::Duplicate => self.duplicate(&pane, window, cx),
         }
     }
-    /// New browsers start like the one last changed; the folders shown with
-    /// their subfolders are the same in every browser.
+    /// Seed future browsers from the most recently used browser.
     fn remember_browser(&mut self, browser: &Entity<Browser>, cx: &mut Context<Self>) {
         let b = browser.read(cx);
         let layouts = b.table.read(cx).delegate().layouts.clone();
         let prefs = b.prefs.clone();
         self.services.router.update(cx, |r, _| {
             r.template.layouts = layouts;
-            r.template.prefs = prefs.clone();
+            r.template.prefs = prefs;
         });
-        for pane in self.ordered(cx) {
-            if let Some(other) = browser_of(&pane, cx)
-                && other != *browser
-                && other.read(cx).prefs.subfolders != prefs.subfolders
-            {
-                let rules = prefs.subfolders.clone();
-                other.update(cx, |b, _| b.prefs.subfolders = rules);
-            }
-        }
     }
 
     fn new_pane(
@@ -1620,6 +1634,30 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &GoUp, w, cx| {
                 if let Some(b) = s.browser(cx) {
                     b.update(cx, |b, cx| b.up(w, cx))
+                }
+            }))
+            .on_action(cx.listener(|s, _: &PreviousDestination, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| b.step_sequence(None, false, w, cx));
+                }
+            }))
+            .on_action(cx.listener(|s, _: &NextDestination, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| b.step_sequence(None, true, w, cx));
+                }
+            }))
+            .on_action(cx.listener(|s, _: &PreviousRelease, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.step_sequence(Some(crate::browser::SequenceKind::Release), false, w, cx)
+                    });
+                }
+            }))
+            .on_action(cx.listener(|s, _: &NextRelease, w, cx| {
+                if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.step_sequence(Some(crate::browser::SequenceKind::Release), true, w, cx)
+                    });
                 }
             }))
             .on_action(cx.listener(|s, _: &Refresh, w, cx| {

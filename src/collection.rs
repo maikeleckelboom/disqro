@@ -215,31 +215,26 @@ impl Discs {
     /// lowest-numbered disc would be. A year that differs between the sheets
     /// of one release then cannot move the release.
     pub fn shelve(discs: Vec<Arc<Disc>>) -> Vec<Shelf> {
-        let mut members: HashMap<DiscId, Vec<Arc<Disc>>> = HashMap::new();
-        for d in &discs {
-            if let Some(m) = &d.release {
-                members.entry(m.key.clone()).or_default().push(d.clone());
-            }
-        }
-        for found in members.values_mut() {
-            found.sort_by_key(|d| d.release.as_ref().map(|m| m.number));
-        }
-        let mut rows = Vec::with_capacity(discs.len() + members.len());
-        for d in discs {
-            let Some(m) = &d.release else {
-                rows.push(Shelf::Disc(d));
-                continue;
+        let order = crate::release::ordered(
+            discs
+                .iter()
+                .map(|d| d.release.as_ref().map(|m| (&m.key, m.number))),
+        );
+        let mut rows = Vec::with_capacity(discs.len());
+        for item in order {
+            let indices = match item {
+                crate::release::Ordered::Disc(index) => {
+                    rows.push(Shelf::Disc(discs[index].clone()));
+                    continue;
+                }
+                crate::release::Ordered::Release(indices) => indices,
             };
-            if members
-                .get(&m.key)
-                .is_none_or(|found| !Arc::ptr_eq(&found[0], &d))
-            {
-                continue;
-            }
-            let Some(found) = members.remove(&m.key) else {
-                continue;
-            };
+            let found: Vec<_> = indices
+                .into_iter()
+                .map(|index| discs[index].clone())
+                .collect();
             let first = &found[0];
+            let m = first.release.as_ref().expect("release member");
             rows.push(Shelf::Release(Arc::new(Release {
                 key: m.key.clone(),
                 title: m.title.clone(),

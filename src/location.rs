@@ -369,7 +369,8 @@ impl LocationBar {
         };
         let chevron = px(16.);
         let pad = px(14.);
-        let available = self.width.get() - px(12.) - if icon.is_some() { px(18.) } else { px(0.) };
+        let available = self.width.get() - px(20.) - if icon.is_some() { px(18.) } else { px(0.) };
+        let overflow = px(40.);
         let widths: Vec<Pixels> = all.iter().map(|c| measure(&c.label) + pad).collect();
         let mut hidden = 0;
         if available > px(0.) {
@@ -381,7 +382,7 @@ impl LocationBar {
                 hidden += 1;
             }
             if hidden > 0 {
-                total += px(28.);
+                total += overflow;
                 while hidden + first_to_keep < all.len() && total > available {
                     total -= widths[hidden] + chevron;
                     hidden += 1;
@@ -389,11 +390,6 @@ impl LocationBar {
             }
         }
         let browser = self.browser.clone();
-        let compact_tail = hidden + 1 < all.len()
-            && widths[hidden..].iter().copied().sum::<Pixels>()
-                + chevron * (all.len() - hidden - 1) as f32
-                + if hidden > 0 { px(28.) } else { px(0.) }
-                > available;
         let last = all.len().saturating_sub(1);
         let mut row = h_flex()
             .h_full()
@@ -455,6 +451,7 @@ impl LocationBar {
             let browser = browser.clone();
             let navigates = !matches!(c.step, Step::Label);
             let step = c.step.clone();
+            let keyboard = (browser.clone(), step.clone());
             row = row.child(
                 div()
                     .id(("crumb", i))
@@ -466,8 +463,10 @@ impl LocationBar {
                         }
                     })
                     .min_w_0()
-                    .when(i == last && compact_tail, |d| {
-                        d.flex_shrink_0().max_w(available.max(px(32.)) * 0.56)
+                    .when(i == last && available > px(0.), |d| {
+                        let budget = available - if hidden > 0 { overflow } else { px(0.) };
+                        let cap = if i > hidden { budget * 0.57 } else { budget };
+                        d.flex_shrink_0().max_w(cap.max(px(32.)))
                     })
                     .px(px(7.))
                     .h(px(22.))
@@ -477,7 +476,13 @@ impl LocationBar {
                     .text_size(font_size)
                     .text_color(if i == last { m.text } else { m.text_muted })
                     .when(navigates, |d| {
-                        d.tab_index(0)
+                        d.tab_stop(true)
+                            .on_key_down(move |e, w, cx| {
+                                if matches!(e.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.stop_propagation();
+                                    keyboard.0.update(cx, |b, cx| keyboard.1.open(b, w, cx));
+                                }
+                            })
                             .focus_visible(|d| d.bg(m.hover))
                             .hover(|d| d.bg(m.hover).text_color(m.text))
                             .cursor_pointer()
@@ -491,7 +496,7 @@ impl LocationBar {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_ellipsis_middle()
+                            .when(i != last, |d| d.text_ellipsis_middle())
                             .child(c.label.clone()),
                     )
                     .tooltip(move |w, cx| {

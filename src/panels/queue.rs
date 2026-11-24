@@ -7,9 +7,8 @@
 use super::{Pane, PaneContent, PanelType, Services};
 use crate::{
     audio::{Command, TransportState},
-    browser::Destination,
     library::clock,
-    player::{Player, PlayerEvent},
+    player::{Player, PlayerEvent, reveal_items},
     queue::{Entry, Queue, Repeat},
     theme::materials,
 };
@@ -200,6 +199,7 @@ impl Entries {
     }
     fn entry_menu(
         this: WeakEntity<Self>,
+        player: &Entity<Player>,
         entry: Entry,
         mode: Mode,
         is_current: bool,
@@ -216,46 +216,32 @@ impl Entries {
                 }
             }
         };
-        let (destination, label) = if entry.disc_context.allows(&entry.track) {
-            (Destination::Locations, "Show in Locations")
-        } else {
-            (Destination::Library, "Show in Library")
-        };
         let play = act(Command::Jump(id));
         let next = act(Command::Move(id, next_slot));
         let remove = act(Command::Remove(vec![id]));
-        menu.when(!is_current, |m| {
-            m.item(
-                PopupMenuItem::new("Play")
-                    .icon(IconName::Play)
-                    .on_click(play),
-            )
-            .item(
-                PopupMenuItem::new("Play Next")
-                    .icon(IconName::ListStart)
-                    .on_click(next),
-            )
-        })
-        .item(
-            PopupMenuItem::new(match mode {
-                Mode::Queue => "Remove from Queue",
-                Mode::History => "Remove from History",
+        let menu = menu
+            .when(!is_current, |m| {
+                m.item(
+                    PopupMenuItem::new("Play")
+                        .icon(IconName::Play)
+                        .on_click(play),
+                )
+                .item(
+                    PopupMenuItem::new("Play Next")
+                        .icon(IconName::ListStart)
+                        .on_click(next),
+                )
             })
-            .icon(IconName::X)
-            .on_click(remove),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new(label)
-                .icon(IconName::FolderOpen)
-                .on_click(move |_, _, cx| {
-                    let _ = this.update(cx, |s, cx| {
-                        s.player.update(cx, |_, cx| {
-                            cx.emit(PlayerEvent::Locate(entry.track.clone(), destination))
-                        })
-                    });
-                }),
-        )
+            .item(
+                PopupMenuItem::new(match mode {
+                    Mode::Queue => "Remove from Queue",
+                    Mode::History => "Remove from History",
+                })
+                .icon(IconName::X)
+                .on_click(remove),
+            )
+            .separator();
+        reveal_items(menu, player, &entry.track)
     }
     fn render_row(&self, ix: usize, q: &Queue, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
@@ -277,6 +263,7 @@ impl Entries {
         let this = cx.weak_entity();
         let mode = self.mode;
         let menu_entry = entry.clone();
+        let player = self.player.clone();
         let row = h_flex()
             .id(("entry", id))
             .w_full()
@@ -355,6 +342,7 @@ impl Entries {
             .context_menu(move |menu, _, _| {
                 Self::entry_menu(
                     this.clone(),
+                    &player,
                     menu_entry.clone(),
                     mode,
                     is_current,

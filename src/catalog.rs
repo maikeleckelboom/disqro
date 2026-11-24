@@ -63,6 +63,8 @@ pub enum CatalogEvent {
     Changed,
     /// Library rows changed; open views should query again.
     Content,
+    /// A registered collection's navigation structure or availability changed.
+    Structure(RootId),
     /// A playlist was just created and can be named.
     Created(PlaylistId),
     Notice(String),
@@ -138,6 +140,9 @@ impl Catalog {
             let _ = this.update(cx, |c, cx| {
                 for (id, online) in availability {
                     if let Some(collection) = c.collections.iter_mut().find(|c| c.root.id == id) {
+                        if collection.online != online {
+                            cx.emit(CatalogEvent::Structure(id));
+                        }
                         collection.online = online;
                         if rescan && online {
                             c.rescan(id, cx);
@@ -566,6 +571,7 @@ impl Catalog {
                     c.set_marks(marks);
                     cx.emit(CatalogEvent::Changed);
                     cx.emit(CatalogEvent::Content);
+                    cx.emit(CatalogEvent::Structure(id));
                     cx.notify();
                 }
                 Err(e) => cx.emit(CatalogEvent::Notice(format!("{e:#}"))),
@@ -663,6 +669,7 @@ impl Catalog {
         }
         if let Err(result) = message {
             self.scanning = None;
+            cx.emit(CatalogEvent::Structure(id));
             match result {
                 Ok(summary) if summary.ambiguous > 0 => cx.emit(CatalogEvent::Notice(format!(
                     "{} moved or copied files could not be matched with certainty. Their earlier entries are kept as missing.",
