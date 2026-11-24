@@ -288,7 +288,7 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
     );
 
     let mut queue = crate::queue::Queue::default();
-    queue.replace(std::slice::from_ref(first), 0);
+    queue.replace(std::iter::once(first.clone()).collect(), 0);
     let id = queue.current_entry().unwrap().id;
     let revision = queue.revision;
     assert!(!queue.continue_disc(id, &tracks, Inferred));
@@ -299,7 +299,7 @@ fn loose_wavs_require_an_explicit_cd_selection_to_continue() {
         .unwrap()
         .tracks;
     assert_eq!(&*explicit, tracks);
-    let duplicates = queue.add(&[tracks[1].clone(), tracks[1].clone()]);
+    let duplicates = queue.add(&[tracks[1].clone(), tracks[1].clone()].into_iter().collect());
     assert!(queue.continue_disc(id, &explicit, Selected));
     assert_eq!(queue.current_entry().unwrap().id, id);
     assert_eq!(queue.upcoming()[0].id, duplicates[0]);
@@ -343,7 +343,7 @@ fn tagged_wavs_continue_in_track_order_within_the_same_album_and_disc() {
         ["b", "a"]
     );
     let mut queue = crate::queue::Queue::default();
-    queue.replace(&program[..1], 0);
+    queue.replace(program[..1].iter().cloned().collect(), 0);
     assert!(queue.continue_disc(queue.current_entry().unwrap().id, &program, Inferred));
     assert_eq!(queue.upcoming()[0].track.title, "a");
 }

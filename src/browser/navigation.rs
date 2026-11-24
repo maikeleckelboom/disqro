@@ -966,6 +966,45 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         let request = self.begin_navigation(cx);
+        if let Destination::Playlist(occurrence) = dest {
+            let key = RowKey::Key(occurrence.entry);
+            let location = Location::Playlist(occurrence.playlist);
+            if matches!(self.location, Location::Playlist(id) if id == occurrence.playlist)
+                && self
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .contains_playlist_entry(occurrence, track.library_id)
+            {
+                self.reveal_row(key, w, cx);
+                return;
+            }
+            let Some(store) = self.catalog.read(cx).handle() else {
+                w.push_notification("The Library is unavailable.", cx);
+                return;
+            };
+            let lookup = store.query(&self.intent, request, move |store| {
+                let rows = store.rows(Scope::Playlist(occurrence.playlist), &[occurrence.entry])?;
+                Ok(rows.first().is_some_and(|row| row.track.same_item(&track)))
+            });
+            cx.spawn_in(w, async move |this, cx| {
+                let found = lookup.await;
+                let _ = this.update_in(cx, |b, w, cx| {
+                    if !b.navigation_is_current(request) {
+                        return;
+                    }
+                    match found {
+                        Ok(true) => b.move_to(Route::new(location, None), Arrival::Row(key), w, cx),
+                        Ok(false) => {
+                            w.push_notification("This entry is no longer in the playlist.", cx)
+                        }
+                        Err(_) => w.push_notification("This playlist is unavailable.", cx),
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         if dest == Destination::Current {
             if self.busy
                 || (self.scope().is_some()
@@ -1076,6 +1115,11 @@ impl Browser {
         let Some(key) = self.table.read(cx).delegate().recording_key(track, id) else {
             return false;
         };
+        self.reveal_row(key, w, cx);
+        true
+    }
+
+    fn reveal_row(&mut self, key: RowKey, w: &mut Window, cx: &mut Context<Self>) {
         if self.listing_shelf() {
             self.move_to(self.route(), Arrival::Row(key), w, cx);
         } else {
@@ -1088,7 +1132,6 @@ impl Browser {
             });
             self.finish_listing(cx);
         }
-        true
     }
 
     fn reveal_folder(
@@ -1181,6 +1224,7 @@ pub fn continue_cd(
         id: entry,
         track,
         disc_context: context,
+        ..
     } = request;
     if !context.allows(&track) {
         return;

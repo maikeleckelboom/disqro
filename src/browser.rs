@@ -102,6 +102,7 @@ pub enum Destination {
     Current,
     Library,
     Locations,
+    Playlist(crate::queue::PlaylistOccurrence),
 }
 
 pub struct ViewChanged;

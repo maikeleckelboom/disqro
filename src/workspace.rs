@@ -1376,7 +1376,7 @@ impl Workspace {
     }
     fn play_pause(&self, cx: &mut App) {
         let p = self.services.player.read(cx);
-        if p.status.track.is_none() && p.queue().entries.is_empty() {
+        if p.status.track.is_none() && p.queue().upcoming().is_empty() {
             self.play_selected(cx);
         } else {
             self.services

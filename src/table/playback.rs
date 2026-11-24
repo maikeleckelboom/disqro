@@ -1,13 +1,14 @@
 //! Take playback order from the activated list or authored page.
 use super::*;
 use crate::catalog::ListeningList;
+use crate::queue::Selection;
 
 pub(crate) fn play_library(
     catalog: &Entity<Catalog>,
     player: &Entity<Player>,
     list: ListeningList,
     chosen: Option<i64>,
-    command: impl FnOnce(TrackList, usize) -> Command + 'static,
+    command: impl FnOnce(Selection, usize) -> Command + 'static,
     cx: &mut App,
 ) {
     let ticket = player.read(cx).play_request.clone();
@@ -43,9 +44,9 @@ pub(crate) fn play_library(
     .detach();
 }
 
-fn from_chapter(tracks: TrackList, start: usize) -> Command {
+fn from_chapter(selection: Selection, start: usize) -> Command {
     Command::PlayDisc {
-        tracks,
+        tracks: selection.tracks,
         from_chapter: Some(start),
     }
 }
@@ -69,7 +70,7 @@ impl FolderAction {
     fn command(&self, displayed: &TrackList, programs: &[Arc<Disc>]) -> Option<Command> {
         match self {
             Self::Row(chosen) => Some(Command::Play(
-                displayed.clone(),
+                displayed.clone().into(),
                 displayed.iter().position(|t| t.same_item(chosen))?,
             )),
             Self::Program(page, chosen) => {
@@ -87,9 +88,8 @@ impl FolderAction {
                     from_chapter,
                 })
             }
-            Self::All(shuffle) => {
-                (!displayed.is_empty()).then(|| Command::PlayList(displayed.clone(), *shuffle))
-            }
+            Self::All(shuffle) => (!displayed.is_empty())
+                .then(|| Command::PlayList(displayed.clone().into(), *shuffle)),
             Self::Collection => {
                 let visible: HashSet<_> = displayed.iter().map(Arc::as_ptr).collect();
                 let order = crate::release::ordered(
@@ -115,7 +115,8 @@ impl FolderAction {
                         }
                     }
                 }
-                (!tracks.is_empty()).then(|| Command::PlayList(tracks.into(), false))
+                (!tracks.is_empty())
+                    .then(|| Command::PlayList(TrackList::from(tracks).into(), false))
             }
         }
     }
@@ -158,7 +159,7 @@ impl MusicTable {
             Contents::Folder { sorted, .. } => {
                 let Some(track) = sorted.get(ix) else { return };
                 if track_only {
-                    let single = Command::Play(Arc::from([track.clone()]), 0);
+                    let single = Command::Play(TrackList::from([track.clone()]).into(), 0);
                     self.player.update(cx, |p, cx| p.command(single, cx));
                 } else {
                     let action = match &self.folder_page {
@@ -213,8 +214,8 @@ impl MusicTable {
                 &self.player,
                 ListeningList::Disc(scope),
                 None,
-                |tracks, _| Command::PlayDisc {
-                    tracks,
+                |selection, _| Command::PlayDisc {
+                    tracks: selection.tracks,
                     from_chapter: None,
                 },
                 cx,
@@ -352,7 +353,7 @@ mod tests {
         else {
             panic!("expected list")
         };
-        assert_eq!((tracks, start), (filtered.clone(), 1));
+        assert_eq!((tracks.tracks, start), (filtered.clone(), 1));
         let page = Page::Disc(discs[0].id.clone());
         let release = Page::Release(discs[0].release.as_ref().unwrap().key.clone());
         for (page, expected) in [(page, &all[..2]), (release, &all[..])] {

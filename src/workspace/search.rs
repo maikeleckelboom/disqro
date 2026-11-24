@@ -451,7 +451,7 @@ impl LibrarySearch {
                                     .xsmall()
                                     .icon(IconName::Play)
                                     .accessibility_label(format!("Play {}", hit.title))
-                                    .tooltip("Play track")
+                                    .tooltip("Play from search results")
                                     .on_click(cx.listener(move |s, _, _, cx| {
                                         if let Some(workspace) = s.workspace.upgrade() {
                                             let player = workspace.read(cx).services.player.clone();

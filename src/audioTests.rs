@@ -287,7 +287,7 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
         "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:00:45",
     )
     .unwrap();
-    let chapters = crate::cue::read(&sheet)
+    let chapters: crate::library::TrackList = crate::cue::read(&sheet)
         .unwrap()
         .into_iter()
         .map(Arc::new)
@@ -299,7 +299,7 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
     let reader = e.signal.subscribe();
     let pcm = e.signal.pcm();
     let _demand = pcm.subscribe();
-    e.command(Command::Play(chapters, 0)).unwrap();
+    e.command(Command::Play(chapters.into(), 0)).unwrap();
     let audible = |_: &Engine, levels: Levels| levels.rms.iter().all(|v| *v > 0.015);
     let silent = |_: &Engine, levels: Levels| levels.peak == [0.; 2];
     until(&mut e, &reader, audible);
@@ -335,8 +335,11 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
     let replacement = dir.path().join("replacement.wav");
     fixture(&replacement, 96_000, 96_000);
     let replacement = Arc::new(Track::file(replacement));
-    e.command(Command::Play(vec![replacement.clone()].into(), 0))
-        .unwrap();
+    e.command(Command::Play(
+        [replacement.clone()].into_iter().collect(),
+        0,
+    ))
+    .unwrap();
     until(&mut e, &reader, audible);
     assert_eq!(e.status.track.as_ref(), Some(&replacement));
     assert_eq!(e.rate, 96_000);
@@ -377,7 +380,7 @@ fn sustained_output_observation() {
     let source = std::path::PathBuf::from(
         std::env::var_os("DISQRO_SOAK_SOURCE").expect("set DISQRO_SOAK_SOURCE"),
     );
-    let tracks = if source
+    let tracks: crate::library::TrackList = if source
         .extension()
         .is_some_and(|v| v.eq_ignore_ascii_case("cue"))
     {
@@ -407,7 +410,7 @@ fn sustained_output_observation() {
         ..Default::default()
     };
     crate::diagnostics::start();
-    engine.command(Command::Play(tracks, 0)).unwrap();
+    engine.command(Command::Play(tracks.into(), 0)).unwrap();
     let epoch = reader.epoch();
     let mut audible = 0;
     let mut spectra = 0;
@@ -462,7 +465,7 @@ fn sustained_output_observation() {
 #[test]
 fn shutdown_receipt_includes_pending_queue_edits() {
     let transport = Transport::new(0.);
-    let tracks = vec![Arc::new(Track::file("first.wav".into()))].into();
+    let tracks = [Track::file("first.wav".into())].into_iter().collect();
     transport.send(Command::Enqueue(tracks), None).unwrap();
     let saved = transport.sender().snapshot().unwrap().unwrap();
     assert_eq!(saved.queue.entries.len(), 1);
@@ -484,7 +487,7 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
             Arc::new(t)
         })
         .collect();
-    e.queue.replace(&program, 1);
+    e.queue.replace(program.clone().into(), 1);
     let current = e.queue.current_entry().unwrap().id;
     e.select(Some(1), 0.);
     e.group = vec![Chapter {
@@ -555,7 +558,7 @@ fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
     assert!(!contiguous(&release[1], &release[2]));
     assert!(contiguous(&release[2], &release[3]));
     let mut q = Queue::default();
-    q.replace(&release, 0);
+    q.replace(release.clone().into(), 0);
     q.set_current(Some(1));
     assert_eq!(q.next_index(true), Some(2), "CD 2 follows CD 1");
     q.set_current(Some(4));
@@ -581,7 +584,7 @@ fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
         .map(Arc::new)
         .collect();
     let mut e = Engine::default();
-    e.queue.replace(&tracks, 0);
+    e.queue.replace(tracks.clone().into(), 0);
     e.select(Some(0), 0.);
     let origin = e.status.entry;
     let target = e.queue.entries[1].id;
@@ -622,7 +625,7 @@ fn restoring_a_final_chapter_without_tag_duration_keeps_saved_position() {
     let mut e = Engine::default();
     let mut q = Queue::default();
     let track = Arc::new(Track::file("unknown-length.wav".into()));
-    q.replace(&[track], 0);
+    q.replace([track].into_iter().collect(), 0);
     e.command(Command::Restore(Box::new(q), 12.25)).unwrap();
     assert_eq!(e.status.position, 12.25);
     assert!(!e.status.playing && e.voice.is_none());
@@ -660,7 +663,7 @@ fn stale_context_cannot_replace_a_later_play_pause_or_media_stop() {
         })),
         4,
     );
-    let play = || Command::Play(Arc::default(), 0);
+    let play = || Command::Play(crate::library::TrackList::default().into(), 0);
     let first = commands.play_request.next();
     let second = commands.play_request.next();
     assert!(!commands.play_if_current(play(), first).unwrap());
@@ -678,7 +681,8 @@ fn recording_recovery_is_bounded_and_interruptible() {
     let root = tempfile::tempdir().unwrap();
     let missing = Track::file(root.path().join("absent.wav"));
     let mut e = Engine::default();
-    e.queue.replace(&vec![missing; 40], 0);
+    e.queue
+        .replace(std::iter::repeat_n(missing, 40).collect(), 0);
     e.queue.set_repeat(Repeat::All);
     e.advance(true).unwrap();
     assert!(e.retry_next);
@@ -740,7 +744,7 @@ fn separate_files_continue_past_source_and_decoder_failures() {
         ..Default::default()
     };
     let reader = e.signal.subscribe();
-    e.command(Command::Play(files.clone(), 0)).unwrap();
+    e.command(Command::Play(files.clone().into(), 0)).unwrap();
     let mut heard_last = false;
     let mut failed = Vec::new();
     let begin = Instant::now();
@@ -789,7 +793,7 @@ fn separate_file_transition_observation() {
     let t = Transport::new(0.5);
     let capture = t.signal.pcm();
     let _demand = capture.subscribe();
-    t.send(Command::Play(tracks, 0), None).unwrap();
+    t.send(Command::Play(tracks.into(), 0), None).unwrap();
     let mut sign = 0;
     let mut last_signal = 0;
     let mut next_block = None;
@@ -831,7 +835,8 @@ fn losing_output_during_recovery_keeps_the_occurrence_and_cancels_skips() {
     use kira::backend::cpal::cpal::{Error, ErrorKind};
     let track = Track::file("absent.wav".into());
     let mut e = Engine::default();
-    e.queue.replace(&[track.clone(), track], 0);
+    e.queue
+        .replace([track.clone(), track].into_iter().collect(), 0);
     e.select(Some(0), 0.);
     e.retry_next = true;
     e.status.playing = true;

@@ -4,7 +4,7 @@ use crate::{
     audio::{Command, Status, Transport},
     library::{DiscContext, clock},
     location::ActivateLocationControl,
-    queue::{Queue, Repeat},
+    queue::{PlaylistOccurrence, Queue, Repeat},
     theme::materials,
     timeline::{Program, SECOND},
 };
@@ -59,16 +59,27 @@ pub(crate) fn reveal_items(
     player: &Entity<Player>,
     track: &Arc<crate::library::Track>,
     context: DiscContext,
+    occurrence: Option<PlaylistOccurrence>,
 ) -> PopupMenu {
     use crate::browser::Destination;
-    for (destination, label, icon) in [
-        (Destination::Library, "Show in Library", IconName::Library),
-        (
-            Destination::Locations,
-            "Show in Locations",
-            IconName::FolderOpen,
-        ),
-    ] {
+    let destinations = occurrence
+        .map(|occurrence| {
+            (
+                Destination::Playlist(occurrence),
+                "Show in Playlist",
+                IconName::ListMusic,
+            )
+        })
+        .into_iter()
+        .chain([
+            (Destination::Library, "Show in Library", IconName::Library),
+            (
+                Destination::Locations,
+                "Show in Locations",
+                IconName::FolderOpen,
+            ),
+        ]);
+    for (destination, label, icon) in destinations {
         let (player, track) = (player.clone(), track.clone());
         menu = menu.item(
             PopupMenuItem::new(label)
@@ -208,7 +219,7 @@ impl Player {
     pub fn command(&mut self, c: Command, cx: &mut Context<Self>) {
         if matches!(c, Command::Toggle | Command::SetPlaying(true))
             && self.status.track.is_none()
-            && self.queue.entries.is_empty()
+            && self.queue.upcoming().is_empty()
         {
             cx.emit(PlayerEvent::PlaySelection);
         } else if let Err(e) = self.transport.send(c, self.status.entry) {
@@ -493,6 +504,10 @@ impl Render for Player {
         let disc_context = self
             .playing_entry()
             .map_or_default(|entry| entry.disc_context);
+        let occurrence = self
+            .playing_entry()
+            .and_then(|entry| entry.playlist_occurrence);
+        let playing_destination = occurrence.map_or(Destination::Current, Destination::Playlist);
         let art = art
             .id("playing-artwork")
             .relative()
@@ -526,19 +541,20 @@ impl Render for Player {
                         cx.emit(PlayerEvent::Locate(
                             track.clone(),
                             disc_context,
-                            Destination::Current,
+                            playing_destination,
                         ));
                     }))
                     .on_action(cx.listener(move |_, _: &ActivateLocationControl, _, cx| {
                         cx.emit(PlayerEvent::Locate(
                             keyboard_track.clone(),
                             disc_context,
-                            Destination::Current,
+                            playing_destination,
                         ));
                     }))
             });
         let reveal_menu = s.track.clone().map(|track| {
             let player = cx.entity();
+            let source = self.queue.source.clone();
             let entry = self
                 .playing_entry()
                 .filter(|entry| entry.disc_context.allows(&entry.track))
@@ -554,7 +570,11 @@ impl Render for Player {
                 .accessibility_label("Now Playing actions")
                 .tooltip("Now Playing actions")
                 .dropdown_menu(move |menu, _, _| {
-                    reveal_items(menu, &player, &track, disc_context).when_some(
+                    let menu = menu.when_some(source.as_ref(), |menu, label| {
+                        menu.item(PopupMenuItem::label(format!("Started from {label}")))
+                            .separator()
+                    });
+                    reveal_items(menu, &player, &track, disc_context, occurrence).when_some(
                         entry.clone(),
                         |menu, entry| {
                             let player = player.clone();

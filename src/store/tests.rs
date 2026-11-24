@@ -107,6 +107,7 @@ fn listening_list_keeps_the_displayed_occurrences_after_navigation() {
         ListeningList::for_row(Scope::Liked, &liked.clone().into(), three, false),
         three,
     );
+    let tracks = tracks.tracks;
     let ids = |tracks: &crate::library::TrackList| {
         tracks
             .iter()
@@ -122,24 +123,48 @@ fn listening_list_keeps_the_displayed_occurrences_after_navigation() {
     let (tracks, start, _) = resolve(
         ListeningList::for_row(
             Scope::Playlist(playlist),
-            &occurrences.into(),
+            &occurrences.clone().into(),
             chosen,
             false,
         ),
         chosen,
     );
-    assert_eq!((ids(&tracks), start), (vec![single, single, three, one], 1));
+    assert_eq!(
+        (ids(&tracks.tracks), start),
+        (vec![single, single, three, one], 1)
+    );
+    let mut queue = crate::queue::Queue::default();
+    queue.replace(tracks, start);
+    assert_eq!(
+        queue
+            .entries
+            .iter()
+            .map(|entry| entry.playlist_occurrence.unwrap().entry)
+            .collect::<Vec<_>>(),
+        occurrences
+    );
+    let restored: crate::queue::Queue =
+        serde_json::from_str(&serde_json::to_string(&queue).unwrap()).unwrap();
+    let current = restored.current_entry().unwrap();
+    let occurrence = current.playlist_occurrence.unwrap();
+    let saved = block_on(
+        handle.call(move |s| s.rows(Scope::Playlist(occurrence.playlist), &[occurrence.entry])),
+    )
+    .unwrap();
+    assert!(current.track.library_id.is_none());
+    assert!(saved[0].track.same_item(&current.track));
+    assert_eq!(occurrence.entry, chosen);
     let (tracks, start, _) = resolve(
         ListeningList::Displayed(Scope::Library(None), filtered.clone().into()),
         three,
     );
-    assert_eq!(ids(&tracks), filtered);
-    assert_eq!(tracks[start].library_id, Some(three));
+    assert_eq!(ids(&tracks.tracks), filtered);
+    assert_eq!(tracks.tracks[start].library_id, Some(three));
     let (tracks, start, _) = resolve(
         ListeningList::for_row(Scope::Liked, &liked.into(), three, true),
         three,
     );
-    assert_eq!((ids(&tracks), start), (vec![three], 0));
+    assert_eq!((ids(&tracks.tracks), start), (vec![three], 0));
 }
 
 #[test]
@@ -1034,8 +1059,8 @@ fn six_figure_listening_snapshot() {
         ),
     )
     .unwrap();
-    assert_eq!((tracks.len(), i, skipped), (100001, 60000, 0));
-    assert_eq!(tracks[i].library_id, Some(chosen));
+    assert_eq!((tracks.tracks.len(), i, skipped), (100001, 60000, 0));
+    assert_eq!(tracks.tracks[i].library_id, Some(chosen));
     eprintln!(
         "100,001 sorted recordings resolved in {:?}",
         start.elapsed()

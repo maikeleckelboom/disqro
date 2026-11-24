@@ -29,6 +29,8 @@ gpui_kit::actions!(
     [
         PlaySelectedEntry,
         RemoveSelectedEntry,
+        SelectPreviousEntry,
+        SelectNextEntry,
         MoveEntryUp,
         MoveEntryDown
     ]
@@ -38,6 +40,8 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", PlaySelectedEntry, Some("Queue")),
         KeyBinding::new("delete", RemoveSelectedEntry, Some("Queue")),
+        KeyBinding::new("up", SelectPreviousEntry, Some("Queue")),
+        KeyBinding::new("down", SelectNextEntry, Some("Queue")),
         KeyBinding::new("alt-up", MoveEntryUp, Some("Queue")),
         KeyBinding::new("alt-down", MoveEntryDown, Some("Queue")),
     ]);
@@ -146,6 +150,27 @@ impl Entries {
     fn send(&self, c: Command, cx: &mut App) {
         self.player.update(cx, |p, cx| p.command(c, cx));
     }
+    fn select_adjacent(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let q = self.queue(cx);
+        let range = self.mode.indices(&q);
+        if range.is_empty() {
+            return;
+        }
+        let row = self
+            .selected
+            .and_then(|id| q.index_of(id))
+            .filter(|ix| range.contains(ix))
+            .map_or(0, |ix| {
+                let row = match self.mode {
+                    Mode::Queue => ix - range.start,
+                    Mode::History => range.end - 1 - ix,
+                };
+                row.saturating_add_signed(delta).min(range.len() - 1)
+            });
+        self.selected = Some(q.entries[row_index(self.mode, &range, row)].id);
+        self.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
+        cx.notify();
+    }
     fn move_selected(&mut self, delta: isize, cx: &mut Context<Self>) {
         if self.mode != Mode::Queue {
             return;
@@ -154,11 +179,13 @@ impl Entries {
         let Some(id) = self.selected else { return };
         let Some(ix) = q.index_of(id) else { return };
         let to = if delta < 0 {
-            ix.saturating_sub(1)
+            let Some(to) = ix.checked_sub(1) else { return };
+            to
         } else {
-            (ix + 2).min(q.entries.len())
+            ix + 2
         };
-        self.send(Command::Move(id, to), cx);
+        let before = q.entries.get(to).map(|entry| entry.id);
+        self.send(Command::MoveUpcoming(id, before), cx);
     }
     fn panel_menu(&self, menu: PopupMenu, cx: &App) -> PopupMenu {
         let q = self.queue(cx);
@@ -176,7 +203,11 @@ impl Entries {
             );
         }
         let shuffle = q.shuffle;
-        menu.item(item(
+        menu.when_some(q.source.as_ref(), |menu, source| {
+            menu.item(PopupMenuItem::label(format!("Started from {source}")))
+                .separator()
+        })
+        .item(item(
             "Shuffle",
             shuffle,
             if shuffle {
@@ -207,7 +238,6 @@ impl Entries {
         entry: Entry,
         mode: Mode,
         is_current: bool,
-        next_slot: usize,
         menu: PopupMenu,
     ) -> PopupMenu {
         let id = entry.id;
@@ -221,7 +251,7 @@ impl Entries {
             }
         };
         let play = act(Command::Jump(id));
-        let next = act(Command::Move(id, next_slot));
+        let next = act(Command::ScheduleNext(id));
         let remove = act(Command::Remove(vec![id]));
         let menu = menu
             .when(!is_current, |m| {
@@ -245,7 +275,13 @@ impl Entries {
                 .on_click(remove),
             )
             .separator();
-        reveal_items(menu, player, &entry.track, entry.disc_context)
+        reveal_items(
+            menu,
+            player,
+            &entry.track,
+            entry.disc_context,
+            entry.playlist_occurrence,
+        )
     }
     fn render_row(&self, ix: usize, q: &Queue, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
@@ -265,13 +301,27 @@ impl Entries {
         } else {
             m.text_faint
         };
-        let next_slot = q.current.map_or(0, |c| c + 1);
         let this = cx.weak_entity();
         let mode = self.mode;
         let menu_entry = entry.clone();
         let player = self.player.clone();
         let row = h_flex()
             .id(("entry", id))
+            .role(Role::ListBoxOption)
+            .aria_selected(selected)
+            .aria_label(if is_current {
+                format!(
+                    "{title} · {}",
+                    match status.playback_state() {
+                        TransportState::Playing => "Now playing",
+                        TransportState::Paused => "Paused",
+                        TransportState::Finished => "Finished",
+                        TransportState::Stopped => "Stopped",
+                    }
+                )
+            } else {
+                title.to_string()
+            })
             .w_full()
             .h(px(ROW))
             .px(px(10.))
@@ -345,7 +395,7 @@ impl Entries {
                 }
                 cx.notify();
             }))
-            .when(mode == Mode::Queue, |row| {
+            .when(mode == Mode::Queue && !is_current, |row| {
                 row.on_drag(
                     DraggedEntry {
                         id,
@@ -355,7 +405,7 @@ impl Entries {
                 )
                 .drag_over::<DraggedEntry>(move |d, _, _, _| d.border_t_2().border_color(m.accent))
                 .on_drop(cx.listener(move |s, d: &DraggedEntry, _, cx| {
-                    s.send(Command::Move(d.id, ix), cx);
+                    s.send(Command::MoveUpcoming(d.id, Some(id)), cx);
                 }))
             })
             .context_menu(move |menu, _, _| {
@@ -365,7 +415,6 @@ impl Entries {
                     menu_entry.clone(),
                     mode,
                     is_current,
-                    next_slot,
                     menu,
                 )
             });
@@ -382,8 +431,7 @@ impl Render for Entries {
         let view = cx.entity();
         let listed = q.clone();
         let end_drop = cx.listener(|s, d: &DraggedEntry, _, cx| {
-            let end = s.queue(cx).entries.len();
-            s.send(Command::Move(d.id, end), cx);
+            s.send(Command::MoveUpcoming(d.id, None), cx);
         });
         let body = if order.is_empty() {
             let (icon, text) = match self.mode {
@@ -407,9 +455,11 @@ impl Render for Entries {
                 .into_any_element()
         } else {
             div()
+                .id("entry-list")
                 .flex_1()
                 .min_h_0()
                 .pt(px(4.))
+                .role(Role::ListBox)
                 .child(
                     uniform_list("queue-rows", order.len(), move |range, _, cx| {
                         view.update(cx, |v, cx| {
@@ -464,6 +514,8 @@ impl Render for Entries {
             }))
             .on_action(cx.listener(|s, _: &MoveEntryUp, _, cx| s.move_selected(-1, cx)))
             .on_action(cx.listener(|s, _: &MoveEntryDown, _, cx| s.move_selected(1, cx)))
+            .on_action(cx.listener(|s, _: &SelectPreviousEntry, _, cx| s.select_adjacent(-1, cx)))
+            .on_action(cx.listener(|s, _: &SelectNextEntry, _, cx| s.select_adjacent(1, cx)))
             .child(body)
             .when(self.mode == Mode::Queue, |d| {
                 d.child(
@@ -526,7 +578,7 @@ mod tests {
             .map(|i| Track::file(std::path::PathBuf::from(format!("C:\\Music\\{i}.flac"))))
             .collect();
         let mut q = Queue::default();
-        q.replace(&tracks, current.unwrap_or(0));
+        q.replace(tracks.into_iter().collect(), current.unwrap_or(0));
         q.current = current;
         q
     }

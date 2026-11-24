@@ -1,6 +1,6 @@
 use crate::{
     library::{DiscContext, Track},
-    queue::{Queue, Repeat},
+    queue::{Queue, Repeat, Selection},
 };
 use anyhow::{Context, Result};
 use kira::{
@@ -68,12 +68,12 @@ impl Status {
 /// the one transport, so they can never disagree about what is playing.
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
-    Play(crate::library::TrackList, usize),
+    Play(Selection, usize),
     PlayDisc {
         tracks: crate::library::TrackList,
         from_chapter: Option<usize>,
     },
-    PlayList(crate::library::TrackList, bool),
+    PlayList(Selection, bool),
     Toggle,
     SetPlaying(bool),
     Stop,
@@ -92,10 +92,11 @@ pub enum Command {
     Step(i8),
     Volume(f32),
     Jump(u64),
-    PlayNext(crate::library::TrackList),
-    Enqueue(crate::library::TrackList),
+    PlayNext(Selection),
+    Enqueue(Selection),
     Remove(Vec<u64>),
-    Move(u64, usize),
+    MoveUpcoming(u64, Option<u64>),
+    ScheduleNext(u64),
     ContinueDisc(u64, crate::library::TrackList, DiscContext),
     ClearUpcoming,
     ClearHistory,
@@ -687,11 +688,7 @@ impl Engine {
             }
             return Ok(());
         }
-        let Some(index) = self
-            .queue
-            .current
-            .or((!self.queue.entries.is_empty()).then_some(0))
-        else {
+        let Some(index) = self.queue.current.or_else(|| self.queue.next_index(false)) else {
             return Ok(());
         };
         let position = if self.queue.current == Some(index)
@@ -749,21 +746,21 @@ impl Engine {
                     }
                 }
                 let i = from_chapter.unwrap_or(0);
-                self.queue.replace(&tracks, i);
+                self.queue.replace(tracks.into(), i);
                 for entry in Arc::make_mut(&mut self.queue.entries) {
                     entry.disc_context = DiscContext::Selected;
                 }
                 self.play(i, 0.)?;
             }
-            Command::PlayList(tracks, shuffle) => {
+            Command::PlayList(selection, shuffle) => {
                 self.queue.shuffle = shuffle;
                 // Shuffle the entire list before selecting the first occurrence.
-                self.queue
-                    .replace(&tracks, if shuffle { tracks.len() } else { 0 });
+                let start = if shuffle { selection.tracks.len() } else { 0 };
+                self.queue.replace(selection, start);
                 self.play(0, 0.)?;
             }
-            Command::Play(tracks, i) => {
-                self.queue.replace(&tracks, i);
+            Command::Play(selection, i) => {
+                self.queue.replace(selection, i);
                 self.play(i, 0.)?;
             }
             Command::Volume(v) => {
@@ -848,8 +845,12 @@ impl Engine {
                 self.queue.add(&tracks);
                 self.revalidate();
             }
-            Command::Move(id, to) => {
-                self.queue.move_entry(id, to);
+            Command::MoveUpcoming(id, before) => {
+                self.queue.move_upcoming(id, before);
+                self.revalidate();
+            }
+            Command::ScheduleNext(id) => {
+                self.queue.schedule_next(id);
                 self.revalidate();
             }
             Command::Remove(ids) => {

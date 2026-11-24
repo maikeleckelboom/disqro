@@ -422,6 +422,24 @@ impl Rows {
         }
     }
 
+    fn playlist_row_matches(
+        &self,
+        row: usize,
+        occurrence: crate::queue::PlaylistOccurrence,
+    ) -> Option<bool> {
+        let Contents::Library(p) = &self.data else {
+            return None;
+        };
+        let Scope::Playlist(playlist) = p.scope else {
+            return None;
+        };
+        Some(
+            playlist == occurrence.playlist
+                && self.sections.data_index(row).and_then(|i| p.keys.get(i))
+                    == Some(&occurrence.entry),
+        )
+    }
+
     fn row(&self, row: usize) -> Option<&Row> {
         match &self.data {
             Contents::Library(p) => p.cache.get(p.keys.get(self.sections.data_index(row)?)?),
@@ -789,15 +807,15 @@ pub fn queue_targets(
     catalog: &Entity<Catalog>,
     player: &Entity<Player>,
     targets: Targets,
-    command: impl FnOnce(TrackList) -> Command + 'static,
+    command: impl FnOnce(crate::queue::Selection) -> Command + 'static,
     cx: &mut App,
 ) {
-    let tracks = catalog.read(cx).tracks(targets, cx);
+    let selection = catalog.read(cx).queue_selection(targets, cx);
     let catalog = catalog.clone();
     let player = player.clone();
-    cx.spawn(async move |cx| match tracks.await {
-        Ok(tracks) if !tracks.is_empty() => {
-            player.update(cx, |p, cx| p.command(command(tracks), cx))
+    cx.spawn(async move |cx| match selection.await {
+        Ok(selection) if !selection.tracks.is_empty() => {
+            player.update(cx, |p, cx| p.command(command(selection), cx))
         }
         result => catalog.update(cx, |_, cx| {
             cx.emit(crate::catalog::CatalogEvent::Notice(
@@ -1469,9 +1487,30 @@ impl MusicTable {
         }
     }
 
-    fn is_playing(&self, t: &Track, cx: &App) -> bool {
-        let status = &self.player.read(cx).status;
-        status.playing && status.track.as_ref().is_some_and(|p| p.same_item(t))
+    pub(crate) fn contains_playlist_entry(
+        &self,
+        occurrence: crate::queue::PlaylistOccurrence,
+        track_id: Option<i64>,
+    ) -> bool {
+        let Contents::Library(p) = &self.rows.data else {
+            return false;
+        };
+        p.scope == Scope::Playlist(occurrence.playlist)
+            && p.keys
+                .iter()
+                .position(|&key| key == occurrence.entry)
+                .is_some_and(|index| p.playlist_tracks.get(index).copied() == track_id)
+    }
+
+    fn is_playing(&self, row: usize, t: &Track, cx: &App) -> bool {
+        let player = self.player.read(cx);
+        player.status.playing
+            && player.status.track.as_ref().is_some_and(|p| p.same_item(t))
+            && player
+                .playing_entry()
+                .and_then(|entry| entry.playlist_occurrence)
+                .and_then(|occurrence| self.rows.playlist_row_matches(row, occurrence))
+                .unwrap_or(true)
     }
     /// A stable element id for the cells of row `ix`.
     fn cell_id(&self, ix: usize) -> u64 {
@@ -1913,10 +1952,11 @@ impl TableDelegate for MusicTable {
         }
         let t = self.rows.track(row)?;
         let field = self.layout().columns[col].field;
-        if field == Field::Number && self.is_playing(t, cx) {
+        if field == Field::Number && self.is_playing(row, t, cx) {
             return Some(format!("Now playing · {}", field.value(t, self.mark(row, cx))).into());
         }
-        if field == Field::Title && !self.layout().has(Field::Number) && self.is_playing(t, cx) {
+        if field == Field::Title && !self.layout().has(Field::Number) && self.is_playing(row, t, cx)
+        {
             return Some(format!("{} · Now playing", t.title).into());
         }
         (!matches!(field, Field::Cover | Field::Favorite))
@@ -1957,7 +1997,7 @@ impl TableDelegate for MusicTable {
             && self.unreadable.contains(&t.source);
         let available = self.rows.row(row).is_none_or(|r| r.available) && !unreadable;
         let mark = self.mark(row, cx);
-        let playing = self.is_playing(&t, cx);
+        let playing = self.is_playing(row, &t, cx);
         let cell = cell.when(!available, |d| d.opacity(0.45));
         match f {
             Field::Number if playing => cell.child(playing_icon(cx)).into_any_element(),
@@ -2241,7 +2281,9 @@ impl TableDelegate for MusicTable {
         let (player, catalog) = (self.player.clone(), self.catalog.clone());
         let send = {
             let (player, catalog) = (player.clone(), catalog.clone());
-            move |targets: Targets, command: fn(TrackList) -> Command, cx: &mut App| {
+            move |targets: Targets,
+                  command: fn(crate::queue::Selection) -> Command,
+                  cx: &mut App| {
                 queue_targets(&catalog, &player, targets, command, cx)
             }
         };
@@ -2633,6 +2675,20 @@ mod tests {
         assert_eq!(rows.recording_key(&track, Some(41)), Some(RowKey::Key(12)));
         assert_eq!(rows.recording_key(&track, Some(12)), Some(RowKey::Key(11)));
         assert_eq!(rows.recording_key(&track, Some(13)), None);
+        let occurrence = crate::queue::PlaylistOccurrence {
+            playlist: 3,
+            entry: 13,
+        };
+        assert_eq!(rows.playlist_row_matches(1, occurrence), Some(false));
+        assert_eq!(rows.playlist_row_matches(2, occurrence), Some(true));
+        let from_another_playlist = crate::queue::PlaylistOccurrence {
+            playlist: 4,
+            ..occurrence
+        };
+        assert_eq!(
+            rows.playlist_row_matches(2, from_another_playlist),
+            Some(false)
+        );
     }
 
     #[test]

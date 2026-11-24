@@ -5,8 +5,95 @@
 //! editing a folder never changes it, and changing the queue never changes an
 //! album or a playlist. A CUE chapter is an entry like any other file.
 use crate::library::{DiscContext, Track};
+use crate::store::{EntryId, PlaylistId};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistOccurrence {
+    pub playlist: PlaylistId,
+    pub entry: EntryId,
+}
+
+/// An ordered activation or selection. Playlist keys travel alongside the
+/// tracks so library recordings keep their own identity.
+pub struct Selection {
+    pub tracks: crate::library::TrackList,
+    pub source: Option<String>,
+    playlist: Option<(PlaylistId, Vec<EntryId>)>,
+}
+
+impl Selection {
+    pub fn from_rows(
+        scope: crate::store::Scope,
+        rows: impl IntoIterator<Item = crate::store::Row>,
+    ) -> Self {
+        let mut tracks = Vec::new();
+        let mut playlist = match scope {
+            crate::store::Scope::Playlist(id) => Some((id, Vec::new())),
+            _ => None,
+        };
+        for row in rows {
+            tracks.push(row.track);
+            if let Some((_, keys)) = &mut playlist {
+                keys.push(row.key);
+            }
+        }
+        Self::from_indexed(tracks.into(), playlist)
+    }
+
+    pub fn from_indexed(
+        tracks: crate::library::TrackList,
+        playlist: Option<(PlaylistId, Vec<EntryId>)>,
+    ) -> Self {
+        assert!(
+            playlist
+                .as_ref()
+                .is_none_or(|(_, keys)| keys.len() == tracks.len())
+        );
+        Self {
+            tracks,
+            source: None,
+            playlist,
+        }
+    }
+
+    pub fn named(mut self, source: Option<String>) -> Self {
+        self.source = source;
+        self
+    }
+
+    fn items(&self) -> impl Iterator<Item = (Arc<Track>, Option<PlaylistOccurrence>)> + '_ {
+        self.tracks.iter().enumerate().map(|(i, track)| {
+            (
+                track.clone(),
+                self.playlist
+                    .as_ref()
+                    .map(|(playlist, entries)| PlaylistOccurrence {
+                        playlist: *playlist,
+                        entry: entries[i],
+                    }),
+            )
+        })
+    }
+}
+
+impl From<crate::library::TrackList> for Selection {
+    fn from(tracks: crate::library::TrackList) -> Self {
+        Self {
+            tracks,
+            source: None,
+            playlist: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<T: Into<Arc<Track>>> FromIterator<T> for Selection {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        crate::library::TrackList::from_iter(iter.into_iter().map(Into::into)).into()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -14,6 +101,8 @@ pub struct Entry {
     pub track: Arc<Track>,
     #[serde(default)]
     pub disc_context: DiscContext,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playlist_occurrence: Option<PlaylistOccurrence>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,8 +128,14 @@ pub struct Queue {
     /// Entries in play order. Those before `current` are this session's history.
     pub entries: Arc<Vec<Entry>>,
     pub current: Option<usize>,
+    /// History can remain when the last current entry is removed.
+    #[serde(skip_serializing_if = "is_zero")]
+    idle_history: usize,
     pub shuffle: bool,
     pub repeat: Repeat,
+    /// The list that started this sequence. Manual additions can mix sources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The order of upcoming entries before shuffle was switched on.
     unshuffled: Arc<Vec<u64>>,
     next_id: u64,
@@ -48,11 +143,20 @@ pub struct Queue {
     pub revision: u64,
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 impl Queue {
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.current.is_none_or(|i| i < self.entries.len()),
             "Queue cursor is outside its entries"
+        );
+        anyhow::ensure!(
+            self.idle_history <= self.entries.len()
+                && (self.current.is_none() || self.idle_history == 0),
+            "Queue history is outside its entries"
         );
         let mut ids = std::collections::HashSet::new();
         anyhow::ensure!(
@@ -81,7 +185,17 @@ impl Queue {
             id: self.next_id,
             track: track.into(),
             disc_context: DiscContext::Inferred,
+            playlist_occurrence: None,
         }
+    }
+    fn selection_entries(&mut self, selection: &Selection) -> Vec<Entry> {
+        selection
+            .items()
+            .map(|(track, playlist_occurrence)| Entry {
+                playlist_occurrence,
+                ..self.entry(track)
+            })
+            .collect()
     }
     fn touch(&mut self) {
         self.revision += 1;
@@ -94,20 +208,22 @@ impl Queue {
     }
     /// The first entry that has not played yet.
     fn upcoming_start(&self) -> usize {
-        self.current.map_or(0, |c| c + 1)
+        self.current.map_or(self.idle_history, |c| c + 1)
     }
     pub fn upcoming(&self) -> &[Entry] {
         &self.entries[self.upcoming_start().min(self.entries.len())..]
     }
     pub fn history(&self) -> &[Entry] {
-        &self.entries[..self.current.unwrap_or(0).min(self.entries.len())]
+        &self.entries[..self.current.unwrap_or(self.idle_history)]
     }
 
     /// Starts a new queue from a table, beginning at `start`. The tracks before
     /// it become history, so Previous moves back through the album.
-    pub fn replace(&mut self, tracks: &[impl Clone + Into<Arc<Track>>], start: usize) {
-        self.entries = Arc::new(tracks.iter().cloned().map(|t| self.entry(t)).collect());
+    pub fn replace(&mut self, selection: Selection, start: usize) {
+        self.entries = Arc::new(self.selection_entries(&selection));
+        self.source = selection.source;
         self.current = (start < self.entries.len()).then_some(start);
+        self.idle_history = 0;
         self.unshuffled = Arc::default();
         if self.shuffle {
             self.shuffle_upcoming();
@@ -115,9 +231,12 @@ impl Queue {
         self.touch();
     }
     /// Inserts tracks right after the current entry, in the order given.
-    pub fn play_next(&mut self, tracks: &[impl Clone + Into<Arc<Track>>]) -> Vec<u64> {
+    pub fn play_next(&mut self, selection: &Selection) -> Vec<u64> {
+        let new = self.selection_entries(selection);
+        self.insert_next(new)
+    }
+    fn insert_next(&mut self, new: Vec<Entry>) -> Vec<u64> {
         let at = self.upcoming_start().min(self.entries.len());
-        let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
         Arc::make_mut(&mut self.entries).splice(at..at, new);
         if self.shuffle {
@@ -126,8 +245,8 @@ impl Queue {
         self.touch();
         ids
     }
-    pub fn add(&mut self, tracks: &[impl Clone + Into<Arc<Track>>]) -> Vec<u64> {
-        let new: Vec<Entry> = tracks.iter().cloned().map(|t| self.entry(t)).collect();
+    pub fn add(&mut self, selection: &Selection) -> Vec<u64> {
+        let new = self.selection_entries(selection);
         let ids = new.iter().map(|e| e.id).collect::<Vec<_>>();
         Arc::make_mut(&mut self.entries).extend(new);
         if self.shuffle {
@@ -207,33 +326,77 @@ impl Queue {
     /// the entry that followed it then becomes current.
     pub fn remove(&mut self, ids: &[u64]) -> bool {
         let removed_current = self.current_entry().is_some_and(|e| ids.contains(&e.id));
-        let current = self.current.map(|c| {
-            c - self.entries[..c]
-                .iter()
-                .filter(|e| ids.contains(&e.id))
-                .count()
-        });
+        let history = self.history();
+        let remaining_history =
+            history.len() - history.iter().filter(|e| ids.contains(&e.id)).count();
         Arc::make_mut(&mut self.entries).retain(|e| !ids.contains(&e.id));
         // When the current entry went, the one that followed slid into its slot.
-        self.current = current.filter(|&c| c < self.entries.len());
+        self.current = self
+            .current
+            .and(Some(remaining_history))
+            .filter(|&c| c < self.entries.len());
+        self.idle_history = if self.current.is_none() {
+            remaining_history
+        } else {
+            0
+        };
         Arc::make_mut(&mut self.unshuffled).retain(|id| !ids.contains(id));
         self.touch();
         removed_current
     }
-    /// Moves an entry to the position `to` in the full list (history included).
-    pub fn move_entry(&mut self, id: u64, to: usize) {
+    /// Reorders upcoming entries without crossing the current recording.
+    pub fn move_upcoming(&mut self, id: u64, before: Option<u64>) {
+        let start = self.upcoming_start();
+        let to = match before {
+            Some(before) => {
+                let Some(to) = self.index_of(before) else {
+                    return;
+                };
+                to
+            }
+            None => self.entries.len(),
+        };
+        if to >= start
+            && let Some(from) = self.index_of(id).filter(|&from| from >= start)
+        {
+            self.move_entry(from, to);
+        }
+    }
+
+    /// Promote an upcoming entry or schedule a fresh occurrence from History.
+    pub fn schedule_next(&mut self, id: u64) {
         let Some(from) = self.index_of(id) else {
             return;
         };
-        let to = to.min(self.entries.len());
+        let start = self.upcoming_start();
+        if Some(from) == self.current {
+            return;
+        }
+        if from < start {
+            let previous = self.entries[from].clone();
+            let entry = self.entry(previous.track.clone());
+            self.insert_next(vec![Entry {
+                id: entry.id,
+                ..previous
+            }]);
+        } else {
+            self.move_entry(from, start);
+            if self.shuffle {
+                let order = Arc::make_mut(&mut self.unshuffled);
+                order.retain(|&entry| entry != id);
+                order.insert(0, id);
+                self.touch();
+            }
+        }
+    }
+
+    fn move_entry(&mut self, from: usize, to: usize) {
         if to == from || to == from + 1 {
             return;
         }
-        let current_id = self.current_entry().map(|e| e.id);
         let entry = Arc::make_mut(&mut self.entries).remove(from);
         let to = if to > from { to - 1 } else { to };
         Arc::make_mut(&mut self.entries).insert(to, entry);
-        self.current = current_id.and_then(|id| self.index_of(id));
         self.touch();
     }
     pub fn clear_upcoming(&mut self) {
@@ -243,15 +406,22 @@ impl Queue {
         self.touch();
     }
     pub fn clear_history(&mut self) {
-        if let Some(c) = self.current {
-            Arc::make_mut(&mut self.entries).drain(..c);
-            self.current = Some(0);
+        let history = self.history().len();
+        if history != 0 {
+            Arc::make_mut(&mut self.entries).drain(..history);
+            self.current = self.current.map(|_| 0);
+            self.idle_history = 0;
             self.touch();
         }
     }
     pub fn set_current(&mut self, index: Option<usize>) {
         let index = index.filter(|&i| i < self.entries.len());
         if self.current != index {
+            self.idle_history = if index.is_none() {
+                self.current.unwrap_or(0)
+            } else {
+                0
+            };
             self.current = index;
             self.touch();
         }
@@ -295,7 +465,7 @@ impl Queue {
             return None;
         }
         let Some(c) = self.current else {
-            return Some(0);
+            return (self.idle_history < self.entries.len()).then_some(self.idle_history);
         };
         if ended && self.repeat == Repeat::One {
             return Some(c.min(self.entries.len() - 1));
@@ -346,7 +516,11 @@ mod tests {
     #[test]
     fn mixed_cue_chapters_and_files_keep_their_identity() {
         let mut q = Queue::default();
-        q.add(&[chapter("A", 7), file("single"), chapter("B", 11)]);
+        q.add(
+            &[chapter("A", 7), file("single"), chapter("B", 11)]
+                .into_iter()
+                .collect(),
+        );
         assert_eq!(q.next_index(false), Some(0));
         q.set_current(Some(0));
         assert_eq!(q.next_index(false), Some(1));
@@ -361,9 +535,9 @@ mod tests {
     #[test]
     fn play_next_and_add_respect_the_current_entry() {
         let mut q = Queue::default();
-        q.replace(&[file("1"), file("2"), file("3")], 1);
-        q.play_next(&[file("x"), file("y")]);
-        q.add(&[file("z")]);
+        q.replace([file("1"), file("2"), file("3")].into_iter().collect(), 1);
+        q.play_next(&[file("x"), file("y")].into_iter().collect());
+        q.add(&[file("z")].into_iter().collect());
         assert_eq!(titles(&q), ["1", "2", "x", "y", "3", "z"]);
         assert_eq!(q.current, Some(1));
         assert_eq!(q.history().len(), 1);
@@ -373,29 +547,89 @@ mod tests {
     #[test]
     fn reordering_removing_and_clearing() {
         let mut q = Queue::default();
-        q.replace(&[file("1"), file("2"), file("3"), file("4")], 1);
+        q.replace(
+            [file("1"), file("2"), file("3"), file("4")]
+                .into_iter()
+                .collect(),
+            1,
+        );
         let id4 = q.entries[3].id;
-        q.move_entry(id4, 2);
-        assert_eq!(titles(&q), ["1", "2", "4", "3"]);
-        // Moving history around keeps the same entry current.
-        let id1 = q.entries[0].id;
-        q.move_entry(id1, 4);
-        assert_eq!(titles(&q), ["2", "4", "3", "1"]);
-        assert_eq!(q.current_entry().unwrap().track.title, "2");
         let id3 = q.entries[2].id;
+        let current = q.entries[1].id;
+        q.move_upcoming(id4, Some(current));
+        q.move_upcoming(current, None);
+        assert_eq!(titles(&q), ["1", "2", "3", "4"]);
+        q.move_upcoming(id4, Some(id3));
+        assert_eq!(titles(&q), ["1", "2", "4", "3"]);
+        let id1 = q.entries[0].id;
+        q.move_upcoming(id1, None);
+        assert_eq!(titles(&q), ["1", "2", "4", "3"]);
+        assert_eq!(q.current_entry().unwrap().track.title, "2");
         assert!(!q.remove(&[id3]));
-        assert_eq!(titles(&q), ["2", "4", "1"]);
-        let current = q.current_entry().unwrap().id;
+        assert_eq!(titles(&q), ["1", "2", "4"]);
         assert!(q.remove(&[current]));
         assert_eq!(q.current_entry().unwrap().track.title, "4");
         q.clear_upcoming();
-        assert_eq!(titles(&q), ["4"]);
+        assert_eq!(titles(&q), ["1", "4"]);
+    }
+
+    #[test]
+    fn removing_the_last_current_entry_keeps_history_out_of_upcoming() {
+        let mut q = Queue::default();
+        q.replace([file("played"), file("current")].into_iter().collect(), 1);
+        let current = q.current_entry().unwrap().id;
+        assert!(q.remove(&[current]));
+        let mut q: Queue = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        q.validate().unwrap();
+        assert_eq!(q.history()[0].track.title, "played");
+        assert!(q.upcoming().is_empty());
+        assert_eq!(q.next_index(false), None);
+        q.schedule_next(q.history()[0].id);
+        assert_eq!(q.history().len(), 1);
+        assert_eq!(q.next_index(false), Some(1));
+        q.clear_history();
+        assert_eq!(q.next_index(false), Some(0));
+        assert_eq!(titles(&q), ["played"]);
+    }
+
+    #[test]
+    fn replaying_history_next_copies_an_occurrence_and_keeps_it_first_after_shuffle() {
+        let recording = Arc::new(file("repeat"));
+        let selection = Selection::from_indexed(
+            [recording.clone(), Arc::new(file("current")), recording].into(),
+            Some((7, vec![40, 41, 42])),
+        )
+        .named(Some("Repeats".into()));
+        let mut q = Queue::default();
+        q.replace(selection, 1);
+        let original = q.history()[0].clone();
+        let current = q.current_entry().unwrap().id;
+        let upcoming = q.upcoming()[0].id;
+        q.set_shuffle(true);
+        q.schedule_next(original.id);
+        assert_eq!(q.history(), std::slice::from_ref(&original));
+        assert_ne!(q.upcoming()[0].id, original.id);
+        assert_eq!(
+            q.upcoming()[0].playlist_occurrence,
+            original.playlist_occurrence
+        );
+        q.schedule_next(upcoming);
+        q.set_shuffle(false);
+        assert_eq!(q.upcoming()[0].id, upcoming);
+        assert_eq!(q.current_entry().unwrap().id, current);
+        let restored: Queue = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(restored.entries, q.entries);
+        assert_eq!(restored.source.as_deref(), Some("Repeats"));
+        assert_eq!(
+            restored.upcoming()[0].playlist_occurrence.unwrap().entry,
+            42
+        );
     }
 
     #[test]
     fn repeat_modes() {
         let mut q = Queue::default();
-        q.replace(&[file("1"), file("2"), file("3")], 2);
+        q.replace([file("1"), file("2"), file("3")].into_iter().collect(), 2);
         assert_eq!(q.next_index(true), None);
         q.set_repeat(Repeat::All);
         assert_eq!(q.next_index(true), Some(0));
@@ -418,7 +652,7 @@ mod tests {
     fn shuffle_only_reorders_upcoming_and_restores() {
         let mut q = Queue::default();
         let tracks: Vec<Track> = (0..30).map(|i| file(&i.to_string())).collect();
-        q.replace(&tracks, 4);
+        q.replace(tracks.into_iter().collect(), 4);
         let before = titles(&q);
         q.set_shuffle(true);
         assert_eq!(titles(&q)[..5], before[..5]);
@@ -427,7 +661,7 @@ mod tests {
         let mut expected = before.clone();
         expected.sort();
         assert_eq!(sorted, expected);
-        q.add(&[file("late")]);
+        q.add(&[file("late")].into_iter().collect());
         q.set_shuffle(false);
         let mut restored = before.clone();
         restored.push("late".into());
@@ -439,9 +673,13 @@ mod tests {
         let cd: Vec<_> = (1..=4).map(|n| Arc::new(chapter("A", n))).collect();
         let extra = Arc::new(file("extra"));
         let mut q = Queue::default();
-        q.replace(&cd[..2], 1);
+        q.replace(cd[..2].iter().cloned().collect(), 1);
         let current = q.current_entry().unwrap().id;
-        let ids = q.add(&[extra.clone(), cd[3].clone(), extra, cd[3].clone()]);
+        let ids = q.add(
+            &[extra.clone(), cd[3].clone(), extra, cd[3].clone()]
+                .into_iter()
+                .collect(),
+        );
         let history = q.history().to_vec();
         q.set_repeat(Repeat::One);
         assert!(q.continue_disc(current, &cd, DiscContext::Inferred));
@@ -471,14 +709,14 @@ mod tests {
     #[test]
     fn survives_a_round_trip() {
         let mut q = Queue::default();
-        q.replace(&[chapter("A", 1), file("2")], 0);
+        q.replace([chapter("A", 1), file("2")].into_iter().collect(), 0);
         q.set_repeat(Repeat::All);
         let json = serde_json::to_string(&q).unwrap();
         let back: Queue = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries, q.entries);
         assert_eq!((back.current, back.repeat), (Some(0), Repeat::All));
         let mut back = back;
-        let ids = back.add(&[file("3")]);
+        let ids = back.add(&[file("3")].into_iter().collect());
         assert!(
             ids[0] > q.entries[1].id,
             "identities stay unique after restore"

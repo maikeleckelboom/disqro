@@ -8,6 +8,7 @@
 use crate::{
     cache::Cache,
     library::{DiscContext, Track, TrackList},
+    queue::Selection,
     store::{
         self, Handle, Locator, Mark, PlaylistId, Progress, RootId, Row, Scope, Store, TrackId,
     },
@@ -78,11 +79,15 @@ impl ListeningList {
         ticket: store::Ticket,
         generation: u64,
         offline: HashSet<RootId>,
-    ) -> anyhow::Result<(TrackList, usize, usize)> {
+    ) -> anyhow::Result<(Selection, usize, usize)> {
         let (scope, keys) = store
             .query(&ticket, generation, move |s| self.keys(s))
             .await?;
         let mut tracks = Vec::with_capacity(keys.len());
+        let mut playlist = match scope {
+            Scope::Playlist(id) => Some((id, Vec::with_capacity(keys.len()))),
+            _ => None,
+        };
         let mut start = None;
         for chunk in keys.chunks(500) {
             let batch = chunk.to_vec();
@@ -96,6 +101,9 @@ impl ListeningList {
                     if Some(row.key) == chosen {
                         start = Some(tracks.len());
                     }
+                    if let Some((_, entries)) = &mut playlist {
+                        entries.push(row.key);
+                    }
                     tracks.push(row.track);
                 }
             }
@@ -107,7 +115,35 @@ impl ListeningList {
         };
         anyhow::ensure!(!tracks.is_empty(), "No available tracks in this list.");
         let skipped = keys.len() - tracks.len();
-        Ok((tracks.into(), start, skipped))
+        Ok((
+            Selection::from_indexed(tracks.into(), playlist),
+            start,
+            skipped,
+        ))
+    }
+
+    fn source(&self, catalog: &Catalog) -> Option<String> {
+        let scope = match self {
+            Self::Displayed(scope, _) | Self::Disc(scope) => *scope,
+            Self::Collection(root, _) => Scope::Library(*root),
+            Self::Playlist(id) => Scope::Playlist(*id),
+            Self::Search(query) => return Some(format!("search for “{query}”")),
+        };
+        match scope {
+            Scope::Liked => Some("Liked Tracks".into()),
+            Scope::Playlist(id) => catalog
+                .playlists
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone()),
+            Scope::Library(None) => Some("All Music".into()),
+            Scope::Library(Some(id)) => catalog
+                .collections
+                .iter()
+                .find(|c| c.root.id == id)
+                .map(|c| c.root.name.clone()),
+            Scope::Album(_) | Scope::Release(_) => None,
+        }
     }
 
     fn keys(self, store: &Store) -> anyhow::Result<(Scope, Arc<[i64]>)> {
@@ -574,13 +610,16 @@ impl Catalog {
         ticket: store::Ticket,
         generation: u64,
         cx: &App,
-    ) -> impl Future<Output = anyhow::Result<(TrackList, usize, usize)>> + use<> {
+    ) -> impl Future<Output = anyhow::Result<(Selection, usize, usize)>> + use<> {
         let handle = self.handle();
         let offline = self.offline_roots();
+        let source = list.source(self);
         cx.background_spawn(async move {
             let store = handle.ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
-            list.resolve(store, chosen, ticket, generation, offline)
-                .await
+            let (selection, start, skipped) = list
+                .resolve(store, chosen, ticket, generation, offline)
+                .await?;
+            Ok((selection.named(source), start, skipped))
         })
     }
 
@@ -599,27 +638,28 @@ impl Catalog {
             && files.available(row)
     }
 
-    pub fn tracks(
+    pub fn queue_selection(
         &self,
         targets: Targets,
         cx: &App,
-    ) -> impl Future<Output = anyhow::Result<TrackList>> + use<> {
+    ) -> impl Future<Output = anyhow::Result<Selection>> + use<> {
         let (tracks, pending) = match targets {
-            Targets::Tracks(t) => (t, None),
+            Targets::Tracks(tracks) => (tracks, None),
             Targets::Keys(scope, keys) => (
-                vec![],
-                Some(self.rows(scope, keys, &store::Ticket::default(), 0, cx)),
+                Vec::new(),
+                Some((
+                    scope,
+                    self.rows(scope, keys, &store::Ticket::default(), 0, cx),
+                )),
             ),
         };
         async move {
             match pending {
-                None => Ok(tracks.into()),
-                Some(rows) => Ok(rows
-                    .await?
-                    .into_iter()
-                    .filter(|r| r.available)
-                    .map(|r| r.track)
-                    .collect()),
+                None => Ok(TrackList::from(tracks).into()),
+                Some((scope, rows)) => Ok(Selection::from_rows(
+                    scope,
+                    rows.await?.into_iter().filter(|r| r.available),
+                )),
             }
         }
     }
@@ -680,8 +720,11 @@ impl Catalog {
             .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
         let keys = store.call(move |s| s.disc_keys(scope)).await?;
         catalog
-            .read_with(cx, |c, cx| c.tracks(Targets::Keys(scope, keys), cx))
+            .read_with(cx, |c, cx| {
+                c.queue_selection(Targets::Keys(scope, keys), cx)
+            })
             .await
+            .map(|selection| selection.tracks)
     }
     pub fn handle(&self) -> Option<Handle> {
         self.store.clone()
