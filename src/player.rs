@@ -67,6 +67,7 @@ impl Render for LevelDrag {
 }
 
 pub struct Player {
+    pub spectra: crate::spectrum_worker::Hub,
     pub can_start: bool,
     pub play_request: crate::store::Ticket,
     transport: Transport,
@@ -127,6 +128,7 @@ impl Player {
         .detach();
         Self {
             can_start: false,
+            spectra: crate::spectrum_worker::Hub::new(transport.signal.pcm()),
             play_request: Default::default(),
             transport,
             meter,

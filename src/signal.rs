@@ -18,6 +18,7 @@ pub struct SignalMonitor(Arc<Shared>);
 
 #[derive(Default)]
 struct Shared {
+    pcm: Arc<crate::capture::Capture>,
     readers: AtomicUsize,
     epoch: AtomicU64,
     latest: Publication,
@@ -72,14 +73,19 @@ impl Publication {
 impl SignalMonitor {
     pub fn subscribe(&self) -> LevelReader {
         if self.0.readers.fetch_add(1, SeqCst) == 0 {
-            self.reset();
+            self.0.epoch.fetch_add(1, SeqCst);
         }
         LevelReader(self.0.clone())
     }
 
-    /// Start a fresh measurement for a replacement voice or first subscriber.
+    /// Invalidate both observations when the transport replaces a voice.
     pub fn reset(&self) {
         self.0.epoch.fetch_add(1, SeqCst);
+        self.0.pcm.reset();
+    }
+
+    pub fn pcm(&self) -> Arc<crate::capture::Capture> {
+        self.0.pcm.clone()
     }
 }
 
@@ -104,6 +110,7 @@ impl EffectBuilder for SignalMonitor {
     fn build(self) -> (Box<dyn Effect>, ()) {
         (
             Box::new(SignalTap {
+                writer: self.0.pcm.writer(),
                 shared: self.0,
                 rate: 0,
                 epoch: 0,
@@ -115,6 +122,7 @@ impl EffectBuilder for SignalMonitor {
 }
 
 struct SignalTap {
+    writer: crate::capture::Writer,
     shared: Arc<Shared>,
     rate: u32,
     epoch: u64,
@@ -126,6 +134,7 @@ impl Effect for SignalTap {
         self.on_change_sample_rate(rate);
     }
     fn on_change_sample_rate(&mut self, rate: u32) {
+        self.shared.pcm.reset();
         self.rate = rate;
         self.epoch = self.shared.epoch.fetch_add(1, SeqCst).wrapping_add(1);
         self.meter = Measurement::new(rate);
@@ -137,8 +146,9 @@ impl Effect for SignalTap {
 }
 
 impl SignalTap {
-    // Only this boundary sees Kira's frames. Future reductions receive a shared slice.
+    // Both observers borrow the same immutable mix block.
     fn observe(&mut self, input: &[Frame]) {
+        self.writer.observe(&self.shared.pcm, self.rate, input);
         if self.shared.readers.load(Relaxed) == 0 {
             return;
         }

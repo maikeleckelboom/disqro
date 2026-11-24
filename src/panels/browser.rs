@@ -613,6 +613,10 @@ impl Render for Browser {
                 // Keep the outermost header grips clear of the dock splitters.
                 .mx(px(4.))
                 .on_prepaint(move |bounds, _, cx| {
+                    if let Some(d) = crate::diagnostics::get() {
+                        d.browser_prepaints
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     fit.update(cx, |t, cx| {
                         crate::table::MusicTable::fit(t, f32::from(bounds.size.width).floor(), cx)
                     });

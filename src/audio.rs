@@ -339,6 +339,25 @@ struct Engine {
     volume: f32,
     status: Status,
 }
+static SILENT_QUALIFICATION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+pub fn silent_qualification() -> bool {
+    SILENT_QUALIFICATION.get().is_some()
+}
+
+pub fn qualify_silently() {
+    SILENT_QUALIFICATION.get_or_init(|| ());
+}
+
+fn output_track(signal: crate::signal::SignalMonitor, silent: bool) -> MainTrackBuilder {
+    let track = MainTrackBuilder::new().with_effect(signal);
+    if silent {
+        track.volume(Decibels::SILENCE)
+    } else {
+        track
+    }
+}
+
 fn db(volume: f32) -> Decibels {
     if volume <= 0. {
         Decibels::SILENCE
@@ -443,7 +462,10 @@ impl Engine {
         if self.device.is_none() {
             self.device = Some(
                 AudioManager::<DefaultBackend>::new(AudioManagerSettings {
-                    main_track_builder: MainTrackBuilder::new().with_effect(self.signal.clone()),
+                    main_track_builder: output_track(
+                        self.signal.clone(),
+                        cfg!(test) || silent_qualification(),
+                    ),
                     ..Default::default()
                 })
                 .context("Windows audio output is unavailable")?,

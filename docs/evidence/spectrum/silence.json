@@ -1,0 +1,35 @@
+[
+  {
+    "from_ms": 2000,
+    "to_ms": 4000,
+    "callbacks": 196,
+    "capture_frames": 96000,
+    "fft_pairs": 60,
+    "spectrum_updates": 60,
+    "spectrum_paints": 60,
+    "decode_errors": 0,
+    "device_errors": 0
+  },
+  {
+    "from_ms": 9500,
+    "to_ms": 13500,
+    "callbacks": 402,
+    "capture_frames": 192000,
+    "fft_pairs": 0,
+    "spectrum_updates": 0,
+    "spectrum_paints": 0,
+    "decode_errors": 0,
+    "device_errors": 0
+  },
+  {
+    "from_ms": 16000,
+    "to_ms": 18000,
+    "callbacks": 201,
+    "capture_frames": 96000,
+    "fft_pairs": 60,
+    "spectrum_updates": 60,
+    "spectrum_paints": 60,
+    "decode_errors": 0,
+    "device_errors": 0
+  }
+]

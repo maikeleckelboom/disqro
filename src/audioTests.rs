@@ -45,6 +45,15 @@ fn read_all(dec: &mut Recording) -> Vec<Frame> {
 
 #[test]
 fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
+    check_chapter_render(false);
+}
+
+#[test]
+fn qualification_tap_reads_full_level_while_every_output_sample_is_zero() {
+    check_chapter_render(true);
+}
+
+fn check_chapter_render(silent: bool) {
     use kira::backend::{Backend, Renderer};
     use std::time::Instant;
 
@@ -74,7 +83,7 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
     let monitor = crate::signal::SignalMonitor::default();
     let reader = monitor.subscribe();
     let mut output = AudioManager::<Capture>::new(AudioManagerSettings {
-        main_track_builder: MainTrackBuilder::new().with_effect(monitor),
+        main_track_builder: output_track(monitor, silent),
         ..Default::default()
     })
     .unwrap();
@@ -100,6 +109,10 @@ fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
             .iter()
             .all(|peak| *peak > 0.35)
     );
+    if silent {
+        assert!(frames.iter().all(|s| *s == [0., 0.]));
+        return;
+    }
     let start = frames.iter().position(|s| s[0] != 0.).unwrap();
     let boundary = disc_frame(tracks[1].disc.as_ref().unwrap().start, 48000);
     for i in boundary - 512..boundary + 512 {
@@ -284,15 +297,24 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
         ..Default::default()
     };
     let reader = e.signal.subscribe();
+    let pcm = e.signal.pcm();
+    let _demand = pcm.subscribe();
     e.command(Command::Play(chapters, 0)).unwrap();
     let audible = |_: &Engine, levels: Levels| levels.rms.iter().all(|v| *v > 0.015);
     let silent = |_: &Engine, levels: Levels| levels.peak == [0.; 2];
     until(&mut e, &reader, audible);
     let epoch = reader.epoch();
+    let pcm_epoch = pcm.epoch();
     until(&mut e, &reader, |e, levels| {
         e.chapter == 1 && audible(e, levels)
     });
     assert_eq!(reader.epoch(), epoch, "same decoder/voice across the join");
+    assert_eq!(pcm.epoch(), pcm_epoch);
+    let mut observed = false;
+    pcm.drain(|b| {
+        observed |= b.epoch == pcm_epoch && b.frames.iter().any(|f| f.left != 0. && f.right != 0.);
+    });
+    assert!(observed);
     e.command(Command::Volume(0.)).unwrap();
     until(&mut e, &reader, silent);
     e.command(Command::Volume(0.125)).unwrap();
@@ -306,6 +328,7 @@ fn output_levels_follow_transport_and_contiguous_chapters() {
     }
     until(&mut e, &reader, audible);
     assert!(e.status.position >= 0.2 * e.status.duration - 0.01);
+    assert_ne!(pcm.epoch(), pcm_epoch);
     e.command(Command::Stop).unwrap();
     until(&mut e, &reader, silent);
 
@@ -375,6 +398,8 @@ fn sustained_output_observation() {
     })
     .unwrap();
     let reader = signal.subscribe();
+    let analyzer = crate::spectrum_worker::Hub::new(signal.pcm());
+    let (_spectrum, readings) = analyzer.subscribe(Default::default()).unwrap();
     let mut engine = Engine {
         signal,
         device: Some(device),
@@ -385,6 +410,8 @@ fn sustained_output_observation() {
     engine.command(Command::Play(tracks, 0)).unwrap();
     let epoch = reader.epoch();
     let mut audible = 0;
+    let mut spectra = 0;
+    let mut last_spectrum = Instant::now();
     let mut peak = [0f32; 2];
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(600) {
@@ -396,6 +423,26 @@ fn sustained_output_observation() {
             epoch,
             "the source must be one continuous voice"
         );
+        if let Ok(Some(r)) = readings.try_recv() {
+            assert_eq!(r.epoch, analyzer.capture.epoch());
+            assert!(r.levels.iter().all(|level| level.is_finite()));
+            if r.stereo.energy.iter().any(|power| *power > 0.) {
+                spectra += 1;
+            }
+            last_spectrum = Instant::now();
+        }
+        // Settled silence intentionally suppresses publication.
+        if reader
+            .latest()
+            .is_some_and(|l| l.rms[0].max(l.rms[1]) > 0.001)
+        {
+            assert!(
+                last_spectrum.elapsed() < Duration::from_secs(2),
+                "stale spectrum during playback"
+            );
+        } else {
+            last_spectrum = Instant::now();
+        }
         if let Some(levels) = reader.latest() {
             audible += usize::from(levels.rms.iter().all(|v| *v > 0.));
             for (maximum, level) in peak.iter_mut().zip(levels.peak) {
@@ -404,8 +451,9 @@ fn sustained_output_observation() {
         }
     }
     assert!(audible > 0, "no stereo signal observed");
+    assert!(spectra > 0, "no spectrum observed");
     println!(
-        "Elapsed {:.3}s, non-silent reads {audible}, sample peaks {peak:?}, chapter {}",
+        "Elapsed {:.3}s, non-silent reads {audible}, spectra {spectra}, sample peaks {peak:?}, chapter {}",
         started.elapsed().as_secs_f64(),
         engine.chapter + 1
     );

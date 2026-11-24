@@ -17,7 +17,7 @@ The pinned Kira implementation defines the ordering. The two-voice test adds 0.8
 
 ## Measurement and publication
 
-At the Kira effect boundary, `SignalTap::observe` accepts an immutable frame slice. It reduces samples directly into fixed-size arrays. The callback performs a single atomic subscriber-count load when idle. An active observer never queues PCM, requests a redraw, waits for a reader, allocates, logs or accesses files.
+At the Kira effect boundary, `SignalTap::observe` accepts an immutable frame slice. The levels reducer tests its own atomic subscriber count and accumulates into fixed-size arrays. The stereo capture writer tests a second, independent subscriber count. An idle tap skips both sample loops.
 
 At each output rate the bucket size is the nearest whole frame to 25 ms. Four consecutive buckets give approximately 100 ms of RMS and sample peak, updated every bucket. At 48 kHz that is exactly 4,800 frames with a 1,200-frame hop. At 44.1 kHz it is 4,412 frames with a 1,103-frame hop. Startup uses the available completed buckets and their actual frame count. An incomplete bucket carries across callbacks. A new voice, a new output rate or a first subscriber starts fresh. Contiguous CUE chapters keep the same voice and measurement history.
 
@@ -29,7 +29,7 @@ The meter uses the existing visible transport updates (up to 25 Hz) and repaints
 
 ## Extending the tap
 
-An additional level display can hold its own `SignalMonitor::subscribe()` reader and call `latest()` at its own cadence. Dropping it releases demand. For a new measurement, add a bounded reducer at the immutable slice boundary in [signal.rs](../src/signal.rs). Keep signal math independent of the engine adapter, as in [levels.rs](../src/levels.rs). For a spectrum or scope that actually needs samples, gate capture on that consumer’s demand and preallocate a bounded handoff. The producer must be able to drop data immediately when the consumer falls behind. Compute transforms and draw off the audio thread.
+An additional level display can hold its own `SignalMonitor::subscribe()` reader and call `latest()` at its own cadence. Dropping it releases demand. Measurements that require PCM can use the existing bounded stereo capture and analysis worker. Spectrum panels share this worker and own their display settings. [Capture, calibration and presentation](realtime-spectrum.md)
 
 ## Reliability observations
 

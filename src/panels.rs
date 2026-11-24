@@ -20,10 +20,12 @@
 //! [`PaneContent`] implementation, plus one line in [`TYPES`]. The workspace
 //! creates, places, closes, saves and restores it without knowing the type.
 pub mod browser;
+mod instruments;
 pub mod library;
 pub mod locations;
 pub mod nav;
 pub mod queue;
+pub mod spectrum;
 
 use crate::{
     browser::{Browser, Location},
@@ -112,6 +114,9 @@ pub static TYPES: &[&PanelType] = &[
     &locations::TYPE,
     &queue::QUEUE,
     &queue::HISTORY,
+    &spectrum::TYPE,
+    &instruments::SPECTROGRAM,
+    &instruments::STEREO_FIELD,
 ];
 
 /// What an instance saves in the layout, under its type's key.
@@ -179,6 +184,9 @@ pub trait PaneContent: 'static {
     /// The listener brought the panel forward: clicked inside it or chose
     /// its tab.
     fn focused(&self, window: &mut Window, cx: &mut App) {}
+    /// A displayed tab in a visible window can run its presentation work.
+    /// Analysis and animations can pause between these edges.
+    fn set_presented(&self, presented: bool, cx: &mut App) {}
     /// A folder dragged from Locations onto this panel's tab.
     fn accepts_folder(&self) -> bool {
         false
@@ -402,11 +410,15 @@ impl BasePanel for Pane {
     fn on_added_to(&mut self, group: WeakEntity<TabGroup>, _: &mut Window, _: &mut Context<Self>) {
         self.group = Some(group);
     }
-    fn on_removed(&mut self, _: &mut Window, _: &mut Context<Self>) {
+    fn on_removed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.group = None;
+        self.content.set_presented(false, cx);
     }
     fn dump(&self, cx: &App) -> PanelState {
         self.record(cx).to_state(self.ty.key)
+    }
+    fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.content.set_presented(active, cx);
     }
 }
 
@@ -568,6 +580,8 @@ impl Router {
 /// The state every panel shares, whatever its type or placement.
 #[derive(Clone)]
 pub struct Services {
+    /// Presented Stereo Field instances providing the workspace's stereo readouts.
+    pub field_readouts: Entity<std::collections::HashSet<EntityId>>,
     pub player: Entity<Player>,
     pub catalog: Entity<Catalog>,
     pub locations: Entity<locations::Locations>,
