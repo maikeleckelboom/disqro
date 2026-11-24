@@ -1,0 +1,67 @@
+Runtime source fe8020cb9cedc492b85df45099b63027d82e1105
+Windows build 26300 x64, AMD Ryzen 7 8845HS, Rust 1.99.1.
+
+running 27 tests
+test audio::tests::encoded_formats_open_decode_and_seek ... ignored, uses FFmpeg to encode the test recording
+test audio::tests::output_levels_follow_transport_and_contiguous_chapters ... ignored, requires a Windows output device; exercises the actual CPAL stream
+test audio::tests::a_release_sequence_opens_each_disc_and_ends_with_the_release ... ok
+test audio::tests::queue_heading_tracks_pause_finish_stop_and_restoration ... ok
+test audio::tests::paused_seek_updates_the_position_without_opening_output ... ok
+test audio::tests::continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits ... ok
+test audio::tests::losing_output_during_recovery_keeps_the_occurrence_and_cancels_skips ... ok
+test audio::tests::separate_file_transition_observation ... ignored, measures separate WAV joins on the silent Windows endpoint
+test audio::tests::separate_files_continue_past_source_and_decoder_failures ... ignored, requires a Windows output device; physical output is muted after the PCM observer
+test audio::tests::restoring_a_final_chapter_without_tag_duration_keeps_saved_position ... ok
+test audio::tests::sustained_output_observation ... ignored, ten-minute CPAL soak; set DISQRO_SOAK_SOURCE to a long audio file or CUE
+test audio::tests::seek_bursts_coalesce_without_crossing_transport_actions ... ok
+test audio::tests::stale_context_cannot_replace_a_later_play_pause_or_media_stop ... ok
+test audio::tests::shutdown_receipt_includes_pending_queue_edits ... ok
+test audio::tests::zero_volume_is_digital_silence ... ok
+test audio::tests::disc_seek_is_atomic_and_rejects_changed_queue_or_recording ... ok
+test audio::tests::recording_recovery_is_bounded_and_interruptible ... ok
+test audio::tests::unavailable_alternate_rip_is_not_a_second_disc ... ok
+test audio::tests::cue_seek_and_both_channels_match_original_samples ... ok
+test audio::tests::delayed_transport_keeps_render_timestamps_when_a_cue_limit_is_restored ... ok
+test audio::tests::delayed_transport_credits_both_blocks_before_midnight ... ok
+test audio::tests::delayed_transport_estimates_only_missing_committed_progress_after_overflow ... ok
+test audio::tests::cue_queue_edit_uses_the_same_completed_block_for_the_playhead_and_credit ... ok
+test audio::tests::renderer_preserves_stereo_samples_across_a_disc_chapter ... ok
+test audio::tests::qualification_tap_reads_full_level_while_every_output_sample_is_zero ... ok
+test audio::tests::listening_voice_lifecycle_uses_output_cursor_and_splits_cue_boundaries ... ok
+test audio::tests::renderer_credits_a_drained_tail_and_never_the_truncated_remainder ... ok
+
+test result: ok. 22 passed; 0 failed; 5 ignored; 0 measured; 183 filtered out; finished in 0.90s
+
+running 1 test
+test audio::tests::output_levels_follow_transport_and_contiguous_chapters ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 1.21s
+
+running 1 test
+test audio::tests::separate_files_continue_past_source_and_decoder_failures ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 1.16s
+
+running 1 test
+Separate WAV transitions, below-threshold PCM milliseconds: [20.00, 20.00, 9.33]
+test audio::tests::separate_file_transition_observation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 1.66s
+
+running 1 test
+test store::listening::tests::local_daylight_saving_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 0.02s
+
+running 1 test
+lossless.flac: 48000 frames, decode + reopen/seek 1.8445ms, peak sample difference 0
+lossless.aiff: 48000 frames, decode + reopen/seek 910µs, peak sample difference 0
+apple.m4a: 48000 frames, decode + reopen/seek 1.757ms, peak sample difference 0
+lossy.mp3: 48000 frames, decode + reopen/seek 2.3578ms, peak sample difference 0
+aac.m4a: 48000 frames, decode + reopen/seek 2.3135ms, peak sample difference 0.14703728
+music.opus: 48000 frames, decode + reopen/seek 7.8597ms, peak sample difference 0.00001168251
+Opus vs FFmpeg maximum absolute sample difference: 0.0000002682209
+vorbis.ogg: 48000 frames, decode + reopen/seek 3.1879ms, peak sample difference 0
+test audio::tests::encoded_formats_open_decode_and_seek ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 2.37s

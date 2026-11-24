@@ -1,0 +1,20 @@
+Windows build 26300 x64, AMD Ryzen 7 8845HS, Rust 1.99.1.
+Corrected runtime source fe8020cb9cedc492b85df45099b63027d82e1105.
+Reviewed runtime source 31c36634a5c1c2255df2bace5557134925204764.
+Optimized qualification builds ran sequentially with the same copied scale fixture,
+the same native input sequence and the same synthetic WAV on the same muted CPAL endpoint.
+
+Corrected A
+Concurrent history navigation and completed Statistics UI after final inputs, seconds 2.25
+Peak private bytes 292745216 peak working set 138522624
+Active windows 34 {'callbacks': 3368, 'device_errors': 0, 'decode_errors': 0, 'discarded_device_errors': 0, 'unchanged_ticks': 1, 'capture_drops': 0} callback max permille 19 max position delta error us 15746
+
+Reviewed head
+Concurrent history navigation and completed Statistics UI after final inputs, seconds 1.859
+Peak private bytes 325947392 peak working set 181374976
+Active windows 33 {'callbacks': 3260, 'device_errors': 0, 'decode_errors': 0, 'discarded_device_errors': 0, 'unchanged_ticks': 1, 'capture_drops': 0} callback max permille 26 max position delta error us 9989
+
+Corrected B
+Concurrent history navigation and completed Statistics UI after final inputs, seconds 2.046
+Peak private bytes 293679104 peak working set 134799360
+Active windows 33 {'callbacks': 3270, 'device_errors': 0, 'decode_errors': 0, 'discarded_device_errors': 0, 'unchanged_ticks': 1, 'capture_drops': 0} callback max permille 32 max position delta error us 8770

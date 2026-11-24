@@ -1,0 +1,19 @@
+Runtime source fe8020cb9cedc492b85df45099b63027d82e1105
+Windows build 26300 x64, AMD Ryzen 7 8845HS, Rust 1.99.1.
+Isolated profiles on a private Win32 desktop, with CPAL muted downstream of the PCM tap.
+
+ok browser::navigation::native_tests::delayed_ranked_reveal_respects_browser_navigation_and_lifetime
+
+Last Train to Briar qualified [('Last Train to Briar', 5820000, 1, None)]
+An unavailable ranked recording left Statistics open.
+A ranked recording revealed the current CUE track in the existing Music Browser.
+Recently Played reused restored browser instance 3
+shutdown [('Last Train to Briar', 5820000, 1, 'shutdown')]
+PASS native isolated profile, capture and restart. DPI 144
+
+Schema 3 -> 5. Preserved {'likes': 3, 'ratings': 0, 'playlists': 1, 'playlist_entries': 4} and wrote migration backup.
+
+The second process continued playing with no durable history while the first owned capture. After the first quit, the second recovered exactly one buffered occurrence. [(1, 8770000)]
+
+CPAL contiguous CUE chapter durations [('First chapter', 6000000, 1, 'completed', 1795554981013318), ('Second chapter', 6000000, 1, 'completed', 1795554987013318)]
+Hard termination retained 4.005s. Last durable activity was 2.229s before termination.

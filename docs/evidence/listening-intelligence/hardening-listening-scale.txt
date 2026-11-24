@@ -1,0 +1,20 @@
+Prior Windows hardening scale run recorded in e9f2c80d1109562599d39241c40f46308af6666a.
+
+running 1 test
+test store::listening::tests::listening_scale has been running for over 60 seconds
+fixture 139.52s, database 350.1 MiB
+Recently Played 100k keys 626.9 ms
+Sort 100k tracks by plays 198.3 ms
+First page including availability 7.9 ms
+Cursor page at 500k 7.9 ms
+Week statistics 159.6 ms, 3836 plays
+Month statistics 696.2 ms, 16438 plays
+All statistics 640.5 ms, 1000000 plays
+History cursor page during all-time statistics 8.1 ms
+Browser row hydration during all-time statistics 0.4 ms
+Concurrent all-time statistics 600.4 ms
+New unindexed recording and qualifying checkpoint 7.1 ms
+Incremental checkpoint 0.9 ms
+test store::listening::tests::listening_scale ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 205 filtered out; finished in 142.56s
