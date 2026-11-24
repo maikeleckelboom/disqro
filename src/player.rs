@@ -31,6 +31,7 @@ use std::{
 #[path = "player_wave.rs"]
 mod wave;
 use crate::level_meter::LevelMeter;
+pub(crate) use wave::WaveTrack;
 
 /// The perspective tabs above the timeline lane.
 const PERSPECTIVE_HEIGHT: f32 = 20.;
@@ -341,7 +342,8 @@ impl Player {
         let track_changed = context_changed
             || self.status.track.as_deref() != status.track.as_deref()
             || self.status.entry != status.entry
-            || self.status.source_revision != status.source_revision;
+            || self.status.source_revision != status.source_revision
+            || self.status.source_object != status.source_object;
         let state_changed = self.status.playback_state() != status.playback_state()
             || self.status.next != status.next
             || self.status.previous != status.previous
@@ -370,6 +372,10 @@ impl Player {
                                 .source_revision
                                 .as_ref()
                                 .is_none_or(|r| r == &p.segments[i].source.stamp)
+                            && self
+                                .status
+                                .source_object
+                                .is_none_or(|file| Some(file) == p.segments[i].source.object)
                     })
                 });
             if let Some(i) = self.segment {

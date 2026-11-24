@@ -23,7 +23,12 @@ fn geometry(shapes: &[Shape]) -> Geometry {
                 hash(bin.end_frame as u64);
                 hash(u64::from(bin.low.to_bits()));
                 hash(u64::from(bin.high.to_bits()));
+                hash(bin.low_at as u64);
+                hash(bin.high_at as u64);
                 hash(u64::from(bin.mean_square.to_bits()));
+                for band in bin.band_rms {
+                    hash(u64::from(band.to_bits()));
+                }
             }
         }
     }
@@ -63,10 +68,12 @@ fn timeline_waveform_baseline() {
             RefCell::new((vec![Shape::default(); program.segments.len()], None, None));
         analyse(
             &program,
-            active,
-            2.0,
+            (active, 2.0),
             &focus,
-            Some(&cache),
+            DecoderSession {
+                cache: Some(&cache),
+                reader: &mut None,
+            },
             || true,
             &|update| {
                 let Update::Wave(index, shape) = update else {
@@ -85,6 +92,7 @@ fn timeline_waveform_baseline() {
                 shapes[index] = shape;
                 true
             },
+            &|_| {},
         );
         let finished = began.elapsed();
         let (shapes, first, active_complete) = observations.into_inner();
@@ -92,7 +100,7 @@ fn timeline_waveform_baseline() {
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_pages_v1", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM wave_pages_v2", [], |row| row.get(0))
             .unwrap();
         let ms = |time: Duration| time.as_secs_f64() * 1000.0;
         println!(

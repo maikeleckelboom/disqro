@@ -1,8 +1,46 @@
 use super::*;
 use crate::theme::Materials;
-use crate::timeline::Overview;
+use crate::{
+    overview::Bin,
+    timeline::{Overview, Source},
+};
 use gpui_kit::component::Selectable;
+
+pub(crate) struct WaveTrack {
+    pub generation: u64,
+    pub source: Arc<Source>,
+    pub range: std::ops::Range<usize>,
+    pub bins: Arc<[Bin]>,
+    pub position: usize,
+}
+
 impl Player {
+    pub(crate) fn wave_view(&self) -> crate::waveform_detail::View {
+        self.analysis.view()
+    }
+
+    pub(crate) fn wave_track(&self) -> Option<WaveTrack> {
+        let index = self.segment?;
+        let segment = self.program.as_ref()?.segments.get(index)?;
+        Some(WaveTrack {
+            generation: self.generation,
+            source: segment.source.clone(),
+            range: segment.frames.clone(),
+            bins: self.shapes.get(index)?.track.clone(),
+            position: segment.elapsed_frame(self.status.position) - segment.frames.start,
+        })
+    }
+
+    pub(crate) fn seek_wave_track(&mut self, frame: usize, cx: &mut Context<Self>) {
+        let Some((program, index)) = self.program.as_ref().zip(self.segment) else {
+            return;
+        };
+        let range = &program.segments[index].frames;
+        let absolute = range.start + frame.min(range.len() - 1);
+        if let Some(command) = self.target_frame(program, index, index, absolute) {
+            self.command(command, cx);
+        }
+    }
     pub(super) fn request_wave(&mut self) {
         self.program = None;
         self.segment = None;
@@ -38,6 +76,10 @@ impl Player {
                         .source_revision
                         .as_ref()
                         .is_some_and(|r| r != &p.segments[i].source.stamp)
+                        || self
+                            .status
+                            .source_object
+                            .is_some_and(|r| Some(r) != p.segments[i].source.object)
                     {
                         self.segment = None;
                         self.generation = 0;
@@ -76,6 +118,7 @@ impl Player {
             }
             Update::Failed(e) => self.unavailable = Some(e),
             Update::Changed => self.request_wave(),
+            Update::Detail => {}
         }
         if self.visible {
             cx.notify()
@@ -160,18 +203,26 @@ impl Player {
         }
     }
     fn target(&self, f: f32) -> Option<Command> {
+        self.target_in(f64::from(f), self.disc_view())
+    }
+
+    fn target_in(&self, fraction: f64, disc: bool) -> Option<Command> {
         let Some((p, active)) = self.program.as_ref().zip(self.segment) else {
-            return Some(Command::Seek(f64::from(f)));
+            return Some(Command::Seek(fraction));
         };
         let seg = &p.segments[active];
-        let range = if self.disc_view() {
+        let range = if disc {
             0..p.duration
         } else {
             seg.time.clone()
         };
-        let time = (range.start + (f64::from(f) * (range.end - range.start) as f64) as u64)
-            .min(range.end - 1);
+        let time =
+            (range.start + (fraction * (range.end - range.start) as f64) as u64).min(range.end - 1);
         let (i, frame) = p.locate(time)?;
+        self.target_frame(p, active, i, frame)
+    }
+
+    fn target_frame(&self, p: &Program, active: usize, i: usize, frame: usize) -> Option<Command> {
         if !self.run.contains(&i) {
             return None;
         }

@@ -30,6 +30,7 @@ pub struct Status {
     /// The queue entry that is playing, which tells two copies of a track apart.
     pub entry: Option<u64>,
     pub source_revision: Option<crate::cache::Stamp>,
+    pub source_object: Option<crate::store::NativeFile>,
     pub position: f64,
     pub duration: f64,
     pub playing: bool,
@@ -756,6 +757,7 @@ impl Engine {
         self.position_probe = None;
         self.voice = None;
         self.status.source_revision = None;
+        self.status.source_object = None;
         self.group.clear();
         self.status.playing = false;
     }
@@ -939,6 +941,7 @@ impl Engine {
             recording.playback_probe = Some(std::time::Instant::now());
         }
         self.status.source_revision = recording.stamp.clone();
+        self.status.source_object = recording.object;
         self.rate = recording.sample_rate();
         let first = crate::recording::disc_frame(disc_start(&entry.track), self.rate);
         for (chapter, queued) in group.iter_mut().zip(&self.queue.entries[index..]) {

@@ -27,6 +27,7 @@ pub mod locations;
 pub mod nav;
 pub mod queue;
 pub mod spectrum;
+pub mod waveform;
 
 use crate::{
     browser::{Browser, Location},
@@ -112,6 +113,7 @@ pub static TYPES: &[&PanelType] = &[
     &queue::HISTORY,
     &listening::HISTORY,
     &listening::STATISTICS,
+    &waveform::TYPE,
     &spectrum::TYPE,
     &instruments::SPECTROGRAM,
     &instruments::STEREO_FIELD,

@@ -71,7 +71,7 @@ fn digest(bytes: &[u8], size: u64) -> i64 {
     hash as i64
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct NativeFile(pub i64, pub i64);
 
 impl NativeFile {

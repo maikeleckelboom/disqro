@@ -44,8 +44,9 @@ impl Cache {
             CREATE INDEX IF NOT EXISTS chapters_artist ON chapters(artist COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS chapters_album ON chapters(album COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS wave_pages_v1(path BLOB, bytes INTEGER, modified INTEGER,
-                page INTEGER, data BLOB, UNIQUE(path,page));
+            DROP TABLE IF EXISTS wave_pages_v1;
+            CREATE TABLE IF NOT EXISTS wave_pages_v2(path BLOB, bytes INTEGER, modified INTEGER,
+                volume INTEGER, object INTEGER, page INTEGER, data BLOB, UNIQUE(path,page));
             CREATE TABLE IF NOT EXISTS disc_sources_v1(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
                 path BLOB, bytes INTEGER, modified INTEGER, rate INTEGER, frames INTEGER, PRIMARY KEY(sheet,path)) WITHOUT ROWID;")?;
         Ok(Self(db))

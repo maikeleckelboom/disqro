@@ -95,13 +95,33 @@ impl Overview {
 pub fn frame_time(frame: usize, rate: u32) -> u64 {
     ((frame as u128 * u128::from(SECOND) + u128::from(rate / 2)) / u128::from(rate)) as u64
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Source {
     pub path: PathBuf,
     pub stamp: Stamp,
+    pub object: Option<crate::store::NativeFile>,
     pub rate: u32,
     pub frames: usize,
     pub available: bool,
+}
+
+impl Source {
+    pub fn unchanged(&self) -> bool {
+        if !self.available {
+            return Stamp::read(&self.path).is_none();
+        }
+        let Ok(file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        file.metadata()
+            .ok()
+            .and_then(|m| Stamp::from_metadata(&m))
+            .as_ref()
+            == Some(&self.stamp)
+            && self
+                .object
+                .is_none_or(|known| crate::store::NativeFile::of(&file) == Some(known))
+    }
 }
 #[derive(Debug)]
 pub struct Segment {
@@ -281,8 +301,7 @@ impl Program {
                 return true;
             }
             last = Some(&seg.source.path);
-            Stamp::read(&seg.source.path).as_ref()
-                == seg.source.available.then_some(&seg.source.stamp)
+            seg.source.unchanged()
         })
     }
 }
@@ -319,6 +338,7 @@ fn describe(
         Source {
             path: path.into(),
             stamp,
+            object: recording.object,
             rate,
             frames,
             available: true,
@@ -326,7 +346,7 @@ fn describe(
     } else {
         let known=cache.zip(sheet).and_then(|(c,(p,s))|c.0.query_row(
             "SELECT bytes,modified,rate,frames FROM disc_sources_v1 WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
-            params![p.as_os_str().as_encoded_bytes(),s.bytes,s.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
+            params![p.as_os_str().as_encoded_bytes(),s.bytes,s.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},object:None,rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
         known.with_context(|| {
             format!(
                 "Unknown duration for {}",

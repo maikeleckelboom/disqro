@@ -42,6 +42,8 @@ mod table;
 mod theme;
 mod timeline;
 mod waveform;
+#[path = "waveformDetail.rs"]
+mod waveform_detail;
 mod workspace;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};

@@ -237,7 +237,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(
         cache
             .0
-            .query_row("SELECT count(*) FROM wave_pages_v1", [], |r| r
+            .query_row("SELECT count(*) FROM wave_pages_v2", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
         1
@@ -246,12 +246,20 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(split, 4);
     assert_eq!(cached[split - 1].lo[1], -1.);
     assert!(cached[split - 1].hi[0] > 0.99);
+    assert_eq!(cached[split - 1].lo_at[1], boundary - 1);
+    assert_eq!(cached[split - 1].hi_at[0], boundary - 1);
     assert_eq!(cached[split - 1].energy, page[split - 1].energy);
+    assert_eq!(cached[split - 1].bands, page[split - 1].bands);
     assert!(
         page[split..]
             .iter()
             .all(|m| m.energy == 0. && m.hi == [0.; 2] && m.lo == [0.; 2])
     );
+    let samples =
+        waveform::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true).unwrap();
+    assert_eq!(samples[0].right, -1.);
+    assert!(samples[0].left > 0.99);
+    assert_eq!([samples[1].left, samples[1].right], [0., 0.]);
     fixture(&path, rate, frames + 1);
     assert!(!p.unchanged());
     assert!(waveform::load(source, 0, Some(&cache), &mut None, &|| true).is_err());
@@ -266,4 +274,59 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stereo.wav");
+    fixture(&path, 8000, 48000);
+    let track = Arc::new(Track::file(path));
+    let program = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let source = &program.segments[0].source;
+    let mut decoder = None;
+    waveform::load(source, 0, None, &mut decoder, &|| true).unwrap();
+    let sequential = waveform::load(source, 1, None, &mut decoder, &|| true).unwrap();
+    let seek = waveform::load(source, 1, None, &mut None, &|| true).unwrap();
+    for (a, b) in sequential.iter().zip(seek) {
+        assert_eq!(a.bands, b.bands);
+        assert_eq!(a.extrema(), b.extrema());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn replacing_a_source_with_the_same_length_and_time_invalidates_wave_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.wav");
+    let replacement = dir.path().join("replacement.wav");
+    fixture(&path, 8000, 8000);
+    let track = Arc::new(Track::file(path.clone()));
+    let cache = Cache::open(dir.path()).unwrap();
+    let resolve = || Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
+    let original = resolve();
+    let source = &original.segments[0].source;
+    assert!(source.object.is_some());
+    let old_page = waveform::load(source, 0, Some(&cache), &mut None, &|| true).unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[44..].fill(0);
+    fs::write(&replacement, bytes).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::rename(&path, dir.path().join("retained.wav")).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert!(!original.unchanged());
+    let new = resolve();
+    let changed = &new.segments[0].source;
+    assert_eq!(source.stamp, changed.stamp);
+    assert_ne!(source.object, changed.object);
+    assert!(waveform::load(changed, 0, Some(&cache), &mut None, &|| false).is_err());
+    let new_page = waveform::load(changed, 0, Some(&cache), &mut None, &|| true).unwrap();
+    assert!(old_page.iter().any(|m| m.energy > 0.));
+    assert!(new_page.iter().all(|m| m.energy == 0.));
 }
