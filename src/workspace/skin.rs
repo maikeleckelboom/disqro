@@ -205,7 +205,6 @@ impl DockAreaRenderer for Skin {
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
         Rc::new(Tabs {
             state: self.state.clone(),
-            scroll: ScrollHandle::new(),
         })
     }
 }
@@ -213,7 +212,6 @@ impl DockAreaRenderer for Skin {
 /// One tab group's appearance.
 struct Tabs {
     state: Rc<SkinState>,
-    scroll: ScrollHandle,
 }
 
 impl TabGroupRenderer for Tabs {
@@ -256,24 +254,32 @@ impl TabGroupRenderer for Tabs {
             tabs[0]
         };
         let shown = editing.unwrap_or(selected);
-        let current = tabs::labels_width(group, &[shown], window, cx);
-        let labels = tabs::TabLabels {
-            current,
-            all: if editing.is_some() || !several {
-                current
-            } else {
-                tabs::labels_width(group, &tabs, window, cx)
-            },
-            several: several && editing.is_none(),
-        };
+        let tabs: Vec<_> = tabs
+            .into_iter()
+            .filter(|&ix| editing.is_none() || ix == shown)
+            .map(|ix| (ix, tabs::label_width(group, ix, window, cx)))
+            .collect();
         let group = group.clone();
         let state = self.state.clone();
-        let scroll = self.scroll.clone();
-        container_query(move |size, _, cx| {
-            let widths = labels.fit(size.width);
+        container_query(move |size, window, cx| {
+            let snap = |width| window.pixel_snap(px(width));
+            let gap = snap(tabs::SPACING);
+            let labels = tabs::TabLabels::new(&tabs, gap);
+            let widths = labels.fit(size.width, snap);
             let overflow = widths.overflow;
-            let compact_width =
-                (widths.tabs < if overflow { current } else { labels.all }).then_some(widths.tabs);
+            let inline = !overflow && tabs.len() > 1;
+            let visible: Vec<_> = tabs
+                .iter()
+                .filter(|&&(ix, _)| !overflow || ix == shown)
+                .map(|&(ix, natural)| {
+                    let width = if inline { natural } else { widths.tabs };
+                    let compact_width = (width < natural).then_some(width);
+                    (ix, tab(&group, ix, &state, width, compact_width, cx))
+                })
+                .collect();
+            let bounds = Rc::new(RefCell::new(Vec::new()));
+            let measured = bounds.clone();
+            let indices: Vec<_> = visible.iter().map(|(ix, _)| *ix).collect();
             // Panel commands live on each tab's own context menu, where their
             // scope is the tab. The strip offers a switcher only while it is
             // too narrow to show every tab.
@@ -282,7 +288,7 @@ impl TabGroupRenderer for Tabs {
                 Button::new("tab-switcher")
                     .ghost()
                     .xsmall()
-                    .w(px(tabs::SWITCHER))
+                    .w(widths.switcher)
                     .icon(
                         Icon::new(IconName::ChevronDown)
                             .size(px(12.))
@@ -311,6 +317,7 @@ impl TabGroupRenderer for Tabs {
             });
             h_flex()
                 .id(("tab-strip", node.as_u64()))
+                .relative()
                 .w(size.width)
                 .h(px(STRIP_HEIGHT))
                 .flex_shrink_0()
@@ -322,23 +329,28 @@ impl TabGroupRenderer for Tabs {
                 })
                 .child(
                     h_flex()
+                        .on_children_prepainted(move |rects, _, _| {
+                            *measured.borrow_mut() = indices.iter().copied().zip(rects).collect();
+                        })
                         .id(("tabs", node.as_u64()))
                         .h_full()
                         .min_w_0()
                         .w(widths.tabs)
+                        .flex_shrink_0()
+                        .gap(gap)
                         .tab_group()
                         .role(Role::TabList)
-                        .overflow_x_scroll()
-                        .track_scroll(&scroll)
-                        .children(
-                            tabs.iter()
-                                .copied()
-                                .filter(|&ix| (!overflow && editing.is_none()) || ix == shown)
-                                .map(|ix| tab(&group, ix, &state, compact_width, cx)),
-                        ),
+                        .overflow_hidden()
+                        .children(visible.into_iter().map(|(_, tab)| tab)),
                 )
                 .children(switcher)
-                .child(drop_space(&group, ("strip-space", node.as_u64()), cx))
+                .child(tabs::drop_targets(
+                    &group,
+                    &state,
+                    bounds,
+                    widths.switcher,
+                    cx,
+                ))
         })
         .h(px(STRIP_HEIGHT))
         .flex_shrink_0()
@@ -413,7 +425,7 @@ impl TabGroupRenderer for Tabs {
             .absolute()
             .inset_0()
             .size_full();
-            routine_target(body.child(overlay), target, false, &self.state).into_any_element()
+            routine_split_target(body.child(overlay), target, &self.state).into_any_element()
         } else {
             body.into_any_element()
         }
@@ -488,6 +500,7 @@ fn tab(
     group: &TabGroupContext,
     ix: usize,
     state: &Rc<SkinState>,
+    width: Pixels,
     compact_width: Option<Pixels>,
     cx: &mut App,
 ) -> AnyElement {
@@ -537,7 +550,7 @@ fn tab(
     let compact = compact_width.is_some();
     // Keep at least three ems for the name when the strip compresses a tab.
     let fits_close = compact_width
-        .is_none_or(|width| width >= tabs::tab_width(px(3. * crate::theme::size::TEXT), false));
+        .is_none_or(|width| width >= tabs::tab_width(px(3. * crate::theme::size::TEXT), false, px));
     let label_element = match renaming {
         Some(input) => {
             let pane = pane.clone();
@@ -562,7 +575,6 @@ fn tab(
     };
     let long = label.len() > 26;
     let select = group.clone();
-    let drop_group = group.clone();
     let (folder_drop_pane, menu_pane, click_pane) = (pane.clone(), pane.clone(), pane.clone());
     let (hover_tracks, hover_folders) = (
         (state.clone(), group.clone()),
@@ -583,8 +595,8 @@ fn tab(
         .when(!editing, |d| tabs::keyboard_tab(d, group, ix, selected, cx))
         .relative()
         .h(px(STRIP_HEIGHT))
-        .min_w(px(40.))
-        .max_w(px(220.))
+        .w(width)
+        .min_w_0()
         .pl(px(TAB_X))
         .pr(px(if utility { TAB_X } else { TAB_END }))
         .gap(px(TAB_GAP))
@@ -595,11 +607,16 @@ fn tab(
         .border_color(transparent_black())
         .items_center()
         .text_size(px(crate::theme::size::TEXT))
-        .when(compact, |d| d.min_w_0().flex_1())
-        .when(editing, |d| d.flex_1().min_w_0())
+        .overflow_hidden()
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(surface))
-        .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
+        .hover(move |d| {
+            if selected {
+                d
+            } else {
+                d.bg(m.hover).text_color(m.text)
+            }
+        })
         .when(!utility, |d| {
             d.child(
                 icon.size(px(TAB_ICON))
@@ -670,12 +687,6 @@ fn tab(
                 cx.new(|_| TabPreview { label })
             })
         })
-        .when(group.is_droppable(), |d| {
-            d.drag_over::<DragPanel>(move |d, _, _, _| d.border_l_2().border_color(m.accent))
-                .on_drop(move |drag: &DragPanel, w, cx| {
-                    drop_group.drop_panel(drag.clone(), Some(ix), true, w, cx)
-                })
-        })
         // Library-bound items: rest over a tab to open it, then drop inside.
         .on_drag_move::<DraggedTracks>(move |e, w, cx| {
             let inside = e.bounds.contains(&e.event.position);
@@ -701,19 +712,14 @@ fn tab(
     let tab = if group.is_locked() && !editing {
         let title = label.clone();
         let source_state = state.clone();
-        routine_target(
-            tab.on_drag(RoutineTab(id), move |_, _, _, cx| {
-                let label = title.clone();
-                let preview = cx.new(|_| TabPreview { label });
-                source_state
-                    .routine_drag
-                    .replace(Some((id, preview.downgrade())));
-                preview
-            }),
-            id,
-            true,
-            state,
-        )
+        tab.on_drag(RoutineTab(id), move |_, _, _, cx| {
+            let label = title.clone();
+            let preview = cx.new(|_| TabPreview { label });
+            source_state
+                .routine_drag
+                .replace(Some((id, preview.downgrade())));
+            preview
+        })
     } else {
         tab
     };
@@ -747,66 +753,38 @@ fn split_edge(bounds: Bounds<Pixels>, point: Point<Pixels>) -> Option<TabDrop> {
     }
 }
 
-fn routine_target(
-    view: Stateful<Div>,
-    target: PanelId,
-    strip: bool,
-    state: &SkinState,
-) -> Stateful<Div> {
-    let bounds = Rc::new(Cell::new(Bounds::default()));
+fn routine_split_target(view: Stateful<Div>, target: PanelId, state: &SkinState) -> Stateful<Div> {
+    let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
     let measured = bounds.clone();
-    let direction = move |w: &Window| {
-        let bounds: Bounds<Pixels> = bounds.get();
-        let point = w.mouse_position();
-        if strip {
-            Some(if point.x < bounds.center().x {
-                TabDrop::Before
-            } else {
-                TabDrop::After
-            })
-        } else {
-            split_edge(bounds, point)
-        }
-    };
-    let indicator = direction.clone();
     let ws = state.workspace.clone();
-    let owner = ws.clone();
     view.on_prepaint(move |b, _, _| measured.set(b))
-        .drag_over::<RoutineTab>(move |style, drag, w, cx| {
-            let Some(edge) = indicator(w) else {
-                return style;
-            };
-            if !ws
-                .upgrade()
-                .is_some_and(|ws| ws.read(cx).routine_move(drag.0, target, edge, cx).is_some())
-            {
-                return style;
-            }
-            // Between tabs an insertion line marks the slot. A split is shown
-            // by the content's own region preview, painted by the overlay.
-            let style = style.border_color(materials(cx).accent);
-            match edge {
-                TabDrop::Before => style.border_l_2(),
-                TabDrop::After => style.border_r_2(),
-                TabDrop::Above | TabDrop::Below => style,
-            }
-        })
         .on_drop(move |drag: &RoutineTab, w, cx| {
-            if let Some(edge) = direction(w) {
-                let _ = owner.update(cx, |ws, cx| {
-                    if let Some(dest) = ws.routine_move(drag.0, target, edge, cx) {
-                        ws.remember_layout(None, cx);
-                        ws.dock.update(cx, |dock, cx| {
-                            dock.move_panel(drag.0, dest, w, cx);
-                            dock.select_panel(drag.0, w, cx);
-                        });
-                    }
+            if let Some(edge) = split_edge(bounds.get(), w.mouse_position()) {
+                let _ = ws.update(cx, |ws, cx| {
+                    ws.drop_routine_tab(drag.0, target, edge, w, cx)
                 });
             }
         })
 }
 
 impl Workspace {
+    fn drop_routine_tab(
+        &mut self,
+        from: PanelId,
+        to: PanelId,
+        edge: TabDrop,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(dest) = self.routine_move(from, to, edge, cx) {
+            self.remember_layout(None, cx);
+            self.dock.update(cx, |dock, cx| {
+                dock.move_panel(from, dest, window, cx);
+                dock.select_panel(from, window, cx);
+            });
+        }
+    }
+
     fn routine_move(
         &self,
         from: PanelId,
@@ -888,31 +866,6 @@ impl Workspace {
             _ => None,
         }
     }
-}
-
-/// The space after the tabs, where a dragged tab lands at the end.
-fn drop_space(group: &TabGroupContext, id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
-    let m = *materials(cx);
-    let node = group.node();
-    let count = group.panels().len();
-    let group = group.clone();
-    div()
-        .id(id)
-        .h_full()
-        .flex_1()
-        .min_w(px(crate::theme::size::TAB_DROP))
-        .when(group.is_droppable(), |d| {
-            d.drag_over::<DragPanel>(move |d, _, _, _| d.bg(m.accent.opacity(0.08)))
-                .on_drop(move |drag: &DragPanel, w, cx| {
-                    // A tab dropped past its own group's last tab moves to the end.
-                    let ix = if drag.source() == node {
-                        count.saturating_sub(1)
-                    } else {
-                        count
-                    };
-                    group.drop_panel(drag.clone(), Some(ix), true, w, cx);
-                })
-        })
 }
 
 /// What follows the pointer while a tab is dragged.
