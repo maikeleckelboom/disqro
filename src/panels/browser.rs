@@ -191,7 +191,10 @@ impl BrowserPane {
             .min_w_0()
             .overflow_hidden()
             .capture_any_mouse_down(move |_, _, cx| {
-                router.update(cx, |r, cx| r.set_active(Some(&owner), cx))
+                router.update(cx, |r, cx| r.set_active(Some(&owner), cx));
+                owner.update(cx, |b, cx| {
+                    b.begin_navigation(cx);
+                });
             })
             .px(px(3.))
             .gap(px(3.))
@@ -308,15 +311,16 @@ impl BrowserPane {
         }
     }
     pub fn new_tab_state(browser: &Browser, cx: &App) -> BrowserState {
+        let mut visit = SavedVisit::new(browser.route(), browser.prefs.albums);
+        visit.root = browser.tree_root.clone();
+        visit.subfolders = browser.location.is_folder().then_some(browser.subfolders);
+        visit.query = browser.search.read(cx).value().to_string();
         BrowserState {
-            location: Some(browser.location.clone()),
-            page: browser.page.clone(),
+            current: Some(visit),
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
-            albums: Some(browser.prefs.albums),
             prefs: Some(browser.prefs.clone()),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
-            search: browser.search.read(cx).value().to_string(),
             ..Default::default()
         }
     }
@@ -622,9 +626,12 @@ impl Render for Browser {
             .size_full()
             .bg(m.canvas)
             .capture_any_mouse_down(cx.listener(|b, e: &MouseDownEvent, _, cx| {
-                if e.button == MouseButton::Left {
-                    b.cancel_context_for_click(cx);
+                if matches!(e.button, MouseButton::Left | MouseButton::Right) {
+                    b.cancel_context_for_input(cx);
                 }
+            }))
+            .on_scroll(cx.listener(|b, _: &ScrollEvent, _, cx| {
+                b.cancel_context_for_input(cx);
             }))
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),

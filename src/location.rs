@@ -21,13 +21,17 @@ use std::{
     rc::Rc,
 };
 
-gpui_kit::actions!(location, [CancelEdit]);
+gpui_kit::actions!(location, [CancelEdit, ActivateLocationControl]);
 
 /// Both fields in a Music Browser's navigation row use its original address height.
 pub const NAV_FIELD_HEIGHT: f32 = 28.;
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", CancelEdit, Some("LocationBar"))]);
+    cx.bind_keys([
+        KeyBinding::new("escape", CancelEdit, Some("LocationBar")),
+        KeyBinding::new("enter", ActivateLocationControl, Some("LocationControl")),
+        KeyBinding::new("space", ActivateLocationControl, Some("LocationControl")),
+    ]);
 }
 
 pub struct LocationBar {
@@ -252,6 +256,9 @@ impl LocationBar {
     }
     /// Shows the path as text with everything selected, ready to replace.
     pub fn edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browser.update(cx, |b, cx| {
+            b.begin_navigation(cx);
+        });
         let browser = self.browser.read(cx);
         let path = physical_address(&browser.location, browser.page.as_ref())
             .map(|p| p.display().to_string())
@@ -286,7 +293,7 @@ impl LocationBar {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.request += 1;
         let request = self.request;
-        let navigation = self.browser.read(cx).revision();
+        let navigation = self.browser.update(cx, Browser::begin_navigation);
         let raw = self.input.read(cx).value().to_string();
         let path = match parse(&raw) {
             Ok(p) => p,
@@ -306,7 +313,7 @@ impl LocationBar {
                 if bar.request != request {
                     return;
                 }
-                if bar.browser.read(cx).revision() != navigation {
+                if !bar.browser.read(cx).navigation_is_current(navigation) {
                     bar.cancel(window, cx);
                     return;
                 }
@@ -477,12 +484,10 @@ impl LocationBar {
                     .text_size(font_size)
                     .text_color(if i == last { m.text } else { m.text_muted })
                     .when(navigates, |d| {
-                        d.tab_stop(true)
-                            .on_key_down(move |e, w, cx| {
-                                if matches!(e.keystroke.key.as_str(), "enter" | "space") {
-                                    cx.stop_propagation();
-                                    keyboard.0.update(cx, |b, cx| keyboard.1.open(b, w, cx));
-                                }
+                        d.tab_index(0)
+                            .key_context("LocationControl")
+                            .on_action(move |_: &ActivateLocationControl, w, cx| {
+                                keyboard.0.update(cx, |b, cx| keyboard.1.open(b, w, cx));
                             })
                             .focus_visible(|d| d.bg(m.hover))
                             .hover(|d| d.bg(m.hover).text_color(m.text))

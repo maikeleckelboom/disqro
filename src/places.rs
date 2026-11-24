@@ -223,6 +223,7 @@ impl Place {
 pub fn same_path(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
         p.to_string_lossy()
+            .replace('/', "\\")
             .trim_end_matches(['\\', '/'])
             .to_lowercase()
     };

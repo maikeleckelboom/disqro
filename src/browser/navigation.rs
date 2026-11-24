@@ -27,7 +27,12 @@ impl Route {
     }
 
     fn same(&self, other: &Self) -> bool {
-        self.page == other.page
+        let same_page = match (&self.page, &other.page) {
+            (Some(Page::Disc(a)), Some(Page::Disc(b)))
+            | (Some(Page::Release(a)), Some(Page::Release(b))) => a.same(b),
+            (a, b) => a == b,
+        };
+        same_page
             && match (&self.location, &other.location) {
                 (Location::Folder(a), Location::Folder(b)) => crate::places::same_path(a, b),
                 (Location::Album { id: a, .. }, Location::Album { id: b, .. })
@@ -105,7 +110,7 @@ pub(crate) struct SavedVisit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     child: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    subfolders: Option<bool>,
+    pub(crate) subfolders: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -262,6 +267,7 @@ pub(super) enum Arrival {
     File(Reveal),
     Row(RowKey),
     FolderChild(PathBuf),
+    Sequence(bool),
 }
 
 const SHELF_ROW_HEIGHT: f32 = 42.;
@@ -342,15 +348,33 @@ impl Browser {
     }
 
     pub(super) fn cancel_pending(&mut self) {
+        self.intent.next();
         self.navigation += 1;
         self.pending = None;
     }
 
-    pub(crate) fn cancel_context_for_click(&mut self, cx: &mut Context<Self>) {
+    /// Supersedes destination lookups at the point of interaction. A history
+    /// bookmark still belongs to its visit when focus moves to another control.
+    pub fn begin_navigation(&mut self, cx: &mut Context<Self>) -> u64 {
+        let revision = self.intent.next();
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..))))
+        {
+            self.navigation += 1;
+            self.pending = None;
+            cx.notify();
+        }
+        revision
+    }
+
+    pub(crate) fn cancel_context_for_input(&mut self, cx: &mut Context<Self>) {
         if self.waiting_for_context() {
             self.cancel_pending();
             cx.notify();
         } else {
+            self.intent.next();
             self.navigation += 1;
         }
     }
@@ -371,7 +395,7 @@ impl Browser {
         let current = self.saved_visit(cx);
         let same = current.route.same(&route);
         if same && matches!(arrival, Arrival::Regular) {
-            self.navigation += 1;
+            self.begin_navigation(cx);
             return;
         }
         if (!same || matches!(arrival, Arrival::Row(_) | Arrival::File(_)))
@@ -405,6 +429,10 @@ impl Browser {
             }
             Arrival::FolderChild(child) => {
                 visit.child = Some(child);
+                (None, None)
+            }
+            Arrival::Sequence(recursive) => {
+                visit.subfolders = Some(recursive);
                 (None, None)
             }
             Arrival::File(file) => (Some(file), None),
@@ -523,6 +551,7 @@ impl Browser {
                     if !self.page_available() {
                         self.notice = Some("This CD or release is unavailable.".into());
                     }
+                    self.refresh_folder_traversal(cx);
                     self.finish_listing(cx);
                 }
             } else {
@@ -530,6 +559,7 @@ impl Browser {
                 self.load_from(path, file, visit.root, tree_reveal, window, cx);
             }
         } else {
+            self.folder_traversal = Default::default();
             self.generation += 1;
             if self.busy {
                 self.folder_ready = false;
@@ -565,6 +595,8 @@ impl Browser {
         let current = self.saved_visit(cx);
         if let Some(next) = self.history.step(current, false) {
             self.restore_visit(next, window, cx);
+        } else {
+            self.begin_navigation(cx);
         }
     }
 
@@ -572,6 +604,8 @@ impl Browser {
         let current = self.saved_visit(cx);
         if let Some(next) = self.history.step(current, true) {
             self.restore_visit(next, window, cx);
+        } else {
+            self.begin_navigation(cx);
         }
     }
 
@@ -610,6 +644,7 @@ impl Browser {
 
     pub fn up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_go_up() {
+            self.begin_navigation(cx);
             return;
         }
         let Some((parent, target)) = self.route().parent(self.membership.as_deref()) else {
@@ -638,10 +673,23 @@ impl Browser {
                 let table = self.table.read(cx).delegate();
                 table.position(key).or_else(|| match key {
                     RowKey::Track(source, Some(disc)) => {
-                        let mut disc = disc.clone();
-                        disc.sheet = self.equivalent_sheets.get(&disc.sheet)?.clone();
-                        table.position(&RowKey::Track(source.clone(), Some(disc)))
+                        let sheet = self.alternate_sheet(&disc.sheet).unwrap_or(&disc.sheet);
+                        (0..table.len()).find(|&i| {
+                            table.track(i).is_some_and(|t| {
+                                crate::places::same_path(source, &t.source)
+                                    && t.disc.as_ref().is_some_and(|d| {
+                                        (disc.number, disc.start, disc.end)
+                                            == (d.number, d.start, d.end)
+                                            && crate::places::same_path(sheet, &d.sheet)
+                                    })
+                            })
+                        })
                     }
+                    RowKey::Track(source, None) => (0..table.len()).find(|&i| {
+                        table.track(i).is_some_and(|t| {
+                            t.disc.is_none() && crate::places::same_path(source, &t.source)
+                        })
+                    }),
                     RowKey::Disc(id)
                         if self.location.is_folder()
                             && self.page.is_none()
@@ -655,7 +703,6 @@ impl Browser {
         });
         if let Some(key) = &pending.target
             && target.is_none()
-            && self.notice.is_none()
         {
             let view = match key {
                 RowKey::Release(_) if self.can_list_discs() && !listing_shelf => Some(true),
@@ -764,37 +811,37 @@ impl Browser {
     pub fn locate(
         &mut self,
         track: Arc<Track>,
+        context: library::DiscContext,
         dest: Destination,
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let request = self.begin_navigation(cx);
         if dest == Destination::Locations {
             let Some((id, store)) = track.library_id.zip(self.catalog.read(cx).handle()) else {
-                self.reveal_folder(track, w, cx);
+                self.reveal_folder(track, context, w, cx);
                 return;
             };
-            self.navigation += 1;
-            let request = self.navigation;
-            let lookup = store.call(move |s| s.rows(Scope::Library(None), &[id]));
+            let lookup = store.query(&self.intent, request, move |s| {
+                s.rows(Scope::Library(None), &[id])
+            });
             cx.spawn_in(w, async move |this, cx| {
                 let current = lookup
                     .await
                     .ok()
                     .and_then(|rows| rows.into_iter().find(|row| row.available));
                 let _ = this.update_in(cx, |b, w, cx| {
-                    if b.navigation == request {
-                        b.reveal_folder(current.map_or(track, |row| row.track), w, cx);
+                    if b.navigation_is_current(request) {
+                        b.reveal_folder(current.map_or(track, |row| row.track), context, w, cx);
                     }
                 });
             })
             .detach();
             return;
         }
-        let request = self.navigation + 1;
-        self.navigation = request;
         let lookup = self.catalog.read(cx).handle().map(|store| {
             let target = track.clone();
-            store.call(move |s| s.registered_disc(&target))
+            store.query(&self.intent, request, move |s| s.registered_disc(&target))
         });
         cx.spawn_in(w, async move |this, cx| {
             let result = match lookup {
@@ -802,7 +849,7 @@ impl Browser {
                 None => Ok(None),
             };
             let _ = this.update_in(cx, |b, w, cx| {
-                if b.navigation != request {
+                if !b.navigation_is_current(request) {
                     return;
                 }
                 match result {
@@ -829,33 +876,42 @@ impl Browser {
         .detach();
     }
 
-    fn reveal_folder(&mut self, track: Arc<Track>, w: &mut Window, cx: &mut Context<Self>) {
-        let source = track
-            .disc
-            .as_ref()
-            .map_or(&track.source, |disc| &disc.sheet);
-        let Some(parent) = source.parent() else {
+    fn reveal_folder(
+        &mut self,
+        track: Arc<Track>,
+        context: library::DiscContext,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let disc = DiscId::of(&track);
+        let Some(parent) = disc.folder() else {
             return;
         };
-        let disc = DiscId::of(&track);
-        let page = track.has_disc_context().then(|| Page::Disc(disc.clone()));
-        let origin = std::iter::once(self.route())
-            .chain(self.history.recent.iter().rev().map(|v| v.route.clone()))
-            .find(|r| {
-                r.page == page
-                    && matches!(&r.location, Location::Folder(path)
-                if crate::places::same_path(parent, path) || library::within(parent, path))
-            });
-        let route = origin.unwrap_or_else(|| {
-            let disc_folder = parent
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(crate::release::disc_folder);
-            Route::new(
-                Location::Folder(parent.to_owned()),
-                if disc_folder.is_some() { None } else { page },
-            )
+        let matches_disc =
+            |route: &Route| matches!(&route.page, Some(Page::Disc(id)) if id.same(&disc));
+        let current = self.route();
+        let scope = self.reveal_collection_scope(parent, cx);
+        let recent = self.history.recent.iter().rev().find(|visit| {
+            matches_disc(&visit.route)
+                && matches!(&visit.route.location, Location::Folder(path)
+                    if crate::places::same_path(path, scope.as_deref().unwrap_or(parent))
+                        && (crate::places::same_path(path, parent) || visit.subfolders == Some(true)))
         });
+        let route = if matches_disc(&current)
+            || (self.location.is_folder()
+                && self.page.is_none()
+                && self
+                    .physical_sequence_disc()
+                    .is_some_and(|id| id.same(&disc)))
+        {
+            current
+        } else if let Some(visit) = recent {
+            visit.route.clone()
+        } else {
+            let folder = parent.to_owned();
+            let page = context.allows(&track).then_some(Page::Disc(disc));
+            Route::new(Location::Folder(folder), page)
+        };
         let key = RowKey::Track(track.source.clone(), track.disc.clone());
         self.move_to(route, Arrival::Row(key), w, cx);
     }

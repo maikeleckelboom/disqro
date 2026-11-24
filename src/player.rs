@@ -2,7 +2,8 @@ use crate::{
     analysis::{Analysis, Shape, Update},
     artwork,
     audio::{Command, Status, Transport},
-    library::clock,
+    library::{DiscContext, clock},
+    location::ActivateLocationControl,
     queue::{Queue, Repeat},
     theme::materials,
     timeline::{Program, SECOND},
@@ -32,7 +33,11 @@ mod wave;
 use crate::level_meter::LevelMeter;
 
 pub enum PlayerEvent {
-    Locate(Arc<crate::library::Track>, crate::browser::Destination),
+    Locate(
+        Arc<crate::library::Track>,
+        DiscContext,
+        crate::browser::Destination,
+    ),
     ContinueCd(crate::queue::Entry),
     TrackChanged,
     PlaySelection,
@@ -46,6 +51,7 @@ pub(crate) fn reveal_items(
     mut menu: PopupMenu,
     player: &Entity<Player>,
     track: &Arc<crate::library::Track>,
+    context: DiscContext,
 ) -> PopupMenu {
     use crate::browser::Destination;
     for (destination, label, icon) in [
@@ -62,7 +68,7 @@ pub(crate) fn reveal_items(
                 .icon(icon)
                 .on_click(move |_, _, cx| {
                     player.update(cx, |_, cx| {
-                        cx.emit(PlayerEvent::Locate(track.clone(), destination))
+                        cx.emit(PlayerEvent::Locate(track.clone(), context, destination))
                     });
                 }),
         );
@@ -478,6 +484,9 @@ impl Render for Player {
         };
 
         use crate::browser::Destination;
+        let disc_context = self
+            .playing_entry()
+            .map_or_default(|entry| entry.disc_context);
         let art = art
             .id("playing-artwork")
             .when_some(s.track.clone(), |art, track| {
@@ -486,13 +495,27 @@ impl Render for Player {
                 } else {
                     (Destination::Locations, "Show in Locations")
                 };
+                let keyboard_track = track.clone();
                 art.role(Role::Button)
                     .aria_label(label)
                     .tab_index(0)
+                    .key_context("LocationControl")
+                    .focus_visible(|d| d.border_1().border_color(m.accent))
                     .cursor_pointer()
                     .tooltip(move |w, cx| Tooltip::new(label).build(w, cx))
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(PlayerEvent::Locate(track.clone(), destination));
+                        cx.emit(PlayerEvent::Locate(
+                            track.clone(),
+                            disc_context,
+                            destination,
+                        ));
+                    }))
+                    .on_action(cx.listener(move |_, _: &ActivateLocationControl, _, cx| {
+                        cx.emit(PlayerEvent::Locate(
+                            keyboard_track.clone(),
+                            disc_context,
+                            destination,
+                        ));
                     }))
             });
         let reveal_menu = s.track.clone().map(|track| {
@@ -512,16 +535,19 @@ impl Render for Player {
                 .accessibility_label("Now Playing actions")
                 .tooltip("Now Playing actions")
                 .dropdown_menu(move |menu, _, _| {
-                    reveal_items(menu, &player, &track).when_some(entry.clone(), |menu, entry| {
-                        let player = player.clone();
-                        menu.item(PopupMenuItem::new("Continue This CD").on_click(
-                            move |_, _, cx| {
-                                player.update(cx, |_, cx| {
-                                    cx.emit(PlayerEvent::ContinueCd(entry.clone()))
-                                });
-                            },
-                        ))
-                    })
+                    reveal_items(menu, &player, &track, disc_context).when_some(
+                        entry.clone(),
+                        |menu, entry| {
+                            let player = player.clone();
+                            menu.item(PopupMenuItem::new("Continue This CD").on_click(
+                                move |_, _, cx| {
+                                    player.update(cx, |_, cx| {
+                                        cx.emit(PlayerEvent::ContinueCd(entry.clone()))
+                                    });
+                                },
+                            ))
+                        },
+                    )
                 })
         });
 

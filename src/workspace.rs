@@ -329,10 +329,10 @@ impl Workspace {
                 }
             }),
             cx.subscribe_in(&player, window, |s: &mut Self, _, e, w, cx| match e {
-                PlayerEvent::Locate(track, dest) => {
+                PlayerEvent::Locate(track, context, dest) => {
                     if let Some(browser) = s.browser(cx) {
                         s.reveal_active_browser(w, cx);
-                        browser.update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
+                        browser.update(cx, |b, cx| b.locate(track.clone(), *context, *dest, w, cx));
                     } else {
                         w.push_notification("Open a Music Browser to show this recording.", cx);
                     }
@@ -1677,6 +1677,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &FindTrack, w, cx| {
                 s.reveal_active_browser(w, cx);
                 if let Some(b) = s.browser(cx) {
+                    b.update(cx, |b, cx| {
+                        b.begin_navigation(cx);
+                    });
                     let search = b.read(cx).search.clone();
                     search.update(cx, |i, cx| {
                         i.focus(w, cx);

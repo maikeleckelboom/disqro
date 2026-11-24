@@ -27,7 +27,11 @@ use navigation::{Arrival, History, Pending};
 pub(crate) use navigation::{Bookmark, Route, SavedVisit};
 pub(crate) use sequential::SequenceKind;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 /// A folder that has not listed anything by then says it is opening, rather
 /// than flashing that message for every folder.
@@ -128,8 +132,10 @@ pub struct Browser {
     folder_child: Option<PathBuf>,
     window: AnyWindowHandle,
     navigation: u64,
+    intent: Ticket,
     programs: Arc<[Arc<Disc>]>,
     folder_sequence: sequential::Sequence,
+    folder_traversal: sequential::FolderTraversal,
     indexed_sequence: sequential::IndexedSequence,
     folder_ready: bool,
     raw: Vec<Option<Arc<Track>>>,
@@ -235,6 +241,20 @@ impl Browser {
             }
         })
         .detach();
+        // Table key bindings can consume these before a raw key handler runs.
+        cx.observe_keystrokes(|b, event, window, cx| {
+            let key = &event.keystroke;
+            if !key.modifiers.alt
+                && matches!(
+                    key.key.as_str(),
+                    "up" | "down" | "pageup" | "pagedown" | "home" | "end" | "enter" | "escape"
+                )
+                && b.list_focus(cx).contains_focused(window, cx)
+            {
+                b.begin_navigation(cx);
+            }
+        })
+        .detach();
         cx.subscribe_in(
             &table,
             window,
@@ -263,7 +283,10 @@ impl Browser {
         .detach();
         cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
             CatalogEvent::Content => b.library_changed(cx),
-            CatalogEvent::Structure(root) => b.refresh_indexed_sequence(*root, cx),
+            CatalogEvent::Structure(root) => {
+                b.refresh_indexed_sequence(*root, cx);
+                b.refresh_folder_traversal(cx);
+            }
             CatalogEvent::Changed => {
                 if let Some(notice) = b.location.unavailable(b.catalog.read(cx)) {
                     b.notice = Some(notice.into());
@@ -271,6 +294,7 @@ impl Browser {
                 } else if b.location.is_directory() {
                     b.filter(cx);
                 }
+                b.refresh_folder_traversal(cx);
                 cx.notify();
             }
             CatalogEvent::Notice(_) if b.location.is_directory() && !b.catalog.read(cx).loaded => {
@@ -309,12 +333,14 @@ impl Browser {
             query: String::new(),
             programs: Arc::default(),
             folder_sequence: Default::default(),
+            folder_traversal: Default::default(),
             indexed_sequence: Default::default(),
             history: History::default(),
             pending: None,
             folder_child: None,
             window: window.window_handle(),
             navigation: 0,
+            intent: Ticket::default(),
             notice: None,
             busy: false,
             slow: false,
@@ -323,8 +349,8 @@ impl Browser {
             albums: Ticket::default(),
         }
     }
-    pub fn revision(&self) -> u64 {
-        self.navigation
+    pub fn navigation_is_current(&self, revision: u64) -> bool {
+        self.intent.is_current(revision)
     }
     /// Makes this the browser the address bar, Locations and the player's
     /// Play button address, or stops it being that.
@@ -335,6 +361,7 @@ impl Browser {
         self.active = active;
         cx.notify();
         if !active {
+            self.begin_navigation(cx);
             return;
         }
         self.sync_tree(cx);
@@ -464,17 +491,17 @@ impl Browser {
     fn title_of(&self, key: &DiscId) -> String {
         self.programs
             .iter()
-            .find(|d| &d.id == key)
+            .find(|d| d.id.same(key))
             .and_then(|d| d.release.as_ref())
             .map_or_else(String::new, |m| m.title.clone())
     }
     fn page_available(&self) -> bool {
         match &self.page {
-            Some(Page::Disc(id)) => self.programs.iter().any(|d| &d.id == id),
+            Some(Page::Disc(id)) => self.programs.iter().any(|d| d.id.same(id)),
             Some(Page::Release(key)) => self
                 .programs
                 .iter()
-                .any(|d| d.release.as_ref().is_some_and(|r| &r.key == key)),
+                .any(|d| d.release.as_ref().is_some_and(|r| r.key.same(key))),
             None => true,
         }
     }
@@ -585,6 +612,7 @@ impl Browser {
             self.cancel_pending();
             self.prefs.albums = albums;
             self.filter(cx);
+            self.refresh_folder_traversal(cx);
         }
         cx.emit(ViewChanged);
         if had_list_focus {
@@ -633,7 +661,7 @@ impl Browser {
             Some(Page::Disc(id)) => self
                 .programs
                 .iter()
-                .filter(|d| &d.id == id)
+                .filter(|d| d.id.same(id))
                 .cloned()
                 .collect(),
             Some(Page::Release(key)) => crate::collection::release_discs(&self.programs, key),
@@ -1006,7 +1034,7 @@ impl Browser {
         self.move_to(Route::new(location, None), Arrival::Regular, window, cx);
     }
     pub fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let revision = self.revision();
+        let revision = self.begin_navigation(cx);
         let result = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1018,7 +1046,7 @@ impl Browser {
                 && let Some(path) = paths.into_iter().next()
             {
                 let _ = this.update_in(cx, |b, w, cx| {
-                    if b.revision() == revision {
+                    if b.navigation_is_current(revision) {
                         b.open(path, w, cx);
                     }
                 });
@@ -1027,6 +1055,7 @@ impl Browser {
         .detach();
     }
     pub fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_navigation(cx);
         match self.location.clone() {
             Location::Folder(_) => {
                 let path = self.path.clone();
@@ -1068,7 +1097,7 @@ impl Browser {
     ) {
         self.generation += 1;
         let revision = self.generation;
-        let navigation = self.navigation;
+        let file_intent = reveal.as_ref().map(|_| self.intent.next());
         let timing = std::env::var_os("DISQRO_TRACE_DISCOVERY").map(|_| std::time::Instant::now());
         self.task.take();
         let events = self.scanner.open(path.clone(), self.subfolders);
@@ -1083,6 +1112,7 @@ impl Browser {
         self.raw.clear();
         self.programs = Arc::default();
         self.folder_sequence = Default::default();
+        self.folder_traversal = Default::default();
         self.covers = Default::default();
         self.unreadable = Default::default();
         self.equivalent_sheets.clear();
@@ -1104,8 +1134,10 @@ impl Browser {
         self.task = Some(cx.spawn_in(window, async move |this, cx| {
             let mut reveal = reveal;
             let mut first = true;
+            let mut complete = true;
             let mut handling = (0usize, std::time::Duration::ZERO, std::time::Duration::ZERO);
             while let Ok(batch) = events.recv().await {
+                complete &= batch.incomplete.is_empty();
                 let started = timing.map(|_| std::time::Instant::now());
                 if this
                     .update_in(cx, |b, window, cx| {
@@ -1126,10 +1158,10 @@ impl Browser {
                             Arc::make_mut(&mut b.unreadable).extend(batch.unreadable);
                         }
                         b.equivalent_sheets.extend(batch.equivalent_sheets);
-                        if let Some(Page::Disc(DiscId::Cue(sheet))) = &mut b.page
-                            && let Some(canonical) = b.equivalent_sheets.get(sheet)
+                        if let Some(Page::Disc(DiscId::Cue(sheet))) = &b.page
+                            && let Some(canonical) = b.alternate_sheet(sheet)
                         {
-                            *sheet = canonical.clone();
+                            b.page = Some(Page::Disc(DiscId::Cue(canonical.to_owned())));
                         }
                         if b.notice.is_none() {
                             b.notice = batch.notice;
@@ -1154,7 +1186,8 @@ impl Browser {
                                 );
                             }
                         }
-                        if b.navigation == navigation && let Some(request) = &reveal
+                        if file_intent.is_some_and(|ticket| b.navigation_is_current(ticket))
+                            && let Some(request) = &reveal
                             && b.reveal(request, window, cx)
                         {
                             reveal = None;
@@ -1174,7 +1207,10 @@ impl Browser {
             let _ = this.update(cx, |b, cx| {
                 if b.generation == revision {
                     b.busy = false;
-                    b.folder_sequence = sequential::Sequence::folder(&b.programs);
+                    b.folder_ready &= complete;
+                    if b.folder_ready {
+                        b.folder_sequence = sequential::Sequence::folder(&b.programs, &b.unreadable);
+                    }
                     if let Some(start) = timing {
                         eprintln!(
                             "Discovery {revision} finished {:?} ({} tracks; {} batches, interface {:?}, longest {:?})",
@@ -1185,18 +1221,34 @@ impl Browser {
                             handling.2
                         );
                     }
-                    if b.navigation == navigation && reveal.is_some() && b.notice.is_none() {
+                    if file_intent.is_some_and(|ticket| b.navigation_is_current(ticket))
+                        && reveal.is_some()
+                        && b.notice.is_none()
+                    {
                         b.notice = Some("This recording is unavailable.".into());
                     }
                     if b.page.is_some() && !b.page_available() && b.notice.is_none() {
                         b.notice = Some("This CD or release is unavailable.".into());
                     }
                     b.filter(cx);
+                    b.refresh_folder_traversal(cx);
                     b.finish_listing(cx);
                     cx.notify();
                 }
             });
         }));
+    }
+    fn alternate_sheet(&self, sheet: &Path) -> Option<&Path> {
+        self.equivalent_sheets
+            .get(sheet)
+            .or_else(|| {
+                self.equivalent_sheets
+                    .iter()
+                    .find_map(|(alias, canonical)| {
+                        crate::places::same_path(alias, sheet).then_some(canonical)
+                    })
+            })
+            .map(PathBuf::as_path)
     }
     fn reveal(&mut self, request: &Reveal, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let table = self.table.read(cx).delegate();
@@ -1205,7 +1257,7 @@ impl Browser {
             .find(|t| match request {
                 Reveal::Track(wanted) => wanted.same_item(t),
                 Reveal::Select(path) | Reveal::Play(path) => {
-                    let path = self.equivalent_sheets.get(path).unwrap_or(path);
+                    let path = self.alternate_sheet(path).unwrap_or(path);
                     crate::places::same_path(&t.source, path)
                         || t.disc
                             .as_ref()

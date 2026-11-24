@@ -48,23 +48,23 @@ impl ViewPrefs {
     /// Whether `folder` is browsed with its subfolders: the choice made for
     /// it or its nearest ancestor, or not.
     pub fn includes_subfolders(&self, folder: &Path) -> bool {
+        self.subfolder_rule(folder).is_some_and(|r| r.include)
+    }
+    pub fn subfolder_rule(&self, folder: &Path) -> Option<&SubfolderRule> {
         self.subfolders
             .iter()
             .filter(|r| library::within(folder, &r.path))
             .max_by_key(|r| r.path.as_os_str().len())
-            .is_some_and(|r| r.include)
     }
     /// Records a choice for `folder` and everything beneath it, replacing
     /// earlier choices made inside it.
     pub fn set_subfolders(&mut self, folder: &Path, include: bool) {
         self.subfolders
             .retain(|r| !library::within(&r.path, folder));
-        if self.includes_subfolders(folder) != include {
-            self.subfolders.push(SubfolderRule {
-                path: folder.to_owned(),
-                include,
-            });
-        }
+        self.subfolders.push(SubfolderRule {
+            path: folder.to_owned(),
+            include,
+        });
         let excess = self.subfolders.len().saturating_sub(RULES);
         self.subfolders.drain(..excess);
     }
@@ -100,6 +100,22 @@ impl DiscId {
         match self {
             Self::Library(id) => Some(*id),
             _ => None,
+        }
+    }
+    pub fn folder(&self) -> Option<&Path> {
+        match self {
+            Self::Cue(sheet) => sheet.parent(),
+            Self::Album(folder, ..) => Some(folder),
+            Self::Library(_) => None,
+        }
+    }
+    pub fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Cue(a), Self::Cue(b)) => crate::places::same_path(a, b),
+            (Self::Album(a, title, number), Self::Album(b, other_title, other_number)) => {
+                title == other_title && number == other_number && crate::places::same_path(a, b)
+            }
+            _ => self == other,
         }
     }
 }
@@ -142,7 +158,7 @@ pub struct Disc {
 pub fn release_discs(discs: &[Arc<Disc>], key: &DiscId) -> Vec<Arc<Disc>> {
     let mut found: Vec<_> = discs
         .iter()
-        .filter(|d| d.release.as_ref().is_some_and(|m| &m.key == key))
+        .filter(|d| d.release.as_ref().is_some_and(|m| m.key.same(key)))
         .cloned()
         .collect();
     found.sort_by_key(|d| d.release.as_ref().map(|m| m.number));
@@ -714,7 +730,8 @@ mod tests {
         assert_eq!(prefs.subfolders.len(), 1);
         // Turning a folder back to itself leaves no rule behind.
         prefs.set_subfolders(archive, false);
-        assert!(prefs.subfolders.is_empty());
+        assert_eq!(prefs.subfolders.len(), 1);
+        assert!(!prefs.includes_subfolders(disc));
     }
     #[test]
     fn earlier_global_subfolder_switch_is_not_carried_over() {

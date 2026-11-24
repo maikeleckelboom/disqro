@@ -241,7 +241,7 @@ impl Entries {
                 .on_click(remove),
             )
             .separator();
-        reveal_items(menu, player, &entry.track)
+        reveal_items(menu, player, &entry.track, entry.disc_context)
     }
     fn render_row(&self, ix: usize, q: &Queue, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
