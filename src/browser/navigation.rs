@@ -1,5 +1,6 @@
 //! Per-browser navigation routes, history, and view restoration.
 use super::*;
+use crate::panels::{Router, RouterEvent};
 use crate::table::{Selection, Viewport};
 use std::{
     collections::HashMap,
@@ -173,7 +174,9 @@ impl Route {
                 None,
                 Some(RowKey::Link(ShelfLink::Playlist(*id))),
             ),
-            (Location::Liked, _) => (Location::Library(None), None, None),
+            (Location::Liked | Location::RecentlyPlayed, _) => {
+                (Location::Library(None), None, None)
+            }
             _ => return None,
         };
         Some((Route::new(location, page), child))
@@ -1020,6 +1023,74 @@ impl Browser {
         self.restore_visit(visit, w, cx);
     }
 
+    pub(crate) fn reveal_recording(
+        &mut self,
+        id: crate::store::TrackId,
+        router: &Entity<Router>,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = self.begin_navigation(cx);
+        let Some(store) = self.catalog.read(cx).handle() else {
+            w.push_notification("The Library is unavailable.", cx);
+            return;
+        };
+        let lookup = store.query(&self.intent, request, move |s| {
+            let mut files = crate::store::DetachedFiles::default();
+            Ok(s.rows(Scope::Library(None), &[id])?
+                .pop()
+                .filter(|row| {
+                    row.available
+                        && row.track.source.is_file()
+                        && row.track.disc.as_ref().is_none_or(|d| d.sheet.is_file())
+                        && files.available(row)
+                })
+                .map(|row| row.track))
+        });
+        self.resolve_recording_reveal(request, lookup, router.clone(), w, cx)
+            .detach();
+    }
+
+    fn resolve_recording_reveal(
+        &self,
+        request: u64,
+        lookup: impl Future<Output = anyhow::Result<Option<Arc<Track>>>> + 'static,
+        router: Entity<Router>,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn_in(w, async move |this, cx| {
+            let found = lookup.await;
+            let _ = this.update_in(cx, |b, w, cx| {
+                let target = cx.entity_id();
+                if !b.navigation_is_current(request)
+                    || !router
+                        .read(cx)
+                        .active()
+                        .is_some_and(|b| b.entity_id() == target)
+                {
+                    return;
+                }
+                match found {
+                    Ok(Some(track)) => {
+                        let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
+                        if let Some(folder) = anchor.parent() {
+                            b.open_revealing(
+                                folder.to_path_buf(),
+                                Some(Reveal::Track(track)),
+                                w,
+                                cx,
+                            );
+                            router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal(target)));
+                        }
+                    }
+                    Ok(None) => w.push_notification("This recording is unavailable.", cx),
+                    Err(error) => w.push_notification(error.to_string(), cx),
+                }
+            });
+        })
+    }
+
     pub fn locate(
         &mut self,
         track: Arc<Track>,
@@ -1293,6 +1364,10 @@ impl Browser {
         Some(request)
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "navigationTests.rs"]
+mod native_tests;
 
 /// Continues the CD of a queue entry from the program Disqro reads for it,
 /// for when no open browser lists that CD.

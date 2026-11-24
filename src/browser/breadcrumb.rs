@@ -89,6 +89,7 @@ impl Browser {
                 Location::Collections,
                 Location::Playlists,
                 Location::Liked,
+                Location::RecentlyPlayed,
             ]
             .into_iter()
             .map(|location| {

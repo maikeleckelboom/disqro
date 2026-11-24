@@ -97,7 +97,9 @@ impl ListeningList {
             let mut files = store::DetachedFiles::default();
             for row in rows {
                 anyhow::ensure!(ticket.is_current(generation), store::Cancelled);
-                if Catalog::available(&row, &offline, &mut files) {
+                if Catalog::available(&row, &offline, &mut files)
+                    && (scope != Scope::RecentlyPlayed || row.track.source.is_file())
+                {
                     if Some(row.key) == chosen {
                         start = Some(tracks.len());
                     }
@@ -131,6 +133,7 @@ impl ListeningList {
         };
         match scope {
             Scope::Liked => Some("Liked Tracks".into()),
+            Scope::RecentlyPlayed => Some("Recently Played".into()),
             Scope::Playlist(id) => catalog
                 .playlists
                 .iter()
@@ -180,6 +183,9 @@ pub enum CatalogEvent {
     Changed,
     /// Library rows changed; open views should query again.
     Content,
+    Listening(Vec<crate::listening::Change>),
+    ListeningRemoved,
+    SourcesMoved(Vec<PathBuf>),
     /// A registered collection's navigation structure or availability changed.
     Structure(RootId),
     /// A playlist was just created and can be named.
@@ -190,11 +196,17 @@ impl EventEmitter<CatalogEvent> for Catalog {}
 
 pub struct Catalog {
     store: Option<Handle>,
+    listening_reads: Option<Handle>,
+    statistics_reads: Option<Handle>,
+    listening_changes: Option<crate::listening::Changes>,
     cache_dir: Option<PathBuf>,
     pub collections: Vec<Collection>,
     pub playlists: Vec<store::Playlist>,
     marks: Arc<HashMap<TrackId, Mark>>,
     located: Arc<HashMap<Locator, TrackId>>,
+    listening: Arc<HashMap<TrackId, crate::listening::Totals>>,
+    listening_locations: Arc<HashMap<Locator, TrackId>>,
+    listening_keys: HashMap<TrackId, Locator>,
     scanning: Option<(RootId, Arc<AtomicBool>)>,
     pending: VecDeque<RootId>,
     pub loaded: bool,
@@ -205,14 +217,24 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let store = Store::location().map(Handle::spawn);
+        Self::open(Store::location(), cx)
+    }
+
+    pub(crate) fn open(path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        let cache_dir = path.as_ref().map(|p| p.with_file_name("Cache"));
         let mut this = Self {
-            store,
-            cache_dir: crate::profile::location().map(|p| p.with_file_name("Cache")),
+            store: path.map(Handle::spawn),
+            listening_reads: None,
+            statistics_reads: None,
+            listening_changes: None,
+            cache_dir,
             collections: vec![],
             playlists: vec![],
             marks: Arc::default(),
             located: Arc::default(),
+            listening: Arc::default(),
+            listening_locations: Arc::default(),
+            listening_keys: HashMap::new(),
             scanning: None,
             pending: VecDeque::new(),
             loaded: false,
@@ -222,6 +244,144 @@ impl Catalog {
         };
         this.load(true, cx);
         this
+    }
+
+    pub fn watch_listening(&mut self, updates: crate::listening::Updates, cx: &mut Context<Self>) {
+        let Some(store) = self.listening_handle() else {
+            return;
+        };
+        self.listening_changes = Some(updates.changes.clone());
+        let pending = updates.changes.pending();
+        let changed = updates.changed;
+        let notice = updates.error;
+        cx.spawn(async move |this, cx| {
+            let mut initial = true;
+            let mut index_error = None;
+            while initial || changed.recv().await.is_ok() {
+                let changes = std::mem::take(&mut *pending.lock().unwrap());
+                let notice = notice.lock().unwrap().take();
+                if this
+                    .update(cx, |_, cx| {
+                        if let Some(notice) = notice {
+                            cx.emit(CatalogEvent::Notice(format!("Listening history: {notice}")));
+                        }
+                        if changes.iter().any(|c| c.removed) {
+                            cx.emit(CatalogEvent::ListeningRemoved);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let rebuild = initial || changes.iter().any(|c| c.track.is_none() && c.order);
+                initial = false;
+                let ids =
+                    (!rebuild).then(|| changes.iter().filter_map(|c| c.track).collect::<Vec<_>>());
+                let rows = if ids.as_ref().is_some_and(Vec::is_empty) {
+                    Ok(Vec::new())
+                } else {
+                    store.call(move |s| s.listening_index(ids)).await
+                };
+                if this
+                    .update(cx, |state, cx| match rows {
+                        Ok(rows) => {
+                            index_error = None;
+                            if rebuild {
+                                state.listening = Arc::default();
+                                state.listening_locations = Arc::default();
+                                state.listening_keys.clear();
+                            }
+                            for (id, locator, totals) in rows {
+                                if let Some(key) = state.listening_keys.remove(&id)
+                                    && state.listening_locations.get(&key) == Some(&id)
+                                {
+                                    Arc::make_mut(&mut state.listening_locations).remove(&key);
+                                }
+                                if totals.credited_us == 0 {
+                                    Arc::make_mut(&mut state.listening).remove(&id);
+                                } else {
+                                    Arc::make_mut(&mut state.listening).insert(id, totals);
+                                    if let Some(locator) = locator {
+                                        state.listening_keys.insert(id, locator.clone());
+                                        Arc::make_mut(&mut state.listening_locations)
+                                            .insert(locator, id);
+                                    }
+                                }
+                            }
+                            if rebuild || !changes.is_empty() {
+                                cx.emit(CatalogEvent::Listening(changes));
+                            }
+                        }
+                        Err(e) => {
+                            initial = true;
+                            let message = format!("Listening history: {e:#}");
+                            if index_error.as_ref() != Some(&message) {
+                                cx.emit(CatalogEvent::Notice(message.clone()));
+                                index_error = Some(message);
+                            }
+                            if !changes.is_empty() {
+                                cx.emit(CatalogEvent::Listening(changes));
+                            }
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                if initial {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
+                }
+            }
+        })
+        .detach();
+    }
+    pub fn listening_handle(&mut self) -> Option<Handle> {
+        if self.listening_reads.is_none() {
+            self.listening_reads = self
+                .store
+                .as_ref()
+                .map(|s| Handle::spawn(s.path().to_path_buf()));
+        }
+        self.listening_reads.clone()
+    }
+    pub fn statistics_handle(&mut self) -> Option<Handle> {
+        if self.statistics_reads.is_none() {
+            self.statistics_reads = self
+                .store
+                .as_ref()
+                .map(|s| Handle::spawn(s.path().to_path_buf()));
+        }
+        self.statistics_reads.clone()
+    }
+    fn refresh_listening_locations(&self) {
+        if let Some(changes) = &self.listening_changes {
+            changes.publish(crate::listening::Change {
+                track: None,
+                order: true,
+                removed: false,
+            });
+        }
+    }
+
+    pub fn listening_of(&self, track: &Track) -> crate::listening::Totals {
+        track
+            .library_id
+            .or_else(|| self.listening_locations.get(&Locator::of(track)).copied())
+            .and_then(|id| self.listening.get(&id).copied())
+            .unwrap_or_default()
+    }
+    pub fn listening_snapshot(&self) -> impl Fn(&Track) -> crate::listening::Totals + Send + use<> {
+        let totals = self.listening.clone();
+        let located = self.listening_locations.clone();
+        move |track| {
+            track
+                .library_id
+                .or_else(|| located.get(&Locator::of(track)).copied())
+                .and_then(|id| totals.get(&id).copied())
+                .unwrap_or_default()
+        }
     }
 
     /// Reads collections, playlists and marks; optionally rescans every
@@ -593,7 +753,8 @@ impl Catalog {
                         if !ticket.is_current(generation) {
                             return Err(store::Cancelled.into());
                         }
-                        row.available = Self::available(row, &offline, &mut files);
+                        row.available = Self::available(row, &offline, &mut files)
+                            && (scope != Scope::RecentlyPlayed || row.track.source.is_file());
                     }
                     Ok(rows)
                 })
@@ -774,6 +935,7 @@ impl Catalog {
                 Ok((roots, marks)) => {
                     c.set_roots(roots);
                     c.set_marks(marks);
+                    c.refresh_listening_locations();
                     cx.emit(CatalogEvent::Changed);
                     cx.emit(CatalogEvent::Content);
                     cx.emit(CatalogEvent::Structure(id));
@@ -874,6 +1036,9 @@ impl Catalog {
         }
         if let Err(result) = message {
             self.scanning = None;
+            // Scan transactions can commit file moves before later phases finish,
+            // including when a scan is cancelled.
+            self.refresh_listening_locations();
             cx.emit(CatalogEvent::Structure(id));
             match result {
                 Ok(summary) if summary.ambiguous > 0 => cx.emit(CatalogEvent::Notice(format!(
@@ -887,6 +1052,11 @@ impl Catalog {
             }
             self.load(false, cx);
             self.next_scan(cx);
+        } else if let Ok(Progress::Indexed(summary)) = message {
+            self.refresh_listening_locations();
+            if !summary.relocated_folders.is_empty() {
+                cx.emit(CatalogEvent::SourcesMoved(summary.relocated_folders));
+            }
         }
         if refresh {
             cx.emit(CatalogEvent::Content);

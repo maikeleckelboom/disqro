@@ -247,18 +247,21 @@ impl LocationsPanel {
             .read(cx)
             .current()
             .is_some_and(|(r, c)| same_path(r, &root) && same_path(c, &path));
-        let folder_view = router
-            .read(cx)
-            .active()
-            .is_some_and(|b| b.read(cx).location.is_folder() && !b.read(cx).is_page());
-        if new_tab || !shown || !folder_view {
+        if !new_tab
+            && shown
+            && let Some(b) = router.read(cx).active()
+            && b.read(cx).location.is_folder()
+            && !b.read(cx).is_page()
+        {
+            router.update(cx, |_, cx| {
+                cx.emit(super::RouterEvent::Reveal(b.entity_id()))
+            });
+        } else {
             let destination = Destination::Folder {
                 path,
                 root: Some(root),
             };
             Router::open(router, destination, new_tab, window, cx);
-        } else {
-            router.update(cx, |_, cx| cx.emit(super::RouterEvent::Reveal));
         }
     }
     fn panel_menu(this: WeakEntity<Self>, menu: PopupMenu, missing: usize) -> PopupMenu {

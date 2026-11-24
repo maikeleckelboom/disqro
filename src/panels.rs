@@ -22,6 +22,7 @@
 pub mod browser;
 mod instruments;
 pub mod library;
+pub(crate) mod listening;
 pub mod locations;
 pub mod nav;
 pub mod queue;
@@ -109,6 +110,8 @@ pub static TYPES: &[&PanelType] = &[
     &locations::TYPE,
     &queue::QUEUE,
     &queue::HISTORY,
+    &listening::HISTORY,
+    &listening::STATISTICS,
     &spectrum::TYPE,
     &instruments::SPECTROGRAM,
     &instruments::STEREO_FIELD,
@@ -473,7 +476,7 @@ pub enum RouterEvent {
     Open(Destination),
     Beside(Destination),
     /// Show the active browser where it sits in the dock.
-    Reveal,
+    Reveal(EntityId),
 }
 
 /// The active Music Browser, which navigation panels, the address bar and
@@ -517,7 +520,9 @@ impl Router {
     ) {
         if !new_tab && let Some(browser) = router.read(cx).active() {
             browser.update(cx, |b, cx| destination.apply(b, window, cx));
-            router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal));
+            router.update(cx, |_, cx| {
+                cx.emit(RouterEvent::Reveal(browser.entity_id()))
+            });
         } else {
             router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination)));
         }

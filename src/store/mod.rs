@@ -26,6 +26,7 @@ use std::{
 
 mod identity;
 mod index;
+pub mod listening;
 mod playlists;
 pub mod query;
 mod schema;
@@ -34,6 +35,7 @@ pub mod search;
 mod tests;
 mod worker;
 
+pub use identity::NativeFile;
 pub use index::{Progress, Summary, index_root};
 pub use query::{AlbumRow, AlbumStructure, Order, Query, Scope, Term};
 pub use worker::{Cancelled, Handle, Ticket, is_cancelled};
@@ -201,7 +203,21 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.pragma_update(None, "foreign_keys", true)?;
-        schema::migrate(&mut db, Some(path), schema::MIGRATIONS)?;
+        let _migration = if schema::version(&db)? != schema::VERSION {
+            // The catalog, listening writer and statistics reader may open
+            // together. Serialize backup and migration as one startup step.
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path.with_extension("migration.lock"))?;
+            lock.lock()?;
+            schema::initialize(&mut db, Some(path))?;
+            Some(lock)
+        } else {
+            None
+        };
         configure(&db)?;
         Ok(Self { db })
     }
@@ -209,7 +225,7 @@ impl Store {
     pub fn memory() -> Self {
         let mut db = Connection::open_in_memory().unwrap();
         configure(&db).unwrap();
-        schema::migrate(&mut db, None, schema::MIGRATIONS).unwrap();
+        schema::initialize(&mut db, None).unwrap();
         Self { db }
     }
 
@@ -278,9 +294,8 @@ impl Store {
     /// liked, rated or added to a playlist stay, detached, and return to the
     /// collection if its folder is added again.
     pub fn remove_root(&mut self, id: RootId) -> Result<()> {
-        let tx = self
-            .db
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let tx = Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
+        self.remember_listening_releases(&tx, id)?;
         tx.execute("UPDATE tracks SET root_id = NULL WHERE root_id = ?1", [id])?;
         tx.execute("UPDATE files SET root_id = NULL WHERE root_id = ?1", [id])?;
         tx.execute("UPDATE albums SET root_id = NULL WHERE root_id = ?1", [id])?;
@@ -455,7 +470,9 @@ fn collect_garbage(tx: &Transaction) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM tracks WHERE root_id IS NULL AND id NOT IN (
              SELECT track_id FROM likes UNION SELECT track_id FROM ratings
-             UNION SELECT track_id FROM playlist_entries);
+             UNION SELECT track_id FROM playlist_entries
+             UNION SELECT track_id FROM listening_totals
+             UNION SELECT track_id FROM listening_release_evidence);
          DELETE FROM files WHERE root_id IS NULL AND id NOT IN (
              SELECT anchor FROM tracks UNION SELECT source FROM tracks);
          DELETE FROM albums WHERE id NOT IN (

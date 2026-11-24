@@ -27,6 +27,7 @@ pub struct Recording {
     samples: Vec<f32>,
     gain: f32,
     pub stamp: Option<crate::cache::Stamp>,
+    pub(crate) object: Option<crate::store::NativeFile>,
     pub(crate) playback_probe: Option<std::time::Instant>,
 }
 pub fn disc_frame(tick: u64, rate: u32) -> usize {
@@ -35,6 +36,7 @@ pub fn disc_frame(tick: u64, rate: u32) -> usize {
 impl Recording {
     pub fn open(track: &Track, end: Option<u64>) -> Result<Self> {
         let file = Box::new(File::open(&track.source)?);
+        let object = crate::store::NativeFile::of(&file);
         let stamp = file
             .metadata()
             .ok()
@@ -138,6 +140,7 @@ impl Recording {
             samples: Vec::new(),
             gain,
             stamp,
+            object,
             playback_probe: None,
         })
     }

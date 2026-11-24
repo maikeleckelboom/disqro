@@ -71,6 +71,16 @@ fn digest(bytes: &[u8], size: u64) -> i64 {
     hash as i64
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NativeFile(pub i64, pub i64);
+
+impl NativeFile {
+    pub fn of(file: &fs::File) -> Option<Self> {
+        let (volume, index) = file_identity(file);
+        Some(Self(volume?, index.filter(|&id| id != 0)?))
+    }
+}
+
 impl Evidence {
     pub fn read(path: &Path, sheet: bool, stamp: &Stamp) -> Option<Self> {
         let mut file = fs::File::open(path).ok()?;

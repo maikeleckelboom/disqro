@@ -1,0 +1,25 @@
+Runtime source fe8020cb9cedc492b85df45099b63027d82e1105
+Windows build 26300 x64, AMD Ryzen 7 8845HS, Rust 1.99.1.
+cargo test --locked --release listening_scale -- --ignored --nocapture
+An isolated scratch directory retained the fixture for the paired native workload.
+The fixture test also verifies 100,000 recordings, 1,000,000 qualified plays,
+25,000 listening hours, 3,000 artist credits and 6,000 releases.
+
+running 1 test
+test store::listening::tests::listening_scale has been running for over 60 seconds
+fixture 119.14s, database 350.1 MiB
+Recently Played 100k keys 515.1 ms
+Sort 100k tracks by plays 175.7 ms
+First page including availability 7.9 ms
+Cursor page at 500k 6.4 ms
+Week statistics 116.4 ms, 3836 plays
+Month statistics 580.4 ms, 16438 plays
+All statistics 523.0 ms, 1000000 plays
+History cursor page during all-time statistics 8.3 ms
+Browser row hydration during all-time statistics 0.5 ms
+Concurrent all-time statistics 569.1 ms
+New unindexed recording and qualifying checkpoint 14.7 ms
+Incremental checkpoint 1.2 ms
+test store::listening::tests::listening_scale ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 121.70s

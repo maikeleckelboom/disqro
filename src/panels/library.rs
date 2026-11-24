@@ -389,6 +389,29 @@ impl LibraryPanel {
             })
             .into_any_element(),
         );
+        let router = self.router.clone();
+        rows.push(
+            Self::opens(
+                nav_row(
+                    "recently-played".into(),
+                    Icon::new(IconName::Clock),
+                    "Recently Played".into(),
+                    location == Some(Location::RecentlyPlayed),
+                    &m,
+                ),
+                &self.router,
+                Location::RecentlyPlayed,
+            )
+            .context_menu(move |menu, _, _| {
+                Self::open_items(
+                    menu,
+                    router.clone(),
+                    Location::RecentlyPlayed,
+                    IconName::Clock,
+                )
+            })
+            .into_any_element(),
+        );
         rows.extend(self.render_playlists(location, cx));
         rows
     }

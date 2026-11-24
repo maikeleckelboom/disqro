@@ -8,7 +8,7 @@
 use super::{AlbumId, PlaylistId, RootId, Row, Store, TrackId};
 use crate::library::{DiscTrack, Track};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, ToSql, params_from_iter};
+use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -19,6 +19,7 @@ pub enum Scope {
     /// Every disc of the release whose first disc this is, in disc order.
     Release(AlbumId),
     Liked,
+    RecentlyPlayed,
     Playlist(PlaylistId),
 }
 impl Scope {
@@ -40,6 +41,9 @@ pub enum Order {
     Year,
     Path,
     Rating,
+    Plays,
+    LastPlayed,
+    ListeningTime,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +158,9 @@ fn order_sql(order: Order) -> &'static str {
         Order::Year => "t.year",
         Order::Path => "s.path_key",
         Order::Rating => "coalesce(r.stars, 0)",
+        Order::Plays => "coalesce(lt.plays, 0)",
+        Order::LastPlayed => "lt.last_played",
+        Order::ListeningTime => "coalesce(lt.credited_us, 0)",
     }
 }
 
@@ -284,6 +291,21 @@ impl Store {
     }
 
     fn listing_in_order(&self, q: &Query, context: ListingContext<'_>) -> Result<Listing> {
+        if q.scope == Scope::RecentlyPlayed && q.search.trim().is_empty() && q.order.is_none() {
+            let mut stmt = self.db.prepare_cached(
+                "SELECT recent.track_id, t.duration FROM listening_totals recent
+                 CROSS JOIN tracks t ON t.id = recent.track_id
+                 WHERE recent.last_played IS NOT NULL
+                 ORDER BY recent.last_played DESC, recent.track_id",
+            )?;
+            let mut listing = Listing::default();
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                listing.keys.push(r.get(0)?);
+                listing.duration += r.get::<_, Option<f64>>(1)?.unwrap_or(0.);
+            }
+            return Ok(listing);
+        }
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let release_order;
         let (key, from, mut filter, default) = match q.scope {
@@ -342,6 +364,12 @@ impl Store {
                 vec![],
                 "lk.liked_at DESC, t.id",
             ),
+            Scope::RecentlyPlayed => (
+                "t.id",
+                "listening_totals recent JOIN tracks t ON t.id = recent.track_id",
+                vec!["recent.last_played IS NOT NULL".into()],
+                "recent.last_played DESC, recent.track_id",
+            ),
             Scope::Playlist(p) => {
                 args.push(Box::new(p));
                 (
@@ -366,6 +394,7 @@ impl Store {
              JOIN files s ON s.id = t.source
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
+             LEFT JOIN listening_totals lt ON lt.track_id = t.id
              {} ORDER BY {order}",
             where_clause(&filter)
         );
@@ -596,6 +625,91 @@ impl Store {
             discs.into_iter().map(|(_, id)| id).collect()
         };
         Ok(ReleaseContents { discs, membership })
+    }
+
+    pub(super) fn listening_release(
+        &self,
+        track: TrackId,
+        album: Option<AlbumId>,
+    ) -> Result<Option<(AlbumId, String)>> {
+        if let Some(release) = self
+            .db
+            .query_row(
+                "SELECT release_id,title FROM listening_release_evidence WHERE track_id=?1",
+                [track],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        {
+            return Ok(Some(release));
+        }
+        let Some(album) = album else { return Ok(None) };
+        Ok((
+            album,
+            self.db
+                .query_row("SELECT title FROM albums WHERE id=?1", [album], |r| {
+                    r.get(0)
+                })?,
+        )
+            .into())
+    }
+
+    pub(super) fn remember_listening_releases(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        root: RootId,
+    ) -> Result<()> {
+        let mut releases = std::collections::BTreeMap::new();
+        for (album, release) in self.releases(Some(root))? {
+            releases
+                .entry(release.first)
+                .or_insert_with(Vec::new)
+                .push((album, release.title));
+        }
+        for (first, discs) in releases {
+            let mut known = std::collections::BTreeSet::new();
+            for (album, _) in &discs {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT DISTINCT e.release_id FROM tracks t
+                     JOIN listening_release_evidence e ON e.track_id=t.id
+                     WHERE t.album_id=?1 AND t.root_id=?2 AND t.present",
+                )?;
+                for id in stmt.query_map(params![album, root], |r| r.get::<_, AlbumId>(0))? {
+                    known.insert(id?);
+                }
+            }
+            // Earlier distinct releases can coexist after tag edits. Keep the
+            // established assignments when new evidence is ambiguous.
+            if known.len() > 1 {
+                continue;
+            }
+            let release = known.first().copied().unwrap_or(first);
+            for (album, title) in discs {
+                tx.prepare_cached(
+                    "INSERT INTO listening_release_evidence
+                     SELECT id,?3,?4 FROM tracks WHERE album_id=?1 AND root_id=?2 AND present
+                     ON CONFLICT(track_id) DO NOTHING",
+                )?
+                .execute(params![album, root, release, title])?;
+                if album != release {
+                    // Repair earlier standalone attribution only for recordings
+                    // with evidence in this specific authored disc.
+                    tx.prepare_cached(
+                        "UPDATE listening_occurrences SET release_key=?3
+                         WHERE track_id IN (
+                            SELECT id FROM tracks WHERE album_id=?1 AND root_id=?2 AND present
+                         ) AND release_key=?4",
+                    )?
+                    .execute(params![
+                        album,
+                        root,
+                        format!("album:{release}"),
+                        format!("album:{album}")
+                    ])?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The release memberships of a collection's discs, from all of its

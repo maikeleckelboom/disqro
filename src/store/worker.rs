@@ -83,7 +83,9 @@ impl Handle {
         std::thread::Builder::new()
             .name("disqro-library".into())
             .spawn(move || {
-                let mut store = Store::open(&path).map_err(|e| format!("{e:#}"));
+                let open = || Store::open(&path).map_err(|e| format!("{e:#}"));
+                let mut store = open();
+                let mut opened_at = std::time::Instant::now();
                 loop {
                     let mut state = mailbox.state.lock().unwrap();
                     while state.jobs.is_empty() && !state.closed {
@@ -93,6 +95,10 @@ impl Handle {
                         break;
                     };
                     drop(state);
+                    if store.is_err() && opened_at.elapsed() >= std::time::Duration::from_secs(1) {
+                        store = open();
+                        opened_at = std::time::Instant::now();
+                    }
                     match &mut store {
                         Ok(store) => job(Ok(store)),
                         Err(e) => job(Err(e)),

@@ -155,8 +155,14 @@ pub struct Player {
     pub queue_shown: bool,
 }
 impl Player {
-    pub fn new(volume: f32, full_cd: bool, show_levels: bool, cx: &mut Context<Self>) -> Self {
-        let transport = Transport::new(volume);
+    pub fn new(
+        volume: f32,
+        full_cd: bool,
+        show_levels: bool,
+        listening: Option<crate::listening::Writer>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let transport = Transport::new(volume, listening);
         let meter = cx.new(|_| LevelMeter::new(transport.signal.clone(), Axis::Horizontal));
         let player = cx.entity();
         let wave_strip = cx.new(|cx| wave::WaveStrip::new(player, cx));
@@ -612,6 +618,8 @@ impl Render for Player {
 
         let play = div()
             .id("play-pause")
+            .role(Role::Button)
+            .aria_label(if s.playing { "Pause" } else { "Play" })
             .size(px(34.))
             .flex_shrink_0()
             .rounded_full()
