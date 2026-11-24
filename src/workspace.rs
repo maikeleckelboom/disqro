@@ -359,7 +359,11 @@ impl Workspace {
                         });
                     s.open_browser(Some(destination.clone()), None, place, w, cx);
                 }
-                RouterEvent::Reveal => s.reveal_active_browser(w, cx),
+                RouterEvent::Reveal(target) => {
+                    if s.browser(cx).is_some_and(|b| b.entity_id() == *target) {
+                        s.reveal_active_browser(w, cx);
+                    }
+                }
             }),
             cx.subscribe_in(&catalog, window, |s: &mut Self, catalog, e, window, cx| {
                 if matches!(e, CatalogEvent::Structure(_)) {

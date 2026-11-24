@@ -1,12 +1,12 @@
 //! Native listening history and statistics panels.
-use super::{Destination, PaneContent, PanelType, Router, Services};
+use super::{PaneContent, PanelType, Router, Services};
 use crate::{
     audio::Command,
     catalog::CatalogEvent,
     listening::{Period, duration, local_date, midnight},
     player::Player,
     store::{
-        Handle, Scope, Ticket, TrackId,
+        Handle, Ticket, TrackId,
         listening::{HISTORY_PAGE, HistoryKey, HistoryRow, Rank, Statistics, period_range},
     },
     theme::{materials, size},
@@ -712,7 +712,6 @@ struct StatsPrefs {
 struct Stats {
     prefs: StatsPrefs,
     store: Option<Handle>,
-    catalog: Option<Handle>,
     router: Entity<Router>,
     ticket: Ticket,
     focus: FocusHandle,
@@ -743,7 +742,6 @@ impl Stats {
         Self {
             prefs,
             store: services.catalog.update(cx, |c, _| c.statistics_handle()),
-            catalog: services.catalog.read(cx).handle(),
             router: services.router.clone(),
             ticket: Ticket::default(),
             focus: cx.focus_handle(),
@@ -765,24 +763,11 @@ impl Stats {
     }
 
     fn reveal_recording(&self, id: TrackId, w: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = &self.catalog else { return };
-        let row = store.call(move |s| {
-            Ok(s.rows(Scope::Library(None), &[id])?
-                .pop()
-                .filter(|r| r.available && r.track.source.is_file()))
-        });
-        let router = self.router.clone();
-        cx.spawn_in(w, async move |_, cx| {
-            let row = row.await;
-            let _ = cx.update(move |w, cx| match row {
-                Ok(Some(row)) => {
-                    Router::open(&router, Destination::Recording(row.track), false, w, cx)
-                }
-                Ok(None) => w.push_notification("This recording is unavailable.", cx),
-                Err(error) => w.push_notification(error.to_string(), cx),
-            });
-        })
-        .detach();
+        if let Some(browser) = self.router.read(cx).active() {
+            browser.update(cx, |b, cx| b.reveal_recording(id, &self.router, w, cx));
+        } else {
+            w.push_notification("Open a Music Browser to show this recording.", cx);
+        }
     }
     fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;

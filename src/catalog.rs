@@ -217,13 +217,17 @@ pub struct Catalog {
 
 impl Catalog {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let store = Store::location().map(Handle::spawn);
+        Self::open(Store::location(), cx)
+    }
+
+    pub(crate) fn open(path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+        let cache_dir = path.as_ref().map(|p| p.with_file_name("Cache"));
         let mut this = Self {
-            store,
+            store: path.map(Handle::spawn),
             listening_reads: None,
             statistics_reads: None,
             listening_changes: None,
-            cache_dir: crate::profile::location().map(|p| p.with_file_name("Cache")),
+            cache_dir,
             collections: vec![],
             playlists: vec![],
             marks: Arc::default(),

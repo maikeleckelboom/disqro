@@ -203,7 +203,7 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.pragma_update(None, "foreign_keys", true)?;
-        let _migration = if schema::version(&db)? != schema::MIGRATIONS.len() {
+        let _migration = if schema::version(&db)? != schema::VERSION {
             // The catalog, listening writer and statistics reader may open
             // together. Serialize backup and migration as one startup step.
             let lock = std::fs::OpenOptions::new()
@@ -213,7 +213,7 @@ impl Store {
                 .write(true)
                 .open(path.with_extension("migration.lock"))?;
             lock.lock()?;
-            schema::migrate(&mut db, Some(path), schema::MIGRATIONS)?;
+            schema::initialize(&mut db, Some(path))?;
             Some(lock)
         } else {
             None
@@ -225,7 +225,7 @@ impl Store {
     pub fn memory() -> Self {
         let mut db = Connection::open_in_memory().unwrap();
         configure(&db).unwrap();
-        schema::migrate(&mut db, None, schema::MIGRATIONS).unwrap();
+        schema::initialize(&mut db, None).unwrap();
         Self { db }
     }
 

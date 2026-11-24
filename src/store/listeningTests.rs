@@ -202,8 +202,7 @@ fn concurrent_catalog_and_history_startup_upgrade_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.sqlite3");
     let mut db = rusqlite::Connection::open(&path).unwrap();
-    let old = &super::super::schema::MIGRATIONS[..3];
-    super::super::schema::migrate(&mut db, Some(&path), old).unwrap();
+    super::super::schema::initialize_production(&mut db).unwrap();
     db.execute("INSERT INTO playlists VALUES (1,'Preserved',0,0)", [])
         .unwrap();
     drop(db);
@@ -213,7 +212,10 @@ fn concurrent_catalog_and_history_startup_upgrade_once() {
             scope.spawn(|| {
                 start.wait();
                 let store = Store::open(&path).unwrap();
-                assert_eq!(super::super::schema::version(&store.db).unwrap(), 5);
+                assert_eq!(
+                    super::super::schema::version(&store.db).unwrap(),
+                    super::super::schema::VERSION
+                );
                 assert_eq!(store.playlists().unwrap()[0].name, "Preserved");
             });
         }

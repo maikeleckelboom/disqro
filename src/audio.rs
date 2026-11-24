@@ -17,7 +17,7 @@ use std::{
     io,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -433,11 +433,28 @@ struct OutputState {
     volume: AtomicU32,
     state: AtomicU8,
     cursor: AtomicUsize,
-    last_advance: AtomicI64,
     // The actual contiguous decoded extent, including the voice's seek origin.
     decoded: AtomicUsize,
     decode_failed: AtomicBool,
     error: Mutex<Option<io::Error>>,
+}
+
+impl OutputState {
+    fn publish_cursor(
+        &self,
+        frame: usize,
+        progress: Option<(&mut rtrb::Producer<RenderProgress>, RenderProgress)>,
+        #[cfg(test)] before_cursor: impl FnOnce(),
+    ) {
+        if let Some((queue, block)) = progress {
+            let _ = queue.push(block);
+        }
+        // A reader may see the ring entry early. The cursor commits the
+        // boundary for both the playhead and listening accounting.
+        #[cfg(test)]
+        before_cursor();
+        self.cursor.store(frame, Ordering::Release);
+    }
 }
 
 struct OutputVoice {
@@ -583,18 +600,22 @@ impl kira::sound::Sound for ObservedSound {
         };
         let position = position_us(frame as f64 / self.rate);
         if position > self.cursor {
-            if let (Some(progress), Some(at)) = (&mut self.progress, at) {
-                self.state
-                    .last_advance
-                    .store(at + position - self.cursor, Ordering::Relaxed);
-                let _ = progress.push(RenderProgress {
-                    from: self.cursor,
-                    to: position,
-                    at,
-                });
-            }
+            self.state.publish_cursor(
+                frame,
+                self.progress.as_mut().zip(at).map(|(queue, at)| {
+                    (
+                        queue,
+                        RenderProgress {
+                            from: self.cursor,
+                            to: position,
+                            at,
+                        },
+                    )
+                }),
+                #[cfg(test)]
+                || {},
+            );
             self.cursor = position;
-            self.state.cursor.store(frame, Ordering::Release);
         }
         self.state.state.store(state as u8, Ordering::Release);
         self.state.gate.fetch_and(!RENDERING, Ordering::Release);
@@ -762,27 +783,36 @@ impl Engine {
         // program effective after that boundary.
         let position = voice.position();
         let cursor = position_us(position);
-        let at = voice.state.last_advance.load(Ordering::Acquire);
         let limit = position_us(self.limit);
         while let Some(block) = self.credit.as_mut().and_then(|c| {
             let next = c.progress.peek().ok()?;
             (next.to <= cursor).then(|| c.progress.pop().unwrap())
         }) {
+            // Overflow can leave a gap before the next recorded block. Place
+            // only the missing duration against the nearest available edge.
+            let before = block.from.min(limit);
+            if self.credit.as_ref().is_some_and(|c| c.cursor < before) {
+                self.credit_progress(before, block.at - (block.from - before));
+            }
             let position = block.to.min(limit);
             self.credit_progress(position, block.at + position - block.from);
         }
-        // If the transport was suspended long enough to fill the ring, the
-        // published cursor still preserves the total. The overflow interval's
-        // placement must be estimated.
-        self.credit_progress(cursor.min(limit), at);
+        // A trailing overflow has no later timing evidence. Extend the last
+        // accounted edge by at most the uncredited, committed source advance.
+        let target = cursor.min(limit);
+        if let Some(credit) = &self.credit
+            && target > credit.cursor
+        {
+            self.credit_progress(target, credit.activity_at + (target - credit.cursor));
+        }
         position
     }
     fn credit_progress(&mut self, position: i64, observed_at: i64) {
-        let Some(mut credit) = self.credit.take() else {
+        let Some(mut credit) = self.credit.take_if(|credit| position > credit.cursor) else {
             return;
         };
         let end = position_us(self.limit);
-        let mut from = (observed_at - (position - credit.cursor).max(0)).max(credit.activity_at);
+        let mut from = (observed_at - (position - credit.cursor)).max(credit.activity_at);
         while credit.cursor < position {
             let ix = credit
                 .segments
@@ -927,7 +957,7 @@ impl Engine {
         self.signal.reset();
         let device = self.device.as_mut().unwrap();
         let progress = if self.listening.is_some() {
-            let _ = listening::timestamp();
+            let activity_at = listening::timestamp();
             let (publish, progress) = rtrb::RingBuffer::new(PROGRESS_BLOCKS);
             let source_object = recording.object;
             let sheet_file = entry
@@ -943,7 +973,7 @@ impl Engine {
             self.credit = Some(VoiceCredit {
                 progress,
                 cursor: position_us(start as f64 / f64::from(self.rate)),
-                activity_at: i64::MIN,
+                activity_at,
                 segments: group
                     .iter()
                     .zip(&self.queue.entries[index..])

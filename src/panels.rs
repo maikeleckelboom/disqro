@@ -48,7 +48,7 @@ use gpui_kit::{
     *,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, rc::Rc, sync::Arc};
+use std::{path::PathBuf, rc::Rc};
 
 /// A panel instance's identity. Saved with the layout and never reused for
 /// another instance while this one exists.
@@ -434,7 +434,6 @@ pub enum Destination {
         root: Option<PathBuf>,
     },
     View(Location),
-    Recording(Arc<crate::library::Track>),
 }
 impl Destination {
     /// The same explicit browser actions for every navigation destination.
@@ -460,20 +459,6 @@ impl Destination {
             } => browser.open_in(path, root, window, cx),
             Self::Folder { path, root: None } => browser.open(path, window, cx),
             Self::View(location) => browser.show(location, window, cx),
-            Self::Recording(track) => {
-                let source = track
-                    .disc
-                    .as_ref()
-                    .map_or(&track.source, |disc| &disc.sheet);
-                if let Some(folder) = source.parent() {
-                    browser.open_revealing(
-                        folder.to_path_buf(),
-                        Some(crate::browser::Reveal::Track(track)),
-                        window,
-                        cx,
-                    );
-                }
-            }
         }
     }
 }
@@ -491,7 +476,7 @@ pub enum RouterEvent {
     Open(Destination),
     Beside(Destination),
     /// Show the active browser where it sits in the dock.
-    Reveal,
+    Reveal(EntityId),
 }
 
 /// The active Music Browser, which navigation panels, the address bar and
@@ -535,7 +520,9 @@ impl Router {
     ) {
         if !new_tab && let Some(browser) = router.read(cx).active() {
             browser.update(cx, |b, cx| destination.apply(b, window, cx));
-            router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal));
+            router.update(cx, |_, cx| {
+                cx.emit(RouterEvent::Reveal(browser.entity_id()))
+            });
         } else {
             router.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination)));
         }

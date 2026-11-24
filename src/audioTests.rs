@@ -193,56 +193,39 @@ fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
     }
 }
 
-#[test]
-fn delayed_transport_uses_render_intervals_on_each_side_of_midnight() {
-    let dir = tempfile::tempdir().unwrap();
-    let database = dir.path().join("library.sqlite3");
-    let writer = listening::Writer::spawn(database.clone()).0;
-    let path = dir.path().join("source.wav");
-    fixture(&path, 8000, 8000);
-    let boundary = 30 * listening::MINUTE_US;
-    let (mut publish, progress) = rtrb::RingBuffer::new(4);
+fn delayed_transport_fixture(
+    path: &std::path::Path,
+    start: i64,
+    capacity: usize,
+) -> (
+    Engine,
+    listening::Writer,
+    rtrb::Producer<RenderProgress>,
+    Arc<OutputState>,
+) {
+    let writer = listening::Writer::spawn(path.join("library.sqlite3")).0;
+    let source = path.join("source.wav");
+    fixture(&source, 8000, 8000);
     let recording = listening::Recording {
-        track: Arc::new(Track::file(path.clone())),
-        source: crate::cache::Stamp::read(&path),
+        track: Arc::new(Track::file(source.clone())),
+        source: crate::cache::Stamp::read(&source),
         sheet: None,
         source_object: None,
         sheet_object: None,
     };
-    for block in [
-        RenderProgress {
-            from: 0,
-            to: 100_000,
-            at: boundary - 200_000,
-        },
-        RenderProgress {
-            from: 100_000,
-            to: 200_000,
-            at: boundary + 200_000,
-        },
-        // A block that has entered the ring but has not published its cursor.
-        RenderProgress {
-            from: 200_000,
-            to: 400_000,
-            at: boundary + 300_000,
-        },
-    ] {
-        publish.push(block).ok().unwrap();
-    }
-    let mut engine = Engine {
+    let state = Arc::new(OutputState::default());
+    let (publish, progress) = rtrb::RingBuffer::new(capacity);
+    let engine = Engine {
         listening: Some(writer.clone()),
         limit: 1.,
         voice: Some(OutputVoice {
             rate: 1_000_000.,
-            state: Arc::new(OutputState {
-                cursor: AtomicUsize::new(200_000),
-                ..Default::default()
-            }),
+            state: state.clone(),
         }),
         credit: Some(VoiceCredit {
             progress,
             cursor: 0,
-            activity_at: i64::MIN,
+            activity_at: start,
             segments: vec![CreditSegment {
                 id: 1,
                 start: 0,
@@ -251,10 +234,11 @@ fn delayed_transport_uses_render_intervals_on_each_side_of_midnight() {
         }),
         ..Default::default()
     };
-    assert_eq!(engine.credit_output(), 0.2);
-    engine.end_voice(End::Stopped);
-    writer.barrier().unwrap();
-    let db = rusqlite::Connection::open(database).unwrap();
+    (engine, writer, publish, state)
+}
+
+fn assert_delayed_credit(path: &std::path::Path, expected: &[(i64, i64)]) {
+    let db = rusqlite::Connection::open(path.join("library.sqlite3")).unwrap();
     let mut stmt = db
         .prepare("SELECT minute,credited_us FROM listening_minutes ORDER BY minute")
         .unwrap();
@@ -263,12 +247,149 @@ fn delayed_transport_uses_render_intervals_on_each_side_of_midnight() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert_eq!(
-        bins,
-        [
-            (boundary - listening::MINUTE_US, 100_000),
-            (boundary, 100_000)
-        ]
+    assert_eq!(bins, expected);
+    let total: (i64, i64) = db
+        .query_row(
+            "SELECT count(*),sum(credited_us) FROM listening_occurrences",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(total, (1, expected.iter().map(|(_, us)| us).sum()));
+}
+
+#[test]
+fn delayed_transport_credits_both_blocks_before_midnight() {
+    let dir = tempfile::tempdir().unwrap();
+    let midnight = listening::midnight(
+        &chrono::Local,
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(),
+    );
+    let (mut engine, writer, mut publish, state) =
+        delayed_transport_fixture(dir.path(), midnight - 20_000, 4);
+    state.publish_cursor(
+        10_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 0,
+                to: 10_000,
+                at: midnight - 20_000,
+            },
+        )),
+        || {},
+    );
+    assert_eq!(engine.credit_output(), 0.01);
+    state.publish_cursor(
+        20_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 10_000,
+                to: 20_000,
+                at: midnight - 10_000,
+            },
+        )),
+        || {
+            // The renderer has queued the second timestamp, but has yet to
+            // commit its cursor. Neither an observation nor a regression may
+            // move the listening timeline ahead of the first block.
+            assert_eq!(engine.credit_output(), 0.01);
+            assert_eq!(engine.credit_output(), 0.01);
+            engine.credit_progress(9_000, midnight);
+            assert_eq!(
+                engine.credit.as_ref().unwrap().activity_at,
+                midnight - 10_000
+            );
+        },
+    );
+    assert_eq!(engine.credit_output(), 0.02);
+    assert_eq!(engine.credit_output(), 0.02);
+    engine.end_voice(End::Stopped);
+    writer.barrier().unwrap();
+    assert_delayed_credit(dir.path(), &[(midnight - listening::MINUTE_US, 20_000)]);
+}
+
+#[test]
+fn delayed_transport_estimates_only_missing_committed_progress_after_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = 30 * listening::MINUTE_US;
+    let (mut engine, writer, mut publish, state) =
+        delayed_transport_fixture(dir.path(), boundary - 30_000, 1);
+    state.publish_cursor(
+        10_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 0,
+                to: 10_000,
+                at: boundary - 30_000,
+            },
+        )),
+        || {},
+    );
+    state.publish_cursor(
+        20_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 10_000,
+                to: 20_000,
+                at: boundary - 18_000,
+            },
+        )),
+        || assert_eq!(engine.credit_output(), 0.01),
+    );
+    state.publish_cursor(
+        30_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 20_000,
+                to: 30_000,
+                at: boundary - 8_000,
+            },
+        )),
+        || {},
+    );
+    // Fill the interior gap against the next exact block. That block crosses
+    // the minute, and the trailing overflow extends its accounted edge.
+    state.publish_cursor(
+        40_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 30_000,
+                to: 40_000,
+                at: boundary + 20_000,
+            },
+        )),
+        || {},
+    );
+    assert_eq!(engine.credit_output(), 0.04);
+    assert_eq!(engine.credit_output(), 0.04);
+    state.publish_cursor(
+        50_000,
+        Some((
+            &mut publish,
+            RenderProgress {
+                from: 40_000,
+                to: 50_000,
+                at: boundary + listening::MINUTE_US,
+            },
+        )),
+        || assert_eq!(engine.credit_output(), 0.04),
+    );
+    assert_eq!(engine.credit_output(), 0.05);
+    engine.end_voice(End::Stopped);
+    writer.barrier().unwrap();
+    assert_delayed_credit(
+        dir.path(),
+        &[
+            (boundary - listening::MINUTE_US, 28_000),
+            (boundary, 12_000),
+            (boundary + listening::MINUTE_US, 10_000),
+        ],
     );
 }
 

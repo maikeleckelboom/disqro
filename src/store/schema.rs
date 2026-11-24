@@ -1,21 +1,18 @@
 //! Versioned schema of the library database.
 //!
-//! Each migration runs in its own transaction together with the version
-//! bump, so a failure leaves the previous version intact. Before an existing
-//! library is upgraded, a copy is written next to it. A library created by a
-//! newer Disqro is never opened for writing.
+//! Installation and production upgrades apply the final listening schema in
+//! one transaction. Existing production libraries are backed up first.
 use anyhow::{Context, Result, ensure};
 use rusqlite::Connection;
 use std::path::Path;
 
-/// Migrations in order. The database's `user_version` counts those applied.
-pub const MIGRATIONS: &[&str] = &[
-    V1,
-    include_str!("recording-identity.sql"),
-    include_str!("catalog-search.sql"),
-    include_str!("listening-history.sql"),
-    include_str!("listening-release-evidence.sql"),
+pub const VERSION: usize = 5;
+const PRODUCTION_MIGRATIONS: &[(usize, &str)] = &[
+    (1, V1),
+    (2, include_str!("recording-identity.sql")),
+    (3, include_str!("catalog-search.sql")),
 ];
+const LISTENING_SCHEMA: &str = include_str!("listening-history.sql");
 
 const V1: &str = "
 -- Registered music collections. Removing one never touches files on disk.
@@ -137,16 +134,36 @@ pub fn version(db: &Connection) -> Result<usize> {
     Ok(db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? as usize)
 }
 
-/// Brings the database at `path` (or in memory) up to date.
-pub fn migrate(db: &mut Connection, path: Option<&Path>, migrations: &[&str]) -> Result<()> {
+/// The caller serializes on-disk initialization across connections and processes.
+pub fn initialize(db: &mut Connection, path: Option<&Path>) -> Result<()> {
     let current = version(db)?;
     ensure!(
-        current <= migrations.len(),
+        current <= VERSION,
         "This library was written by a newer version of Disqro (schema {current})."
     );
-    if current == migrations.len() {
+    if current == VERSION {
         return Ok(());
     }
+    ensure!(
+        current != 4,
+        "This library uses an obsolete development schema (4). Preserve the database and use a new profile or explicitly reset the development database."
+    );
+    migrate(
+        db,
+        path,
+        current,
+        PRODUCTION_MIGRATIONS,
+        Some(LISTENING_SCHEMA),
+    )
+}
+
+fn migrate(
+    db: &mut Connection,
+    path: Option<&Path>,
+    current: usize,
+    production: &[(usize, &str)],
+    listening: Option<&str>,
+) -> Result<()> {
     if current > 0
         && let Some(path) = path
     {
@@ -174,29 +191,31 @@ pub fn migrate(db: &mut Connection, path: Option<&Path>, migrations: &[&str]) ->
     // before committing and restore enforcement even after a rollback.
     db.pragma_update(None, "foreign_keys", false)?;
     let result = (|| -> Result<()> {
-        for (i, sql) in migrations.iter().enumerate().skip(current) {
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let version = version(&tx)?;
-            ensure!(
-                version <= migrations.len(),
-                "This library requires a newer Disqro"
-            );
-            if version > i {
-                continue;
-            }
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for (version, sql) in production
+            .iter()
+            .copied()
+            .filter(|(v, _)| *v > current)
+            .chain(listening.map(|sql| (VERSION, sql)))
+        {
             tx.execute_batch(sql)
-                .with_context(|| format!("Library migration {} failed", i + 1))?;
-            ensure!(
-                !tx.prepare("PRAGMA foreign_key_check")?.exists([])?,
-                "Library migration would break a personal or library reference"
-            );
-            tx.pragma_update(None, "user_version", (i + 1) as i64)?;
-            tx.commit()?;
+                .with_context(|| format!("Library migration {version} failed"))?;
+            tx.pragma_update(None, "user_version", version as i64)?;
         }
+        ensure!(
+            !tx.prepare("PRAGMA foreign_key_check")?.exists([])?,
+            "Library migration would break a personal or library reference"
+        );
+        tx.commit()?;
         Ok(())
     })();
     db.pragma_update(None, "foreign_keys", true)?;
     result
+}
+
+#[cfg(test)]
+pub fn initialize_production(db: &mut Connection) -> Result<()> {
+    migrate(db, None, 0, PRODUCTION_MIGRATIONS, None)
 }
 
 #[cfg(test)]
@@ -214,7 +233,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("library.sqlite3");
         let mut db = open(&path);
-        migrate(&mut db, Some(&path), &[V1]).unwrap();
+        migrate(&mut db, None, 0, &[(1, V1)], None).unwrap();
         db.execute_batch(
             "INSERT INTO playlists VALUES(1, 'Keep', 0, 0);
              INSERT INTO files(id, path, path_key, name, kind, size, modified) VALUES(1, 'a', 'a', 'a', 0, 1, 1);
@@ -225,17 +244,13 @@ mod tests {
         .unwrap();
 
         // A later migration that fails leaves the user's schema and rows as they were.
-        let broken = [
-            V1,
-            "ALTER TABLE likes ADD COLUMN note TEXT; SELECT * FROM missing;",
-        ];
-        assert!(migrate(&mut db, Some(&path), &broken).is_err());
+        let broken = "ALTER TABLE likes ADD COLUMN note TEXT; SELECT * FROM missing;";
+        assert!(migrate(&mut db, Some(&path), 1, PRODUCTION_MIGRATIONS, Some(broken)).is_err());
         assert_eq!(version(&db).unwrap(), 1);
         assert!(db.prepare("SELECT note FROM likes").is_err());
 
-        let next = [V1, "ALTER TABLE likes ADD COLUMN note TEXT"];
-        migrate(&mut db, Some(&path), &next).unwrap();
-        assert_eq!(version(&db).unwrap(), 2);
+        initialize(&mut db, Some(&path)).unwrap();
+        assert_eq!(version(&db).unwrap(), VERSION);
         let liked: i64 = db
             .query_row("SELECT liked_at FROM likes WHERE track_id = 1", [], |r| {
                 r.get(0)
@@ -244,11 +259,33 @@ mod tests {
         assert_eq!(liked, 5);
         let backup = open(&dir.path().join("library-schema1-backup.sqlite3"));
         assert_eq!(version(&backup).unwrap(), 1);
+    }
 
-        // A newer library is refused instead of being rewritten.
-        drop(db);
-        let mut db = open(&path);
-        assert!(migrate(&mut db, Some(&path), &[V1]).is_err());
+    #[test]
+    fn obsolete_development_and_newer_libraries_are_preserved() {
+        for version_number in [4, VERSION + 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("library.sqlite3");
+            let mut db = open(&path);
+            initialize_production(&mut db).unwrap();
+            db.execute("INSERT INTO playlists VALUES (1,'Preserved',0,0)", [])
+                .unwrap();
+            db.pragma_update(None, "user_version", version_number as i64)
+                .unwrap();
+            let error = initialize(&mut db, Some(&path)).unwrap_err();
+            let message = if version_number == 4 {
+                "obsolete development schema"
+            } else {
+                "newer version"
+            };
+            assert!(error.to_string().contains(message));
+            assert_eq!(version(&db).unwrap(), version_number);
+            assert_eq!(
+                db.query_row("SELECT name FROM playlists", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "Preserved"
+            );
+        }
     }
 
     #[test]
@@ -256,7 +293,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("library.sqlite3");
         let mut db = open(&path);
-        migrate(&mut db, Some(&path), &[V1]).unwrap();
+        migrate(&mut db, None, 0, &[(1, V1)], None).unwrap();
         db.execute_batch(
             "INSERT INTO files(id,path,path_key,name,kind,size,modified) VALUES(3,'a','a','a',0,1,1);
              INSERT INTO tracks(id,anchor,part,source,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
@@ -267,8 +304,8 @@ mod tests {
              INSERT INTO playlist_entries VALUES(9,2,8,0,0),(11,2,8,1,0);
              UPDATE sqlite_sequence SET seq=20 WHERE name='tracks';"
         ).unwrap();
-        migrate(&mut db, Some(&path), MIGRATIONS).unwrap();
-        assert_eq!(version(&db).unwrap(), MIGRATIONS.len());
+        initialize(&mut db, Some(&path)).unwrap();
+        assert_eq!(version(&db).unwrap(), VERSION);
         let count: i64 = db
             .query_row(
                 "SELECT count(*) FROM playlist_entries e JOIN ratings r USING(track_id)
@@ -299,7 +336,7 @@ mod tests {
     fn rows_with_user_data_cannot_be_deleted() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        migrate(&mut db, None, MIGRATIONS).unwrap();
+        initialize(&mut db, None).unwrap();
         db.execute_batch(
             "INSERT INTO files(id, path, path_key, name, kind, size, modified) VALUES(1, 'a', 'a', 'a', 0, 1, 1);
              INSERT INTO tracks(id, anchor, part, source, title, artist, album, format, title_key, artist_key, album_key, search, added_at)
