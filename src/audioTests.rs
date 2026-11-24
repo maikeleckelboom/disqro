@@ -2,7 +2,28 @@ use super::*;
 use crate::library::DiscTrack;
 use crate::recording::disc_frame;
 use kira::Frame;
+use kira::backend::{Backend, Renderer};
 use std::path::Path;
+use std::time::Instant;
+
+struct Capture(Option<Renderer>);
+impl Backend for Capture {
+    type Settings = ();
+    type Error = ();
+    fn setup(_: (), _: usize) -> std::result::Result<(Self, u32), ()> {
+        Ok((Self(None), 48000))
+    }
+    fn start(&mut self, renderer: Renderer) -> std::result::Result<(), ()> {
+        self.0 = Some(renderer);
+        Ok(())
+    }
+}
+
+fn render(output: &mut AudioManager<Capture>, block: &mut [f32]) {
+    let renderer = output.backend_mut().0.as_mut().unwrap();
+    renderer.on_start_processing();
+    renderer.process(block, 2);
+}
 
 fn samples(i: usize) -> [i16; 2] {
     [
@@ -54,21 +75,6 @@ fn qualification_tap_reads_full_level_while_every_output_sample_is_zero() {
 }
 
 fn check_chapter_render(silent: bool) {
-    use kira::backend::{Backend, Renderer};
-    use std::time::Instant;
-
-    struct Capture(Option<Renderer>);
-    impl Backend for Capture {
-        type Settings = ();
-        type Error = ();
-        fn setup(_: (), _: usize) -> std::result::Result<(Self, u32), ()> {
-            Ok((Self(None), 48000))
-        }
-        fn start(&mut self, renderer: Renderer) -> std::result::Result<(), ()> {
-            self.0 = Some(renderer);
-            Ok(())
-        }
-    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("disc.wav");
     fixture(&path, 48000, 9600);
@@ -89,17 +95,17 @@ fn check_chapter_render(silent: bool) {
     .unwrap();
     let voice = output
         .play(ObservedData {
-            data: StreamingSoundData::from_decoder(recording),
-            gate: Arc::default(),
+            recording,
+            start: 0,
+            volume: 1.,
+            progress: None,
         })
         .unwrap();
     let mut frames = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline && voice.state() != PlaybackState::Stopped {
-        let renderer = output.backend_mut().0.as_mut().unwrap();
         let mut block = [0.; 256];
-        renderer.on_start_processing();
-        renderer.process(&mut block, 2);
+        render(&mut output, &mut block);
         frames.extend_from_slice(block.as_chunks::<2>().0);
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -128,6 +134,240 @@ fn check_chapter_render(silent: bool) {
 }
 
 #[test]
+fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
+    let dir = tempfile::tempdir().unwrap();
+    for truncated in [false, true] {
+        let path = dir.path().join("source.wav");
+        let available = 30_041;
+        let expected = if truncated { 96_000 } else { available };
+        fixture(&path, 48000, expected);
+        if truncated {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len((44 + available * 4) as u64)
+                .unwrap();
+        }
+        let mut track = Track::file(path);
+        track.duration = Some(40.); // Display metadata does not control credit.
+        let recording = Recording::open(&track, None).unwrap();
+        assert_eq!(recording.num_frames(), expected);
+        let rate = f64::from(recording.sample_rate());
+        let (publish, mut progress) = rtrb::RingBuffer::new(8192);
+        let mut output = AudioManager::<Capture>::new(AudioManagerSettings::default()).unwrap();
+        let voice = output
+            .play(ObservedData {
+                recording,
+                start: 0,
+                volume: 1.,
+                progress: Some(publish),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut consumed = 0;
+        while voice.state() != PlaybackState::Stopped {
+            render(&mut output, &mut [0.; 256]);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+            while let Ok(block) = progress.pop() {
+                assert_eq!(block.from, consumed);
+                consumed = block.to;
+            }
+        }
+        let actual = position_us(available as f64 / rate);
+        assert_eq!(voice.pop_error().is_some(), truncated);
+        if truncated {
+            assert!(consumed > 0 && consumed <= actual);
+        } else {
+            assert_eq!(consumed, actual);
+        }
+        assert_eq!(position_us(voice.position()), consumed);
+    }
+}
+
+#[test]
+fn delayed_transport_uses_render_intervals_on_each_side_of_midnight() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let writer = listening::Writer::spawn(database.clone()).0;
+    let path = dir.path().join("source.wav");
+    fixture(&path, 8000, 8000);
+    let boundary = 30 * listening::MINUTE_US;
+    let (mut publish, progress) = rtrb::RingBuffer::new(4);
+    let recording = listening::Recording {
+        track: Arc::new(Track::file(path.clone())),
+        source: crate::cache::Stamp::read(&path),
+        sheet: None,
+        source_object: None,
+        sheet_object: None,
+    };
+    for block in [
+        RenderProgress {
+            from: 0,
+            to: 100_000,
+            at: boundary - 200_000,
+        },
+        RenderProgress {
+            from: 100_000,
+            to: 200_000,
+            at: boundary + 200_000,
+        },
+        // A block that has entered the ring but has not published its cursor.
+        RenderProgress {
+            from: 200_000,
+            to: 400_000,
+            at: boundary + 300_000,
+        },
+    ] {
+        publish.push(block).ok().unwrap();
+    }
+    let mut engine = Engine {
+        listening: Some(writer.clone()),
+        limit: 1.,
+        voice: Some(OutputVoice {
+            rate: 1_000_000.,
+            state: Arc::new(OutputState {
+                cursor: AtomicUsize::new(200_000),
+                ..Default::default()
+            }),
+        }),
+        credit: Some(VoiceCredit {
+            progress,
+            cursor: 0,
+            activity_at: i64::MIN,
+            segments: vec![CreditSegment {
+                id: 1,
+                start: 0,
+                recording,
+            }],
+        }),
+        ..Default::default()
+    };
+    assert_eq!(engine.credit_output(), 0.2);
+    engine.end_voice(End::Stopped);
+    writer.barrier().unwrap();
+    let db = rusqlite::Connection::open(database).unwrap();
+    let mut stmt = db
+        .prepare("SELECT minute,credited_us FROM listening_minutes ORDER BY minute")
+        .unwrap();
+    let bins: Vec<_> = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        bins,
+        [
+            (boundary - listening::MINUTE_US, 100_000),
+            (boundary, 100_000)
+        ]
+    );
+}
+
+#[test]
+fn cue_queue_edit_uses_the_same_completed_block_for_the_playhead_and_credit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("library.sqlite3");
+    let writer = listening::Writer::spawn(db.clone()).0;
+    let source = dir.path().join("disc.wav");
+    fixture(&source, 8000, 48000);
+    let sheet = dir.path().join("disc.cue");
+    std::fs::write(&sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nTITLE First\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE Second\nINDEX 01 00:02:00\nTRACK 03 AUDIO\nTITLE Third\nINDEX 01 00:04:00"
+    ).unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let mut queue = Queue::default();
+    queue.replace(tracks.into(), 0);
+    let group: Vec<_> = queue
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| Chapter {
+            id: entry.id,
+            offset: (i * 2) as f64,
+        })
+        .collect();
+    let segments = group
+        .iter()
+        .zip(queue.entries.iter())
+        .map(|(chapter, entry)| CreditSegment {
+            id: chapter.id,
+            start: position_us(chapter.offset),
+            recording: listening::Recording {
+                track: entry.track.clone(),
+                source: crate::cache::Stamp::read(&source),
+                sheet: crate::cache::Stamp::read(&sheet),
+                source_object: None,
+                sheet_object: None,
+            },
+        })
+        .collect();
+    let (mut publish, progress) = rtrb::RingBuffer::new(4);
+    let state = Arc::new(OutputState {
+        cursor: AtomicUsize::new(16_800),
+        ..Default::default()
+    });
+    let at = listening::timestamp();
+    publish
+        .push(RenderProgress {
+            from: 0,
+            to: 2_100_000,
+            at,
+        })
+        .ok()
+        .unwrap();
+    let mut engine = Engine {
+        queue,
+        group,
+        listening: Some(writer.clone()),
+        limit: 6.,
+        length: 6.,
+        rate: 8000,
+        voice: Some(OutputVoice {
+            state: state.clone(),
+            rate: 8000.,
+        }),
+        credit: Some(VoiceCredit {
+            progress,
+            cursor: 0,
+            activity_at: i64::MIN,
+            segments,
+        }),
+        ..Default::default()
+    };
+    engine.command(Command::ClearUpcoming).unwrap();
+    assert_eq!(engine.queue.current, Some(1));
+    assert_eq!(engine.limit, 4.);
+    assert_eq!(engine.group.len(), 2);
+    publish
+        .push(RenderProgress {
+            from: 2_100_000,
+            to: 4_100_000,
+            at: at + 2_100_000,
+        })
+        .ok()
+        .unwrap();
+    state.cursor.store(32_800, Ordering::Release);
+    engine.end_voice(End::Stopped);
+    writer.barrier().unwrap();
+    let rows = crate::store::Store::open(&db)
+        .unwrap()
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.title.as_str(), r.credited_us))
+            .collect::<Vec<_>>(),
+        [("First", 2_000_000), ("Second", 2_000_000)]
+    );
+}
+
+#[test]
 fn listening_voice_lifecycle_uses_output_cursor_and_splits_cue_boundaries() {
     use crate::{cache::Stamp, store::listening::HistoryRow};
     const SECOND: i64 = 1_000_000;
@@ -147,10 +387,13 @@ fn listening_voice_lifecycle_uses_output_cursor_and_splits_cue_boundaries() {
         track: tracks[i].clone(),
         source: Stamp::read(&path),
         sheet: Stamp::read(&sheet),
+        source_object: None,
+        sheet_object: None,
     };
     let voice = |start| VoiceCredit {
-        gate: Arc::default(),
+        progress: rtrb::RingBuffer::new(1).1,
         cursor: start,
+        activity_at: i64::MIN,
         segments: vec![
             CreditSegment {
                 id: 1,

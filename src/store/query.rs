@@ -8,7 +8,7 @@
 use super::{AlbumId, PlaylistId, RootId, Row, Store, TrackId};
 use crate::library::{DiscTrack, Track};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, ToSql, params_from_iter};
+use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -627,19 +627,89 @@ impl Store {
         Ok(ReleaseContents { discs, membership })
     }
 
-    pub(super) fn listening_release(&self, album: AlbumId) -> Result<(AlbumId, String)> {
-        if let Some(root) = self.album_root(album)?
-            && let Some(release) = self.releases(Some(root))?.remove(&album)
+    pub(super) fn listening_release(
+        &self,
+        track: TrackId,
+        album: Option<AlbumId>,
+    ) -> Result<Option<(AlbumId, String)>> {
+        if let Some(release) = self
+            .db
+            .query_row(
+                "SELECT release_id,title FROM listening_release_evidence WHERE track_id=?1",
+                [track],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
         {
-            return Ok((release.first, release.title));
+            return Ok(Some(release));
         }
+        let Some(album) = album else { return Ok(None) };
         Ok((
             album,
             self.db
                 .query_row("SELECT title FROM albums WHERE id=?1", [album], |r| {
                     r.get(0)
                 })?,
-        ))
+        )
+            .into())
+    }
+
+    pub(super) fn remember_listening_releases(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        root: RootId,
+    ) -> Result<()> {
+        let mut releases = std::collections::BTreeMap::new();
+        for (album, release) in self.releases(Some(root))? {
+            releases
+                .entry(release.first)
+                .or_insert_with(Vec::new)
+                .push((album, release.title));
+        }
+        for (first, discs) in releases {
+            let mut known = std::collections::BTreeSet::new();
+            for (album, _) in &discs {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT DISTINCT e.release_id FROM tracks t
+                     JOIN listening_release_evidence e ON e.track_id=t.id
+                     WHERE t.album_id=?1 AND t.root_id=?2 AND t.present",
+                )?;
+                for id in stmt.query_map(params![album, root], |r| r.get::<_, AlbumId>(0))? {
+                    known.insert(id?);
+                }
+            }
+            // Earlier distinct releases can coexist after tag edits. Keep the
+            // established assignments when new evidence is ambiguous.
+            if known.len() > 1 {
+                continue;
+            }
+            let release = known.first().copied().unwrap_or(first);
+            for (album, title) in discs {
+                tx.prepare_cached(
+                    "INSERT INTO listening_release_evidence
+                     SELECT id,?3,?4 FROM tracks WHERE album_id=?1 AND root_id=?2 AND present
+                     ON CONFLICT(track_id) DO NOTHING",
+                )?
+                .execute(params![album, root, release, title])?;
+                if album != release {
+                    // Repair earlier standalone attribution only for recordings
+                    // with evidence in this specific authored disc.
+                    tx.prepare_cached(
+                        "UPDATE listening_occurrences SET release_key=?3
+                         WHERE track_id IN (
+                            SELECT id FROM tracks WHERE album_id=?1 AND root_id=?2 AND present
+                         ) AND release_key=?4",
+                    )?
+                    .execute(params![
+                        album,
+                        root,
+                        format!("album:{release}"),
+                        format!("album:{album}")
+                    ])?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The release memberships of a collection's discs, from all of its

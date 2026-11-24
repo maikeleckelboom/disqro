@@ -325,39 +325,55 @@ impl Browser {
             },
         )
         .detach();
-        cx.subscribe(&catalog, |b: &mut Self, _, event, cx| match event {
-            CatalogEvent::PlayingDisc => {
-                b.table.update(cx, |_, cx| cx.notify());
-                if b.listing_discs() {
-                    b.discs.update(cx, |_, cx| cx.notify());
+        cx.subscribe_in(
+            &catalog,
+            window,
+            |b: &mut Self, _, event, window, cx| match event {
+                CatalogEvent::PlayingDisc => {
+                    b.table.update(cx, |_, cx| cx.notify());
+                    if b.listing_discs() {
+                        b.discs.update(cx, |_, cx| cx.notify());
+                    }
                 }
-            }
-            CatalogEvent::Content => b.library_changed(cx),
-            CatalogEvent::Listening(changes) => {
-                let order = changes.is_empty() || changes.iter().any(|change| change.order);
-                b.table
-                    .update(cx, |t, cx| MusicTable::listening_changed(t, order, cx));
-            }
-            CatalogEvent::Structure(root) => {
-                b.refresh_indexed_sequence(*root, cx);
-                b.refresh_folder_traversal(cx);
-            }
-            CatalogEvent::Changed => {
-                if let Some(notice) = b.location.unavailable(b.catalog.read(cx)) {
-                    b.notice = Some(notice.into());
+                CatalogEvent::Content => b.library_changed(cx),
+                CatalogEvent::Listening(changes) => {
+                    let order = changes.is_empty() || changes.iter().any(|change| change.order);
+                    b.table
+                        .update(cx, |t, cx| MusicTable::listening_changed(t, order, cx));
+                }
+                CatalogEvent::SourcesMoved(folders) => {
+                    if b.location.is_folder()
+                        && folders.iter().any(|folder| {
+                            crate::store::path_key(folder) == crate::store::path_key(&b.path)
+                                || b.subfolders && crate::library::within(folder, &b.path)
+                        })
+                    {
+                        b.reload(window, cx);
+                    }
+                }
+                CatalogEvent::Structure(root) => {
+                    b.refresh_indexed_sequence(*root, cx);
+                    b.refresh_folder_traversal(cx);
+                }
+                CatalogEvent::Changed => {
+                    if let Some(notice) = b.location.unavailable(b.catalog.read(cx)) {
+                        b.notice = Some(notice.into());
+                        b.finish_listing(cx);
+                    } else if b.location.is_directory() {
+                        b.filter(cx);
+                    }
+                    b.refresh_folder_traversal(cx);
+                    cx.notify();
+                }
+                CatalogEvent::Notice(_)
+                    if b.location.is_directory() && !b.catalog.read(cx).loaded =>
+                {
+                    b.notice = Some("The Library is unavailable.".into());
                     b.finish_listing(cx);
-                } else if b.location.is_directory() {
-                    b.filter(cx);
                 }
-                b.refresh_folder_traversal(cx);
-                cx.notify();
-            }
-            CatalogEvent::Notice(_) if b.location.is_directory() && !b.catalog.read(cx).loaded => {
-                b.notice = Some("The Library is unavailable.".into());
-                b.finish_listing(cx);
-            }
-            _ => {}
-        })
+                _ => {}
+            },
+        )
         .detach();
         Self {
             path: PathBuf::new(),

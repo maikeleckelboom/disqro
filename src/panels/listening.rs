@@ -1,12 +1,12 @@
 //! Native listening history and statistics panels.
-use super::{PaneContent, PanelType, Services};
+use super::{Destination, PaneContent, PanelType, Router, Services};
 use crate::{
     audio::Command,
     catalog::CatalogEvent,
     listening::{Period, duration, local_date, midnight},
     player::Player,
     store::{
-        Handle, Ticket,
+        Handle, Scope, Ticket, TrackId,
         listening::{HISTORY_PAGE, HistoryKey, HistoryRow, Rank, Statistics, period_range},
     },
     theme::{materials, size},
@@ -18,7 +18,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
-        menu::{PopupMenu, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         table::{Column, DataTable, TableDelegate, TableEvent, TableState},
         tooltip::Tooltip,
         v_flex,
@@ -166,12 +166,28 @@ impl History {
             .detach();
         }
         cx.subscribe(&services.catalog, |s: &mut Self, _, e, cx| {
-            if matches!(e, CatalogEvent::Listening(_) | CatalogEvent::Content | CatalogEvent::Structure(_)) {
+            if matches!(
+                e,
+                CatalogEvent::Listening(_)
+                    | CatalogEvent::ListeningRemoved
+                    | CatalogEvent::Content
+                    | CatalogEvent::Structure(_)
+            ) {
                 s.dirty = true;
-                let removed = matches!(e, CatalogEvent::Listening(changes) if changes.iter().any(|c| c.removed));
-                if s.visible && (removed || s.pages.len() == 1 && !s.loading) { s.refresh(cx); }
+                let removed = matches!(e, CatalogEvent::ListeningRemoved);
+                if removed {
+                    s.table.update(cx, |t, cx| {
+                        t.delegate_mut().rows.clear();
+                        t.clear_selection(cx);
+                        cx.notify();
+                    });
+                }
+                if s.visible && (removed || s.pages.len() == 1 && !s.loading) {
+                    s.refresh(cx);
+                }
             }
-        }).detach();
+        })
+        .detach();
         let dates_open =
             prefs.period.is_none() && (!prefs.from.is_empty() || !prefs.through.is_empty());
         Self {
@@ -379,6 +395,35 @@ impl Render for History {
                         s.prefs.oldest = !s.prefs.oldest;
                         s.first(cx);
                     })),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("history-menu")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Ellipsis)
+                    .accessibility_label("History menu")
+                    .tooltip("History menu")
+                    .dropdown_menu({
+                        let history = cx.weak_entity();
+                        move |menu, _, _| {
+                            let history = history.clone();
+                            menu.item(PopupMenuItem::new("Clear History…").on_click(move |_, w, cx| {
+                                let history = history.clone();
+                                w.open_alert_dialog(cx, move |alert, _, _| {
+                                    let history = history.clone();
+                                    alert.title("Clear listening history?")
+                                        .description("All listening entries, play counts and listening statistics will be deleted.")
+                                        .show_cancel(true)
+                                        .ok_text("Clear History")
+                                        .on_ok(move |_, _, cx| {
+                                            let _ = history.update(cx, |s, cx| s.delete(None, cx));
+                                            true
+                                        })
+                                });
+                            }))
+                        }
+                    }),
             );
         let dates = h_flex()
             .flex_wrap()
@@ -410,35 +455,46 @@ impl Render for History {
                     .label("Apply dates")
                     .on_click(cx.listener(|s, _, _, cx| s.custom(cx))),
             );
-        let footer = h_flex().px_2().py_1().gap(px(4.)).border_t_1().border_color(m.line)
-            .child(Button::new("history-previous").ghost().small().label("Previous")
-                .disabled(self.pages.len() == 1 || self.loading)
-                .on_click(cx.listener(|s, _, _, cx| {
-                    s.pages.pop();
-                    s.table.update(cx, |t, cx| { t.clear_selection(cx); t.scroll_to_row(0, cx); });
-                    s.refresh(cx);
-                })))
-            .child(Button::new("history-next").ghost().small().label("Next")
-                .disabled(!self.more || self.loading)
-                .on_click(cx.listener(|s, _, _, cx| {
-                    if let Some(key) = s.table.read(cx).delegate().rows.last().map(HistoryRow::key) {
-                        s.pages.push(Some(key));
-                        s.table.update(cx, |t, cx| { t.clear_selection(cx); t.scroll_to_row(0, cx); });
+        let footer = h_flex()
+            .px_2()
+            .py_1()
+            .gap(px(4.))
+            .border_t_1()
+            .border_color(m.line)
+            .child(
+                Button::new("history-previous")
+                    .ghost()
+                    .small()
+                    .label("Previous")
+                    .disabled(self.pages.len() == 1 || self.loading)
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.pages.pop();
+                        s.table.update(cx, |t, cx| {
+                            t.clear_selection(cx);
+                            t.scroll_to_row(0, cx);
+                        });
                         s.refresh(cx);
-                    }
-                })))
-            .child(div().flex_1())
-            .child(Button::new("history-clear").ghost().small().label("Clear History…")
-                .on_click(cx.listener(|_, _, w, cx| {
-                    let this = cx.weak_entity();
-                    w.open_alert_dialog(cx, move |alert, _, _| {
-                        let this = this.clone();
-                        alert.title("Clear listening history?")
-                            .description("All listening entries, play counts and listening statistics will be deleted.")
-                            .show_cancel(true).ok_text("Clear History")
-                            .on_ok(move |_, _, cx| { let _ = this.update(cx, |s, cx| s.delete(None, cx)); true })
-                    });
-                })));
+                    })),
+            )
+            .child(
+                Button::new("history-next")
+                    .ghost()
+                    .small()
+                    .label("Next")
+                    .disabled(!self.more || self.loading)
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        if let Some(key) =
+                            s.table.read(cx).delegate().rows.last().map(HistoryRow::key)
+                        {
+                            s.pages.push(Some(key));
+                            s.table.update(cx, |t, cx| {
+                                t.clear_selection(cx);
+                                t.scroll_to_row(0, cx);
+                            });
+                            s.refresh(cx);
+                        }
+                    })),
+            );
         v_flex()
             .size_full()
             .min_w_0()
@@ -634,6 +690,11 @@ impl PaneContent for Entity<History> {
     fn set_presented(&self, visible: bool, cx: &mut App) {
         self.update(cx, |s, cx| {
             s.visible = visible;
+            if !visible && s.loading {
+                s.ticket.next();
+                s.loading = false;
+                s.dirty = true;
+            }
             if visible && s.dirty && !s.loading {
                 s.refresh(cx);
             }
@@ -641,7 +702,7 @@ impl PaneContent for Entity<History> {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 struct StatsPrefs {
     period: Period,
@@ -651,9 +712,11 @@ struct StatsPrefs {
 struct Stats {
     prefs: StatsPrefs,
     store: Option<Handle>,
+    catalog: Option<Handle>,
+    router: Entity<Router>,
     ticket: Ticket,
     focus: FocusHandle,
-    state: Option<Statistics>,
+    state: Option<(StatsPrefs, Statistics)>,
     error: Option<String>,
     visible: bool,
     busy: bool,
@@ -663,15 +726,25 @@ struct Stats {
 }
 impl Stats {
     fn new(services: &Services, prefs: StatsPrefs, cx: &mut Context<Self>) -> Self {
-        cx.subscribe(&services.catalog, |s: &mut Self, _, e, cx| {
-            if matches!(e, CatalogEvent::Listening(_)) {
+        cx.subscribe(&services.catalog, |s: &mut Self, _, e, cx| match e {
+            CatalogEvent::ListeningRemoved => {
+                s.state = None;
+                s.dirty = true;
+                if s.visible {
+                    s.refresh(cx);
+                }
+            }
+            CatalogEvent::Listening(changes) if changes.iter().all(|c| !c.removed) => {
                 s.invalidate(cx);
             }
+            _ => {}
         })
         .detach();
         Self {
             prefs,
-            store: services.catalog.update(cx, |c, _| c.listening_handle()),
+            store: services.catalog.update(cx, |c, _| c.statistics_handle()),
+            catalog: services.catalog.read(cx).handle(),
+            router: services.router.clone(),
             ticket: Ticket::default(),
             focus: cx.focus_handle(),
             state: None,
@@ -682,6 +755,30 @@ impl Stats {
             last_refresh: None,
             scheduled: false,
         }
+    }
+    fn select(&mut self, prefs: StatsPrefs, cx: &mut Context<Self>) {
+        if prefs != self.prefs {
+            self.prefs = prefs;
+            self.state = None;
+            self.refresh(cx);
+        }
+    }
+
+    fn reveal_recording(&self, id: TrackId, w: &mut Window, cx: &mut Context<Self>) {
+        let Some(store) = &self.catalog else { return };
+        let row = store.call(move |s| {
+            Ok(s.rows(Scope::Library(None), &[id])?
+                .pop()
+                .filter(|r| r.available))
+        });
+        let router = self.router.clone();
+        cx.spawn_in(w, async move |_, cx| {
+            let Ok(Some(row)) = row.await else { return };
+            let _ = cx.update(|w, cx| {
+                Router::open(&router, Destination::Recording(row.track), false, w, cx)
+            });
+        })
+        .detach();
     }
     fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
@@ -715,7 +812,9 @@ impl Stats {
             return;
         };
         let generation = self.ticket.next();
-        let StatsPrefs { period, by_time } = self.prefs;
+        let prefs = self.prefs;
+        let StatsPrefs { period, by_time } = prefs;
+        self.error = None;
         self.busy = true;
         self.last_refresh = Some(std::time::Instant::now());
         let result = store.query(&self.ticket, generation, move |s| {
@@ -730,7 +829,7 @@ impl Stats {
                 s.busy = false;
                 match result {
                     Ok(stats) => {
-                        s.state = Some(stats);
+                        s.state = Some((prefs, stats));
                         s.error = None;
                     }
                     Err(e) => s.error = Some(format!("{e:#}")),
@@ -749,13 +848,9 @@ impl Stats {
 impl Render for Stats {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *materials(cx);
-        let toolbar = h_flex()
+        let periods = h_flex()
             .gap(px(5.))
             .flex_wrap()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(m.line)
             .children(Period::OPTIONS.map(|period| {
                 Button::new(period.label())
                     .ghost()
@@ -763,11 +858,25 @@ impl Render for Stats {
                     .label(period.label())
                     .selected(self.prefs.period == period)
                     .on_click(cx.listener(move |s, _, _, cx| {
-                        s.prefs.period = period;
-                        s.state = None;
-                        s.refresh(cx);
+                        s.select(StatsPrefs { period, ..s.prefs }, cx);
                     }))
             }));
+        let rank_selector = h_flex()
+            .flex_wrap()
+            .gap(px(5.))
+            .child(div().text_color(m.text_muted).child("Rank by"))
+            .children(
+                [(false, "Plays"), (true, "Listening Time")].map(|(by_time, name)| {
+                    Button::new(name)
+                        .ghost()
+                        .small()
+                        .label(name)
+                        .selected(self.prefs.by_time == by_time)
+                        .on_click(cx.listener(move |s, _, _, cx| {
+                            s.select(StatsPrefs { by_time, ..s.prefs }, cx);
+                        }))
+                }),
+            );
         let content = if let Some(error) = &self.error {
             div()
                 .px_3()
@@ -775,7 +884,9 @@ impl Render for Stats {
                 .text_color(m.warning)
                 .child(error.clone())
                 .into_any_element()
-        } else if let Some(stats) = &self.state {
+        } else if let Some((prefs, stats)) = &self.state
+            && *prefs == self.prefs
+        {
             if stats.totals.credited_us == 0 && stats.totals.plays == 0 {
                 div()
                     .id("statistics-empty")
@@ -787,18 +898,17 @@ impl Render for Stats {
                     .child("No listening activity in this period.")
                     .into_any_element()
             } else {
-                let summary = h_flex().flex_wrap().gap(px(18.)).children(
+                let summary = h_flex().flex_wrap().gap(px(12.)).children(
                     [
-                        ("Listening time", duration(stats.totals.credited_us)),
-                        ("Qualified plays", stats.totals.plays.to_string()),
-                        ("Recordings", stats.recordings.to_string()),
-                        ("Artists", stats.artists.to_string()),
-                        ("Releases", stats.releases.to_string()),
+                        ("Listening time", long_duration(stats.totals.credited_us)),
+                        ("Qualified plays", grouped_count(stats.totals.plays)),
+                        ("Recordings", grouped_count(stats.recordings)),
+                        ("Artists", grouped_count(stats.artists)),
+                        ("Releases", grouped_count(stats.releases)),
                     ]
                     .map(|(label, value)| {
                         v_flex()
                             .gap(px(2.))
-                            .min_w(px(70.))
                             .id(label)
                             .role(Role::Group)
                             .aria_label(format!("{label}, {value}"))
@@ -806,37 +916,14 @@ impl Render for Stats {
                             .child(div().text_color(m.text_muted).child(label))
                     }),
                 );
-                let rank_selector = h_flex()
-                    .flex_wrap()
-                    .gap(px(5.))
-                    .child(div().text_color(m.text_muted).child("Rank by"))
-                    .children([(false, "Plays"), (true, "Listening Time")].map(
-                        |(by_time, name)| {
-                            Button::new(name)
-                                .ghost()
-                                .small()
-                                .label(name)
-                                .selected(self.prefs.by_time == by_time)
-                                .on_click(cx.listener(move |s, _, _, cx| {
-                                    s.prefs.by_time = by_time;
-                                    s.refresh(cx);
-                                }))
-                        },
-                    ));
                 v_flex()
-                    .gap(px(15.))
+                    .gap(px(10.))
                     .p_3()
                     .child(summary)
                     .child(activity(&stats.days, cx))
-                    .child(rank_selector)
-                    .child(ranking("Recordings", &stats.tracks, self.prefs.by_time, cx))
-                    .child(ranking(
-                        "Artists",
-                        &stats.performers,
-                        self.prefs.by_time,
-                        cx,
-                    ))
-                    .child(ranking("Releases", &stats.albums, self.prefs.by_time, cx))
+                    .child(ranking("Recordings", &stats.tracks, prefs.by_time, cx))
+                    .child(ranking("Artists", &stats.performers, prefs.by_time, cx))
+                    .child(ranking("Releases", &stats.albums, prefs.by_time, cx))
                     .into_any_element()
             }
         } else {
@@ -853,7 +940,18 @@ impl Render for Stats {
             .min_w_0()
             .bg(m.canvas)
             .text_size(px(size::TEXT))
-            .child(toolbar)
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .justify_between()
+                    .gap(px(5.))
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(m.line)
+                    .child(periods)
+                    .child(rank_selector),
+            )
             .child(
                 div()
                     .id("statistics-scroll")
@@ -865,19 +963,94 @@ impl Render for Stats {
     }
 }
 
+impl Drop for Stats {
+    fn drop(&mut self) {
+        self.ticket.next();
+    }
+}
+
+fn grouped_count(value: i64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.bytes().enumerate() {
+        if i != 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(char::from(digit));
+    }
+    grouped
+}
+
+fn long_duration(us: i64) -> String {
+    let minutes = us / 60_000_000;
+    match minutes {
+        0 => duration(us),
+        1..60 => {
+            let seconds = us / 1_000_000 % 60;
+            if seconds == 0 {
+                format!("{minutes} m")
+            } else {
+                format!("{minutes} m {seconds} s")
+            }
+        }
+        _ => {
+            let hours = grouped_count(minutes / 60);
+            let minutes = minutes % 60;
+            if minutes == 0 {
+                format!("{hours} h")
+            } else {
+                format!("{hours} h {minutes} m")
+            }
+        }
+    }
+}
+
+fn exact_duration(us: i64) -> String {
+    let seconds = us / 1_000_000;
+    let fraction = us % 1_000_000;
+    let integral = format!(
+        "{}h {:02}m {:02}",
+        grouped_count(seconds / 3600),
+        seconds / 60 % 60,
+        seconds % 60
+    );
+    if fraction == 0 {
+        format!("{integral}s")
+    } else {
+        let fraction = format!("{fraction:06}");
+        format!("{integral}.{}s", fraction.trim_end_matches('0'))
+    }
+}
+
 fn activity(days: &[(chrono::NaiveDate, i64)], cx: &App) -> impl IntoElement {
     let m = *materials(cx);
-    let Some((first, _)) = days.first() else {
+    let Some(&(first, _)) = days.first() else {
         return div();
     };
-    let (last, _) = days.last().unwrap();
-    let span = (*last - *first).num_days() as usize + 1;
-    let per_bar = span.div_ceil(42);
+    let &(last, _) = days.last().unwrap();
+    let first = first.min(last - chrono::Days::new(6));
+    let span = (last - first).num_days() as usize + 1;
+    let per_bar = [1, 7, 28, 91, 364]
+        .into_iter()
+        .find(|interval| span.div_ceil(*interval) <= 31)
+        .unwrap_or_else(|| span.div_ceil(31).div_ceil(364) * 364);
     let mut bars = vec![0; span.div_ceil(per_bar)];
     for (day, time) in days {
-        bars[(*day - *first).num_days() as usize / per_bar] += time;
+        bars[(*day - first).num_days() as usize / per_bar] += time;
     }
-    let max = bars.iter().copied().max().unwrap_or(0).max(1);
+    let peak = bars.iter().copied().max().unwrap_or(0);
+    let unit = match peak {
+        0..=59_999_999 => 1_000_000,
+        60_000_000..=3_599_999_999 => 60_000_000,
+        _ => 3_600_000_000,
+    };
+    let magnitude = ((peak / unit).max(1) as u64).ilog10();
+    let step = unit * 10_i64.pow(magnitude);
+    let scale = [1, 2, 5, 10]
+        .into_iter()
+        .map(|n| n * step)
+        .find(|n| *n >= peak)
+        .unwrap();
     div()
         .flex()
         .flex_col()
@@ -889,31 +1062,38 @@ fn activity(days: &[(chrono::NaiveDate, i64)], cx: &App) -> impl IntoElement {
             h_flex()
                 .justify_between()
                 .child(if per_bar == 1 {
-                    "Daily listening"
+                    "Daily listening".to_string()
                 } else {
-                    "Listening activity"
+                    format!("Listening per {per_bar} days")
                 })
-                .child(div().text_color(m.text_muted).child(duration(max))),
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(m.text_muted)
+                        .child(long_duration(scale)),
+                ),
         )
         .child(
             h_flex()
                 .h(px(67.))
                 .w_full()
                 .items_end()
-                .gap(px(2.))
+                .gap(px(if bars.len() > 14 { 1. } else { 3. }))
+                .border_t_1()
                 .border_b_1()
                 .border_color(m.line)
                 .children(bars.into_iter().enumerate().map(|(i, value)| {
-                    let at = *first + chrono::Days::new((i * per_bar) as u64);
-                    let end = (at + chrono::Days::new(per_bar as u64 - 1)).min(*last);
+                    let at = first + chrono::Days::new((i * per_bar) as u64);
+                    let end = (at + chrono::Days::new(per_bar as u64 - 1)).min(last);
                     let label = if at == end {
-                        at.format("%b %d").to_string()
+                        at.format("%-d %b %Y").to_string()
                     } else {
-                        format!("{}–{}", at.format("%b %d"), end.format("%b %d"))
+                        format!("{} – {}", at.format("%-d %b %Y"), end.format("%-d %b %Y"))
                     };
                     div()
                         .id(("listening-bar", i))
                         .flex_1()
+                        .min_w_0()
                         .h_full()
                         .flex()
                         .items_end()
@@ -922,60 +1102,106 @@ fn activity(days: &[(chrono::NaiveDate, i64)], cx: &App) -> impl IntoElement {
                             div()
                                 .w_full()
                                 .max_w(px(24.))
-                                .h(px(66. * value as f32 / max as f32))
+                                .h(px(if value == 0 {
+                                    0.
+                                } else {
+                                    (65. * value as f32 / scale as f32).max(1.)
+                                }))
                                 .bg(m.accent),
                         )
                         .tooltip(move |w, cx| {
-                            Tooltip::new(format!("{} · {}", label, duration(value))).build(w, cx)
+                            Tooltip::new(format!("{label} · {}", exact_duration(value)))
+                                .build(w, cx)
                         })
                 })),
         )
         .child(
             h_flex()
                 .justify_between()
+                .gap(px(4.))
                 .text_color(m.text_muted)
-                .child(first.format("%b %d, %Y").to_string())
+                .child(
+                    div()
+                        .truncate()
+                        .child(first.format("%-d %b %Y").to_string()),
+                )
                 .when(last != first, |d| {
-                    d.child(last.format("%b %d, %Y").to_string())
+                    d.child(div().truncate().child(last.format("%-d %b %Y").to_string()))
                 }),
         )
 }
 
-fn ranking(title: &'static str, ranks: &[Rank], by_time: bool, cx: &App) -> impl IntoElement {
+fn ranking(
+    title: &'static str,
+    ranks: &[Rank],
+    by_time: bool,
+    cx: &mut Context<Stats>,
+) -> impl IntoElement {
     let m = *materials(cx);
+    let show_actions = ranks.iter().any(|rank| rank.track.is_some());
     v_flex()
-        .child(div().py_1().border_b_1().border_color(m.line).child(title))
+        .child(
+            h_flex()
+                .justify_between()
+                .py_1()
+                .border_b_1()
+                .border_color(m.line)
+                .child(title)
+                .child(
+                    div()
+                        .text_color(m.text_muted)
+                        .when(show_actions, |d| d.pr(px(32.)))
+                        .child(if by_time { "Time" } else { "Plays" }),
+                ),
+        )
         .when(ranks.is_empty(), |d| {
-            d.child(
-                div()
-                    .py_1()
-                    .text_color(m.text_muted)
-                    .child("No metadata in this period."),
-            )
-        })
-        .children(ranks.iter().map(|rank| {
-            let value = if by_time {
-                duration(rank.credited_us)
-            } else if rank.plays == 1 {
-                "1 play".into()
+            d.child(div().py_1().text_color(m.text_muted).child(if by_time {
+                "No ranked listening time."
             } else {
-                format!("{} plays", rank.plays)
+                "No qualified plays."
+            }))
+        })
+        .children(ranks.iter().enumerate().map(|(i, rank)| {
+            let value = if by_time {
+                long_duration(rank.credited_us)
+            } else {
+                grouped_count(rank.plays)
             };
             h_flex()
-                .h(px(26.))
+                .min_h(px(if rank.detail.is_empty() { 24. } else { 34. }))
                 .gap(px(10.))
-                .child(div().flex_1().min_w_0().truncate().child(rank.name.clone()))
-                .when(!rank.detail.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(m.text_muted)
-                            .child(rank.detail.clone()),
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().child(rank.name.clone()))
+                        .when(!rank.detail.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .truncate()
+                                    .text_color(m.text_muted)
+                                    .child(rank.detail.clone()),
+                            )
+                        }),
+                )
+                .child(div().flex_shrink_0().text_right().child(value))
+                .when_some(rank.track, |row, id| {
+                    row.child(
+                        Button::new(("reveal-ranked-recording", i))
+                            .ghost()
+                            .xsmall()
+                            .w(px(22.))
+                            .icon(IconName::FolderOpen)
+                            .accessibility_label(format!("Show {} in Music Browser", rank.name))
+                            .tooltip("Show in Music Browser")
+                            .on_click(
+                                cx.listener(move |s, _, w, cx| s.reveal_recording(id, w, cx)),
+                            ),
                     )
                 })
-                .child(div().flex_shrink_0().text_color(m.text_muted).child(value))
+                .when(show_actions && rank.track.is_none(), |row| {
+                    row.child(div().w(px(22.)).flex_shrink_0())
+                })
         }))
 }
 
@@ -993,11 +1219,16 @@ impl PaneContent for Entity<Stats> {
         STATISTICS.title.into()
     }
     fn save(&self, cx: &App) -> serde_json::Value {
-        serde_json::to_value(&self.read(cx).prefs).unwrap_or_default()
+        serde_json::to_value(self.read(cx).prefs).unwrap_or_default()
     }
     fn set_presented(&self, visible: bool, cx: &mut App) {
         self.update(cx, |s, cx| {
             s.visible = visible;
+            if !visible && s.busy {
+                s.ticket.next();
+                s.busy = false;
+                s.dirty = true;
+            }
             if visible && s.dirty && !s.busy {
                 s.refresh(cx);
             }

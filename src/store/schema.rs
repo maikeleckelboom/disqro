@@ -14,6 +14,7 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("recording-identity.sql"),
     include_str!("catalog-search.sql"),
     include_str!("listening-history.sql"),
+    include_str!("listening-release-evidence.sql"),
 ];
 
 const V1: &str = "

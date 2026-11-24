@@ -58,6 +58,8 @@ fn recording(path: &Path, artist: &str) -> Recording {
         track: Arc::new(track),
         source: Stamp::read(path),
         sheet: None,
+        source_object: None,
+        sheet_object: None,
     }
 }
 
@@ -211,7 +213,7 @@ fn concurrent_catalog_and_history_startup_upgrade_once() {
             scope.spawn(|| {
                 start.wait();
                 let store = Store::open(&path).unwrap();
-                assert_eq!(super::super::schema::version(&store.db).unwrap(), 4);
+                assert_eq!(super::super::schema::version(&store.db).unwrap(), 5);
                 assert_eq!(store.playlists().unwrap()[0].name, "Preserved");
             });
         }
@@ -293,8 +295,199 @@ fn listening_writer_retains_ordered_checkpoints_after_a_write_error() {
 }
 
 #[test]
+fn competing_writer_bounds_pending_work_and_recovers_in_order() {
+    use crate::listening::Writer;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.sqlite3");
+    let owner = Writer::spawn(path.clone()).0;
+    owner.barrier().unwrap();
+    let (writer, updates) = Writer::spawn_bounded(path.clone(), 3);
+    let error = writer.barrier().unwrap_err();
+    assert!(format!("{error:#}").contains("another instance"));
+    assert!(
+        updates
+            .error
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .contains("not yet saved")
+    );
+
+    let track = recording(&dir.path().join("buffered.wav"), "");
+    let mut first = Occurrence::new(track.clone(), 0);
+    let first_checkpoint = first.credit(Some(2.), 0, SECOND).unwrap();
+    assert!(writer.save(first_checkpoint));
+    assert!(writer.save(first.finish(SECOND, End::Stopped)));
+    let mut second = Occurrence::new(track.clone(), 2 * SECOND);
+    let second_checkpoint = second.credit(Some(2.), 2 * SECOND, SECOND).unwrap();
+    assert!(!writer.save(second_checkpoint));
+    assert!(writer.suspended());
+    assert!(!writer.save(second.finish(3 * SECOND, End::Stopped)));
+    let (reply, response) = async_channel::bounded(1);
+    writer.erase(None, reply);
+    assert!(response.recv_blocking().unwrap().is_err());
+    let reader = Store::open(&path).unwrap();
+    let snapshot = || {
+        let mut stmt = reader
+            .db
+            .prepare("SELECT credited_us,reason,checkpoint FROM listening_occurrences ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+    assert!(snapshot().is_empty());
+
+    drop(owner);
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    while writer.barrier().is_err() {
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    assert!(!writer.suspended());
+    assert_eq!(
+        snapshot(),
+        [
+            (SECOND, "stopped".into(), 2),
+            (SECOND, "capture-suspended".into(), 1)
+        ]
+    );
+
+    let (reply, response) = async_channel::bounded(1);
+    writer.erase(None, reply);
+    response.recv_blocking().unwrap().unwrap();
+    assert!(snapshot().is_empty());
+    let mut next = Occurrence::new(track, 4 * SECOND);
+    assert!(writer.save(next.credit(Some(2.), 4 * SECOND, SECOND).unwrap()));
+    assert!(writer.save(next.finish(5 * SECOND, End::Stopped)));
+    writer.barrier().unwrap();
+    assert_eq!(snapshot(), [(SECOND, "stopped".into(), 2)]);
+}
+
+#[test]
+fn authored_release_survives_detachment_retagging_and_reattachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let root_path = dir.path();
+    let authored = |folder: &str, number: u8, title: &str| {
+        let folder = root_path.join(folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let source = folder.join("image.wav");
+        std::fs::write(&source, [number; 128]).unwrap();
+        let sheet = folder.join("album.cue");
+        std::fs::write(&sheet, format!(
+            "PERFORMER \"Quartet\"\nTITLE \"{title}\"\nFILE image.wav WAVE\nTRACK 01 AUDIO\nTITLE \"Side {number}\"\nINDEX 01 00:00:00"
+        )).unwrap();
+        sheet
+    };
+    let first = authored("Edition/CD1", 1, "Live set (CD1)");
+    let second = authored("Edition/CD2", 2, "Live set (CD2)");
+    let other = authored("Other edition", 3, "Live set (CD2)");
+    let track = |sheet: &Path| {
+        let t = Arc::new(crate::cue::read(sheet).unwrap().remove(0));
+        Recording {
+            source: Stamp::read(&t.source),
+            sheet: Stamp::read(sheet),
+            source_object: None,
+            sheet_object: None,
+            track: t,
+        }
+    };
+    let listen = |s: &mut Store, sheet: &Path, at| {
+        let mut o = Occurrence::new(track(sheet), at);
+        credit(s, &mut o, Some(10.), at, 5);
+    };
+    let index = |s: &mut Store, root| {
+        super::super::index_root(s, root, None, &|| true, &mut |_| {}).unwrap();
+    };
+    let mut s = Store::memory();
+    listen(&mut s, &second, SECOND);
+    let root = s.add_root(root_path).unwrap();
+    index(&mut s, root);
+    listen(&mut s, &first, 10 * SECOND);
+    s.remove_root(root).unwrap();
+    listen(&mut s, &second, 20 * SECOND);
+    listen(&mut s, &other, 30 * SECOND);
+
+    let source = second.with_file_name("image.wav");
+    let renamed = second.with_file_name("recording.wav");
+    std::fs::rename(&source, &renamed).unwrap();
+    let text = std::fs::read_to_string(&second).unwrap();
+    std::fs::write(
+        &second,
+        text.replace("image.wav", "recording.wav")
+            .replace("Side 2", "Finale"),
+    )
+    .unwrap();
+    let root = s.add_root(root_path).unwrap();
+    index(&mut s, root);
+    listen(&mut s, &second, 40 * SECOND);
+    let stats = s.listening_statistics(Period::All, false).unwrap();
+    assert_eq!(
+        (stats.releases, stats.totals.plays, stats.totals.credited_us),
+        (2, 5, 25 * SECOND)
+    );
+    assert_eq!(
+        stats.albums.iter().map(|r| r.plays).collect::<Vec<_>>(),
+        [4, 1]
+    );
+    let rows = s
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert_eq!(rows[0].title, "Side 2");
+    assert_eq!(rows[4].title, "Finale");
+    let before = rows[0].track.as_ref().unwrap();
+    let after = rows[4].track.as_ref().unwrap();
+    assert_eq!(before.id, after.id);
+    assert_eq!(after.track.source, renamed);
+    let totals = s.listening_index(None).unwrap();
+    let (_, locator, total) = totals.iter().find(|(id, _, _)| *id == after.id).unwrap();
+    assert_eq!(
+        locator.as_ref(),
+        Some(&crate::store::Locator::of(&after.track))
+    );
+    assert_eq!(total.plays, 3);
+}
+
+#[test]
+fn first_checkpoint_can_follow_an_already_verified_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("before.wav");
+    let mut recorded = recording(&source, "Quartet");
+    recorded.source_object = crate::store::NativeFile::of(&std::fs::File::open(&source).unwrap());
+    assert!(recorded.source_object.is_some());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    let index =
+        |s: &mut Store| super::super::index_root(s, root, None, &|| true, &mut |_| {}).unwrap();
+    index(&mut s);
+    let id = s
+        .find(&crate::store::Locator::of(&recorded.track))
+        .unwrap()
+        .unwrap();
+    let renamed = dir.path().join("after.wav");
+    std::fs::rename(source, &renamed).unwrap();
+    assert_eq!(index(&mut s).relocated, 1);
+    let mut occurrence = Occurrence::new(recorded, 0);
+    credit(&mut s, &mut occurrence, Some(2.), 0, 1);
+    assert_eq!(s.listening_totals(id).unwrap().plays, 1);
+    let rows = s
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert_eq!(rows[0].track.as_ref().unwrap().track.source, renamed);
+}
+
+#[test]
 #[ignore = "one million occurrence qualification dataset"]
 fn listening_scale() {
+    use gpui_kit::block_on as blocking;
     let export = std::env::var_os("DISQRO_LISTENING_SCALE_DIR").map(std::path::PathBuf::from);
     let dir = match &export {
         Some(directory) => tempfile::Builder::new()
@@ -391,6 +584,42 @@ fn listening_scale() {
             stats.totals.plays
         );
     }
+    // Use the same independent FIFO workers as the native views and launch
+    // interactive reads only after the expensive query enters its worker.
+    let stats = crate::store::Handle::spawn(path.clone());
+    let history = crate::store::Handle::spawn(path.clone());
+    let browser = crate::store::Handle::spawn(path.clone());
+    for worker in [&stats, &history, &browser] {
+        blocking(worker.drain()).unwrap();
+    }
+    let (started, running) = std::sync::mpsc::sync_channel(1);
+    let start = Instant::now();
+    let all = stats.call(move |s| {
+        started.send(())?;
+        s.listening_statistics(Period::All, true)
+    });
+    running.recv().unwrap();
+    let history_start = Instant::now();
+    let rows = history.call(move |s| s.history_page((i64::MIN, i64::MAX), "", false, Some(middle)));
+    let browse_start = Instant::now();
+    let list = browser.call(move |s| s.rows(Scope::Library(None), &[1, 2, 3, 4, 5]));
+    std::thread::scope(|scope| {
+        let browse = scope.spawn(move || {
+            assert_eq!(blocking(list).unwrap().len(), 5);
+            elapsed(browse_start)
+        });
+        assert_eq!(blocking(rows).unwrap().len(), HISTORY_PAGE + 1);
+        println!(
+            "History cursor page during all-time statistics {:.1} ms",
+            elapsed(history_start)
+        );
+        println!(
+            "Browser row hydration during all-time statistics {:.1} ms",
+            browse.join().unwrap()
+        );
+    });
+    assert_eq!(blocking(all).unwrap().totals.plays, 1_000_000);
+    println!("Concurrent all-time statistics {:.1} ms", elapsed(start));
     let start = Instant::now();
     let mut occurrence = Occurrence::new(recording(&dir.path().join("new.wav"), ""), base);
     credit(&mut s, &mut occurrence, None, base, 31);

@@ -39,6 +39,7 @@ pub struct Summary {
     pub added: usize,
     pub missing: usize,
     pub relocated: usize,
+    pub relocated_folders: Vec<PathBuf>,
     pub ambiguous: usize,
     /// False when part of the collection could not be read; nothing under
     /// those folders was marked missing.
@@ -283,12 +284,15 @@ pub fn index_root(
 
     // Verified relocation: a one-to-one match between a new path and a file
     // the library can no longer find, here or anywhere else.
-    let mut relocated: HashMap<String, (i64, Evidence)> = HashMap::new();
+    let mut relocated = HashMap::new();
     let mut ambiguous = 0;
     {
         let mut elsewhere = db.prepare_cached(
             "SELECT id, kind, size, modified, name, volume, file_index, digest, path, sample
-             FROM files WHERE present = 0 AND path_key IS NOT NULL AND kind = ?1 AND size = ?2",
+             FROM files WHERE present = 0 AND path_key IS NOT NULL AND kind = ?1 AND size = ?2
+             UNION ALL
+             SELECT id, kind, size, modified, name, volume, file_index, digest, path, sample
+             FROM files WHERE root_id IS NULL AND present = 1 AND kind = ?1 AND size = ?2",
         )?;
         let mut matches = Vec::new();
         let mut claims: HashMap<i64, usize> = HashMap::new();
@@ -327,14 +331,14 @@ pub fn index_root(
                 [] => {}
                 [old] => {
                     let verified = old.verified(info, e);
-                    matches.push((key.clone(), old.id, e.clone(), verified));
+                    matches.push((key.clone(), old.id, old.path.clone(), e.clone(), verified));
                 }
                 _ => ambiguous += 1,
             }
         }
-        for (key, old, e, verified) in matches {
+        for (key, old, old_path, e, verified) in matches {
             if verified && claims[&old] == 1 {
-                relocated.insert(key, (old, e));
+                relocated.insert(key, (old, old_path, e));
             } else {
                 ambiguous += 1;
             }
@@ -345,7 +349,7 @@ pub fn index_root(
     let before: i64 = db.query_row("SELECT count(*) FROM tracks", [], |r| r.get(0))?;
     {
         let tx = scan_transaction(db, root, generation, alive)?;
-        for (key, (old, e)) in &relocated {
+        for (key, (old, _, e)) in &relocated {
             let f = &files[key];
             tx.execute(
                 "UPDATE files SET path = ?2, path_key = ?3, name = ?4, root_id = coalesce(?5, root_id),
@@ -454,11 +458,30 @@ pub fn index_root(
         added: (after - before).max(0) as usize,
         missing: newly_missing,
         relocated: relocated.len(),
+        relocated_folders: relocated
+            .iter()
+            .flat_map(|(key, (_, from, _))| [from.parent(), files[key].path.parent()])
+            .flatten()
+            .map(Path::to_owned)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         ambiguous,
         complete,
     };
     progress(Progress::Indexed(summary.clone()));
     enrich(db, root, generation, &found.covers, cache, alive, progress)?;
+    let tx = Transaction::new_unchecked(&store.db, TransactionBehavior::Immediate)?;
+    let current: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM roots WHERE id=?1 AND generation=?2)",
+        params![root, generation],
+        |row| row.get(0),
+    )?;
+    if !current || !alive() {
+        return Err(super::worker::Cancelled.into());
+    }
+    store.remember_listening_releases(&tx, root)?;
+    tx.commit()?;
     Ok(summary)
 }
 

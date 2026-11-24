@@ -184,6 +184,8 @@ pub enum CatalogEvent {
     /// Library rows changed; open views should query again.
     Content,
     Listening(Vec<crate::listening::Change>),
+    ListeningRemoved,
+    SourcesMoved(Vec<PathBuf>),
     /// A registered collection's navigation structure or availability changed.
     Structure(RootId),
     /// A playlist was just created and can be named.
@@ -195,6 +197,8 @@ impl EventEmitter<CatalogEvent> for Catalog {}
 pub struct Catalog {
     store: Option<Handle>,
     listening_reads: Option<Handle>,
+    statistics_reads: Option<Handle>,
+    listening_changes: Option<crate::listening::Changes>,
     cache_dir: Option<PathBuf>,
     pub collections: Vec<Collection>,
     pub playlists: Vec<store::Playlist>,
@@ -217,6 +221,8 @@ impl Catalog {
         let mut this = Self {
             store,
             listening_reads: None,
+            statistics_reads: None,
+            listening_changes: None,
             cache_dir: crate::profile::location().map(|p| p.with_file_name("Cache")),
             collections: vec![],
             playlists: vec![],
@@ -237,14 +243,32 @@ impl Catalog {
     }
 
     pub fn watch_listening(&mut self, updates: crate::listening::Updates, cx: &mut Context<Self>) {
-        let Some(store) = self.store.clone() else {
+        let Some(store) = self.listening_handle() else {
             return;
         };
+        self.listening_changes = Some(updates.changes.clone());
+        let pending = updates.changes.pending();
+        let changed = updates.changed;
+        let notice = updates.error;
         cx.spawn(async move |this, cx| {
             let mut initial = true;
-            while initial || updates.changed.recv().await.is_ok() {
-                let changes = std::mem::take(&mut *updates.pending.lock().unwrap());
-                let error = updates.error.lock().unwrap().take();
+            let mut index_error = None;
+            while initial || changed.recv().await.is_ok() {
+                let changes = std::mem::take(&mut *pending.lock().unwrap());
+                let notice = notice.lock().unwrap().take();
+                if this
+                    .update(cx, |_, cx| {
+                        if let Some(notice) = notice {
+                            cx.emit(CatalogEvent::Notice(format!("Listening history: {notice}")));
+                        }
+                        if changes.iter().any(|c| c.removed) {
+                            cx.emit(CatalogEvent::ListeningRemoved);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
                 let rebuild = initial || changes.iter().any(|c| c.track.is_none() && c.order);
                 initial = false;
                 let ids =
@@ -255,46 +279,55 @@ impl Catalog {
                     store.call(move |s| s.listening_index(ids)).await
                 };
                 if this
-                    .update(cx, |state, cx| {
-                        if let Some(error) = error {
-                            cx.emit(CatalogEvent::Notice(format!("Listening history: {error}")));
-                        }
-                        match rows {
-                            Ok(rows) => {
-                                if rebuild {
-                                    state.listening = Arc::default();
-                                    state.listening_locations = Arc::default();
-                                    state.listening_keys.clear();
+                    .update(cx, |state, cx| match rows {
+                        Ok(rows) => {
+                            index_error = None;
+                            if rebuild {
+                                state.listening = Arc::default();
+                                state.listening_locations = Arc::default();
+                                state.listening_keys.clear();
+                            }
+                            for (id, locator, totals) in rows {
+                                if let Some(key) = state.listening_keys.remove(&id)
+                                    && state.listening_locations.get(&key) == Some(&id)
+                                {
+                                    Arc::make_mut(&mut state.listening_locations).remove(&key);
                                 }
-                                for (id, locator, totals) in rows {
-                                    if let Some(key) = state.listening_keys.remove(&id)
-                                        && state.listening_locations.get(&key) == Some(&id)
-                                    {
-                                        Arc::make_mut(&mut state.listening_locations).remove(&key);
+                                if totals.credited_us == 0 {
+                                    Arc::make_mut(&mut state.listening).remove(&id);
+                                } else {
+                                    Arc::make_mut(&mut state.listening).insert(id, totals);
+                                    if let Some(locator) = locator {
+                                        state.listening_keys.insert(id, locator.clone());
+                                        Arc::make_mut(&mut state.listening_locations)
+                                            .insert(locator, id);
                                     }
-                                    if totals.credited_us == 0 {
-                                        Arc::make_mut(&mut state.listening).remove(&id);
-                                    } else {
-                                        Arc::make_mut(&mut state.listening).insert(id, totals);
-                                        if let Some(locator) = locator {
-                                            state.listening_keys.insert(id, locator.clone());
-                                            Arc::make_mut(&mut state.listening_locations)
-                                                .insert(locator, id);
-                                        }
-                                    }
-                                }
-                                if rebuild || !changes.is_empty() {
-                                    cx.emit(CatalogEvent::Listening(changes));
                                 }
                             }
-                            Err(e) => {
-                                cx.emit(CatalogEvent::Notice(format!("Listening history: {e:#}")))
+                            if rebuild || !changes.is_empty() {
+                                cx.emit(CatalogEvent::Listening(changes));
+                            }
+                        }
+                        Err(e) => {
+                            initial = true;
+                            let message = format!("Listening history: {e:#}");
+                            if index_error.as_ref() != Some(&message) {
+                                cx.emit(CatalogEvent::Notice(message.clone()));
+                                index_error = Some(message);
+                            }
+                            if !changes.is_empty() {
+                                cx.emit(CatalogEvent::Listening(changes));
                             }
                         }
                     })
                     .is_err()
                 {
                     break;
+                }
+                if initial {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(1))
+                        .await;
                 }
             }
         })
@@ -308,6 +341,24 @@ impl Catalog {
                 .map(|s| Handle::spawn(s.path().to_path_buf()));
         }
         self.listening_reads.clone()
+    }
+    pub fn statistics_handle(&mut self) -> Option<Handle> {
+        if self.statistics_reads.is_none() {
+            self.statistics_reads = self
+                .store
+                .as_ref()
+                .map(|s| Handle::spawn(s.path().to_path_buf()));
+        }
+        self.statistics_reads.clone()
+    }
+    fn refresh_listening_locations(&self) {
+        if let Some(changes) = &self.listening_changes {
+            changes.publish(crate::listening::Change {
+                track: None,
+                order: true,
+                removed: false,
+            });
+        }
     }
 
     pub fn listening_of(&self, track: &Track) -> crate::listening::Totals {
@@ -880,6 +931,7 @@ impl Catalog {
                 Ok((roots, marks)) => {
                     c.set_roots(roots);
                     c.set_marks(marks);
+                    c.refresh_listening_locations();
                     cx.emit(CatalogEvent::Changed);
                     cx.emit(CatalogEvent::Content);
                     cx.emit(CatalogEvent::Structure(id));
@@ -980,6 +1032,9 @@ impl Catalog {
         }
         if let Err(result) = message {
             self.scanning = None;
+            // Scan transactions can commit file moves before later phases finish,
+            // including when a scan is cancelled.
+            self.refresh_listening_locations();
             cx.emit(CatalogEvent::Structure(id));
             match result {
                 Ok(summary) if summary.ambiguous > 0 => cx.emit(CatalogEvent::Notice(format!(
@@ -993,6 +1048,11 @@ impl Catalog {
             }
             self.load(false, cx);
             self.next_scan(cx);
+        } else if let Ok(Progress::Indexed(summary)) = message {
+            self.refresh_listening_locations();
+            if !summary.relocated_folders.is_empty() {
+                cx.emit(CatalogEvent::SourcesMoved(summary.relocated_folders));
+            }
         }
         if refresh {
             cx.emit(CatalogEvent::Content);

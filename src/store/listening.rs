@@ -142,46 +142,63 @@ impl Store {
         use crate::cache::Stamp;
         let track = &recording.track;
         let source = Stamp::read(&track.source);
-        if source.is_none()
-            || source != recording.source
-            || track.disc.as_ref().is_some_and(|d| {
-                recording.sheet.is_none() || Stamp::read(&d.sheet) != recording.sheet
-            })
-        {
-            return Ok(None);
-        }
-        let found = self.find(&Locator::of(track))?;
-        let current = if let Some(id) = found {
-            let source = source.as_ref().unwrap();
-            let (size, modified, a_size, a_modified): (i64, i64, i64, i64) = self.db.query_row(
-                "SELECT s.size,s.modified,a.size,a.modified FROM tracks t
-                 JOIN files s ON s.id=t.source JOIN files a ON a.id=t.anchor WHERE t.id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
-            (source.bytes == size
-                && source.modified == modified
-                && recording
-                    .sheet
+        let same_object = |path: &std::path::Path, expected: Option<super::NativeFile>| {
+            expected.is_none_or(|expected| {
+                std::fs::File::open(path)
+                    .ok()
                     .as_ref()
-                    .is_none_or(|s| s.bytes == a_size && s.modified == a_modified))
-            .then_some(id)
-        } else {
-            None
+                    .and_then(super::NativeFile::of)
+                    == Some(expected)
+            })
         };
-        let id = match current {
-            Some(id) => id,
-            None => {
-                if let Err(error) = super::index::adopt(&mut self.db, track) {
-                    if error.downcast_ref::<rusqlite::Error>().is_some() {
-                        return Err(error);
+        let same_paths = source.is_some()
+            && source == recording.source
+            && same_object(&track.source, recording.source_object)
+            && track.disc.as_ref().is_none_or(|d| {
+                recording.sheet.is_some()
+                    && Stamp::read(&d.sheet) == recording.sheet
+                    && same_object(&d.sheet, recording.sheet_object)
+            });
+        let id = if !same_paths {
+            let Some(id) = self.relocated_listening_track(recording)? else {
+                return Ok(None);
+            };
+            id
+        } else {
+            let found = self.find(&Locator::of(track))?;
+            let current = if let Some(id) = found {
+                let source = source.as_ref().unwrap();
+                let (size, modified, a_size, a_modified): (i64, i64, i64, i64) =
+                    self.db.query_row(
+                        "SELECT s.size,s.modified,a.size,a.modified FROM tracks t
+                     JOIN files s ON s.id=t.source JOIN files a ON a.id=t.anchor WHERE t.id=?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )?;
+                (source.bytes == size
+                    && source.modified == modified
+                    && recording
+                        .sheet
+                        .as_ref()
+                        .is_none_or(|s| s.bytes == a_size && s.modified == a_modified))
+                .then_some(id)
+            } else {
+                None
+            };
+            match current {
+                Some(id) => id,
+                None => {
+                    if let Err(error) = super::index::adopt(&mut self.db, track) {
+                        if error.downcast_ref::<rusqlite::Error>().is_some() {
+                            return Err(error);
+                        }
+                        return Ok(None);
                     }
-                    return Ok(None);
+                    let Some(id) = self.find(&Locator::of(track))? else {
+                        return Ok(None);
+                    };
+                    id
                 }
-                let Some(id) = self.find(&Locator::of(track))? else {
-                    return Ok(None);
-                };
-                id
             }
         };
         let album: Option<i64> = self
@@ -192,13 +209,10 @@ impl Store {
             .optional()?
             .flatten();
         // A tagged album or authored sheet is meaningful release evidence.
-        let release = if let Some(album) =
-            album.filter(|_| !track.album.trim().is_empty() || track.disc.is_some())
-        {
-            Some(self.listening_release(album)?)
-        } else {
-            None
-        };
+        let release = self.listening_release(
+            id,
+            album.filter(|_| !track.album.trim().is_empty() || track.disc.is_some()),
+        )?;
         let (key, name) = release.map_or((None, track.album.clone()), |(id, label)| {
             (Some(format!("album:{id}")), label)
         });
@@ -207,6 +221,47 @@ impl Store {
             release: key,
             album: name,
         }))
+    }
+
+    fn relocated_listening_track(
+        &self,
+        recording: &crate::listening::Recording,
+    ) -> Result<Option<TrackId>> {
+        let Some((source, stamp)) = recording.source_object.zip(recording.source.as_ref()) else {
+            return Ok(None);
+        };
+        let anchor = if recording.track.disc.is_some() {
+            recording.sheet_object.zip(recording.sheet.as_ref())
+        } else {
+            Some((source, stamp))
+        };
+        let Some((anchor, anchor_stamp)) = anchor else {
+            return Ok(None);
+        };
+        let loc = super::Locator::of(&recording.track);
+        let mut stmt = self.db.prepare_cached(
+            "SELECT t.id FROM files s
+             JOIN tracks t ON t.source=s.id JOIN files a ON a.id=t.anchor
+             WHERE s.present=1 AND s.volume=?1 AND s.file_index=?2 AND s.size=?3 AND s.modified=?4
+               AND a.present=1 AND a.volume=?5 AND a.file_index=?6 AND a.size=?7 AND a.modified=?8
+               AND t.present=1 AND max(t.part,0)=?9 AND t.first_tick IS ?10 AND t.last_tick IS ?11
+             LIMIT 2",
+        )?;
+        let mut ids = stmt.query(params![
+            source.0,
+            source.1,
+            stamp.bytes,
+            stamp.modified,
+            anchor.0,
+            anchor.1,
+            anchor_stamp.bytes,
+            anchor_stamp.modified,
+            loc.chapter,
+            loc.start,
+            loc.end,
+        ])?;
+        let first = ids.next()?.map(|r| r.get(0)).transpose()?;
+        Ok(if ids.next()?.is_none() { first } else { None })
     }
 
     pub fn erase_listening(&mut self, id: Option<i64>) -> Result<Change> {
@@ -431,6 +486,7 @@ pub struct Rank {
     pub detail: String,
     pub plays: i64,
     pub credited_us: i64,
+    pub track: Option<TrackId>,
 }
 
 impl Store {
@@ -529,6 +585,7 @@ fn ranks(db: &rusqlite::Connection, sql: &str, args: impl rusqlite::Params) -> R
                 detail: r.get(1)?,
                 plays: r.get(2)?,
                 credited_us: r.get(3)?,
+                track: r.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?)
@@ -549,11 +606,11 @@ fn dated(db: &rusqlite::Connection, by_time: bool) -> Result<Statistics> {
     )?;
     let order = rank_order(by_time);
     let metric = if by_time { "p.time" } else { "p.plays" };
-    let rank = |group: &str, name: &str, detail: &str| {
+    let rank = |group: &str, name: &str, detail: &str, track: &str| {
         ranks(
             db,
             &format!(
-                "SELECT max({name}),max({detail}),sum(p.plays) plays,sum(p.time) time
+                "SELECT max({name}),max({detail}),sum(p.plays) plays,sum(p.time) time,{track}
          FROM {joined} WHERE {group} IS NOT NULL GROUP BY {group}
          HAVING sum({metric}) > 0 ORDER BY {order}, {group} LIMIT 10"
             ),
@@ -569,9 +626,14 @@ fn dated(db: &rusqlite::Connection, by_time: bool) -> Result<Statistics> {
         recordings,
         artists,
         releases,
-        tracks: rank("coalesce(track_id,-o.id)", "title", "artist")?,
-        performers: rank("artist_key", "artist", "''")?,
-        albums: rank("release_key", "album", "''")?,
+        tracks: rank(
+            "coalesce(track_id,-o.id)",
+            "title",
+            "artist",
+            "max(track_id)",
+        )?,
+        performers: rank("artist_key", "artist", "''", "NULL")?,
+        albums: rank("release_key", "album", "''", "NULL")?,
         days: Vec::new(),
     })
 }
@@ -600,7 +662,7 @@ fn all_time(db: &rusqlite::Connection, by_time: bool) -> Result<Statistics> {
     let order = rank_order(by_time);
     let metric = if by_time { "time" } else { "plays" };
     let tracks = ranks(db, &format!(
-        "SELECT coalesce(t.title,o.title),coalesce(t.artist,o.artist),s.plays,s.time
+        "SELECT coalesce(t.title,o.title),coalesce(t.artist,o.artist),s.plays,s.time,t.id
          FROM (
             SELECT track_id id,plays,credited_us time FROM listening_totals
             UNION ALL
@@ -613,7 +675,7 @@ fn all_time(db: &rusqlite::Connection, by_time: bool) -> Result<Statistics> {
         ranks(
             db,
             &format!(
-                "SELECT max(label),'',sum(plays) AS plays,sum(credited_us) AS time
+                "SELECT max(label),'',sum(plays) AS plays,sum(credited_us) AS time,NULL
          FROM listening_groups WHERE kind=?1 GROUP BY key
          HAVING {} > 0 ORDER BY {order}, key LIMIT 10",
                 if by_time {
