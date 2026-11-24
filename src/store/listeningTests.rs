@@ -454,6 +454,11 @@ fn authored_release_survives_detachment_retagging_and_reattachment() {
         Some(&crate::store::Locator::of(&after.track))
     );
     assert_eq!(total.plays, 3);
+    s.db.execute("UPDATE tracks SET present=0 WHERE id=?1", [after.id])
+        .unwrap();
+    let stats = s.listening_statistics(Period::All, false).unwrap();
+    assert_eq!(stats.tracks[0].plays, 3);
+    assert_eq!(stats.tracks[0].track, None);
 }
 
 #[test]

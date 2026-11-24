@@ -536,6 +536,16 @@ impl Store {
             db.execute_batch("DROP TABLE listening_period")?;
             stats
         };
+        let ids: Vec<_> = stats.tracks.iter().filter_map(|rank| rank.track).collect();
+        let available: std::collections::HashSet<_> = self
+            .rows(super::Scope::Library(None), &ids)?
+            .into_iter()
+            .filter(|row| row.available)
+            .map(|row| row.id)
+            .collect();
+        for rank in &mut stats.tracks {
+            rank.track = rank.track.filter(|id| available.contains(id));
+        }
         stats.days = {
             let mut days = BTreeMap::new();
             if let Some(start) = period.start(today) {

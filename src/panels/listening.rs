@@ -769,13 +769,17 @@ impl Stats {
         let row = store.call(move |s| {
             Ok(s.rows(Scope::Library(None), &[id])?
                 .pop()
-                .filter(|r| r.available))
+                .filter(|r| r.available && r.track.source.is_file()))
         });
         let router = self.router.clone();
         cx.spawn_in(w, async move |_, cx| {
-            let Ok(Some(row)) = row.await else { return };
-            let _ = cx.update(|w, cx| {
-                Router::open(&router, Destination::Recording(row.track), false, w, cx)
+            let row = row.await;
+            let _ = cx.update(move |w, cx| match row {
+                Ok(Some(row)) => {
+                    Router::open(&router, Destination::Recording(row.track), false, w, cx)
+                }
+                Ok(None) => w.push_notification("This recording is unavailable.", cx),
+                Err(error) => w.push_notification(error.to_string(), cx),
             });
         })
         .detach();
