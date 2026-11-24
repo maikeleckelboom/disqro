@@ -8,9 +8,9 @@ use super::{Pane, PaneContent, PanelType, Router, Services};
 use crate::{
     assets::FileIcon,
     audio::Command,
-    browser::{Browser, Location, SavedVisit, music_home},
+    browser::{Bookmark, Browser, Location, Route, SavedVisit, music_home},
     catalog::Targets,
-    collection::Page,
+    collection::{Page, ViewPrefs},
     library::TrackList,
     location::{LocationBar, NAV_FIELD_HEIGHT},
     player::Player,
@@ -56,10 +56,28 @@ pub struct BrowserState {
     pub location: Option<Location>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<Page>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_visits"
+    )]
     pub(crate) back: Vec<SavedVisit>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_visits"
+    )]
     pub(crate) forward: Vec<SavedVisit>,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_visits"
+    )]
+    pub(crate) recent: Vec<SavedVisit>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_current"
+    )]
+    pub(crate) current: Option<SavedVisit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefs: Option<ViewPrefs>,
     /// The folder shown, or the last one while a library view is shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<PathBuf>,
@@ -79,6 +97,18 @@ pub struct BrowserState {
 fn is_zero(v: &f32) -> bool {
     *v == 0.
 }
+fn read_visits<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SavedVisit>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<Vec<serde_json::Value>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|visit| serde_json::from_value(visit).ok())
+        .collect())
+}
+fn read_current<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<SavedVisit>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).ok())
+}
 
 pub struct BrowserPane {
     pub location: Entity<LocationBar>,
@@ -95,31 +125,27 @@ impl BrowserPane {
             .clone()
             .map(Layouts::validate)
             .unwrap_or(template.layouts);
-        let mut prefs = template.prefs;
+        let mut prefs = state.prefs.unwrap_or(template.prefs);
         prefs.albums = state.albums.unwrap_or(prefs.albums);
         let folders = services.locations.read(cx).folders.clone();
         let (player, catalog) = (services.player.clone(), services.catalog.clone());
         let browser = cx.new(|cx| {
+            let albums = prefs.albums;
             let mut b = Browser::new(player, catalog, folders, layouts, prefs, window, cx);
-            let folder = state.folder.clone().unwrap_or_else(music_home);
-            match state.location.clone() {
-                Some(Location::Folder(path)) => {
-                    b.restore_folder(path, state.root.clone(), window, cx)
-                }
-                Some(location) => {
-                    b.path = folder;
-                    b.show(location, window, cx);
-                }
-                None => b.restore_folder(folder, state.root.clone(), window, cx),
-            }
-            if b.location.is_folder() {
-                b.page = state.page;
-            }
-            b.restore_history(state.back, state.forward);
-            if !state.search.is_empty() {
-                b.restore_search(state.search, window, cx);
-            }
-            b.restore_scroll(state.scroll);
+            b.path = state.folder.unwrap_or_else(music_home);
+            b.tree_root = state.root.clone();
+            let current = state.current.unwrap_or_else(|| {
+                let location = state
+                    .location
+                    .unwrap_or_else(|| Location::Folder(b.path.clone()));
+                let mut visit = SavedVisit::new(Route::new(location, state.page), albums);
+                visit.root = state.root;
+                visit.query = state.search;
+                visit.bookmark = Bookmark::legacy(state.scroll);
+                visit
+            });
+            b.restore_history(state.back, state.forward, state.recent);
+            b.restore_visit(current, window, cx);
             b
         });
         let location = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
@@ -206,14 +232,8 @@ impl BrowserPane {
                         .on_click(move |_, w, cx| forward.update(cx, |b, cx| b.forward(w, cx))),
                     )
                     .child(
-                        Self::nav_button(
-                            "up",
-                            IconName::ArrowUp,
-                            "Parent folder · Alt+Up",
-                            has_parent,
-                            cx,
-                        )
-                        .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
+                        Self::nav_button("up", IconName::ArrowUp, "Up · Alt+Up", has_parent, cx)
+                            .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
                     ),
             )
             .child(div().flex_1().min_w_0().child(location))
@@ -230,7 +250,7 @@ impl BrowserPane {
                                     .text_color(m.text_faint),
                             )
                             .cleanable(true)
-                            .aria_label("Find tracks"),
+                            .aria_label("Find in current view"),
                     ),
             )
             .into_any_element()
@@ -238,12 +258,17 @@ impl BrowserPane {
     /// What this instance saves, and what a new instance opened from it
     /// starts with.
     pub fn state(browser: &Browser, cx: &App) -> BrowserState {
-        let (back, forward) = browser.saved_history();
+        let (back, forward, recent) = browser.saved_history();
         BrowserState {
             back,
             forward,
-            scroll: browser.scroll_offset(cx),
-            ..Self::new_tab_state(browser, cx)
+            recent,
+            current: Some(browser.saved_visit(cx)),
+            folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
+            root: browser.tree_root.clone(),
+            prefs: Some(browser.prefs.clone()),
+            layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
+            ..Default::default()
         }
     }
     pub fn new_tab_state(browser: &Browser, cx: &App) -> BrowserState {
@@ -253,6 +278,7 @@ impl BrowserPane {
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
             albums: Some(browser.prefs.albums),
+            prefs: Some(browser.prefs.clone()),
             layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
             search: browser.search.read(cx).value().to_string(),
             ..Default::default()
@@ -395,7 +421,9 @@ fn browser_menu(
                 .on_click(move |_, w, cx| refresh.update(cx, |b, cx| b.reload(w, cx))),
             )
         }
-        Location::Liked | Location::Playlist(_) => menu,
+        Location::Liked | Location::Playlist(_) | Location::Collections | Location::Playlists => {
+            menu
+        }
     }
 }
 
@@ -435,12 +463,12 @@ impl PaneContent for BrowserPane {
     fn icon(&self, _: &'static PanelType, cx: &App) -> Icon {
         match &self.browser.read(cx).location {
             Location::Folder(_) => FileIcon::Folder.icon(),
-            Location::Library(None) => Icon::new(IconName::Library),
+            Location::Library(None) | Location::Collections => Icon::new(IconName::Library),
             Location::Library(Some(_)) | Location::Album { .. } | Location::Release { .. } => {
                 Icon::new(IconName::Disc3)
             }
             Location::Liked => Icon::default().path(crate::assets::HEART_FILL),
-            Location::Playlist(_) => Icon::new(IconName::ListMusic),
+            Location::Playlist(_) | Location::Playlists => Icon::new(IconName::ListMusic),
         }
     }
     fn save(&self, cx: &App) -> serde_json::Value {
@@ -450,23 +478,7 @@ impl PaneContent for BrowserPane {
         let m = *materials(cx);
         let b = self.browser.read(cx);
         let mut items = Vec::new();
-        if b.is_page() {
-            let browser = self.browser.clone();
-            // A CD of a release goes back to the release.
-            let release = b.membership.is_some();
-            items.push(
-                Button::new("view-up")
-                    .ghost()
-                    .xsmall()
-                    .label(if release {
-                        "‹ Release"
-                    } else {
-                        "‹ Collection"
-                    })
-                    .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.up(w, cx)))
-                    .into_any_element(),
-            );
-        } else if b.can_list_discs() {
+        if !b.is_page() && b.can_list_discs() {
             let albums = b.prefs.albums;
             for (id, label, value) in [
                 ("view-tracks", "All Tracks", false),
@@ -573,13 +585,20 @@ impl Render for Browser {
                     .child(div().truncate().child(notice.clone())),
             );
         }
-        if self.listing_discs()
-            && (!self.location.is_folder() || !self.discs.read(cx).delegate().rows.is_empty())
-        {
+        if self.waiting_for_context() {
+            return view;
+        }
+        if self.listing_shelf() {
             return view.child(
                 div().flex_1().min_h_0().child(
                     DataTable::new(&self.discs)
-                        .accessibility_label("Albums and CDs")
+                        .accessibility_label(
+                            self.discs
+                                .read(cx)
+                                .delegate()
+                                .directory_label
+                                .unwrap_or("Albums and CDs"),
+                        )
                         .bordered(false)
                         .stripe(false)
                         .header_row_height(px(30.))
@@ -673,5 +692,57 @@ mod tests {
         });
         let restored: BrowserState = serde_json::from_value(state.clone()).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap(), state);
+    }
+
+    #[test]
+    fn obsolete_visits_and_row_keys_do_not_discard_usable_browser_state() {
+        let restored: BrowserState = serde_json::from_value(serde_json::json!({
+            "back":[{"location":"ObsoleteView"}, {"location":"Liked","query":"mix"}],
+            "current":{
+                "location":{"Playlist":4},
+                "sort":["ObsoleteColumn",true],
+                "query":"Retained",
+                "bookmark":{"selected":{"ObsoleteRow":42}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(restored.back.len(), 1);
+        assert_eq!(restored.back[0].query, "mix");
+        let current = restored.current.unwrap();
+        assert_eq!(current.route.location, Location::Playlist(4));
+        assert_eq!(current.query, "Retained");
+    }
+
+    #[test]
+    fn two_docked_browser_records_restore_their_own_routes_and_history() {
+        use crate::panels::PanelRecord;
+        let pinned = PanelRecord::with_state(serde_json::json!({
+            "current":{"location":{"Playlist":2},"query":"Evening","bookmark":{"selected":{"Key":42}}},
+            "back":[{"location":"Liked"}],
+            "prefs":{"albums":false,"subfolders":[]}
+        }));
+        let browse = PanelRecord::with_state(serde_json::json!({
+            "current":{"location":{"Folder":"C:/Collection"},"albums":true,"subfolders":true},
+            "forward":[{"location":{"Library":11},"albums":true}],
+            "recent":[{"location":{"Playlist":2},"query":"Morning"}],
+            "prefs":{"albums":true,"subfolders":[{"path":"C:/Collection","include":true}]}
+        }));
+        let on_disk = serde_json::to_vec(&[pinned, browse]).unwrap();
+        let [pinned, browse]: [PanelRecord; 2] = serde_json::from_slice(&on_disk).unwrap();
+        let pinned: BrowserState = pinned.state();
+        let browse: BrowserState = browse.state();
+        assert_eq!(pinned.current.unwrap().query, "Evening");
+        assert_eq!(pinned.back[0].route.location, Location::Liked);
+        assert!(pinned.forward.is_empty() && browse.back.is_empty());
+        assert_eq!(
+            browse.forward[0].route.location,
+            Location::Library(Some(11))
+        );
+        assert_eq!(browse.recent[0].query, "Morning");
+        assert_eq!(
+            browse.current.unwrap().route.location,
+            Location::Folder(PathBuf::from("C:/Collection"))
+        );
+        assert_ne!(pinned.prefs.unwrap().albums, browse.prefs.unwrap().albums);
     }
 }

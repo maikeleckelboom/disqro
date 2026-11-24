@@ -14,9 +14,10 @@
 | Choose **Play Release** from a release, one of its CDs, or the release page | Start CD 1, then each following CD of the release in authored order, then stop. Only CDs that belong to a release of several discs offer it. [Releases](releases.md) |
 | Choose **Play Collection** or **Add All to Queue** from a collection | Play or append the whole displayed track sequence, several releases and loose recordings included. A search limits these actions to the results. Liked Tracks, playlists and single folders call it **Play All**. |
 | Double-click a playlist occurrence | Play from that occurrence in the displayed playlist sequence. Repeated occurrences retain independent queue entries. |
-| Click the player artwork | Open the playing CD and select the exact chapter. A loose recording opens in its collection or folder and its artwork menu offers only **Show in Collection**. |
-| Choose **Show Track on CD** from a queue entry | Reveal that entry’s chapter. The playback indicator stays on the active recording. |
-| Choose **Continue This CD** from the artwork menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
+| Choose **Show in Library** or **Show in Locations** from the Now Playing menu | Reveal the exact chapter in the active Music Browser. Library opens the registered disc. Locations opens the physical location. Back returns to the previous browsing position. |
+| Click the player artwork | Reveal the current recording in its indexed disc when it has a Library identity, or in its physical location. |
+| Choose a reveal action from a queue entry | Select that entry’s exact chapter. The playback indicator stays on the active recording. |
+| Choose **Continue This CD** from the Now Playing menu or the playing CD’s panel menu | Place the remaining chapters immediately after the current occurrence. Current position, play/pause state and history are preserved. |
 
 Continue reuses the first available queued occurrence of each required chapter and creates only missing entries. All other upcoming entries keep their relative order, including intentional repeats. If the continuation is already correct, a second invocation leaves the queue revision unchanged. When there are chapters to continue, the operation disables shuffle and repeat-one. Saved playlists keep their entries and ordering.
 
@@ -28,9 +29,19 @@ The folder scan supplies the shared track objects used by the overview, table an
 
 Indexed sections and ordered keys come from one SQLite read snapshot. Explicit column sorting removes the headers. Opening a track resolves the CD independently of the visible filter and viewport. Queue edits still go through the transport. It can remap a contiguous run inside the decoder range already open, including restoring a previously cleared continuation. A boundary outside that range requires a subsequent decoder open.
 
-Back and Forward retain the page, search, presentation, sort, selected tracks and scroll offset. Moving between a collection and its discs can reuse its scan. Reveal uses the current recursive folder when it contains the browsed item, the owning indexed collection for a registered identity, and the nearest enabled collection ancestor or containing folder for unregistered music. Live indexed tracks can follow verified relocation by database ID. Saved queues retain their original file and chapter locators across restarts.
+Each Music Browser saves its current view, Back and Forward stacks, and most recent context for previously visited locations. A direct revisit restores the last filter, presentation, sort, selection, selection anchor and viewport for that location. The viewport uses the top logical row and its pixel offset so it can survive row order changes. If that row was removed, the saved scroll distance is clamped to the surviving rows. Moving between a physical collection and its CD pages can reuse an active scan.
+
+Up follows the same hierarchy as the breadcrumb. From a CD it selects the CD section in the release. From a playlist or a registered collection it selects that item in the parent directory. From a physical folder it opens the parent and selects the originating child in Locations. Navigating, including explicit reveal, uses the active Music Browser. Playback changes only the playing indicator as it advances.
+
+Workspace saves store logical keys and viewport positions. Each browser retains up to 100 history steps and 100 recent locations. For unusually large archived selections, the most recent selections take priority within a per-browser budget of 128 Ki selected keys. The newest archived selection can exceed that budget so it stays intact. Live indexed tracks can follow verified relocation by database ID. Saved queues retain their original file and chapter locators across restarts.
 
 ![Queue chapter nine selected while chapter seven plays](evidence/cd-queue-reveal.png)
+
+## Navigation verification, 24 November 2026
+
+The Windows app ran with an isolated profile and a two-disc CUE release. Each disc had 36 logical chapters on one WAV. Playback started at chapter 32 on CD 2 while chapter 17 was at the top of the viewport. Up revealed and selected the CD 2 section in its release. Back restored chapter 32 at the same viewport position while chapter 33 played. The browser showed the selected and playing chapters on separate rows.
+
+The native session ended before the indexed reveal, playlist, split-browser and restart paths could be checked interactively. Automated coverage exercises visit snapshots, direct revisits, release and directory ancestry, CUE identities, obsolete workspace data, independent browser records and viewport anchoring after a row moves or disappears.
 
 ## Windows qualification, 20 November 2026
 

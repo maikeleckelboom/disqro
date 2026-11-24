@@ -1,6 +1,6 @@
 //! Per-browser breadcrumbs and the explicit Go to Folder or File editor.
 use crate::{
-    browser::{Browser, Location, Reveal},
+    browser::{Browser, Location, Reveal, Route},
     theme::materials,
 };
 use gpui_kit::assets::IconName;
@@ -61,10 +61,7 @@ struct Crumb {
 
 #[derive(Clone)]
 enum Step {
-    Folder(PathBuf),
-    Library(Location),
-    Collection,
-    Release(crate::collection::DiscId, String),
+    Route(Route),
     /// The current page or a section with no independent destination.
     Label,
 }
@@ -81,76 +78,62 @@ impl Crumb {
 impl Step {
     fn open(&self, browser: &mut Browser, window: &mut Window, cx: &mut Context<Browser>) {
         match self {
-            Self::Folder(path) => browser.open(path.clone(), window, cx),
-            Self::Library(location) => browser.show(location.clone(), window, cx),
-            Self::Collection => browser.show_collection(window, cx),
-            Self::Release(key, title) => browser.open_release(key, title.clone(), window, cx),
+            Self::Route(route) => browser.open_ancestor(route.clone(), window, cx),
             Self::Label => {}
         }
     }
 }
 
-fn crumbs(path: &Path) -> Vec<Crumb> {
-    let mut folders = path
-        .ancestors()
-        .map(|folder| {
-            let label = match folder.components().next_back() {
-                Some(Component::Normal(name)) => name.to_string_lossy().into_owned(),
-                _ => match folder.components().next() {
-                    Some(Component::Prefix(prefix)) => match prefix.kind() {
-                        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
-                            "\\\\{}\\{}",
-                            server.to_string_lossy(),
-                            share.to_string_lossy()
-                        ),
-                        _ => prefix.as_os_str().to_string_lossy().into_owned(),
-                    },
-                    _ => folder.display().to_string(),
-                },
-            };
-            Crumb::new(label, Step::Folder(folder.to_owned()))
-        })
-        .collect::<Vec<_>>();
-    folders.reverse();
-    folders
+fn folder_label(folder: &Path) -> String {
+    match folder.components().next_back() {
+        Some(Component::Normal(name)) => name.to_string_lossy().into_owned(),
+        _ => match folder.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => format!(
+                    "\\\\{}\\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                ),
+                _ => prefix.as_os_str().to_string_lossy().into_owned(),
+            },
+            _ => folder.display().to_string(),
+        },
+    }
 }
 
 fn view_crumbs(browser: &Browser, cx: &App) -> Vec<Crumb> {
     use crate::collection::Page;
-    let mut trail = match &browser.location {
-        Location::Folder(path) => {
-            if browser.page.is_none() {
-                return crumbs(path);
-            }
-            vec![Crumb::new(
-                crate::library::display_name(path),
-                Step::Collection,
-            )]
-        }
-        Location::Playlist(_) => vec![Crumb::new("Playlists", Step::Label)],
-        location => vec![Crumb::new(
-            "Library",
-            if matches!(location, Location::Library(None)) {
+    let routes = browser.ancestors();
+    let last = routes.len().saturating_sub(1);
+    routes
+        .into_iter()
+        .enumerate()
+        .map(|(index, route)| {
+            let label = match (&route.location, &route.page) {
+                (_, Some(Page::Disc(_))) | (Location::Album { .. }, _) => browser.crumb_title(cx),
+                (_, Some(Page::Release(_))) => browser
+                    .release()
+                    .map_or_else(|| "Release".into(), |(_, title)| title),
+                (Location::Folder(path), _) => folder_label(path),
+                (Location::Library(None), _) if index != last => "Library".into(),
+                (Location::Collections, _) => "Collections".into(),
+                (Location::Playlists, _) => "Playlists".into(),
+                (Location::Library(Some(id)), _) => browser
+                    .catalog
+                    .read(cx)
+                    .collection(*id)
+                    .map_or_else(|| "Collection".into(), |c| c.root.name.clone()),
+                (Location::Release { title, .. }, _) => title.clone(),
+                _ => browser.title(cx),
+            };
+            let step = if index == last {
                 Step::Label
             } else {
-                Step::Library(Location::Library(None))
-            },
-        )],
-    };
-    if let Location::Album { root, .. } | Location::Release { root, .. } = browser.location {
-        let name = root
-            .and_then(|r| browser.catalog.read(cx).collection(r))
-            .map_or_else(|| "All Music".to_owned(), |r| r.root.name.clone());
-        trail.push(Crumb::new(name, Step::Library(Location::Library(root))));
-    }
-    if (matches!(browser.location, Location::Album { .. })
-        || matches!(browser.page, Some(Page::Disc(_))))
-        && let Some((key, title)) = browser.release()
-    {
-        trail.push(Crumb::new(title.clone(), Step::Release(key, title)));
-    }
-    trail.push(Crumb::new(browser.crumb_title(cx), Step::Label));
-    trail
+                Step::Route(route)
+            };
+            Crumb::new(label, step)
+        })
+        .collect()
 }
 
 /// Turns what the user typed or pasted into an absolute path, or explains
@@ -358,7 +341,7 @@ impl LocationBar {
         let m = *materials(cx);
         let current = self.browser.read(cx);
         let icon = match current.location {
-            Location::Playlist(_) => Some(IconName::ListMusic),
+            Location::Playlist(_) | Location::Playlists => Some(IconName::ListMusic),
             Location::Folder(_) => None,
             _ => Some(IconName::Library),
         };
@@ -386,25 +369,31 @@ impl LocationBar {
         };
         let chevron = px(16.);
         let pad = px(14.);
-        let available = self.width.get() - px(28.) - if icon.is_some() { px(18.) } else { px(0.) };
+        let available = self.width.get() - px(12.) - if icon.is_some() { px(18.) } else { px(0.) };
         let widths: Vec<Pixels> = all.iter().map(|c| measure(&c.label) + pad).collect();
         let mut hidden = 0;
         if available > px(0.) {
+            let first_to_keep = if available >= px(112.) { 2 } else { 1 };
             let mut total: Pixels = widths.iter().copied().sum::<Pixels>()
                 + chevron * all.len().saturating_sub(1) as f32;
-            while hidden + 1 < all.len() && total > available {
+            while hidden + first_to_keep < all.len() && total > available {
                 total -= widths[hidden] + chevron;
                 hidden += 1;
             }
             if hidden > 0 {
                 total += px(28.);
-                while hidden + 1 < all.len() && total > available {
+                while hidden + first_to_keep < all.len() && total > available {
                     total -= widths[hidden] + chevron;
                     hidden += 1;
                 }
             }
         }
         let browser = self.browser.clone();
+        let compact_tail = hidden + 1 < all.len()
+            && widths[hidden..].iter().copied().sum::<Pixels>()
+                + chevron * (all.len() - hidden - 1) as f32
+                + if hidden > 0 { px(28.) } else { px(0.) }
+                > available;
         let last = all.len().saturating_sub(1);
         let mut row = h_flex()
             .h_full()
@@ -477,7 +466,9 @@ impl LocationBar {
                         }
                     })
                     .min_w_0()
-                    .when(i != last, |d| d.flex_shrink_0())
+                    .when(i == last && compact_tail, |d| {
+                        d.flex_shrink_0().max_w(available.max(px(32.)) * 0.56)
+                    })
                     .px(px(7.))
                     .h(px(22.))
                     .flex()
@@ -625,7 +616,7 @@ impl Render for LocationBar {
 
 #[cfg(test)]
 mod tests {
-    use super::{crumbs, parse};
+    use super::{folder_label, parse};
     use std::path::{Path, PathBuf};
     #[test]
     fn only_physical_folder_views_offer_an_address() {
@@ -684,15 +675,9 @@ mod tests {
     }
     #[test]
     fn breadcrumbs_for_drive_and_share() {
-        let c = crumbs(Path::new("C:\\Users\\Music"));
-        let labels: Vec<_> = c.iter().map(|c| c.label.to_string()).collect();
-        assert_eq!(labels, ["C:", "Users", "Music"]);
-        assert!(matches!(&c[0].step, super::Step::Folder(p) if p == Path::new("C:\\")));
-        let c = crumbs(Path::new("\\\\nas\\media\\Rips"));
-        let labels: Vec<_> = c.iter().map(|c| c.label.to_string()).collect();
-        assert_eq!(labels, ["\\\\nas\\media", "Rips"]);
-        assert!(
-            matches!(&c[1].step, super::Step::Folder(p) if p == Path::new(r"\\nas\media\Rips"))
-        );
+        assert_eq!(folder_label(Path::new(r"C:\")), "C:");
+        assert_eq!(folder_label(Path::new(r"C:\Users\Music")), "Music");
+        assert_eq!(folder_label(Path::new(r"\\nas\media")), r"\\nas\media");
+        assert_eq!(folder_label(Path::new(r"\\nas\media\Rips")), "Rips");
     }
 }

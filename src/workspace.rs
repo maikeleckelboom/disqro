@@ -306,9 +306,12 @@ impl Workspace {
             }),
             cx.subscribe_in(&player, window, |s: &mut Self, _, e, w, cx| match e {
                 PlayerEvent::Locate(track, dest) => {
-                    let browser = s.ensure_browser(w, cx);
-                    s.reveal_active_browser(w, cx);
-                    browser.update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
+                    if let Some(browser) = s.browser(cx) {
+                        s.reveal_active_browser(w, cx);
+                        browser.update(cx, |b, cx| b.locate(track.clone(), *dest, w, cx));
+                    } else {
+                        w.push_notification("Open a Music Browser to show this recording.", cx);
+                    }
                 }
                 PlayerEvent::ContinueCd(entry) => match s.browser(cx) {
                     Some(b) => b.update(cx, |b, cx| b.continue_cd(entry.clone(), cx)),
@@ -1711,7 +1714,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|s, _: &Quit, w, cx| s.quit(w, cx)))
             .on_action(cx.listener(|s, _: &PlaySelected, w, cx| {
                 let Some(browser) = s.browser(cx) else { return };
-                if browser.read(cx).listing_discs() {
+                if browser.read(cx).listing_shelf() {
                     browser.update(cx, |b, cx| {
                         let ix = b.discs.read(cx).selected_row().unwrap_or(0);
                         b.show_disc(ix, w, cx);
@@ -1720,7 +1723,8 @@ impl Render for Workspace {
                     browser.update(cx, |b, cx| {
                         let t = b.table.read(cx);
                         b.activate(
-                            t.selected_row()
+                            t.delegate()
+                                .cursor_row(t.selected_row())
                                 .unwrap_or_else(|| t.delegate().first_track()),
                             w,
                             cx,

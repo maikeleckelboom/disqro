@@ -2,7 +2,7 @@
 //! Two identically titled rips in different folders remain distinct.
 use crate::{
     library::{self, Track},
-    store::{AlbumId, AlbumRow, Mark, Term},
+    store::{AlbumId, AlbumRow, Mark, PlaylistId, RootId, Term},
     theme::materials,
 };
 use gpui_kit::{
@@ -17,6 +17,7 @@ use gpui_kit::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -124,6 +125,7 @@ pub enum Page {
 pub struct Disc {
     pub tracks: Vec<Arc<Track>>,
     pub id: DiscId,
+    pub root: Option<RootId>,
     pub title: String,
     pub folder: PathBuf,
     pub cover: Option<crate::artwork::CoverFile>,
@@ -147,17 +149,40 @@ pub fn release_discs(discs: &[Arc<Disc>], key: &DiscId) -> Vec<Arc<Disc>> {
     found
 }
 
-/// A row of the Albums / CDs list: a disc, or a release whose discs follow it.
+/// A row in a browser directory.
 #[derive(Clone)]
 pub enum Shelf {
     Disc(Arc<Disc>),
     Release(Arc<Release>),
+    Link(ShelfLink, String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ShelfLink {
+    Collection(RootId),
+    Playlist(PlaylistId),
+}
+impl ShelfLink {
+    pub fn location(self) -> crate::browser::Location {
+        use crate::browser::Location;
+        match self {
+            Self::Collection(id) => Location::Library(Some(id)),
+            Self::Playlist(id) => Location::Playlist(id),
+        }
+    }
+    fn icon(self) -> IconName {
+        match self {
+            Self::Collection(_) => IconName::Library,
+            Self::Playlist(_) => IconName::ListMusic,
+        }
+    }
 }
 impl Shelf {
     pub fn key(&self) -> crate::table::RowKey {
         match self {
             Self::Disc(d) => crate::table::RowKey::Disc(d.id.clone()),
             Self::Release(r) => crate::table::RowKey::Release(r.key.clone()),
+            Self::Link(link, _) => crate::table::RowKey::Link(*link),
         }
     }
 }
@@ -179,6 +204,8 @@ pub struct Release {
 #[derive(Default)]
 pub struct Discs {
     pub rows: Vec<Shelf>,
+    pub directory_label: Option<&'static str>,
+    pub empty: SharedString,
     /// Where the commands of the rows' menus go.
     pub browser: Option<WeakEntity<crate::browser::Browser>>,
     pub tracks: Option<WeakEntity<TableState<crate::table::MusicTable>>>,
@@ -273,6 +300,7 @@ impl Discs {
                 items.push(Disc {
                     tracks: Vec::new(),
                     id,
+                    root: None,
                     title,
                     folder: folder.strip_prefix(root).unwrap_or(folder).into(),
                     cover: covers.get(folder).cloned(),
@@ -346,6 +374,7 @@ impl Disc {
         Self {
             tracks: Vec::new(),
             id: DiscId::Library(a.id),
+            root: a.root,
             title: a.title,
             folder: a.folder,
             cover: a.cover.and_then(crate::artwork::CoverFile::new),
@@ -476,17 +505,21 @@ impl Shelf {
         match self {
             Self::Disc(d) => d.label(col),
             Self::Release(r) => r.label(col),
+            Self::Link(_, title) => title.clone(),
         }
     }
 }
 impl TableDelegate for Discs {
     fn columns_count(&self, _: &App) -> usize {
-        6
+        if self.directory_label.is_some() { 1 } else { 6 }
     }
     fn rows_count(&self, _: &App) -> usize {
         self.rows.len()
     }
     fn column(&self, i: usize, _: &App) -> Column {
+        if let Some(label) = self.directory_label {
+            return Column::new(label, label).width(340.);
+        }
         let (label, w) = [
             ("Album / Disc", 340.),
             ("Year", 56.),
@@ -499,6 +532,32 @@ impl TableDelegate for Discs {
     }
     fn cell_label(&self, r: usize, c: usize, _: &App) -> Option<SharedString> {
         Some(self.rows.get(r)?.label(c).into())
+    }
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        h_flex()
+            .size_full()
+            .justify_center()
+            .items_center()
+            .px(px(12.))
+            .text_size(px(13.))
+            .text_color(materials(cx).text_muted)
+            .child(self.empty.clone())
+    }
+    fn visible_rows_changed(
+        &mut self,
+        _: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if let Some(browser) = self.browser.clone() {
+            cx.defer_in(window, move |_, _, cx| {
+                let _ = browser.update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
+            });
+        }
     }
     fn render_td(
         &mut self,
@@ -518,6 +577,15 @@ impl TableDelegate for Discs {
         let (cover, member, discs) = match row {
             Shelf::Disc(d) => (d.cover.as_ref(), d.member_label(), None),
             Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
+            Shelf::Link(link, title) => {
+                return cell
+                    .child(
+                        Icon::new(link.icon())
+                            .size(px(16.))
+                            .text_color(m.text_faint),
+                    )
+                    .child(div().truncate().child(title.clone()));
+            }
         };
         if c != 0 {
             return cell.child(div().truncate().text_ellipsis_middle().child(row.label(c)));
@@ -600,10 +668,22 @@ impl TableDelegate for Discs {
                 menu,
                 r.key.clone(),
                 r.title.clone(),
+                r.discs.first().and_then(|d| d.root),
                 browser,
                 tracks,
                 cx,
             ),
+            Shelf::Link(link, _) => {
+                let location = link.location();
+                menu.item(
+                    gpui_kit::component::menu::PopupMenuItem::new("Open").on_click(
+                        move |_, window, cx| {
+                            let _ =
+                                browser.update(cx, |b, cx| b.show(location.clone(), window, cx));
+                        },
+                    ),
+                )
+            }
         }
     }
 }
@@ -679,6 +759,7 @@ mod release_tests {
             .iter()
             .map(|r| match r {
                 Shelf::Release(r) => format!("release {} {}", r.title, r.discs.len()),
+                Shelf::Link(_, title) => title.clone(),
                 Shelf::Disc(d) => match d.member_label() {
                     Some((n, _)) => n,
                     None => d.title.clone(),

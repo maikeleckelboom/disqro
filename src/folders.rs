@@ -88,6 +88,7 @@ pub struct Folders {
     /// The root that shows the open folder.
     shown_in: Option<PathBuf>,
     current: Option<PathBuf>,
+    child: Option<PathBuf>,
     /// The open folder is highlighted while the browser shows a folder.
     highlight: bool,
     listed: HashMap<String, Arc<[PathBuf]>>,
@@ -119,6 +120,7 @@ impl Folders {
             temporary: None,
             shown_in: None,
             current: None,
+            child: None,
             highlight: false,
             listed: HashMap::new(),
             pending: HashSet::new(),
@@ -219,12 +221,25 @@ impl Folders {
         self.place(path, root);
         // Discovery lists the folder afresh and reports it through `listed`.
         self.current = Some(path.to_owned());
+        self.child = None;
         self.highlight = true;
         self.revealing = reveal == TreeReveal::Ancestors;
         if self.revealing
             && let Some(root) = &self.shown_in
             && reveal_ancestors(&mut self.expanded, root, path)
         {
+            cx.emit(ExpansionChanged);
+        }
+        self.update(true, cx);
+    }
+    pub fn reveal_child(&mut self, child: &Path, cx: &mut Context<Self>) {
+        let Some(root) = &self.shown_in else { return };
+        if !within(child, root) {
+            return;
+        }
+        self.child = Some(child.to_owned());
+        self.revealing = true;
+        if reveal_ancestors(&mut self.expanded, root, child) {
             cx.emit(ExpansionChanged);
         }
         self.update(true, cx);
@@ -292,7 +307,10 @@ impl Folders {
         if key(shown) != key(root) {
             return vec![];
         }
-        let mut chain: Vec<PathBuf> = current
+        let mut chain: Vec<PathBuf> = self
+            .child
+            .as_ref()
+            .unwrap_or(current)
             .ancestors()
             .take_while(|p| within(p, root))
             .map(Path::to_owned)
@@ -348,11 +366,12 @@ impl Folders {
     }
     fn current_id(&self) -> Option<SharedString> {
         let (root, current) = self.current()?;
+        let selected = self.child.as_deref().unwrap_or(current);
         Some(
             format!(
                 "{}\u{1}{}",
                 root.to_string_lossy(),
-                current.to_string_lossy()
+                selected.to_string_lossy()
             )
             .into(),
         )

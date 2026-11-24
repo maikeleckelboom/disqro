@@ -195,11 +195,12 @@ impl Field {
 /// A row's identity for selection: a physical file or authored segment in a
 /// folder, or a library view key. Tags and positions are deliberately
 /// absent, so a refresh or sort keeps the same selection.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum RowKey {
     Disc(DiscId),
     /// A release in the Albums / CDs list, by its first disc.
     Release(DiscId),
+    Link(crate::collection::ShelfLink),
     Track(PathBuf, Option<DiscTrack>),
     Key(i64),
 }
@@ -339,14 +340,20 @@ impl Rows {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct Selection {
-    marked: HashSet<RowKey>,
+    marked: Arc<HashSet<RowKey>>,
     anchor: Option<RowKey>,
     cursor: Option<RowKey>,
+    #[serde(skip)]
     ordered: std::cell::OnceCell<Arc<Targets>>,
 }
 impl Selection {
+    pub fn len(&self) -> usize {
+        self.marked.len()
+    }
+
     fn modify(
         &mut self,
         rows: &Rows,
@@ -356,12 +363,13 @@ impl Selection {
         additive: bool,
     ) {
         self.ordered.take();
-        if self.marked.is_empty()
+        let marked = Arc::make_mut(&mut self.marked);
+        if marked.is_empty()
             && let Some(k) = primary
                 .and_then(|i| rows.key(i))
                 .filter(|k| !matches!(k, RowKey::Disc(_)))
         {
-            self.marked.insert(k.clone());
+            marked.insert(k.clone());
             self.anchor = Some(k);
         }
         let Some(clicked) = rows.key(at).filter(|k| !matches!(k, RowKey::Disc(_))) else {
@@ -375,17 +383,17 @@ impl Selection {
                 .and_then(|k| rows.position(k))
                 .unwrap_or(at);
             if !additive {
-                self.marked.clear();
+                marked.clear();
             }
-            self.marked.extend(
+            marked.extend(
                 (from.min(at)..=from.max(at))
                     .filter_map(|i| rows.key(i))
                     .filter(|k| !matches!(k, RowKey::Disc(_))),
             );
             self.anchor.get_or_insert(clicked);
         } else {
-            if !self.marked.remove(&clicked) {
-                self.marked.insert(clicked.clone());
+            if !marked.remove(&clicked) {
+                marked.insert(clicked.clone());
             }
             self.anchor = Some(clicked);
         }
@@ -474,6 +482,8 @@ pub struct MusicTable {
     pub folder_covers: Arc<HashMap<PathBuf, crate::artwork::CoverFile>>,
     pub sort: Option<(Field, ColumnSort)>,
     selection: Selection,
+    primary: Option<RowKey>,
+    focus: Option<FocusHandle>,
     pub player: Entity<Player>,
     pub catalog: Entity<Catalog>,
     browser: WeakEntity<crate::browser::Browser>,
@@ -526,30 +536,71 @@ pub fn set_rows_in_place(
     t.delegate_mut().set_rows(rows, sections, cx);
     restore_anchor(t, top);
 }
-type Anchor = (usize, Point<Pixels>, Option<RowKey>);
-fn top_anchor(t: &TableState<MusicTable>) -> Anchor {
-    let offset = t.vertical_scroll_handle.0.borrow().base_handle.offset();
-    let first = (-offset.y / px(t.delegate().row_height)).max(0.) as usize;
-    (
-        first,
-        offset,
-        (offset.y < px(0.))
-            .then(|| t.delegate().rows.key(first))
-            .flatten(),
-    )
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Viewport {
+    anchor: Option<RowKey>,
+    within_row: f32,
+    scroll: f32,
+    horizontal: f32,
 }
-fn restore_anchor(t: &mut TableState<MusicTable>, (first, offset, anchor): Anchor) {
-    let height = px(t.delegate().row_height);
-    if let Some(now) = anchor.and_then(|k| t.delegate().rows.position(&k))
-        && now != first
-    {
-        let y = offset.y - height * (now as f32 - first as f32);
-        t.vertical_scroll_handle
-            .0
-            .borrow()
-            .base_handle
-            .set_offset(point(offset.x, y));
+impl Viewport {
+    pub fn legacy(scroll: f32) -> Self {
+        Self {
+            scroll,
+            ..Self::default()
+        }
     }
+
+    pub fn capture<D: TableDelegate>(
+        table: &TableState<D>,
+        height: f32,
+        key: impl FnOnce(usize) -> Option<RowKey>,
+    ) -> Self {
+        let offset = table.vertical_scroll_handle.0.borrow().base_handle.offset();
+        let scroll = (-f32::from(offset.y)).max(0.);
+        let first = (scroll / height) as usize;
+        Self {
+            anchor: (scroll > 0.).then(|| key(first)).flatten(),
+            within_row: scroll - first as f32 * height,
+            scroll,
+            horizontal: (-f32::from(table.horizontal_scroll_handle.offset().x)).max(0.),
+        }
+    }
+
+    pub fn restore<D: TableDelegate>(
+        &self,
+        table: &TableState<D>,
+        height: f32,
+        position: impl FnOnce(&RowKey) -> Option<usize>,
+    ) {
+        let y = self.offset_for(height, position);
+        // UniformList clamps against the destination's content during prepaint.
+        let mut scroll = table.vertical_scroll_handle.0.borrow_mut();
+        scroll.deferred_scroll_to_item = None;
+        scroll.base_handle.set_offset(point(px(0.), px(-y.max(0.))));
+        table
+            .horizontal_scroll_handle
+            .set_offset(point(px(-self.horizontal.max(0.)), px(0.)));
+    }
+
+    pub fn is_at_start(&self) -> bool {
+        self.scroll == 0. && self.horizontal == 0.
+    }
+    fn offset_for(&self, height: f32, position: impl FnOnce(&RowKey) -> Option<usize>) -> f32 {
+        self.anchor
+            .as_ref()
+            .and_then(position)
+            .map_or(self.scroll, |row| {
+                row as f32 * height + self.within_row.clamp(0., height - 0.01)
+            })
+    }
+}
+fn top_anchor(t: &TableState<MusicTable>) -> Viewport {
+    Viewport::capture(t, t.delegate().row_height, |row| t.delegate().rows.key(row))
+}
+fn restore_anchor(t: &TableState<MusicTable>, viewport: Viewport) {
+    viewport.restore(t, t.delegate().row_height, |key| t.delegate().position(key));
 }
 /// Starts a newly opened view at its first row.
 pub fn scroll_to_top<D: TableDelegate>(t: &mut TableState<D>) {
@@ -584,6 +635,7 @@ pub fn disc_menu(
             menu.separator(),
             m.key.clone(),
             m.title.clone(),
+            disc.root,
             browser,
             table,
             cx,
@@ -597,6 +649,7 @@ pub fn release_items(
     menu: PopupMenu,
     key: DiscId,
     title: String,
+    root: Option<crate::store::RootId>,
     browser: WeakEntity<crate::browser::Browser>,
     table: WeakEntity<TableState<MusicTable>>,
     cx: &App,
@@ -608,7 +661,8 @@ pub fn release_items(
     menu.when(!shown, |menu| {
         menu.item(
             PopupMenuItem::new("Open Release").on_click(move |_, w, cx| {
-                let _ = browser.update(cx, |b, cx| b.open_release(&key, title.clone(), w, cx));
+                let _ =
+                    browser.update(cx, |b, cx| b.open_release(&key, title.clone(), root, w, cx));
             }),
         )
     })
@@ -681,6 +735,8 @@ impl MusicTable {
             folder_covers: Default::default(),
             sort: None,
             selection: Default::default(),
+            primary: None,
+            focus: None,
             empty: SharedString::default(),
             offer_subfolders: false,
             offer_library: false,
@@ -886,7 +942,6 @@ impl MusicTable {
         } else {
             self.view += 1;
             self.clear_marks();
-            self.sort = None;
             self.rows.sections = Sections::default();
             self.rows.data = Contents::Library(Paged {
                 scope,
@@ -1071,23 +1126,44 @@ impl MusicTable {
     pub fn selected_key(&self, ix: usize) -> Option<RowKey> {
         self.rows.key(ix)
     }
+    pub fn row_height(&self) -> f32 {
+        self.row_height
+    }
+    pub fn bind_focus(
+        table: &mut TableState<Self>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let handle = table.focus_handle(cx);
+        cx.on_focus(&handle, window, |_, _, cx| cx.notify())
+            .detach();
+        cx.on_blur(&handle, window, |_, _, cx| cx.notify()).detach();
+        table.delegate_mut().focus = Some(handle);
+    }
+
+    pub fn set_primary(&mut self, primary: Option<RowKey>) {
+        self.primary = primary;
+    }
+
+    pub fn cursor_row(&self, primary: Option<usize>) -> Option<usize> {
+        self.selection
+            .cursor
+            .as_ref()
+            .and_then(|key| self.position(key))
+            .or(primary)
+    }
     pub fn position(&self, k: &RowKey) -> Option<usize> {
         self.rows.position(k)
     }
     pub fn first_track(&self) -> usize {
         self.rows.sections.display_index(0)
     }
-
-    pub fn has_marks(&self) -> bool {
-        !self.selection.marked.is_empty()
+    pub(crate) fn first_on_disc(&self, id: &DiscId) -> Option<usize> {
+        (0..self.rows.len()).find(|&row| self.track(row).is_some_and(|track| id.contains(track)))
     }
+
     pub fn extend_selection(&mut self, primary: Option<usize>, direction: isize) -> Option<usize> {
-        let current = self
-            .selection
-            .cursor
-            .as_ref()
-            .and_then(|k| self.rows.position(k))
-            .or(primary);
+        let current = self.cursor_row(primary);
         let next = self.rows.adjacent_track(current, direction)?;
         self.selection
             .modify(&self.rows, primary, next, true, false);
@@ -1123,10 +1199,40 @@ impl MusicTable {
             .update(cx, |c, cx| c.move_entries(playlist, entries, before, cx));
     }
     pub fn marked_selection(&self) -> Option<Selection> {
-        self.has_marks().then(|| self.selection.clone())
+        self.has_selection_cursor().then(|| Selection {
+            marked: self.selection.marked.clone(),
+            anchor: self.selection.anchor.clone(),
+            cursor: self.selection.cursor.clone(),
+            ordered: Default::default(),
+        })
     }
-    pub fn restore_marks(&mut self, mut selection: Selection) {
-        selection.ordered.take();
+    pub fn has_selection_cursor(&self) -> bool {
+        self.selection.cursor.is_some() || !self.selection.marked.is_empty()
+    }
+    pub fn restore_marks(&mut self, mut selection: Selection, filtered: bool) {
+        if !filtered && !selection.marked.is_empty() {
+            let found: HashSet<_> = (0..self.rows.len())
+                .filter_map(|i| self.rows.key(i))
+                .filter(|key| selection.marked.contains(key))
+                .collect();
+            if found.len() != selection.marked.len() {
+                selection.marked = Arc::new(found);
+            }
+        }
+        if !filtered {
+            selection.anchor = selection.anchor.filter(|key| self.position(key).is_some());
+            selection.cursor = selection
+                .cursor
+                .filter(|key| self.position(key).is_some())
+                .or_else(|| selection.anchor.clone())
+                .or_else(|| {
+                    (0..self.rows.len())
+                        .filter_map(|row| self.rows.key(row))
+                        .find(|key| selection.marked.contains(key))
+                });
+            selection.anchor = selection.anchor.or_else(|| selection.cursor.clone());
+        }
+        self.primary = None;
         self.selection = selection;
     }
     pub fn clear_marks(&mut self) {
@@ -1464,12 +1570,16 @@ impl TableDelegate for MusicTable {
     fn visible_rows_changed(
         &mut self,
         range: Range<usize>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
         if self.visible != range {
             self.visible = range;
             self.request_rows(false, cx);
+            let browser = self.browser.clone();
+            cx.defer_in(window, move |_, _, cx| {
+                let _ = browser.update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
+            });
         }
     }
     fn render_th(
@@ -1524,14 +1634,20 @@ impl TableDelegate for MusicTable {
             .when(field.sortable(), |d| {
                 d.hover(|d| d.text_color(m.text_muted))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |t, _, _, cx| {
+                    .on_click(cx.listener(move |t, _, w, cx| {
                         let selected = t.selected_row().and_then(|i| t.delegate().rows.key(i));
+                        let viewport = top_anchor(t);
                         t.delegate_mut().cycle_sort(field, cx);
-                        if let Some(ix) = selected.and_then(|k| t.delegate().rows.position(&k)) {
-                            t.set_selected_row(ix, cx);
-                        }
+                        let ix = selected.and_then(|k| t.delegate().position(&k));
+                        reselect(t, ix, cx);
+                        restore_anchor(t, viewport);
                         t.refresh(cx);
                         cx.notify();
+                        let browser = t.delegate().browser.clone();
+                        cx.defer_in(w, move |_, _, cx| {
+                            let _ =
+                                browser.update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
+                        });
                     }))
             })
             .context_menu({
@@ -1702,12 +1818,42 @@ impl TableDelegate for MusicTable {
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let m = *materials(cx);
+        let focused = self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| focus.is_focused(window));
+        let key = self.rows.key(row);
+        let primary = self
+            .primary
+            .as_ref()
+            .zip(key.as_ref())
+            .is_some_and(|(a, b)| a == b);
+        let cursor = self
+            .selection
+            .cursor
+            .as_ref()
+            .or(self.primary.as_ref())
+            .zip(key.as_ref())
+            .is_some_and(|(a, b)| a == b);
+        let focus_indicator = || {
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .bottom_0()
+                .w(px(2.))
+                .bg(m.accent.opacity(0.70))
+        };
         if let Some(d) = self.header(row) {
             let disc = d.clone();
             return div()
                 .id(("cd-section", row))
                 .overflow_hidden()
                 .bg(m.raised)
+                .when(primary && !focused, |d| {
+                    d.child(div().absolute().size_full().bg(m.canvas.opacity(0.55)))
+                })
+                .when(focused && cursor, |d| d.child(focus_indicator()))
                 .cursor_pointer()
                 .child(d.section(self.row_height, window, cx))
                 .tooltip(move |w, cx| {
@@ -1719,11 +1865,7 @@ impl TableDelegate for MusicTable {
                     .build(w, cx)
                 });
         }
-        let marked = !self.selection.marked.is_empty()
-            && self
-                .rows
-                .key(row)
-                .is_some_and(|k| self.selection.marked.contains(&k));
+        let marked = key.is_some_and(|key| self.selection.marked.contains(&key));
         if row >= self.rows.len() {
             return div().id(("empty-track-row", row));
         }
@@ -1743,7 +1885,9 @@ impl TableDelegate for MusicTable {
         div()
             .id(("track-row", row))
             .group("track-row")
-            .when(marked, |d| d.bg(m.selected))
+            .when(marked, |d| d.bg(if focused { m.selected } else { m.canvas.blend(m.selected.opacity(0.48)) }))
+            .when(primary && !focused, |d| d.child(div().absolute().size_full().bg(m.canvas.opacity(0.55))))
+            .when(focused && cursor, |d| d.child(focus_indicator()))
             .on_drag(
                 DraggedTracks::new(dragged, label),
                 |d, _, _, cx| d.start(cx),
@@ -1786,6 +1930,7 @@ impl TableDelegate for MusicTable {
                             event.modifiers.shift,
                             additive,
                         );
+                        delegate.set_primary(None);
                         table.clear_selection(cx);
                     }
                     cx.notify();
@@ -2047,7 +2192,7 @@ impl TableDelegate for MusicTable {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Contents, Rows, Sections, Selection, Track, key};
+    use super::{Arc, Contents, RowKey, Rows, Sections, Selection, Track, Viewport, key};
     #[test]
     fn section_indices_map_only_tracks_into_actions() {
         use crate::collection::Discs;
@@ -2103,11 +2248,34 @@ mod tests {
         let mut selection = Selection::default();
         selection.modify(&folder(&rows), Some(0), 2, false, true);
         assert_eq!(selection.marked.len(), 2);
+        let saved = serde_json::to_vec(&selection).unwrap();
+        let mut selection: Selection = serde_json::from_slice(&saved).unwrap();
         rows.reverse();
         selection.modify(&folder(&rows), None, 3, true, false);
         assert_eq!(selection.marked.len(), 3);
         assert!(!selection.marked.contains(&key(&rows[0])));
         selection.modify(&folder(&rows), None, 1, false, true);
         assert_eq!(selection.marked.len(), 2);
+    }
+
+    #[test]
+    fn viewport_relocates_its_logical_row_and_keeps_the_pixel_remainder() {
+        let viewport = Viewport {
+            anchor: Some(RowKey::Key(617)),
+            within_row: 12.5,
+            scroll: 100.5,
+            horizontal: 30.,
+        };
+        let viewport: Viewport =
+            serde_json::from_value(serde_json::to_value(viewport).unwrap()).unwrap();
+        assert_eq!(
+            viewport.offset_for(28., |key| {
+                assert_eq!(*key, RowKey::Key(617));
+                Some(21)
+            }),
+            600.5
+        );
+        assert_eq!(viewport.offset_for(28., |_| None), 100.5);
+        assert_eq!(viewport.horizontal, 30.);
     }
 }

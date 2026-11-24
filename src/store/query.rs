@@ -155,6 +155,7 @@ fn order_sql(order: Order) -> &'static str {
 #[derive(Clone, Debug)]
 pub struct AlbumRow {
     pub id: AlbumId,
+    pub root: Option<RootId>,
     pub title: String,
     pub year: Option<u32>,
     pub disc_number: Option<u32>,
@@ -527,7 +528,7 @@ impl Store {
             "SELECT al.id, al.title, al.year, al.folder, al.cover, count(t.id),
                 total(t.duration), count(t.duration) = count(t.id),
                 CASE WHEN min(t.format) = max(t.format) THEN min(t.format) ELSE 'Mixed' END,
-                ro.path, min(t.disc_number)
+                ro.path, min(t.disc_number), ro.id
              FROM tracks t JOIN albums al ON al.id = t.album_id
              JOIN files s ON s.id = t.source
              LEFT JOIN roots ro ON ro.id = t.root_id
@@ -546,6 +547,7 @@ impl Store {
                 .unwrap_or(folder);
             Ok(AlbumRow {
                 id: r.get(0)?,
+                root: r.get(11)?,
                 title: r.get(1)?,
                 year: r.get(2)?,
                 folder,

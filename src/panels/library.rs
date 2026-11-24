@@ -400,6 +400,7 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
+        let browse = self.router.clone();
         let header = h_flex()
             .id("playlists")
             .h(px(ROW))
@@ -412,7 +413,27 @@ impl LibraryPanel {
             .mt(px(6.))
             .text_size(px(12.))
             .text_color(m.text_muted)
-            .child(div().flex_1().min_w_0().truncate().child("Playlists"))
+            .child(
+                div()
+                    .id("browse-playlists")
+                    .role(Role::Button)
+                    .aria_label("Browse playlists")
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if location == Some(Location::Playlists) {
+                        m.accent
+                    } else {
+                        m.text_muted
+                    })
+                    .hover(|d| d.text_color(m.text))
+                    .on_click(move |_, w, cx| {
+                        Self::open(&browse, Location::Playlists, false, w, cx)
+                    })
+                    .child("Playlists"),
+            )
             .child(
                 Button::new("new-playlist")
                     .ghost()

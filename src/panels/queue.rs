@@ -217,9 +217,9 @@ impl Entries {
             }
         };
         let (destination, label) = if entry.disc_context.allows(&entry.track) {
-            (Destination::Disc, "Show Track on CD")
+            (Destination::Locations, "Show in Locations")
         } else {
-            (Destination::Collection, "Show in Collection")
+            (Destination::Library, "Show in Library")
         };
         let play = act(Command::Jump(id));
         let next = act(Command::Move(id, next_slot));
