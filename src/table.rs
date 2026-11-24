@@ -129,11 +129,14 @@ pub enum Field {
     Disc,
     Year,
     Path,
+    Plays,
+    LastPlayed,
+    ListeningTime,
     #[serde(alias = "Liked")]
     Favorite,
 }
 impl Field {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 15] = [
         Self::Number,
         Self::Cover,
         Self::Title,
@@ -145,6 +148,9 @@ impl Field {
         Self::Disc,
         Self::Year,
         Self::Path,
+        Self::Plays,
+        Self::LastPlayed,
+        Self::ListeningTime,
         Self::Favorite,
     ];
     fn label(self) -> &'static str {
@@ -161,6 +167,9 @@ impl Field {
             Self::Year => "Year",
             Self::Path => "File Path",
             Self::Favorite => "Favorite",
+            Self::Plays => "Plays",
+            Self::LastPlayed => "Last Played",
+            Self::ListeningTime => "Listening Time",
         }
     }
     fn heading(self) -> &'static str {
@@ -188,6 +197,9 @@ impl Field {
             Self::Length => 60.,
             Self::Format | Self::Year | Self::Disc => 64.,
             Self::Path => 330.,
+            Self::Plays => 64.,
+            Self::LastPlayed => 152.,
+            Self::ListeningTime => 120.,
         }
     }
     fn min_width(self) -> f32 {
@@ -216,7 +228,10 @@ impl Field {
         }
     }
     fn right_aligned(self) -> bool {
-        matches!(self, Self::Number | Self::Length)
+        matches!(
+            self,
+            Self::Number | Self::Length | Self::Plays | Self::ListeningTime
+        )
     }
     fn value(self, t: &Track, mark: Mark) -> String {
         match self {
@@ -238,6 +253,24 @@ impl Field {
             Self::Disc => t.disc_number.map(|n| n.to_string()).unwrap_or_default(),
             Self::Year => t.year.map(|n| n.to_string()).unwrap_or_default(),
             Self::Path => t.source.display().to_string(),
+            Self::Plays | Self::LastPlayed | Self::ListeningTime => {
+                unreachable!("listening field is formatted from totals")
+            }
+        }
+    }
+    fn listening(self) -> bool {
+        matches!(self, Self::Plays | Self::LastPlayed | Self::ListeningTime)
+    }
+    fn display(self, t: &Track, mark: Mark, catalog: &Catalog) -> String {
+        use crate::listening::{duration, local_date};
+        match self {
+            Self::Plays => catalog.listening_of(t).plays.to_string(),
+            Self::LastPlayed => catalog
+                .listening_of(t)
+                .last_played
+                .map_or_else(|| "Never".into(), |at| local_date(at, "%Y-%m-%d %H:%M")),
+            Self::ListeningTime => duration(catalog.listening_of(t).credited_us),
+            _ => self.value(t, mark),
         }
     }
     fn order(self) -> Option<store::Order> {
@@ -254,6 +287,9 @@ impl Field {
             Self::Disc => O::Disc,
             Self::Year => O::Year,
             Self::Path => O::Path,
+            Self::Plays => O::Plays,
+            Self::LastPlayed => O::LastPlayed,
+            Self::ListeningTime => O::ListeningTime,
         })
     }
     fn sortable(self) -> bool {
@@ -833,6 +869,7 @@ fn sort_folder(
     sorted: &mut TrackList,
     sort: Option<(Field, ColumnSort)>,
     marks: impl Fn(&Track) -> Mark,
+    listening: impl Fn(&Track) -> crate::listening::Totals,
 ) {
     if let Some((f, order)) = sort {
         let rows = Arc::make_mut(sorted);
@@ -846,6 +883,9 @@ fn sort_folder(
             Field::Year => rows.sort_by_key(|t| t.year),
             Field::Number => rows.sort_by_key(|t| t.display_number()),
             Field::Rating => rows.sort_by_cached_key(|t| marks(t).rating),
+            Field::Plays => rows.sort_by_cached_key(|t| listening(t).plays),
+            Field::LastPlayed => rows.sort_by_cached_key(|t| listening(t).last_played),
+            Field::ListeningTime => rows.sort_by_cached_key(|t| listening(t).credited_us),
             _ => rows.sort_by_cached_key(|t| f.value(t, Mark::default()).to_lowercase()),
         }
         if order == ColumnSort::Descending {
@@ -1249,7 +1289,34 @@ impl MusicTable {
             Sections::default()
         };
         *sorted = original.clone();
-        sort_folder(sorted, self.sort, marks);
+        sort_folder(sorted, self.sort, marks, |t| {
+            self.catalog.read(cx).listening_of(t)
+        });
+    }
+    pub fn listening_changed(
+        t: &mut TableState<Self>,
+        order: bool,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let table = t.delegate();
+        let sorted = table.sort.is_some_and(|(field, _)| {
+            field == Field::ListeningTime || (order && field.listening())
+        });
+        match &table.rows.data {
+            Contents::Library(p) if sorted || (order && p.scope == Scope::RecentlyPlayed) => {
+                t.delegate_mut().query(cx);
+            }
+            Contents::Folder { .. } if sorted => {
+                let selected = t.selected_row().and_then(|i| table.rows.key(i));
+                t.delegate_mut().apply_sort(cx);
+                if let Some(row) = selected.and_then(|key| t.delegate().position(&key)) {
+                    t.set_selected_row(row, cx);
+                }
+                cx.notify();
+            }
+            _ if table.layout().columns.iter().any(|c| c.field.listening()) => cx.notify(),
+            _ => {}
+        }
     }
     /// Header clicks cycle ascending, descending, and the view's own order.
     fn cycle_sort(&mut self, field: Field, cx: &mut Context<TableState<Self>>) {
@@ -1959,8 +2026,11 @@ impl TableDelegate for MusicTable {
         {
             return Some(format!("{} · Now playing", t.title).into());
         }
-        (!matches!(field, Field::Cover | Field::Favorite))
-            .then(|| field.value(t, self.mark(row, cx)).into())
+        (!matches!(field, Field::Cover | Field::Favorite)).then(|| {
+            field
+                .display(t, self.mark(row, cx), self.catalog.read(cx))
+                .into()
+        })
     }
     fn render_last_empty_col(
         &mut self,
@@ -2060,7 +2130,12 @@ impl TableDelegate for MusicTable {
                 .when(f == Field::Format, |d| {
                     d.text_size(px(crate::theme::size::TEXT_SMALL))
                 })
-                .child(div().min_w_0().truncate().child(f.value(&t, mark)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .child(f.display(&t, mark, self.catalog.read(cx))),
+                )
                 .into_any_element(),
         }
     }

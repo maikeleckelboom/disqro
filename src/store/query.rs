@@ -19,6 +19,7 @@ pub enum Scope {
     /// Every disc of the release whose first disc this is, in disc order.
     Release(AlbumId),
     Liked,
+    RecentlyPlayed,
     Playlist(PlaylistId),
 }
 impl Scope {
@@ -40,6 +41,9 @@ pub enum Order {
     Year,
     Path,
     Rating,
+    Plays,
+    LastPlayed,
+    ListeningTime,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +158,9 @@ fn order_sql(order: Order) -> &'static str {
         Order::Year => "t.year",
         Order::Path => "s.path_key",
         Order::Rating => "coalesce(r.stars, 0)",
+        Order::Plays => "coalesce(lt.plays, 0)",
+        Order::LastPlayed => "lt.last_played",
+        Order::ListeningTime => "coalesce(lt.credited_us, 0)",
     }
 }
 
@@ -284,6 +291,21 @@ impl Store {
     }
 
     fn listing_in_order(&self, q: &Query, context: ListingContext<'_>) -> Result<Listing> {
+        if q.scope == Scope::RecentlyPlayed && q.search.trim().is_empty() && q.order.is_none() {
+            let mut stmt = self.db.prepare_cached(
+                "SELECT recent.track_id, t.duration FROM listening_totals recent
+                 CROSS JOIN tracks t ON t.id = recent.track_id
+                 WHERE recent.last_played IS NOT NULL
+                 ORDER BY recent.last_played DESC, recent.track_id",
+            )?;
+            let mut listing = Listing::default();
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                listing.keys.push(r.get(0)?);
+                listing.duration += r.get::<_, Option<f64>>(1)?.unwrap_or(0.);
+            }
+            return Ok(listing);
+        }
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let release_order;
         let (key, from, mut filter, default) = match q.scope {
@@ -342,6 +364,12 @@ impl Store {
                 vec![],
                 "lk.liked_at DESC, t.id",
             ),
+            Scope::RecentlyPlayed => (
+                "t.id",
+                "listening_totals recent JOIN tracks t ON t.id = recent.track_id",
+                vec!["recent.last_played IS NOT NULL".into()],
+                "recent.last_played DESC, recent.track_id",
+            ),
             Scope::Playlist(p) => {
                 args.push(Box::new(p));
                 (
@@ -366,6 +394,7 @@ impl Store {
              JOIN files s ON s.id = t.source
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
+             LEFT JOIN listening_totals lt ON lt.track_id = t.id
              {} ORDER BY {order}",
             where_clause(&filter)
         );
@@ -596,6 +625,21 @@ impl Store {
             discs.into_iter().map(|(_, id)| id).collect()
         };
         Ok(ReleaseContents { discs, membership })
+    }
+
+    pub(super) fn listening_release(&self, album: AlbumId) -> Result<(AlbumId, String)> {
+        if let Some(root) = self.album_root(album)?
+            && let Some(release) = self.releases(Some(root))?.remove(&album)
+        {
+            return Ok((release.first, release.title));
+        }
+        Ok((
+            album,
+            self.db
+                .query_row("SELECT title FROM albums WHERE id=?1", [album], |r| {
+                    r.get(0)
+                })?,
+        ))
     }
 
     /// The release memberships of a collection's discs, from all of its

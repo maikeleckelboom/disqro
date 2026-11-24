@@ -22,6 +22,7 @@
 pub mod browser;
 mod instruments;
 pub mod library;
+pub(crate) mod listening;
 pub mod locations;
 pub mod nav;
 pub mod queue;
@@ -109,6 +110,8 @@ pub static TYPES: &[&PanelType] = &[
     &locations::TYPE,
     &queue::QUEUE,
     &queue::HISTORY,
+    &listening::HISTORY,
+    &listening::STATISTICS,
     &spectrum::TYPE,
     &instruments::SPECTROGRAM,
     &instruments::STEREO_FIELD,

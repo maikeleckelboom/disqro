@@ -250,6 +250,7 @@ impl MusicTable {
         let sort = self.sort;
         let page = self.folder_page.clone();
         let catalog = self.catalog.clone();
+        let listening = catalog.read(cx).listening_snapshot();
         cx.spawn(async move |cx| {
             let work = ticket.clone();
             let command = cx
@@ -284,7 +285,7 @@ impl MusicTable {
                             .cloned()
                             .collect()
                     };
-                    sort_folder(&mut tracks, sort, marks);
+                    sort_folder(&mut tracks, sort, marks, listening);
                     action.command(&tracks, &programs)
                 })
                 .await;

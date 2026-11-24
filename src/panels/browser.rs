@@ -368,9 +368,11 @@ fn browser_menu(
                 .on_click(move |_, w, cx| refresh.update(cx, |b, cx| b.reload(w, cx))),
             )
         }
-        Location::Liked | Location::Playlist(_) | Location::Collections | Location::Playlists => {
-            menu
-        }
+        Location::Liked
+        | Location::RecentlyPlayed
+        | Location::Playlist(_)
+        | Location::Collections
+        | Location::Playlists => menu,
     }
 }
 
@@ -415,6 +417,7 @@ impl PaneContent for BrowserPane {
                 Icon::new(IconName::Disc3)
             }
             Location::Liked => Icon::default().path(crate::assets::HEART_FILL),
+            Location::RecentlyPlayed => Icon::new(IconName::Clock),
             Location::Playlist(_) | Location::Playlists => Icon::new(IconName::ListMusic),
         }
     }

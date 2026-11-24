@@ -58,7 +58,7 @@ pub static QUEUE: PanelType = PanelType {
 
 pub static HISTORY: PanelType = PanelType {
     key: "disqro.history",
-    title: "History",
+    title: "Queue History",
     icon: IconName::Clock,
     instances: super::Instances::Single,
     home: super::Home::Trailing,

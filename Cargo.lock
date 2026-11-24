@@ -1395,6 +1395,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
+ "chrono",
  "embed-resource",
  "encoding_rs",
  "fastrand",

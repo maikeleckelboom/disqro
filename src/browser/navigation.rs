@@ -173,7 +173,9 @@ impl Route {
                 None,
                 Some(RowKey::Link(ShelfLink::Playlist(*id))),
             ),
-            (Location::Liked, _) => (Location::Library(None), None, None),
+            (Location::Liked | Location::RecentlyPlayed, _) => {
+                (Location::Library(None), None, None)
+            }
             _ => return None,
         };
         Some((Route::new(location, page), child))

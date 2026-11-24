@@ -17,6 +17,7 @@ mod folders;
 mod level_meter;
 mod levels;
 mod library;
+mod listening;
 mod location;
 mod movie;
 mod overview;
@@ -67,6 +68,7 @@ fn main() {
             workspace::bind_keys(cx);
             location::bind_keys(cx);
             panels::queue::bind_keys(cx);
+            panels::listening::bind_keys(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                     None,

@@ -221,6 +221,7 @@ pub struct Workspace {
     profile: Option<Arc<profile::ProfileFile>>,
     save_revision: u64,
     quitting: bool,
+    listening: Option<crate::listening::Writer>,
     save_dirty: bool,
     window: AnyWindowHandle,
     prefs: WindowPrefs,
@@ -264,8 +265,21 @@ impl Workspace {
             ),
         };
         let volume = saved.volume.clamp(0., 1.);
-        let player = cx.new(|cx| Player::new(volume, saved.full_cd, saved.show_levels, cx));
         let catalog = cx.new(Catalog::new);
+        let listening = crate::store::Store::location().map(|path| {
+            let (writer, updates) = crate::listening::Writer::spawn(path);
+            catalog.update(cx, |c, cx| c.watch_listening(updates, cx));
+            writer
+        });
+        let player = cx.new(|cx| {
+            Player::new(
+                volume,
+                saved.full_cd,
+                saved.show_levels,
+                listening.clone(),
+                cx,
+            )
+        });
         let layouts = saved
             .table_layouts
             .take()
@@ -435,6 +449,7 @@ impl Workspace {
             profile: file,
             save_revision: 0,
             quitting: false,
+            listening,
             save_dirty: false,
             window: window.window_handle(),
             prefs: saved.window,
@@ -1318,6 +1333,7 @@ impl Workspace {
         let revision = self.save_revision;
         let mut snapshot = self.snapshot(cx);
         let commands = self.services.player.read(cx).sender();
+        let listening = self.listening.clone();
         // All personal edits issued before Quit must reach SQLite before process exit.
         let flushed = self.services.catalog.read(cx).handle().map(|s| s.drain());
         cx.spawn_in(window, async move |this, cx| {
@@ -1327,7 +1343,11 @@ impl Workspace {
                         flushed.await?;
                     }
                     snapshot.queue = commands.snapshot()?;
-                    file.commit(revision, &snapshot)
+                    let history = listening.map_or(Ok(()), |writer| {
+                        commands.finish_listening().and_then(|()| writer.barrier())
+                    });
+                    file.commit(revision, &snapshot)?;
+                    history
                 })
                 .await;
             if let Err(error) = result {
@@ -1337,7 +1357,7 @@ impl Workspace {
                     }
                     w.prompt(
                         PromptLevel::Warning,
-                        "The workspace could not be saved.",
+                        "Disqro could not save all changes.",
                         Some(&error.to_string()),
                         &["Keep open", "Quit without saving"],
                         cx,

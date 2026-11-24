@@ -60,6 +60,7 @@ pub enum Location {
         title: String,
     },
     Liked,
+    RecentlyPlayed,
     Playlist(PlaylistId),
     Collections,
     Playlists,
@@ -332,6 +333,11 @@ impl Browser {
                 }
             }
             CatalogEvent::Content => b.library_changed(cx),
+            CatalogEvent::Listening(changes) => {
+                let order = changes.is_empty() || changes.iter().any(|change| change.order);
+                b.table
+                    .update(cx, |t, cx| MusicTable::listening_changed(t, order, cx));
+            }
             CatalogEvent::Structure(root) => {
                 b.refresh_indexed_sequence(*root, cx);
                 b.refresh_folder_traversal(cx);
@@ -492,6 +498,7 @@ impl Browser {
             Location::Album { id, .. } => Scope::Album(*id),
             Location::Release { id, .. } => Scope::Release(*id),
             Location::Liked => Scope::Liked,
+            Location::RecentlyPlayed => Scope::RecentlyPlayed,
             Location::Playlist(p) => Scope::Playlist(*p),
         })
     }
@@ -863,6 +870,7 @@ impl Browser {
                 Location::Liked => {
                     "No liked tracks yet. Like a track from its menu or with Alt+L.".into()
                 }
+                Location::RecentlyPlayed => "Qualified plays will appear here.".into(),
                 Location::Playlist(_) => {
                     "Drag tracks here or use Add\u{a0}to\u{a0}Playlist.".into()
                 }
@@ -1343,6 +1351,7 @@ impl Browser {
                 .map_or_else(|| "Collection".into(), |c| c.root.name.clone()),
             Location::Album { title, .. } | Location::Release { title, .. } => title.clone(),
             Location::Liked => "Liked Tracks".into(),
+            Location::RecentlyPlayed => "Recently Played".into(),
             Location::Collections => "Collections".into(),
             Location::Playlists => "Playlists".into(),
             Location::Playlist(p) => catalog

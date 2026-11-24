@@ -88,7 +88,10 @@ fn check_chapter_render(silent: bool) {
     })
     .unwrap();
     let voice = output
-        .play(StreamingSoundData::from_decoder(recording))
+        .play(ObservedData {
+            data: StreamingSoundData::from_decoder(recording),
+            gate: Arc::default(),
+        })
         .unwrap();
     let mut frames = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -122,6 +125,103 @@ fn check_chapter_render(silent: bool) {
             "rendered frame {i}"
         );
     }
+}
+
+#[test]
+fn listening_voice_lifecycle_uses_output_cursor_and_splits_cue_boundaries() {
+    use crate::{cache::Stamp, store::listening::HistoryRow};
+    const SECOND: i64 = 1_000_000;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let (writer, _) = listening::Writer::spawn(database.clone());
+    let path = dir.path().join("disc.wav");
+    fixture(&path, 8000, 8000 * 45);
+    let sheet = dir.path().join("disc.cue");
+    std::fs::write(&sheet,"FILE disc.wav WAVE\nTRACK 01 AUDIO\nTITLE First\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nTITLE Second\nINDEX 01 00:35:00").unwrap();
+    let tracks: Vec<_> = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let wrap = |i: usize| listening::Recording {
+        track: tracks[i].clone(),
+        source: Stamp::read(&path),
+        sheet: Stamp::read(&sheet),
+    };
+    let voice = |start| VoiceCredit {
+        gate: Arc::default(),
+        cursor: start,
+        segments: vec![
+            CreditSegment {
+                id: 1,
+                start: 0,
+                recording: wrap(0),
+            },
+            CreditSegment {
+                id: 2,
+                start: 35 * SECOND,
+                recording: wrap(1),
+            },
+        ],
+    };
+    let mut engine = Engine {
+        listening: Some(writer.clone()),
+        limit: 45.,
+        ..Default::default()
+    };
+    let at = 1_800_000_000 * SECOND;
+    let rows = || {
+        writer.barrier().unwrap();
+        crate::store::Store::open(&database)
+            .unwrap()
+            .history_page((i64::MIN, i64::MAX), "", true, None)
+            .unwrap()
+    };
+    engine.credit = Some(voice(0));
+    engine.credit_progress(0, at);
+    assert!(rows().is_empty());
+    engine.credit_progress(10 * SECOND, at + 10 * SECOND);
+    assert_eq!(rows()[0].credited_us, 10 * SECOND);
+    assert!(!rows()[0].qualified);
+    // Forward seek, paused interval, then an ordinary seek-to-zero.
+    engine.credit = Some(voice(20 * SECOND));
+    engine.credit_progress(30 * SECOND, at + 20 * SECOND);
+    engine.credit_progress(30 * SECOND, at + 320 * SECOND);
+    assert_eq!(rows()[0].credited_us, 20 * SECOND);
+    engine.credit = Some(voice(0));
+    engine.credit_progress(15 * SECOND, at + 335 * SECOND);
+    assert_eq!(rows()[0].credited_us, 35 * SECOND);
+    assert!(rows()[0].qualified);
+    // One renderer interval crosses the authored boundary.
+    engine.credit_progress(41 * SECOND, at + 361 * SECOND);
+    engine.finish_occurrence(End::Completed, at + 361 * SECOND);
+    let snapshot = rows();
+    let fields = |row: &HistoryRow| (row.title.clone(), row.credited_us, row.qualified);
+    assert_eq!(
+        snapshot.iter().map(fields).collect::<Vec<_>>(),
+        [
+            ("First".into(), 55 * SECOND, true),
+            ("Second".into(), 6 * SECOND, true),
+        ]
+    );
+    assert_ne!(
+        snapshot[0].track.as_ref().unwrap().id,
+        snapshot[1].track.as_ref().unwrap().id
+    );
+    // An explicit replay/Repeat One is a fresh occurrence, even with the
+    // same queue entry id. A prepared voice at its new cursor earns nothing.
+    engine.credit = Some(voice(0));
+    engine.credit_progress(0, at + 365 * SECOND);
+    assert_eq!(rows().len(), 2);
+    engine.credit_progress(31 * SECOND, at + 396 * SECOND);
+    engine.finish_occurrence(End::Stopped, at + 396 * SECOND);
+    assert_eq!(
+        rows()
+            .iter()
+            .filter(|row| row.title == "First" && row.qualified)
+            .count(),
+        2
+    );
 }
 #[test]
 fn cue_seek_and_both_channels_match_original_samples() {
@@ -464,7 +564,7 @@ fn sustained_output_observation() {
 
 #[test]
 fn shutdown_receipt_includes_pending_queue_edits() {
-    let transport = Transport::new(0.);
+    let transport = Transport::new(0., None);
     let tracks = [Track::file("first.wav".into())].into_iter().collect();
     transport.send(Command::Enqueue(tracks), None).unwrap();
     let saved = transport.sender().snapshot().unwrap().unwrap();
@@ -790,7 +890,7 @@ fn separate_file_transition_observation() {
             Arc::new(Track::file(path))
         })
         .collect();
-    let t = Transport::new(0.5);
+    let t = Transport::new(0.5, None);
     let capture = t.signal.pcm();
     let _demand = capture.subscribe();
     t.send(Command::Play(tracks.into(), 0), None).unwrap();
