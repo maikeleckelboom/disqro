@@ -1,6 +1,7 @@
 use super::*;
 use crate::theme::Materials;
 use crate::timeline::Overview;
+use gpui_kit::component::Selectable;
 impl Player {
     pub(super) fn request_wave(&mut self) {
         self.program = None;
@@ -246,7 +247,8 @@ impl Player {
                     .label(label)
                     .text_size(px(crate::theme::size::TEXT_SMALL))
                     .text_color(if selected { m.text } else { m.text_faint })
-                    .when(selected, |b| b.bg(m.canvas).hover(|b| b.bg(m.canvas)))
+                    .selected(selected)
+                    .when(selected, |b| b.bg(m.canvas))
                     .disabled(!enabled)
                     .tooltip(tip)
                     .on_click(cx.listener(move |p, _, _, cx| p.set_perspective(full, cx))),

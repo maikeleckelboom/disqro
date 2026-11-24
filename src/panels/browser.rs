@@ -868,7 +868,7 @@ fn view_tabs(
                 } else {
                     transparent_black()
                 })
-                .when(selected, |b| b.bg(m.canvas).hover(|b| b.bg(m.canvas)))
+                .when(selected, |b| b.bg(m.canvas))
                 .child(Icon::new(icon).size(px(15.)).text_color(if selected {
                     m.text
                 } else {
