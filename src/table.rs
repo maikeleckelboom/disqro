@@ -2099,6 +2099,8 @@ impl TableDelegate for MusicTable {
         let this = cx.entity().downgrade();
         let clicked = self.rows.key(ix);
         let view = self.view;
+        let only_this_track = self.can_play_track_only(ix);
+        let (track_table, track_key) = (this.clone(), clicked.clone());
         menu.item(
             PopupMenuItem::new("Play")
                 .icon(IconName::Play)
@@ -2113,6 +2115,20 @@ impl TableDelegate for MusicTable {
                     });
                 }),
         )
+        .when(only_this_track, |menu| {
+            menu.item(
+                PopupMenuItem::new("Play Only This Track").on_click(move |_, _, cx| {
+                    let _ = track_table.update(cx, |t, cx| {
+                        let d = t.delegate();
+                        if d.view == view
+                            && let Some(i) = track_key.as_ref().and_then(|k| d.rows.position(k))
+                        {
+                            d.play_track(i, cx);
+                        }
+                    });
+                }),
+            )
+        })
         .item(
             PopupMenuItem::new(plural("Play Next", format!("Play {count} Tracks Next")))
                 .icon(IconName::ListStart)

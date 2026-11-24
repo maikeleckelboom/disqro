@@ -91,6 +91,28 @@ impl MusicTable {
     }
 
     pub fn play(&self, row: usize, cx: &mut App) {
+        self.play_row(row, false, cx);
+    }
+
+    pub(super) fn can_play_track_only(&self, row: usize) -> bool {
+        let scoped = match &self.rows.data {
+            Contents::Folder { .. } => self.folder_cd,
+            Contents::Library(page) => matches!(
+                page.scope,
+                Scope::Album(_) | Scope::Release(_) | Scope::Playlist(_)
+            ),
+        };
+        scoped
+            || self
+                .track(row)
+                .is_some_and(|track| track.has_disc_context())
+    }
+
+    pub(super) fn play_track(&self, row: usize, cx: &mut App) {
+        self.play_row(row, true, cx);
+    }
+
+    fn play_row(&self, row: usize, track_only: bool, cx: &mut App) {
         let Some(ix) = self.rows.sections.data_index(row) else {
             return;
         };
@@ -102,7 +124,7 @@ impl MusicTable {
                 } else {
                     DiscContext::Inferred
                 };
-                if !context.allows(track) {
+                if track_only || !context.allows(track) {
                     let single = Arc::from([track.clone()]);
                     self.player
                         .update(cx, |p, cx| p.command(Command::Play(single, 0), cx));
@@ -129,7 +151,7 @@ impl MusicTable {
                 let generation = request.next();
                 cx.spawn(async move |cx| {
                     let result: anyhow::Result<Command> = async {
-                        if scope.keys_are_entries() {
+                        if !track_only && scope.keys_are_entries() {
                             let store = catalog
                                 .read_with(cx, |c, _| c.handle())
                                 .ok_or_else(|| anyhow::anyhow!("The library is unavailable."))?;
@@ -181,7 +203,7 @@ impl MusicTable {
                         } else {
                             DiscContext::Inferred
                         };
-                        if !context.allows(&target) {
+                        if track_only || !context.allows(&target) {
                             return Ok(Command::Play(Arc::from([target]), 0));
                         }
                         let tracks =
