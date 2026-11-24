@@ -1113,6 +1113,9 @@ impl Browser {
                             return;
                         }
                         if let Some(root) = batch.root {
+                            // The scope remains reusable when individual
+                            // recordings or descendant folders report warnings.
+                            b.folder_ready = true;
                             b.folder_count = root.dirs.len();
                             let path = b.path.clone();
                             b.folders
@@ -1171,7 +1174,6 @@ impl Browser {
             let _ = this.update(cx, |b, cx| {
                 if b.generation == revision {
                     b.busy = false;
-                    b.folder_ready = b.notice.is_none();
                     b.folder_sequence = sequential::Sequence::folder(&b.programs);
                     if let Some(start) = timing {
                         eprintln!(
