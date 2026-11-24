@@ -26,7 +26,7 @@ A folder shows the recordings it holds, and Locations shows where it sits within
 
 Use **Ctrl+K** for indexed library search and **Ctrl+F** to filter the active browser. Each browser keeps its own history, selection and scroll position. **Previous CD** and **Next CD** follow authored order. The panel menu also offers release navigation and the track context menu offers **Play Only This Track**.
 
-The Windows workspace is a dock of panels: Music Browsers, Library, Locations, Queue and History, shown as tabs, side by side or stacked, with the player always along the bottom. Shared groups show tabs, and Customize Layout exposes the drag handles for single panels. The Queue control beside volume shows or hides the playback sidebar. It includes an editable address bar, native tray and media controls, real artwork, and waveform seeking, and remembers every panel, the queue, volume and columns. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
+The Windows workspace is a dock of panels: Music Browsers, Library, Locations, Queue and Queue History, shown as tabs, side by side or stacked, with the player always along the bottom. Shared groups show tabs, and Customize Layout exposes the drag handles for single panels. The Queue control beside volume shows or hides the playback sidebar. It includes an editable address bar, native tray and media controls, real artwork, and waveform seeking, and remembers every panel, the queue, volume and columns. [Collection controls, real Thunderdome measurements and screenshots](docs/recursive-collections.md) · [Listening workspace and playback coverage](docs/listening-workspace.md)
 
 In the bottom player, switch between **Track** and **Full CD** with the waveform control or **Alt+W**. Both views follow the same running playback position. [Waveform perspectives and Windows verification](docs/musical-timeline.md)
 
@@ -39,6 +39,8 @@ Choose **Workspace → New Spectrogram** for a scrolling frequency history. Free
 ## Persistent library and personal collections
 
 Open a music folder and choose **Add Folder to Library** in the Music Browser menu, or drag the folder from Locations onto Library. Its indexed albums and tracks appear in Library. Like a CUE chapter, give it up to five stars, or drag it to a playlist. A playlist can mix chapters and individual files from any folder. [Library controls, storage policy and Windows verification](docs/persistent-library.md)
+
+**Recently Played** in Library shows recordings with a qualified play. Open **Listening History** or **Listening Statistics** from the Workspace menu to inspect individual listens or activity over time. Right-click a track-table heading to show **Plays**, **Last Played**, or **Listening Time**. Listening History also lets you remove individual listens or clear the local history. [Listening accounting and Windows qualification](docs/listening-intelligence.md)
 
 ## Product direction
 
