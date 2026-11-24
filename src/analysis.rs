@@ -265,3 +265,7 @@ fn analyse(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "waveformBaselineTests.rs"]
+mod baseline_tests;
