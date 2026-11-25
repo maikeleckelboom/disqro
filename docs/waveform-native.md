@@ -48,3 +48,17 @@ merged until the engine is reachable by public builds (see the engine's
 Encoded evidence moved from `wave_evidence_v3` to `wave_evidence_v4`. The
 old table held rebuildable measurements only and is dropped on open; the
 library, queue and listening data are untouched.
+
+## Qualification of this integration
+
+The locked suite passes with 210 tests (11 waveform tests moved into the
+engine with the code they cover). The release build with `qualification`
+passed all 103 frozen Stroke views through `tools/qualifyWaveformParity.py
+checkpoint-gpu`, byte-identical to the previous production build, and the
+overview digests of `timeline_waveform_baseline` are unchanged on all
+fixtures. The private-desktop journeys passed: two decks, deck lifecycle
+with an injected target failure (recovered while paused in 505.5 ms), host
+device recreation, Full CD seeking across single-image and multi-file CDs
+including replay after natural completion, and audible scrubbing. Timing
+was measured while the machine was in interactive use and must be repeated
+on a quiet machine before merging.
