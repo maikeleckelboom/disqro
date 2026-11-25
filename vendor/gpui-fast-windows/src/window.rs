@@ -76,6 +76,7 @@ pub struct WindowsWindowState {
     /// progress and had to be deferred.
     pub force_render_pending: Cell<bool>,
     pub(crate) retained_present_pending: Cell<bool>,
+    pub(crate) pause_capture_hover: Cell<bool>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -187,6 +188,7 @@ impl WindowsWindowState {
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
             retained_present_pending: Cell::new(false),
+            pause_capture_hover: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -1544,6 +1546,27 @@ pub fn present_retained_next_frame(window: &Window) -> bool {
     let Some(inner) = from_gpui_window(window) else { return false };
     inner.state.retained_present_pending.set(true);
     true
+}
+
+/// Suppresses native hover reentry while an in-place gesture holds capture.
+pub struct CaptureHoverPause(Weak<WindowsWindowInner>);
+
+impl Drop for CaptureHoverPause {
+    fn drop(&mut self) {
+        if let Some(window) = self.0.upgrade() {
+            window.state.pause_capture_hover.set(false);
+        }
+    }
+}
+
+/// Capture delivers movement even outside the HWND. Restarting native hover
+/// tracking on those moves generates leave/reenter notifications and redraws.
+pub fn pause_hover_during_capture(window: &Window) -> Option<CaptureHoverPause> {
+    let window = from_gpui_window(window)?;
+    if window.state.pause_capture_hover.replace(true) {
+        return None;
+    }
+    Some(CaptureHoverPause(Rc::downgrade(&window)))
 }
 
 /// Enters the normal device recovery path without resetting the system GPU.

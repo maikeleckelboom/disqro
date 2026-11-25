@@ -346,7 +346,9 @@ impl WindowsWindowInner {
     }
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
-        self.start_tracking_mouse(handle, TME_LEAVE);
+        if !self.state.pause_capture_hover.get() || unsafe { GetCapture() } != handle {
+            self.start_tracking_mouse(handle, TME_LEAVE);
+        }
         self.restore_cursor_after_hide();
 
         let x = lparam.signed_loword() as f32;

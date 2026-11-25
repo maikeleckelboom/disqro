@@ -29,6 +29,9 @@ mod clock;
 
 pub use crate::recording::Recording;
 pub(crate) use clock::Position as RendererPosition;
+
+#[path = "audioScrub.rs"]
+pub(crate) mod scrub;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub track: Option<Arc<Track>>,
@@ -49,6 +52,15 @@ pub struct Status {
     occurrence_revision: u64,
     seek_revision: u64,
     pub(crate) presentation: Option<Presentation>,
+    pub(crate) scrub: Option<ScrubPosition>,
+    pub(crate) scrub_error: Option<(u64, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ScrubPosition {
+    pub id: u64,
+    pub frame: f64,
+    pub was_playing: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +117,7 @@ pub(crate) struct WaveSeekAnchor {
 pub enum TransportState {
     Playing,
     Paused,
+    Scrubbing,
     Finished,
     Stopped,
 }
@@ -120,7 +133,9 @@ impl Status {
     }
 
     pub fn playback_state(&self) -> TransportState {
-        if self.playing {
+        if self.scrub.is_some() {
+            TransportState::Scrubbing
+        } else if self.playing {
             TransportState::Playing
         } else if self.error.is_some() {
             TransportState::Stopped
@@ -155,6 +170,7 @@ pub enum Command {
         anchor: WaveSeekAnchor,
         frame: usize,
     },
+    BeginWaveScrub(Arc<scrub::Gesture>),
     SeekOnDisc {
         target: u64,
         source_revision: crate::cache::Stamp,
@@ -242,6 +258,7 @@ impl Pending {
 #[derive(Clone)]
 pub struct Commands {
     pub play_request: crate::store::Ticket,
+    pub(crate) scrub_control: Arc<scrub::Control>,
     tx: mpsc::SyncSender<Slot>,
     tail: Arc<Mutex<std::sync::Weak<Mutex<Option<Pending>>>>>,
     shared: Arc<Mutex<Shared>>,
@@ -263,6 +280,7 @@ impl Commands {
                 tx,
                 shared,
                 play_request: Default::default(),
+                scrub_control: Arc::default(),
                 tail: Default::default(),
             },
             rx,
@@ -344,6 +362,7 @@ impl Transport {
             queue: Arc::default(),
         }));
         let (tx, rx) = Commands::channel(latest.clone(), 64);
+        let scrub_control = tx.scrub_control.clone();
         let shared = latest.clone();
         let signal = crate::signal::SignalMonitor::default();
         let monitor = signal.clone();
@@ -357,13 +376,21 @@ impl Transport {
                     volume,
                     signal: monitor,
                     listening,
+                    scrub_control,
                     ..Default::default()
                 };
                 let mut published = 0;
                 let interval = Duration::from_millis(40);
                 let mut next_tick = std::time::Instant::now() + interval;
                 loop {
-                    let ticking = engine.status.playing || engine.pause_checkpoint;
+                    let scrubbing = engine.scrubbing.is_some();
+                    let interval = if scrubbing {
+                        Duration::from_millis(8)
+                    } else {
+                        interval
+                    };
+                    next_tick = next_tick.min(Instant::now() + interval);
+                    let ticking = engine.status.playing || engine.pause_checkpoint || scrubbing;
                     let command = if ticking
                         && !engine.retry_next
                         && std::time::Instant::now() >= next_tick
@@ -383,10 +410,13 @@ impl Transport {
                             Err(_) => break,
                         }
                     };
+                    let mut scrub_admission = false;
                     let result = match command {
                         Some(slot) => {
                             let pending =
                                 slot.lock().unwrap().take().expect("one transport consumer");
+                            scrub_admission =
+                                matches!(&pending.command, Command::BeginWaveScrub(_));
                             if pending.applies_to(engine.status.entry) {
                                 engine.command(pending.command)
                             } else {
@@ -421,6 +451,8 @@ impl Transport {
                         if significant || !is_quiet.load(Ordering::Relaxed) {
                             let _ = wake.try_send(());
                         }
+                    } else if scrub_admission {
+                        let _ = wake.try_send(());
                     }
                 }
                 engine.end_voice(End::Shutdown);
@@ -472,6 +504,9 @@ struct Engine {
     signal: crate::signal::SignalMonitor,
     device: Option<AudioManager<DefaultBackend>>,
     voice: Option<OutputVoice>,
+    scrub_control: Arc<scrub::Control>,
+    scrub_output: Option<scrub::Output>,
+    scrubbing: Option<ActiveScrub>,
     listening: Option<listening::Writer>,
     credit: Option<VoiceCredit>,
     occurrence: Option<(u64, listening::Occurrence)>,
@@ -497,6 +532,11 @@ struct Engine {
     volume: f32,
     status: Status,
     voice_id: u64,
+}
+
+struct ActiveScrub {
+    gesture: Arc<scrub::Gesture>,
+    updated: Instant,
 }
 
 const RENDERING: u8 = 1;
@@ -725,6 +765,7 @@ struct ObservedData {
     recording: Recording,
     start: usize,
     volume: f32,
+    fade_in: Option<Tween>,
     progress: Option<rtrb::Producer<RenderProgress>>,
 }
 
@@ -749,6 +790,7 @@ impl kira::sound::SoundData for ObservedData {
             failed: false,
         })
         .volume(db(self.volume))
+        .fade_in_tween(self.fade_in)
         .start_position(kira::sound::PlaybackPosition::Samples(self.start));
         let (inner, handle) = data.into_sound()?;
         Ok((
@@ -820,6 +862,35 @@ fn contiguous(a: &Track, b: &Track) -> bool {
             .zip(b.disc.as_ref())
             .is_some_and(|(a, b)| a.sheet == b.sheet && a.end == Some(b.start))
 }
+
+pub(crate) fn scrub_run(
+    queue: &Queue,
+    source: &crate::timeline::Source,
+) -> Option<(Range<usize>, Range<usize>)> {
+    let current = queue.current?;
+    let entries = &queue.entries;
+    let mut allowed = source.playable(&entries.get(current)?.track)?;
+    let mut first = current;
+    let mut last = current;
+    if queue.repeat != Repeat::One {
+        while let Some(previous) = first.checked_sub(1)
+            && contiguous(&entries[previous].track, &entries[first].track)
+            && let Some(range) = source.playable(&entries[previous].track)
+        {
+            first = previous;
+            allowed.start = range.start;
+        }
+        while let Some(next) = entries.get(last + 1)
+            && contiguous(&entries[last].track, &next.track)
+            && let Some(range) = source.playable(&next.track)
+        {
+            last += 1;
+            allowed.end = range.end;
+        }
+    }
+    Some((first..last + 1, allowed))
+}
+
 fn disc_start(t: &Track) -> u64 {
     t.disc.as_ref().map_or(0, |d| d.start)
 }
@@ -828,6 +899,7 @@ impl Engine {
         self.end_voice(End::Stopped);
     }
     fn end_voice(&mut self, reason: End) {
+        self.close_scrub();
         self.detach_voice();
         self.finish_occurrence(reason, listening::timestamp());
         self.suppressed_entry = None;
@@ -992,9 +1064,9 @@ impl Engine {
         {
             self.status.occurrence_revision += 1;
         }
-        self.start_voice(index, position)
+        self.start_voice(index, position, None)
     }
-    fn start_voice(&mut self, index: usize, position: f64) -> Result<()> {
+    fn start_voice(&mut self, index: usize, position: f64, fade_in: Option<Tween>) -> Result<()> {
         let entry = self
             .queue
             .entries
@@ -1062,18 +1134,7 @@ impl Engine {
         self.length = recording.num_frames() as f64 / f64::from(recording.sample_rate());
         let frame_count = recording.num_frames();
         let start = ((position * f64::from(self.rate)).round() as usize).min(frame_count - 1);
-        if self.device.is_none() {
-            self.device = Some(
-                AudioManager::<DefaultBackend>::new(AudioManagerSettings {
-                    main_track_builder: output_track(
-                        self.signal.clone(),
-                        cfg!(test) || silent_qualification(),
-                    ),
-                    ..Default::default()
-                })
-                .context("Windows audio output is unavailable")?,
-            );
-        }
+        self.ensure_output()?;
         self.signal.reset();
         let device = self.device.as_mut().unwrap();
         let progress = if self.listening.is_some() {
@@ -1118,6 +1179,7 @@ impl Engine {
             recording,
             start,
             volume: self.volume,
+            fade_in,
             progress,
         });
         let voice = played.map_err(|e| match e {
@@ -1308,7 +1370,7 @@ impl Engine {
         } else {
             0.
         };
-        self.start_voice(index, position)
+        self.start_voice(index, position, None)
     }
     fn pause(&mut self) {
         if let Some(v) = &mut self.voice
@@ -1325,6 +1387,20 @@ impl Engine {
     fn command(&mut self, c: Command) -> Result<()> {
         if let Some(d) = crate::diagnostics::get() {
             d.commands.fetch_add(1, Ordering::Relaxed);
+        }
+        let c = match c {
+            Command::BeginWaveScrub(gesture) => return self.begin_wave_scrub(gesture),
+            other => other,
+        };
+        if !matches!(
+            &c,
+            Command::Volume(_) | Command::Snapshot(_) | Command::EraseListening(..)
+        ) && self
+            .close_scrub()
+            .is_some_and(|gesture| gesture.was_playing)
+            && self.voice.is_some()
+        {
+            self.resume()?;
         }
         if self.retry_next {
             match c {
@@ -1344,7 +1420,8 @@ impl Engine {
             }
         }
         // Account for the old CUE program before changing the queue.
-        if self.voice.is_some()
+        if self.scrubbing.is_none()
+            && self.voice.is_some()
             && !matches!(
                 &c,
                 Command::Seek(_)
@@ -1408,6 +1485,9 @@ impl Engine {
             }
             Command::Volume(v) => {
                 self.volume = v.clamp(0., 1.);
+                if let Some(output) = &self.scrub_output {
+                    output.set_volume(self.volume);
+                }
                 if let Some(h) = &mut self.voice {
                     h.state
                         .volume
@@ -1585,6 +1665,7 @@ impl Engine {
                 self.queue.revision = revision;
                 self.select(self.queue.current, position);
             }
+            Command::BeginWaveScrub(_) => unreachable!("scrub admission was handled above"),
         }
         Ok(())
     }
@@ -1617,6 +1698,216 @@ impl Engine {
             && anchor.source.unchanged()
     }
 
+    fn ensure_output(&mut self) -> Result<()> {
+        if self.device.is_none() {
+            self.device = Some(
+                AudioManager::<DefaultBackend>::new(AudioManagerSettings {
+                    main_track_builder: output_track(
+                        self.signal.clone(),
+                        cfg!(test) || silent_qualification(),
+                    ),
+                    ..Default::default()
+                })
+                .context("Windows audio output is unavailable")?,
+            );
+        }
+        Ok(())
+    }
+
+    fn begin_wave_scrub(&mut self, gesture: Arc<scrub::Gesture>) -> Result<()> {
+        if self.retry_next
+            || self.scrubbing.is_some()
+            || self.status.error.is_some()
+            || self.status.playing != gesture.was_playing
+            || gesture.ending() == Some(scrub::End::Cancel)
+            || !self.accepts_wave_seek(&gesture.anchor, gesture.origin.floor() as usize)
+            || !scrub_run(&self.queue, &gesture.anchor.source)
+                .is_some_and(|(_, bounds)| bounds == gesture.bounds)
+        {
+            gesture.close();
+            return Ok(());
+        }
+        if self.voice.is_some() {
+            let position = self.credit_output();
+            self.update_position(position.min(self.limit));
+            if self.status.playback_identity() != Some(gesture.anchor.identity)
+                || (self.status.playing && position >= self.limit)
+            {
+                gesture.close();
+                return Ok(());
+            }
+        }
+        if gesture.ending().is_none() {
+            let ready = self.ensure_output().and_then(|()| {
+                if self.scrub_output.is_none() {
+                    self.scrub_output = Some(scrub::Output::install(
+                        self.device.as_mut().unwrap(),
+                        self.scrub_control.clone(),
+                    )?);
+                }
+                Ok(())
+            });
+            if let Err(error) = ready {
+                self.status.scrub_error = Some((
+                    gesture.id,
+                    format!("Could not start waveform scrubbing ({error:#})."),
+                ));
+                gesture.close();
+                return Ok(());
+            }
+        }
+        if gesture.ending() == Some(scrub::End::Cancel) {
+            gesture.close();
+            return Ok(());
+        }
+        self.pause();
+        if let Some(output) = &mut self.scrub_output {
+            output.start(&gesture, self.volume);
+        }
+        self.status.scrub = Some(ScrubPosition {
+            id: gesture.id,
+            frame: gesture.frame().unwrap_or(gesture.origin),
+            was_playing: gesture.was_playing,
+        });
+        crate::diagnostics::stage(
+            crate::diagnostics::begin_stage(),
+            "wave_scrub_begin",
+            gesture.origin.to_bits(),
+            gesture.id,
+        );
+        self.scrubbing = Some(ActiveScrub {
+            gesture,
+            updated: Instant::now(),
+        });
+        self.update_scrub()
+    }
+
+    fn close_scrub(&mut self) -> Option<Arc<scrub::Gesture>> {
+        let active = self.scrubbing.take()?;
+        if let Some(output) = &self.scrub_output {
+            output.stop();
+        }
+        self.status.scrub = None;
+        active.gesture.close();
+        Some(active.gesture)
+    }
+
+    fn update_scrub(&mut self) -> Result<()> {
+        let Some(active) = &mut self.scrubbing else {
+            return Ok(());
+        };
+        let gesture = &active.gesture;
+        let ending = gesture.ending();
+        let invalid = self.status.playback_identity() != Some(gesture.anchor.identity)
+            || self.queue.revision != gesture.anchor.identity.queue;
+        let failed = self
+            .scrub_output
+            .as_ref()
+            .is_some_and(|output| output.failed(gesture.id));
+        if invalid || failed || ending.is_some() {
+            let frame = gesture.frame().unwrap_or(gesture.origin);
+            let gesture = self.close_scrub().unwrap();
+            if failed {
+                self.status.scrub_error = Some((
+                    gesture.id,
+                    "Could not read audio for waveform scrubbing.".into(),
+                ));
+            }
+            if invalid {
+                if gesture.was_playing && self.voice.is_some() {
+                    self.resume()?;
+                }
+                return Ok(());
+            }
+            if ending == Some(scrub::End::Release) && !failed {
+                return self.finish_wave_scrub(&gesture, frame);
+            }
+            if gesture.was_playing {
+                return self.finish_wave_scrub(&gesture, gesture.origin);
+            }
+            // A paused transport never moved. In particular, a naturally
+            // finished entry must stay at EOF rather than its last sample.
+            Self::trace_scrub_end(&gesture, gesture.origin.round() as usize);
+            return Ok(());
+        }
+        // The detail decks sample pointer motion without polling. The compact
+        // strip consumes a coalesced transport snapshot.
+        if active.updated.elapsed() >= Duration::from_millis(32)
+            && let Some(frame) = gesture.frame()
+        {
+            active.updated = Instant::now();
+            self.status.scrub = Some(ScrubPosition {
+                id: gesture.id,
+                frame,
+                was_playing: gesture.was_playing,
+            });
+        }
+        Ok(())
+    }
+
+    fn finish_wave_scrub(&mut self, gesture: &scrub::Gesture, frame: f64) -> Result<()> {
+        let source = &gesture.anchor.source;
+        if !self.accepts_wave_seek(&gesture.anchor, gesture.origin.floor() as usize) {
+            self.end_voice(End::SourceFailed);
+            return Ok(());
+        }
+        let Some((mut indices, bounds)) = scrub_run(&self.queue, source) else {
+            return Ok(());
+        };
+        if bounds != gesture.bounds {
+            return Ok(());
+        }
+        let frame = frame.round() as usize;
+        let Some((index, segment)) = indices.find_map(|index| {
+            let segment = source.playable(&self.queue.entries[index].track)?;
+            segment.contains(&frame).then_some((index, segment))
+        }) else {
+            return Ok(());
+        };
+        self.detach_voice();
+        self.flush_occurrence();
+        let destination = self.queue.entries[index].id;
+        if self.queue.current != Some(index)
+            || self
+                .occurrence
+                .as_ref()
+                .is_some_and(|(id, _)| *id != destination)
+        {
+            self.finish_occurrence(End::Replaced, listening::timestamp());
+            self.suppressed_entry = None;
+        }
+        self.status.seek_revision += 1;
+        let rate = f64::from(source.rate);
+        let position = (frame - segment.start) as f64 / rate;
+        if gesture.was_playing {
+            self.start_voice(
+                index,
+                position,
+                Some(Tween {
+                    duration: Duration::from_millis(3),
+                    ..Default::default()
+                }),
+            )?;
+        } else {
+            self.select(Some(index), 0.);
+            self.status.duration = segment.len() as f64 / rate;
+            self.status.position = position;
+            self.status.source_revision = Some(source.stamp.clone());
+            self.status.source_object = source.object;
+        }
+        Self::trace_scrub_end(gesture, frame);
+        Ok(())
+    }
+
+    fn trace_scrub_end(gesture: &scrub::Gesture, frame: usize) {
+        crate::diagnostics::stage(
+            crate::diagnostics::begin_stage(),
+            "wave_scrub_end",
+            frame as u64,
+            gesture.id,
+        );
+    }
+
     fn seek_to(&mut self, position: f64) -> Result<()> {
         if self.status.duration <= 0. {
             return Ok(());
@@ -1643,7 +1934,7 @@ impl Engine {
                 {
                     self.finish_occurrence(End::Replaced, listening::timestamp());
                 }
-                self.start_voice(i, position)?;
+                self.start_voice(i, position, None)?;
             }
         } else {
             let selected = self.queue.current;
@@ -1669,6 +1960,7 @@ impl Engine {
         let position = self.credit_output();
         self.update_position(position.min(self.limit));
         self.end_voice(End::OutputFailed);
+        self.scrub_output = None;
         self.device = None;
         self.discarded_errors = 0;
         Err(error).context("Windows audio output failed")
@@ -1680,6 +1972,27 @@ impl Engine {
             .and_then(|d| d.backend_mut().pop_error())
         {
             self.output_error(error)?;
+        }
+        self.update_scrub()?;
+        if self.scrubbing.is_some() {
+            // The normal voice can still commit the tail of its pause ramp,
+            // even across a CUE boundary. Credit those blocks without moving
+            // the selected occurrence before the scrub is committed.
+            if self.pause_checkpoint {
+                self.credit_output();
+                if let Some(voice) = &self.voice
+                    && !voice.state().is_advancing()
+                {
+                    self.pause_checkpoint = false;
+                    if let Some(error) = voice.pop_error() {
+                        self.end_voice(End::SourceFailed);
+                        self.status.error = Some(format!("Cannot play the recording: {error}"));
+                    } else {
+                        self.flush_occurrence();
+                    }
+                }
+            }
+            return Ok(());
         }
         if !self.status.playing {
             if self.pause_checkpoint {

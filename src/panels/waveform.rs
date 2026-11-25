@@ -28,13 +28,17 @@ use std::{
     time::Instant,
 };
 
+#[path = "waveformScrub.rs"]
+mod scrub;
+use scrub::Press;
+
 pub static TYPE: PanelType = PanelType {
     key: "disqro.waveform",
     title: "Waveform",
     icon: IconName::AudioLines,
     instances: Instances::Multiple,
     home: Home::Main,
-    build: |services, _, _, cx| Rc::new(cx.new(|cx| Waveform::new(services, cx))),
+    build: |services, _, window, cx| Rc::new(cx.new(|cx| Waveform::new(services, window, cx))),
 };
 
 /// All decks in the workspace use one native frame request. Motion updates
@@ -45,10 +49,38 @@ pub(crate) struct Motion(Rc<RefCell<MotionState>>);
 #[derive(Default)]
 struct MotionState {
     panels: Vec<WeakEntity<Waveform>>,
+    presented: Vec<WeakEntity<Waveform>>,
     armed: bool,
 }
 
 impl Motion {
+    fn set_presented(&self, panel: WeakEntity<Waveform>, presented: bool) {
+        let mut state = self.0.borrow_mut();
+        if presented {
+            state.presented.push(panel);
+        } else {
+            state
+                .presented
+                .retain(|view| view.entity_id() != panel.entity_id());
+            state
+                .panels
+                .retain(|view| view.entity_id() != panel.entity_id());
+        }
+    }
+
+    fn follow_scrub(&self, owner: EntityId, window: &mut Window, cx: &App) {
+        let presented = self.0.borrow().presented.clone();
+        for panel in presented {
+            if panel.entity_id() == owner
+                || panel
+                    .upgrade()
+                    .is_some_and(|view| view.read(cx).position.inspecting.is_none())
+            {
+                self.request(panel, window);
+            }
+        }
+    }
+
     fn request(&self, panel: WeakEntity<Waveform>, window: &mut Window) {
         let mut state = self.0.borrow_mut();
         if !state
@@ -69,7 +101,11 @@ impl Motion {
         let motion = self.clone();
         crate::diagnostics::stage(start, "wave_request", 0, 0);
         window.on_next_frame(move |window, cx| {
-            let panels = std::mem::take(&mut *motion.0.borrow_mut()).panels;
+            let panels = {
+                let mut state = motion.0.borrow_mut();
+                state.armed = false;
+                std::mem::take(&mut state.panels)
+            };
             let now = Instant::now();
             let start = crate::diagnostics::begin_stage();
             let count = panels.len() as u64;
@@ -135,32 +171,44 @@ impl Default for DeckPosition {
 }
 
 impl DeckPosition {
-    fn update(&mut self, track: &WaveTrack, at: Instant) -> bool {
+    fn update(&mut self, track: &WaveTrack, at: Instant, grabbed: bool) -> bool {
         if self.source.as_ref() != Some(&track.source) {
             self.source = Some(track.source.clone());
             self.inspecting = None;
             self.last = None;
         }
-        let previous = self
-            .last
-            .filter(|(identity, _)| track.identity.continues(*identity));
-        let sample = track.position(at);
-        let mut frame = sample.map_or_else(
-            || previous.map_or(track.frame as f64, |(_, frame)| frame),
-            |p| p.frame,
-        );
-        if let Some((_, previous)) = previous {
-            frame = frame.max(previous);
-        }
-        frame = frame.clamp(0., track.source.frames.saturating_sub(1) as f64);
-        if let (Some(d), Some(sample)) = (crate::diagnostics::get(), sample) {
-            d.wave_clock_age_us
-                .fetch_max(sample.observation_age_ns / 1000, Relaxed);
-        }
-        self.last = Some((track.identity, frame));
+        let (frame, advancing, observed_frame) = if let Some(target) = track.scrub_frame {
+            (target, false, target)
+        } else {
+            let previous = self
+                .last
+                .filter(|(identity, _)| track.identity.continues(*identity));
+            let sample = track.position(at);
+            let previous_frame = previous.map(|(_, frame)| frame);
+            let mut frame =
+                sample.map_or_else(|| previous_frame.unwrap_or(track.frame as f64), |p| p.frame);
+            if let Some(previous) = previous_frame {
+                frame = frame.max(previous);
+            }
+            frame = frame.clamp(0., track.source.frames.saturating_sub(1) as f64);
+            if let (Some(d), Some(sample)) = (crate::diagnostics::get(), sample) {
+                d.wave_clock_age_us
+                    .fetch_max(sample.observation_age_ns / 1000, Relaxed);
+            }
+            self.last = Some((track.identity, frame));
+            (
+                frame,
+                track.playing || sample.is_some_and(|p| p.advancing),
+                sample.map_or(f64::NAN, |sample| sample.frame),
+            )
+        };
         let rate = f64::from(track.source.rate);
         self.viewport = Viewport::centered(
-            self.inspecting.unwrap_or(frame),
+            if grabbed {
+                frame
+            } else {
+                self.inspecting.unwrap_or(frame)
+            },
             (self.seconds * rate).clamp(32., DETAIL_SECONDS * rate),
         );
         if let Some(at) = crate::diagnostics::begin_stage() {
@@ -168,10 +216,10 @@ impl DeckPosition {
                 Some(at),
                 "wave_deck_position",
                 self.viewport.frame_at(0.5).to_bits(),
-                sample.map_or(f64::NAN, |sample| sample.frame).to_bits(),
+                observed_frame.to_bits(),
             );
         }
-        self.inspecting.is_none() && (track.playing || sample.is_some_and(|p| p.advancing))
+        self.inspecting.is_none() && advancing
     }
 }
 
@@ -188,23 +236,38 @@ struct Waveform {
     texture: Texture,
     input_at: Option<Instant>,
     zoom_label: Option<Task<()>>,
+    press: Option<Press>,
+    capture_watch: Option<Task<()>>,
 }
 
 impl Waveform {
-    fn new(services: &Services, cx: &mut Context<Self>) -> Self {
-        cx.subscribe(&services.player, |panel, player, event, cx| {
-            if panel.presented
-                && (matches!(event, PlayerEvent::WaveChanged)
-                    || (matches!(event, PlayerEvent::WaveEvidence)
-                        && (!player.read(cx).status.playing
-                            || panel.position.inspecting.is_some())))
-            {
-                if let Some(d) = crate::diagnostics::get() {
-                    d.wave_invalidations.fetch_add(1, Relaxed);
-                }
-                cx.notify();
+    fn new(services: &Services, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_window_activation(window, |panel, window, cx| {
+            if !window.is_window_active() {
+                panel.cancel_press(window, cx);
             }
         })
+        .detach();
+        cx.subscribe_in(
+            &services.player,
+            window,
+            |panel, player, event, window, cx| {
+                if matches!(event, PlayerEvent::WaveChanged) && panel.scrub_ended() {
+                    panel.cancel_press(window, cx);
+                }
+                if panel.presented
+                    && (matches!(event, PlayerEvent::WaveChanged)
+                        || (matches!(event, PlayerEvent::WaveEvidence)
+                            && (!player.read(cx).status.playing
+                                || panel.position.inspecting.is_some())))
+                {
+                    if let Some(d) = crate::diagnostics::get() {
+                        d.wave_invalidations.fetch_add(1, Relaxed);
+                    }
+                    cx.notify();
+                }
+            },
+        )
         .detach();
         Self {
             player: services.player.clone(),
@@ -219,10 +282,16 @@ impl Waveform {
             texture: Default::default(),
             input_at: None,
             zoom_label: None,
+            press: None,
+            capture_watch: None,
         }
     }
 
     fn wheel(&mut self, e: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.press.is_some() {
+            cx.stop_propagation();
+            return;
+        }
         let (Some(track), Some(layout)) = (self.player.read(cx).wave_track(), self.layout.get())
         else {
             return;
@@ -230,7 +299,7 @@ impl Waveform {
         if !self.presented || layout.scale != window.scale_factor() {
             return;
         }
-        self.position.update(&track, Instant::now());
+        self.position.update(&track, Instant::now(), false);
         self.input_at = crate::diagnostics::get().map(|_| Instant::now());
         let delta = e.delta.pixel_delta(px(40.));
         let (dx, dy) = (f64::from(f32::from(delta.x)), f64::from(f32::from(delta.y)));
@@ -359,6 +428,8 @@ impl Waveform {
         self.displayed.borrow_mut().take();
         self.zoom_label = None;
         self.input_at = None;
+        self.press = None;
+        self.capture_watch = None;
     }
 
     fn animate(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -377,7 +448,8 @@ impl Waveform {
             cx.notify();
             return false;
         }
-        let moving = self.position.update(&track, now);
+        let grabbed = self.grabbed();
+        let moving = self.position.update(&track, now, grabbed);
         let start = crate::diagnostics::begin_stage();
         let (surface, evidence, coverage) = self.prepare(&track, Some(layout), true);
         let status = Self::coverage(coverage, track.source.available);
@@ -408,6 +480,14 @@ impl Waveform {
                     surface.viewport.frame_at(0.5).to_bits(),
                     surface.viewport.span.to_bits(),
                 );
+                if track.scrub_frame.is_some() && (self.position.inspecting.is_none() || grabbed) {
+                    crate::diagnostics::stage(
+                        crate::diagnostics::begin_stage(),
+                        "wave_scrub_draw",
+                        surface.viewport.frame_at(0.5).to_bits(),
+                        cx.entity_id().as_u64(),
+                    );
+                }
                 *self.displayed.borrow_mut() = track.seek.map(|anchor| Displayed {
                     anchor,
                     viewport: surface.viewport,
@@ -415,6 +495,14 @@ impl Waveform {
                 });
             }
             if self.coverage != status || !ready {
+                if track.scrub_frame.is_some() {
+                    crate::diagnostics::stage(
+                        crate::diagnostics::begin_stage(),
+                        "wave_scrub_layout",
+                        u64::from(ready),
+                        0,
+                    );
+                }
                 cx.notify();
             }
             moving && ready
@@ -444,6 +532,7 @@ impl PaneContent for Entity<Waveform> {
     fn set_presented(&self, presented: bool, cx: &mut App) {
         self.update(cx, |panel, cx| {
             panel.presented = presented;
+            panel.motion.set_presented(cx.weak_entity(), presented);
             if !presented {
                 panel.release_surface();
             }
@@ -458,7 +547,13 @@ impl Render for Waveform {
         let layout = v_flex()
             .size_full()
             .bg(material.canvas)
-            .track_focus(&self.focus);
+            .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && panel.cancel_press(window, cx) {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }));
         let Some(track) = self.player.read(cx).wave_track() else {
             self.release_surface();
             return layout.child(
@@ -468,7 +563,8 @@ impl Render for Waveform {
                     .child("Play a recording to see its waveform."),
             );
         };
-        let moving = self.position.update(&track, Instant::now());
+        let grabbed = self.grabbed();
+        let moving = self.position.update(&track, Instant::now(), grabbed);
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
         self.coverage = Self::coverage(coverage, track.source.available);
@@ -490,7 +586,7 @@ impl Render for Waveform {
         let panel = cx.weak_entity();
         let texture = self.texture.clone();
         let input = self.input_at.take();
-        let inspecting = self.position.inspecting.is_some();
+        let inspecting = self.position.inspecting.is_some() && !grabbed;
         layout
             .child(
                 h_flex()
@@ -536,7 +632,8 @@ impl Render for Waveform {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .cursor_pointer()
+                    .when(grabbed, |viewport| viewport.cursor_grabbing())
+                    .when(!grabbed, |viewport| viewport.cursor_grab())
                     .child(
                         canvas(
                             |_, _, _| (),
@@ -544,6 +641,7 @@ impl Render for Waveform {
                                 if !active {
                                     return;
                                 }
+                                Self::listen_for_scrub(&panel, window);
                                 let _timer = crate::diagnostics::Timer::measure(|d| &d.paint_us);
                                 if let Some(d) = crate::diagnostics::get() {
                                     d.frames.fetch_add(1, Relaxed);
@@ -624,29 +722,7 @@ impl Render for Waveform {
                             }),
                     )
                     .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|panel, event: &MouseDownEvent, window, cx| {
-                            if !panel.presented {
-                                return;
-                            }
-                            panel.focus.focus(window, cx);
-                            let target = panel
-                                .displayed
-                                .borrow()
-                                .as_ref()
-                                .filter(|shown| shown.layout.scale == window.scale_factor())
-                                .and_then(|shown| shown.seek(event.position.x));
-                            if let Some((anchor, frame)) = target
-                                && panel.player.update(cx, |player, cx| {
-                                    player.seek_wave_track(anchor, frame, cx)
-                                })
-                            {
-                                panel.position.inspecting = None;
-                                cx.notify();
-                            }
-                        }),
-                    ),
+                    .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down)),
             )
     }
 }

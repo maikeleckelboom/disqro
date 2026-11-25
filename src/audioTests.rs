@@ -65,6 +65,270 @@ fn read_all(dec: &mut Recording) -> Vec<Frame> {
 }
 
 #[test]
+fn scrub_renders_decoded_pcm_in_both_directions_and_reaches_silence() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("scrub.wav");
+    fixture(&source, 48_000, 48_000);
+    let track = Arc::new(Track::file(source));
+    let program = crate::timeline::Program::resolve(&track, DiscContext::default(), None).unwrap();
+    let segment = &program.segments[0];
+    let output_source = segment.source.clone();
+    let control: Arc<scrub::Control> = Arc::default();
+    let gesture = scrub::Gesture::new(
+        control.clone(),
+        WaveSeekAnchor {
+            identity: PlaybackIdentity {
+                entry: 1,
+                occurrence: 1,
+                seek: 0,
+                voice: None,
+                queue: 1,
+            },
+            source: output_source,
+            playable: segment.frames.clone(),
+            sheet: None,
+        },
+        16_020.,
+        false,
+        segment.frames.clone(),
+    );
+    let mut device = AudioManager::<Capture>::new(AudioManagerSettings::default()).unwrap();
+    let mut sound = scrub::Output::install(&mut device, control).unwrap();
+    sound.start(&gesture, 1.);
+    let first = 16_020;
+    let last = first + 750; // crosses a separately decoded PCM page
+    let mut read = || {
+        let mut block = [0.; 256];
+        render(&mut device, &mut block);
+        *block.as_chunks::<2>().0.as_array::<128>().unwrap()
+    };
+    let mut heard = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        gesture.move_to(last as f64, first as f64, 48_000., Instant::now());
+        let block = read();
+        if let Some(first_sample) = block.iter().position(|frame| *frame != [0.; 2]) {
+            heard.extend_from_slice(&block[first_sample..]);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!heard.is_empty(), "decoded samples never reached the mixer");
+    for _ in 0..8 {
+        heard.extend(read());
+    }
+    let expected = |frame| samples(frame).map(|sample| f32::from(sample) / 32768.);
+    for (offset, &actual) in heard[160..700].iter().enumerate() {
+        let i = 160 + offset;
+        assert_eq!(actual, expected(first + i), "forward source frame {i}");
+    }
+    assert!(heard[910..].iter().all(|frame| *frame == [0.; 2]));
+
+    gesture.move_to(first as f64, last as f64, -48_000., Instant::now());
+    let reversed: Vec<_> = (0..8).flat_map(|_| read()).collect();
+    for (offset, &actual) in reversed[160..700].iter().enumerate() {
+        let i = 160 + offset;
+        assert_eq!(actual, expected(last - i), "reverse source frame {i}");
+    }
+
+    gesture.move_to(first as f64 + 300.5, first as f64, 24_000., Instant::now());
+    let slowed: Vec<_> = (0..7).flat_map(|_| read()).collect();
+    for (offset, &actual) in slowed[160..580].iter().enumerate() {
+        let i = 160 + offset;
+        let a = expected(first + i / 2);
+        let b = expected(first + i / 2 + 1);
+        let want = if i % 2 == 0 {
+            a
+        } else {
+            [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+        };
+        assert_eq!(actual, want, "interpolated source frame {i}");
+    }
+    assert!(read().iter().all(|frame| *frame == [0.; 2]));
+}
+
+#[test]
+fn scrub_keeps_queue_occurrences_and_listening_separate_until_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    let sheet = dir.path().join("disc.cue");
+    fixture(&path, 48_000, 144_000);
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+    )
+    .unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let program =
+        crate::timeline::Program::resolve(&tracks[0], DiscContext::Selected, None).unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let (writer, _) = listening::Writer::spawn(database.clone());
+    let mut engine = Engine {
+        listening: Some(writer.clone()),
+        ..Engine::default()
+    };
+    let unrelated = Arc::new(Track::file(dir.path().join("another.wav")));
+    engine
+        .queue
+        .replace(tracks.iter().cloned().chain([unrelated]).collect(), 0);
+    engine.select(Some(0), 0.5);
+    engine.refresh_flags();
+    let make_gesture = |engine: &Engine, index: usize, origin: f64| {
+        let segment = &program.segments[index];
+        let (_, bounds) = scrub_run(&engine.queue, &segment.source).unwrap();
+        Arc::new(scrub::Gesture::new(
+            engine.scrub_control.clone(),
+            WaveSeekAnchor {
+                identity: engine.status.playback_identity().unwrap(),
+                source: segment.source.clone(),
+                playable: segment.frames.clone(),
+                sheet: program.sheet.clone(),
+            },
+            origin,
+            false,
+            bounds,
+        ))
+    };
+    let gesture = make_gesture(&engine, 0, 24_000.);
+    assert_eq!(gesture.bounds, 0..144_000);
+    engine.scrubbing = Some(ActiveScrub {
+        gesture: gesture.clone(),
+        updated: Instant::now() - Duration::from_millis(33),
+    });
+    engine.group = vec![
+        Chapter {
+            id: engine.queue.entries[0].id,
+            offset: 0.,
+        },
+        Chapter {
+            id: engine.queue.entries[1].id,
+            offset: 1.,
+        },
+    ];
+    engine.limit = 3.;
+    engine.pause_checkpoint = true;
+    engine.voice = Some(OutputVoice {
+        state: Arc::new(OutputState {
+            cursor: AtomicUsize::new(48_010),
+            state: AtomicU8::new(PlaybackState::Paused as u8),
+            ..Default::default()
+        }),
+        rate: 48_000.,
+        clock: Arc::new(clock::Clock::new(0)),
+    });
+    engine.command(Command::Volume(0.5)).unwrap();
+    engine.tick().unwrap();
+    assert_eq!(engine.queue.current, Some(0));
+    assert!(!engine.pause_checkpoint && !gesture.closed());
+
+    for (from, to) in [(24_000., 120_000.), (120_000., 15_000.), (15_000., 72_000.)] {
+        gesture.move_to(to, from, (to - from) * 50., Instant::now());
+        engine.update_scrub().unwrap();
+        assert_eq!(engine.queue.current, Some(0));
+        assert!(engine.occurrence.is_none());
+    }
+    gesture.finish(scrub::End::Release);
+    engine.update_scrub().unwrap();
+    assert!(gesture.closed());
+    assert_eq!(engine.queue.current, Some(1));
+    assert_eq!(engine.status.position, 0.5);
+    assert!(!engine.status.playing && engine.voice.is_none());
+    assert_eq!(engine.status.playback_state(), TransportState::Paused);
+    engine.refresh_flags();
+
+    let reverse = make_gesture(&engine, 1, 72_000.);
+    reverse.move_to(12_000., 72_000., -60_000., Instant::now());
+    reverse.finish(scrub::End::Release);
+    engine
+        .command(Command::BeginWaveScrub(reverse.clone()))
+        .unwrap();
+    assert!(reverse.closed());
+    assert_eq!(engine.queue.current, Some(0));
+    assert_eq!(engine.status.position, 0.25);
+    engine.refresh_flags();
+
+    let stale = make_gesture(&engine, 0, 12_000.);
+    stale.move_to(72_000., 12_000., 60_000., Instant::now());
+    stale.finish(scrub::End::Release);
+    engine.command(Command::Repeat(Repeat::One)).unwrap();
+    engine.refresh_flags();
+    assert_eq!(
+        scrub_run(&engine.queue, &stale.anchor.source).unwrap().1,
+        0..48_000
+    );
+    engine
+        .command(Command::BeginWaveScrub(stale.clone()))
+        .unwrap();
+    assert!(stale.closed());
+    assert_eq!(engine.queue.current, Some(0));
+    assert_eq!(engine.status.position, 0.25);
+
+    let canceled = make_gesture(&engine, 0, 12_000.);
+    canceled.move_to(24_000., 12_000., 60_000., Instant::now());
+    engine.scrubbing = Some(ActiveScrub {
+        gesture: canceled.clone(),
+        updated: Instant::now(),
+    });
+    engine.command(Command::ClearUpcoming).unwrap();
+    assert!(canceled.closed());
+    assert_eq!(engine.status.position, 0.25);
+    engine.refresh_flags();
+
+    // Escape from a scrub entered after natural completion must preserve EOF
+    // and the identity that makes the next Play a new occurrence.
+    engine.status.duration = 1.;
+    engine.status.position = 1.;
+    let finished_identity = engine.status.playback_identity();
+    let finished = make_gesture(&engine, 0, 47_999.);
+    finished.move_to(24_000., 47_999., -60_000., Instant::now());
+    engine.scrubbing = Some(ActiveScrub {
+        gesture: finished.clone(),
+        updated: Instant::now(),
+    });
+    finished.finish(scrub::End::Cancel);
+    engine.update_scrub().unwrap();
+    assert!(finished.closed());
+    assert_eq!(engine.status.position, 1.);
+    assert_eq!(engine.status.playback_state(), TransportState::Finished);
+    assert_eq!(engine.status.playback_identity(), finished_identity);
+    engine.status.position = 0.25;
+
+    let old_sheet = make_gesture(&engine, 0, 12_000.);
+    old_sheet.move_to(24_000., 12_000., 60_000., Instant::now());
+    old_sheet.finish(scrub::End::Release);
+    let changed_sheet = std::fs::read_to_string(&sheet).unwrap() + "\nREM revised\n";
+    std::fs::write(&sheet, changed_sheet).unwrap();
+    engine
+        .command(Command::BeginWaveScrub(old_sheet.clone()))
+        .unwrap();
+    assert!(old_sheet.closed());
+    assert_eq!(engine.status.position, 0.25);
+
+    let interrupted = make_gesture(&engine, 0, 12_000.);
+    engine.scrubbing = Some(ActiveScrub {
+        gesture: interrupted.clone(),
+        updated: Instant::now(),
+    });
+    let error = kira::backend::cpal::cpal::Error::new(
+        kira::backend::cpal::cpal::ErrorKind::DeviceNotAvailable,
+    );
+    assert!(engine.output_error(error).is_err());
+    assert!(interrupted.closed());
+    assert!(!engine.status.playing);
+
+    writer.barrier().unwrap();
+    let history = crate::store::Store::open(&database)
+        .unwrap()
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert!(history.is_empty());
+}
+
+#[test]
 fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
     check_chapter_render(false);
 }
@@ -98,6 +362,7 @@ fn check_chapter_render(silent: bool) {
             recording,
             start: 0,
             volume: 1.,
+            fade_in: None,
             progress: None,
         })
         .unwrap();
@@ -167,6 +432,7 @@ fn renderer_credits_a_drained_tail_and_never_the_truncated_remainder() {
                 recording,
                 start: 0,
                 volume: 1.,
+                fade_in: None,
                 progress: Some(publish),
             })
             .unwrap();
