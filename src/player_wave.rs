@@ -1,4 +1,5 @@
 use super::*;
+use crate::audio::{PlaybackIdentity, Presentation, WaveSeekAnchor};
 use crate::theme::Materials;
 use crate::{
     overview::{self, Surface, Texture, Viewport},
@@ -14,19 +15,23 @@ pub(crate) struct WaveTrack {
     pub source: Arc<Source>,
     pub range: std::ops::Range<usize>,
     pub overview: Arc<Page>,
-    frame: usize,
-    observed: Instant,
+    pub identity: PlaybackIdentity,
+    pub seek: Option<WaveSeekAnchor>,
+    pub frame: usize,
+    presentation: Option<Presentation>,
     pub playing: bool,
 }
 
 impl WaveTrack {
-    pub fn current_frame(&self) -> f64 {
-        let advance = if self.playing {
-            self.observed.elapsed().as_secs_f64().min(0.04) * f64::from(self.source.rate)
-        } else {
-            0.0
-        };
-        (self.frame as f64 + advance).min(self.range.len().saturating_sub(1) as f64)
+    pub fn position(&self, at: Instant) -> Option<crate::audio::RendererPosition> {
+        self.presentation.as_ref().map_or(
+            Some(crate::audio::RendererPosition {
+                frame: self.frame as f64,
+                advancing: false,
+                observation_age_ns: 0,
+            }),
+            |clock| clock.position(at),
+        )
     }
 }
 
@@ -37,27 +42,42 @@ impl Player {
 
     pub(crate) fn wave_track(&self) -> Option<WaveTrack> {
         let index = self.segment?;
-        let segment = self.program.as_ref()?.segments.get(index)?;
+        let program = self.program.as_ref()?;
+        let segment = program.segments.get(index)?;
+        let identity = self.status.playback_identity()?;
+        let seek =
+            (segment.track.disc.is_none() || program.sheet.is_some()).then(|| WaveSeekAnchor {
+                identity,
+                source: segment.source.clone(),
+                playable: segment.frames.clone(),
+                sheet: program.sheet.clone(),
+            });
         Some(WaveTrack {
             generation: self.generation,
             source: segment.source.clone(),
             range: segment.frames.clone(),
             overview: self.shapes.get(index)?.track.clone(),
-            frame: segment.elapsed_frame(self.status.position) - segment.frames.start,
-            observed: self.wave_observed,
+            identity,
+            seek,
+            frame: segment.elapsed_frame(self.status.position),
+            presentation: self.status.presentation.clone(),
             playing: self.status.playing,
         })
     }
 
-    pub(crate) fn seek_wave_track(&mut self, frame: usize, cx: &mut Context<Self>) {
-        let Some((program, index)) = self.program.as_ref().zip(self.segment) else {
-            return;
-        };
-        let range = &program.segments[index].frames;
-        let absolute = range.start + frame.min(range.len() - 1);
-        if let Some(command) = self.target_frame(program, index, index, absolute) {
-            self.command(command, cx);
+    pub(crate) fn seek_wave_track(
+        &mut self,
+        anchor: WaveSeekAnchor,
+        frame: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.wave_track().and_then(|track| track.seek).as_ref() != Some(&anchor)
+            || !anchor.playable.contains(&frame)
+        {
+            return false;
         }
+        self.command(Command::SeekWave { anchor, frame }, cx);
+        true
     }
     pub(super) fn request_wave(&mut self) {
         self.program = None;
@@ -83,6 +103,10 @@ impl Player {
         if self.generation != generation {
             return;
         }
+        let structural = matches!(
+            event,
+            Update::Program(_) | Update::Changed | Update::Failed(_)
+        );
         match event {
             Update::Program(p) => {
                 self.segment = self.status.track.as_ref().and_then(|t| p.index(t));
@@ -101,6 +125,7 @@ impl Player {
                         self.generation = 0;
                         self.analysis.cancel();
                         self.unavailable = Some("Recording changed since playback began".into());
+                        cx.emit(PlayerEvent::WaveChanged);
                         cx.notify();
                         return;
                     }
@@ -128,9 +153,19 @@ impl Player {
             }
             Update::Failed(e) => self.unavailable = Some(e),
             Update::Changed => self.request_wave(),
-            Update::Detail => {}
+            Update::Detail => {
+                if self.visible {
+                    cx.emit(PlayerEvent::WaveEvidence);
+                }
+                return;
+            }
         }
         if self.visible {
+            cx.emit(if structural {
+                PlayerEvent::WaveChanged
+            } else {
+                PlayerEvent::WaveEvidence
+            });
             cx.notify()
         }
     }
@@ -245,7 +280,7 @@ impl Player {
         Some(Command::SeekOnDisc {
             target,
             source_revision: seg.source.stamp.clone(),
-            sheet_revision: p.sheet.as_ref().map(|(_, s)| s.clone()),
+            sheet_revision: p.sheet.as_ref().map(|(_, s)| s.stamp.clone()),
             revision: self.status.queue_revision,
             seconds: (frame - seg.frames.start) as f64 / f64::from(seg.source.rate),
             duration: seg.frames.len() as f64 / f64::from(seg.source.rate),

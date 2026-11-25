@@ -2,26 +2,27 @@
 use crate::{
     cache::Cache,
     timeline::Source,
-    waveform::{self, Evidence, Reader},
-    waveform_port_analysis::{EVIDENCE_FRAMES, LEAF, Plan, Spectrum},
+    waveform::{self, Evidence as RequestEvidence, Reader},
+    waveform_port_analysis::{EVIDENCE_FRAMES, LEAF, MAX_LEAF, Plan, Spectrum},
     waveform_render::Page,
 };
 use hashlink::LinkedHashMap;
 use kira::Frame;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap},
     ops::Range,
     sync::{Arc, Mutex, mpsc},
 };
 
 const SAMPLES: usize = 8192;
-const RESIDENT: usize = 64;
-const VIEW_TILES: usize = 32;
+const LEAVES_PER_TILE: usize = EVIDENCE_FRAMES / LEAF;
+const IDLE_BYTES: usize = 8 * 1024 * 1024;
+const IDLE_ENTRIES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Request {
     Samples(usize),
-    Evidence(Evidence),
+    Evidence(RequestEvidence),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -35,14 +36,33 @@ pub enum Tile {
     Samples { first: usize, samples: Vec<Frame> },
 }
 
+impl Tile {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Evidence(page) => page.bytes(),
+            Self::Samples { samples, .. } => std::mem::size_of_val(samples.as_slice()),
+        }
+    }
+}
+
 impl Key {
+    fn frames(&self) -> Range<usize> {
+        match &self.request {
+            Request::Samples(number) => {
+                number * SAMPLES..((number + 1) * SAMPLES).min(self.source.frames)
+            }
+            Request::Evidence(e) => {
+                e.playable.start + e.plan.start_frame..e.playable.start + e.plan.end_frame
+            }
+        }
+    }
+
     pub fn samples(source: &Arc<Source>, range: Range<usize>) -> Vec<Self> {
         let range = range.start.min(source.frames)..range.end.min(source.frames);
         if range.is_empty() || !source.available {
             return vec![];
         }
         (range.start / SAMPLES..=(range.end - 1) / SAMPLES)
-            .take(8)
             .map(|number| Self {
                 source: source.clone(),
                 request: Request::Samples(number),
@@ -62,15 +82,25 @@ impl Key {
             return vec![];
         }
         let fitted = matches!(source.rate, 44_100 | 48_000);
+        let visible_frames = (seconds * f64::from(source.rate)).ceil() as usize;
         let close = (8.0 / seconds).log2().clamp(0.0, 1.0);
         let columns = ((pixels * 10.0).clamp(128.0, 16384.0) * (1.0 + 3.0 * close))
             .ceil()
             .min(49152.0);
-        let tier = ((seconds * f64::from(source.rate) / (columns - 1.0))
-            .ceil()
-            .max(1.0) as usize)
+        let tier = visible_frames
+            .div_ceil((columns as usize).saturating_sub(1).max(1))
+            .clamp(1, MAX_LEAF)
             .next_power_of_two();
+        let leaf = tier.max(LEAF);
         let spectrum = Spectrum::available(source.rate, fitted);
+        // Keep fitted Stroke colour at its authored hop size. The other rates
+        // pool measured power when the span would exceed the colour budget.
+        let colour = if fitted {
+            256
+        } else {
+            range.len().div_ceil(24_576).max(256).next_power_of_two()
+        };
+        let size = (leaf * LEAVES_PER_TILE).min(EVIDENCE_FRAMES * 4);
         let mut keys: Vec<_> = Self::pages(
             source,
             &playable,
@@ -78,14 +108,14 @@ impl Key {
             Plan {
                 start_frame: 0,
                 end_frame: 0,
-                frames_per_column: 256,
-                leaf_frames: Some(LEAF),
+                frames_per_column: colour,
+                leaf_frames: Some(leaf),
                 octave: spectrum,
                 overview: false,
                 fallback_energy: spectrum.is_none(),
                 preview: false,
             },
-            EVIDENCE_FRAMES,
+            size,
         )
         .collect();
         if tier < LEAF {
@@ -103,7 +133,7 @@ impl Key {
                     fallback_energy: false,
                     preview: false,
                 },
-                tier * 8192,
+                tier * LEAVES_PER_TILE,
             ));
         }
         keys
@@ -128,10 +158,9 @@ impl Key {
                 }
             })
             .filter(move |tile| (first..=last).contains(tile))
-            .take(VIEW_TILES)
             .map(move |tile| Self {
                 source: source.clone(),
-                request: Request::Evidence(Evidence {
+                request: Request::Evidence(RequestEvidence {
                     playable: playable.clone(),
                     plan: Plan {
                         start_frame: tile * size,
@@ -175,69 +204,117 @@ impl Key {
         };
         self.source == requested.source
             && held.playable == wanted.playable
-            && held.plan.fallback_energy == wanted.plan.fallback_energy
-            && held.plan.leaf_frames.is_some() == wanted.plan.leaf_frames.is_some()
             && held.plan.start_frame < wanted.plan.end_frame
             && wanted.plan.start_frame < held.plan.end_frame
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    pub exact: usize,
+    pub approximate: usize,
+    pub pending: usize,
+    pub unavailable: usize,
+}
+
+#[derive(Default)]
+pub struct Evidence {
+    pub tiles: Vec<Arc<Tile>>,
+    pub coverage: Coverage,
 }
 
 #[derive(Default)]
 pub struct Store {
     revision: u64,
     views: BTreeMap<u64, Vec<Key>>,
+    after: u64,
+    pins: HashMap<Key, usize>,
     entries: LinkedHashMap<Key, Option<Arc<Tile>>>,
 }
 
 impl Store {
     pub fn reset(&mut self, revision: u64) {
-        self.revision = revision;
-        self.views.clear();
-        self.entries.clear();
+        *self = Self {
+            revision,
+            ..Self::default()
+        };
     }
 
-    fn wanted(&self) -> impl Iterator<Item = &Key> {
-        let mut seen = HashSet::new();
-        // Give each view one tile before considering its next one.
-        (0..VIEW_TILES * 2)
-            .flat_map(|index| self.views.values().filter_map(move |keys| keys.get(index)))
-            .filter(move |&key| seen.insert(key))
-            .take(RESIDENT)
-    }
-
-    pub fn next(&self, revision: u64) -> Option<Key> {
+    pub fn next(&mut self, revision: u64) -> Option<Key> {
         if self.revision != revision {
             return None;
         }
-        self.wanted()
-            .find(|&key| !self.entries.contains_key(key))
-            .cloned()
+        use std::ops::Bound::{Excluded, Unbounded};
+        let (id, key) = self
+            .views
+            .range((Excluded(self.after), Unbounded))
+            .chain(self.views.range(..=self.after))
+            .find_map(|(&id, keys)| {
+                Some((
+                    id,
+                    keys.iter().find(|key| !self.entries.contains_key(*key))?,
+                ))
+            })?;
+        self.after = id;
+        Some(key.clone())
     }
 
     pub fn publish(&mut self, revision: u64, key: Key, value: Option<Tile>) -> bool {
         if self.revision != revision || self.entries.contains_key(&key) {
             return false;
         }
-        let wanted = self.wanted().any(|wanted| *wanted == key);
+        let wanted = self.pins.contains_key(&key);
         if !wanted && value.is_none() {
             return false;
         }
-        if self.entries.len() == RESIDENT {
-            let evicted = {
-                let wanted: HashSet<_> = self.wanted().collect();
-                self.entries
-                    .keys()
-                    .find(|key| !wanted.contains(key))
-                    .cloned()
-            };
-            if let Some(evicted) = evicted {
-                self.entries.remove(&evicted);
-            } else {
-                return false;
+        self.entries.insert(key, value.map(Arc::new));
+        self.trim();
+        wanted
+    }
+
+    fn trim(&mut self) {
+        let mut idle = 0;
+        let mut bytes = 0;
+        let mut expired = Vec::new();
+        for (key, tile) in self.entries.iter().rev() {
+            if !self.pins.contains_key(key) {
+                idle += 1;
+                bytes += tile.as_ref().map_or(0, |tile| tile.bytes());
+                if idle > IDLE_ENTRIES || bytes > IDLE_BYTES {
+                    expired.push(key.clone());
+                }
             }
         }
-        self.entries.insert(key, value.map(Arc::new));
-        wanted
+        for key in expired {
+            self.entries.remove(&key);
+        }
+    }
+
+    fn set_view(&mut self, id: u64, keys: Vec<Key>) -> bool {
+        if self.views.get(&id).map_or(&[][..], Vec::as_slice) == keys.as_slice() {
+            return false;
+        }
+        for key in &keys {
+            *self.pins.entry(key.clone()).or_default() += 1;
+            self.entries.to_back(key);
+        }
+        if let Some(previous) = self.views.remove(&id) {
+            for key in &previous {
+                let pins = self.pins.get_mut(key).unwrap();
+                *pins -= 1;
+                if *pins == 0 {
+                    self.pins.remove(key);
+                    if self.entries.get(key).is_some_and(Option::is_none) {
+                        self.entries.remove(key);
+                    }
+                }
+            }
+        }
+        if !keys.is_empty() {
+            self.views.insert(id, keys);
+        }
+        self.trim();
+        true
     }
 }
 
@@ -252,37 +329,70 @@ impl View {
         Self { id, shared, wake }
     }
 
-    pub fn tiles(&self, revision: u64, keys: Vec<Key>) -> Vec<Arc<Tile>> {
+    pub fn tiles(&self, revision: u64, keys: Vec<Key>, preview: Option<Range<usize>>) -> Evidence {
         let mut store = self.shared.lock().unwrap();
         if store.revision != revision {
-            return vec![];
+            return Evidence::default();
         }
-        let mut tiles: Vec<_> = keys
-            .iter()
-            .filter_map(|key| store.entries.get(key)?.clone())
-            .collect();
-        tiles.extend(store.entries.iter().filter_map(|(held, tile)| {
-            (!keys.contains(held) && keys.iter().any(|wanted| held.complements(wanted)))
-                .then(|| tile.clone())
-                .flatten()
-        }));
-        tiles.sort_unstable_by_key(|tile| match tile.as_ref() {
-            Tile::Evidence(page) => (page.start_frame, page.frames_per_column),
-            Tile::Samples { first, .. } => (*first, 0),
-        });
-        if store.views.get(&self.id) != Some(&keys) {
-            if keys.is_empty() {
-                store.views.remove(&self.id);
-            } else {
-                store.views.insert(self.id, keys);
+        let mut evidence = Evidence::default();
+        let mut missing = Vec::new();
+        for key in &keys {
+            match store.entries.get(key) {
+                Some(Some(tile)) => {
+                    evidence.tiles.push(tile.clone());
+                    evidence.coverage.exact += 1;
+                    continue;
+                }
+                Some(None) => evidence.coverage.unavailable += 1,
+                None => evidence.coverage.pending += 1,
             }
+            missing.push(key);
+        }
+        // Keep useful prior tiers while a new tier arrives. Cap the extra
+        // projection work regardless of how many other panels hold evidence.
+        let alternatives: Vec<_> = store
+            .entries
+            .iter()
+            .rev()
+            .take(if missing.is_empty() {
+                0
+            } else {
+                store.entries.len()
+            })
+            .filter_map(|(key, tile)| Some((key, tile.as_ref()?)))
+            .filter(|(held, _)| {
+                !keys.contains(held) && missing.iter().any(|wanted| held.complements(wanted))
+            })
+            .take(8)
+            .collect();
+        evidence.coverage.approximate = missing
+            .iter()
+            .filter(|wanted| {
+                preview.as_ref().is_some_and(|preview| {
+                    let frames = wanted.frames();
+                    frames.start < preview.end && preview.start < frames.end
+                }) || alternatives
+                    .iter()
+                    .any(|(held, _)| held.complements(wanted))
+            })
+            .count();
+        evidence
+            .tiles
+            .extend(alternatives.into_iter().map(|(_, tile)| tile.clone()));
+        evidence
+            .tiles
+            .sort_unstable_by_key(|tile| match tile.as_ref() {
+                Tile::Evidence(page) => (page.start_frame, page.frames_per_column),
+                Tile::Samples { first, .. } => (*first, 0),
+            });
+        if store.set_view(self.id, keys) {
             let _ = self.wake.try_send(());
         }
-        tiles
+        evidence
     }
 
     pub fn clear(&self) {
-        if self.shared.lock().unwrap().views.remove(&self.id).is_some() {
+        if self.shared.lock().unwrap().set_view(self.id, vec![]) {
             let _ = self.wake.try_send(());
         }
     }
@@ -322,8 +432,14 @@ mod tests {
         );
         let keys = Key::samples(&source(), 0..SAMPLES);
         shared.lock().unwrap().reset(1);
-        assert!(first.tiles(1, keys.clone()).is_empty());
-        assert!(second.tiles(1, keys.clone()).is_empty());
+        assert_eq!(first.tiles(1, keys.clone(), None).coverage.pending, 1);
+        assert_eq!(
+            second
+                .tiles(1, keys.clone(), Some(0..SAMPLES))
+                .coverage
+                .approximate,
+            1
+        );
         let key = shared.lock().unwrap().next(1).unwrap();
         assert!(shared.lock().unwrap().publish(
             1,
@@ -334,9 +450,10 @@ mod tests {
             })
         ));
         assert!(shared.lock().unwrap().next(1).is_none());
-        let first = first.tiles(1, keys.clone());
-        let second = second.tiles(1, keys);
-        assert!(Arc::ptr_eq(&first[0], &second[0]));
+        let first = first.tiles(1, keys.clone(), None);
+        let second = second.tiles(1, keys, None);
+        assert_eq!(first.coverage.exact, 1);
+        assert!(Arc::ptr_eq(&first.tiles[0], &second.tiles[0]));
         let mut store = shared.lock().unwrap();
         store.reset(2);
         assert!(!store.publish(1, key, None));
@@ -353,15 +470,103 @@ mod tests {
         );
         let source = source();
         let visible = Key::samples(&source, 0..SAMPLES);
-        first.tiles(0, visible.clone());
-        for number in 0..RESIDENT * 2 {
+        first.tiles(0, visible.clone(), None);
+        for number in 0..source.frames / SAMPLES {
             let start = number * SAMPLES;
-            second.tiles(0, Key::samples(&source, start..start + SAMPLES));
+            second.tiles(0, Key::samples(&source, start..start + SAMPLES), None);
             let mut store = shared.lock().unwrap();
             let key = store.next(0).unwrap();
             assert!(store.publish(0, key, None));
             assert!(store.entries.contains_key(&visible[0]));
-            assert!(store.entries.len() <= RESIDENT);
+            assert!(store.entries.len() <= IDLE_ENTRIES + 2);
         }
+    }
+
+    #[test]
+    fn wide_views_cover_all_supported_rates_and_unaligned_ranges() {
+        use crate::waveform_render::SUPPORTED_OCTAVE_RATES;
+        for rate in SUPPORTED_OCTAVE_RATES.into_iter().chain([8400, 384_000]) {
+            let source = Arc::new(Source {
+                rate,
+                frames: rate as usize * 347 + 3907,
+                ..Arc::try_unwrap(source()).unwrap()
+            });
+            let region = 117..source.frames - 309;
+            let span = rate as usize * 120;
+            for width in [460., 1920., 5120., 16_384.] {
+                for visible in [
+                    0..span,
+                    123_293..123_293 + span,
+                    region.len() - span..region.len(),
+                ] {
+                    let keys = Key::geometry(&source, region.clone(), visible.clone(), width, 120.);
+                    let mut tiles: Vec<_> = keys
+                        .iter()
+                        .filter_map(|key| match &key.request {
+                            Request::Evidence(e) => Some(e),
+                            _ => None,
+                        })
+                        .collect();
+                    tiles.sort_by_key(|e| e.plan.start_frame);
+                    assert!(tiles.first().unwrap().plan.start_frame <= visible.start);
+                    assert!(tiles.last().unwrap().plan.end_frame >= visible.end);
+                    assert!(
+                        tiles
+                            .windows(2)
+                            .all(|pair| pair[0].plan.end_frame == pair[1].plan.start_frame)
+                    );
+                    assert!(
+                        tiles
+                            .iter()
+                            .all(|e| e.playable == region && e.plan.leaf_frames.unwrap() >= LEAF)
+                    );
+                    if rate >= 96_000 {
+                        assert!(tiles.iter().all(|e| e.plan.leaf_frames.unwrap() > LEAF));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_visible_panel_can_finish_while_another_panel_moves() {
+        let mut source = Arc::try_unwrap(source()).unwrap();
+        source.rate = 192_000;
+        source.frames = source.rate as usize * 1600;
+        let source = Arc::new(source);
+        let mut store = Store::default();
+        // More distinct pinned requests than the former process-wide limit.
+        for panel in 0..8 {
+            let start = panel as usize * source.rate as usize * 145;
+            store.set_view(
+                panel,
+                Key::geometry(
+                    &source,
+                    0..source.frames,
+                    start..start + source.rate as usize * 120,
+                    5120.,
+                    120.,
+                ),
+            );
+        }
+        let visible = store.pins.len();
+        assert!(visible > 64);
+        for step in 0..visible * 2 {
+            let start = (step + 31_000) * SAMPLES;
+            store.set_view(8, Key::samples(&source, start..start + SAMPLES));
+            let key = store.next(0).unwrap();
+            assert!(store.publish(0, key, Some(Tile::Evidence(Arc::default()))));
+        }
+        assert!(
+            store
+                .views
+                .range(..8)
+                .flat_map(|(_, keys)| keys)
+                .all(|key| store.entries.contains_key(key))
+        );
+        for id in 0..=8 {
+            store.set_view(id, vec![]);
+        }
+        assert!(store.entries.len() <= IDLE_ENTRIES);
     }
 }

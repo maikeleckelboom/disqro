@@ -13,6 +13,7 @@ use filters::FallbackSpectrum;
 use octave::{OCTAVE_BANDS, OctaveAnalyzer, OctaveDescriptor, SOURCE_HOP};
 
 pub const LEAF: usize = 32;
+pub const MAX_LEAF: usize = 65_536;
 pub const OVERVIEW_COLUMNS: usize = 4096;
 pub const EVIDENCE_FRAMES: usize = 262_144;
 pub const DETAIL_SECONDS: f64 = 120.0;
@@ -76,6 +77,10 @@ impl Plan {
 
     pub fn measure_columns(self) -> bool {
         self.leaf_frames.is_none() || self.fallback_energy
+    }
+
+    pub fn pool_octaves(self) -> bool {
+        self.overview || (self.octave == Some(Spectrum::Blackman) && self.frames_per_column > 256)
     }
 }
 
@@ -161,6 +166,7 @@ struct OctaveWork {
     sums: Vec<[f64; OCTAVE_BANDS]>,
     powers: Vec<f64>,
     width: usize,
+    start: usize,
 }
 
 impl OctaveWork {
@@ -170,8 +176,11 @@ impl OctaveWork {
             sums,
             powers,
             width,
+            start,
         } = self;
-        analyzer.push(frames, |cell| collect_octave(cell, sums, powers, *width))?;
+        analyzer.push(frames, |cell| {
+            collect_octave(cell, sums, powers, *width, *start)
+        })?;
         Ok(())
     }
 
@@ -181,13 +190,13 @@ impl OctaveWork {
             sums,
             powers,
             width,
-            ..
+            start,
         } = self;
         ensure!(
             analyzer.is_complete() || reached_eof,
             "Missing octave lookahead"
         );
-        analyzer.finish(|cell| collect_octave(cell, sums, powers, *width))?;
+        analyzer.finish(|cell| collect_octave(cell, sums, powers, *width, *start))?;
         Ok(())
     }
 }
@@ -197,12 +206,13 @@ fn collect_octave(
     sums: &mut [[f64; OCTAVE_BANDS]],
     powers: &mut Vec<f64>,
     width: usize,
+    first: usize,
 ) {
     if sums.is_empty() {
         powers.extend(cell.energy);
     } else {
-        let mut start = cell.start_frame as usize;
-        let end = cell.end_frame as usize;
+        let mut start = (cell.start_frame as usize).saturating_sub(first);
+        let end = (cell.end_frame as usize).saturating_sub(first);
         while start < end {
             let i = start / width;
             let until = end.min((i + 1) * width);
@@ -240,7 +250,7 @@ impl Analyzer {
         );
         ensure!(
             plan.leaf_frames
-                .is_none_or(|w| w.is_power_of_two() && w <= LEAF),
+                .is_none_or(|w| w.is_power_of_two() && w <= MAX_LEAF),
             "Invalid source leaf width"
         );
         let start = plan.start_frame;
@@ -272,13 +282,14 @@ impl Analyzer {
                         plan.end_frame as u64,
                         variant == Spectrum::Stroke,
                     )?,
-                    sums: if plan.overview {
+                    sums: if plan.pool_octaves() {
                         vec![[0.0; OCTAVE_BANDS]; columns]
                     } else {
                         vec![]
                     },
                     powers: Vec::new(),
                     width,
+                    start,
                 })
             })
             .transpose()?;
@@ -405,7 +416,7 @@ impl Analyzer {
         self.column.flush(&mut self.page, self.geometry.as_deref());
         if let Some(mut octave) = self.octave {
             octave.finish(self.cursor == self.source_frames)?;
-            if self.plan.overview {
+            if self.plan.pool_octaves() {
                 let width = self.page.frames_per_column;
                 self.page.spectrum = Some(
                     octave
@@ -434,18 +445,20 @@ impl Analyzer {
 
 fn push_leaf(leaves: &mut SourceDetail, bounds: [f32; 2], position: usize) {
     let index = (position - leaves.first_cell_frame) / leaves.leaf_frames;
-    let offset = (position % leaves.leaf_frames) as u16;
+    let offset = (position % leaves.leaf_frames) as u32;
+    let bits = leaves.offset_bits();
+    let mask = (1 << bits) - 1;
     if index == leaves.offsets.len() {
         leaves.bounds.extend(bounds);
-        leaves.offsets.push(offset | (offset << 5));
+        leaves.offsets.push(offset | (offset << bits));
     } else {
         if bounds[0] < leaves.bounds[index * 2] {
             leaves.bounds[index * 2] = bounds[0];
-            leaves.offsets[index] = (leaves.offsets[index] & !31) | offset;
+            leaves.offsets[index] = (leaves.offsets[index] & !mask) | offset;
         }
         if bounds[1] > leaves.bounds[index * 2 + 1] {
             leaves.bounds[index * 2 + 1] = bounds[1];
-            leaves.offsets[index] = (leaves.offsets[index] & 31) | (offset << 5);
+            leaves.offsets[index] = (leaves.offsets[index] & mask) | (offset << bits);
         }
     }
 }

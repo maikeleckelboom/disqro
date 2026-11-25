@@ -124,11 +124,14 @@ impl Evidence {
         serde_json::to_vec(&(self.playable.start, self.playable.end, self.plan)).unwrap()
     }
 
-    // Persist overview and coarse leaves. Fine evidence lives in the bounded detail store.
+    // Persist overview and reusable base tiers. Close-up refinements stay in memory.
     fn persistent(&self) -> bool {
         !self.plan.preview
             && (self.plan.overview
-                || self.plan.leaf_frames == Some(crate::waveform_port_analysis::LEAF))
+                || self
+                    .plan
+                    .leaf_frames
+                    .is_some_and(|w| w >= crate::waveform_port_analysis::LEAF))
     }
 
     pub fn begin(&self, rate: u32) -> Result<Analyzer> {
@@ -142,7 +145,7 @@ pub fn cached(source: &Source, request: &Evidence, cache: Option<&Cache>) -> Opt
     }
     let db = &cache?.0;
     let mut query = db.prepare_cached(
-        "SELECT data FROM wave_evidence_v2 WHERE path=? AND requested=? AND size=? AND modified=? AND volume IS ? AND object IS ?",
+        "SELECT data FROM wave_evidence_v3 WHERE path=? AND requested=? AND size=? AND modified=? AND volume IS ? AND object IS ?",
     ).ok()?;
     let page = query
         .query_row(
@@ -180,7 +183,7 @@ pub fn store(source: &Source, request: &Evidence, cache: Option<&Cache>, page: &
     let bytes = format::encode(page);
     if let Ok(tx) = cache.0.unchecked_transaction() {
         let written = tx.prepare_cached(
-            "INSERT OR REPLACE INTO wave_evidence_v2(path,requested,size,modified,volume,object,data) VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO wave_evidence_v3(path,requested,size,modified,volume,object,data) VALUES(?,?,?,?,?,?,?)",
         ).and_then(|mut query| query.execute(params![
             source.path.as_os_str().as_encoded_bytes(), request.cache_key(), source.stamp.bytes,
             source.stamp.modified, source.object.map(|p| p.0), source.object.map(|p| p.1), bytes
@@ -188,7 +191,7 @@ pub fn store(source: &Source, request: &Evidence, cache: Option<&Cache>, page: &
         if written.is_ok() {
             if tx.last_insert_rowid() % 32 == 0 {
                 let _ = tx.execute(
-                    "DELETE FROM wave_evidence_v2 WHERE rowid <= (SELECT rowid FROM wave_evidence_v2 ORDER BY rowid DESC LIMIT 1 OFFSET 512)",
+                    "DELETE FROM wave_evidence_v3 WHERE rowid <= (SELECT rowid FROM wave_evidence_v3 ORDER BY rowid DESC LIMIT 1 OFFSET 512)",
                     [],
                 );
             }

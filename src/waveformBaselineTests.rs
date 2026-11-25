@@ -70,15 +70,22 @@ fn timeline_waveform_baseline() {
         let detail_time = std::cell::Cell::new(None);
         let measure_detail = env::var_os("DISQRO_WAVE_BASELINE_DETAIL").is_some();
         let segment = &program.segments[active];
-        let span = (segment.source.rate as usize * 8).min(segment.frames.len());
-        let first = (segment.frames.len() - span) / 2;
+        let surface = crate::overview::Surface {
+            role: crate::waveform_render::Role::Detail,
+            rate: segment.source.rate,
+            playable: 0..segment.source.frames,
+            viewport: crate::overview::Viewport::centered(
+                (segment.frames.start + segment.frames.len() / 2) as f64,
+                f64::from(segment.source.rate) * 8.,
+            ),
+        };
         let detail = if measure_detail {
             crate::waveform_detail::Key::geometry(
                 &segment.source,
-                segment.frames.clone(),
-                first.saturating_sub(2048)..(first + span + 2048).min(segment.frames.len()),
+                surface.playable.clone(),
+                surface.view(1920, 1).required_range(),
                 1920.0,
-                span as f64 / f64::from(segment.source.rate),
+                8.,
             )
         } else {
             vec![]
@@ -144,7 +151,7 @@ fn timeline_waveform_baseline() {
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v2", [], |row| {
+            .query_row("SELECT count(*) FROM wave_evidence_v3", [], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -165,7 +172,7 @@ fn timeline_waveform_baseline() {
             cache
                 .0
                 .query_row(
-                    "SELECT sum(length(data)) FROM wave_evidence_v2",
+                    "SELECT sum(length(data)) FROM wave_evidence_v3",
                     [],
                     |row| row.get::<_, i64>(0)
                 )

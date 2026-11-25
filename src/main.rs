@@ -96,6 +96,8 @@ fn main() {
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 window.set_window_title("Disqro");
+                #[cfg(all(windows, feature = "qualification"))]
+                waveform_render::gpu::qualification::exercise_device_recreation(window, cx);
                 cx.new(|cx| Workspace::new(arg, window, cx))
             })
             .expect("Could not open Disqro");

@@ -120,10 +120,10 @@ impl Page {
         let count = (plan.end_frame - base).div_ceil(256);
         let octave = if plan.octave.is_none() {
             self.spectrum.is_none() && self.octave.is_none()
-        } else if plan.overview {
+        } else if plan.pool_octaves() {
             self.spectrum
                 .as_ref()
-                .is_some_and(|s| s.len() == columns * 8)
+                .is_some_and(|s| s.len() == frames.div_ceil(width) * 8)
                 && self.octave.is_none()
         } else {
             self.octave
@@ -143,7 +143,19 @@ pub struct SourceDetail {
     pub frame_count: usize,
     pub leaf_frames: usize,
     pub bounds: Vec<f32>,
-    pub offsets: Vec<u16>,
+    pub offsets: Vec<u32>,
+}
+
+impl SourceDetail {
+    pub fn offset_bits(&self) -> u32 {
+        self.leaf_frames.ilog2().max(5)
+    }
+
+    pub fn witnesses(&self, index: usize) -> [u32; 2] {
+        let bits = self.offset_bits();
+        let word = self.offsets[index];
+        [word & ((1 << bits) - 1), word >> bits]
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -488,7 +500,12 @@ fn octave_nodes<'a>(
     overview: bool,
 ) -> impl FnMut(i64) -> Option<[f64; 3]> + 'a {
     let mut pages = pages.to_vec();
-    pages.sort_by_key(|p| p.start_frame);
+    pages.sort_by_key(|p| {
+        (
+            p.spectrum.as_ref().map_or(256, |_| p.frames_per_column),
+            p.start_frame,
+        )
+    });
     let rate = f64::from(view.rate);
     let step = octave_step(rate, view.pixels_per_second);
     let lag = rate * 0.001;

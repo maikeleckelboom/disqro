@@ -252,10 +252,20 @@ impl DirectXRenderer {
 
     #[inline]
     pub(crate) fn present(&mut self) -> Result<()> {
-        let chain = &self.resources.as_ref().expect("resources missing").swap_chain;
+        let resources = self.resources.as_ref().expect("resources missing");
+        let chain = &resources.swap_chain;
+        #[cfg(feature = "frame-statistics")]
+        if let (Some(devices), Some(target)) = (&self.devices, &resources.render_target_view) {
+            crate::frame_statistics::marker(&devices.device_context, target, self.height);
+        }
+        #[cfg(feature = "frame-statistics")]
+        let start = crate::frame_statistics::start();
         let result = unsafe { chain.Present(0, DXGI_PRESENT(0)) };
         #[cfg(feature = "frame-statistics")]
-        crate::frame_statistics::record(chain, self.hwnd, result.0);
+        {
+            crate::frame_statistics::stage(start, "present", self.hwnd.0 as u64, result.0 as u32 as u64);
+            crate::frame_statistics::record(chain, self.hwnd, result.0);
+        }
         #[cfg(test)]
         crate::fast::native_tests::present(self.hwnd, self.direct_composition.is_some(), result.0);
         result.ok().context("Presenting swap chain failed")
@@ -348,7 +358,11 @@ impl DirectXRenderer {
             // and so likely do not have the textures anymore that are required for drawing
             return Ok(());
         }
+        #[cfg(feature = "frame-statistics")]
+        let start = crate::frame_statistics::start();
         self.render(scene, background_appearance)?;
+        #[cfg(feature = "frame-statistics")]
+        crate::frame_statistics::stage(start, "composition", self.hwnd.0 as u64, 0);
         self.present()
     }
 

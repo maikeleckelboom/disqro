@@ -71,12 +71,16 @@ pub(super) fn decode(mut data: &[u8], request: &Evidence) -> Option<Page> {
             frame_count: count,
             leaf_frames: leaf,
             bounds: read(&mut data, leaves * 2, f32::from_le_bytes)?,
-            offsets: read(&mut data, leaves, u16::from_le_bytes)?,
+            offsets: read(&mut data, leaves, u32::from_le_bytes)?,
         });
     }
     if let Some(spectrum) = plan.octave {
-        if plan.overview {
-            page.spectrum = Some(read(&mut data, columns * 8, f64::from_le_bytes)?);
+        if plan.pool_octaves() {
+            page.spectrum = Some(read(
+                &mut data,
+                count.div_ceil(width) * 8,
+                f64::from_le_bytes,
+            )?);
         } else {
             let base = plan.start_frame / 256 * 256;
             let cells = (plan.end_frame - base).div_ceil(256);

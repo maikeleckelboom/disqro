@@ -31,6 +31,8 @@ pub struct Counters {
     pub wave_gpu_draws: AtomicU64,
     pub wave_gpu_errors: AtomicU64,
     pub wave_input_us: AtomicU64,
+    pub wave_clock_age_us: AtomicU64,
+    pub wave_invalidations: AtomicU64,
     pub ui_us: AtomicU64,
     pub changes: AtomicU64,
     pub switch_us: AtomicU64,
@@ -71,6 +73,20 @@ static COUNTERS: OnceLock<Counters> = OnceLock::new();
 pub fn get() -> Option<&'static Counters> {
     COUNTERS.get()
 }
+
+pub fn begin_stage() -> Option<i64> {
+    #[cfg(all(windows, feature = "qualification"))]
+    return gpui_windows_gpu::frame_statistics::start();
+    #[cfg(not(all(windows, feature = "qualification")))]
+    None
+}
+
+pub fn stage(start: Option<i64>, label: &'static str, value: u64, detail: u64) {
+    #[cfg(all(windows, feature = "qualification"))]
+    gpui_windows_gpu::frame_statistics::stage(start, label, value, detail);
+    #[cfg(not(all(windows, feature = "qualification")))]
+    let _ = (start, label, value, detail);
+}
 pub fn start() {
     let Some(path) = std::env::var_os("DISQRO_PLAYBACK_TRACE") else {
         return;
@@ -101,6 +117,8 @@ pub fn start() {
                 ("wave_gpu_draws", &d.wave_gpu_draws),
                 ("wave_gpu_errors", &d.wave_gpu_errors),
                 ("wave_input_to_draw_max_us", &d.wave_input_us),
+                ("wave_clock_observation_age_max_us", &d.wave_clock_age_us),
+                ("wave_entity_invalidations", &d.wave_invalidations),
                 ("player_render_max_us", &d.ui_us),
                 ("switches", &d.changes),
                 ("switch_max_us", &d.switch_us),

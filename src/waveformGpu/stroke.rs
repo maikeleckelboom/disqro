@@ -20,11 +20,13 @@ struct Resident {
     page: Weak<Page>,
     words: Range<u32>,
     spectrum: Option<(u32, u32, u32)>, // first hop, end hop, starting word
+    draw: u64,
 }
 
 struct Samples {
     tile: Weak<Tile>,
     words: Range<u32>,
+    draw: u64,
 }
 
 pub(super) struct Detail {
@@ -37,6 +39,7 @@ pub(super) struct Detail {
     projection: Buffer,
     cores: Buffer,
     columns: Buffer,
+    draw: u64,
     #[cfg(any(test, feature = "qualification"))]
     pub(super) origin: usize,
 }
@@ -83,6 +86,7 @@ impl Detail {
                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                 WORD_BYTES,
             )?,
+            draw: 0,
             #[cfg(any(test, feature = "qualification"))]
             origin: 0,
         })
@@ -96,14 +100,9 @@ impl Detail {
         let mut data = Vec::<Word>::new();
         if let Some(detail) = &page.source_detail {
             data.reserve(detail.offsets.len());
-            for (&[lo, hi], &offset) in detail.bounds.as_chunks::<2>().0.iter().zip(&detail.offsets)
-            {
-                data.push([
-                    lo.to_bits(),
-                    hi.to_bits(),
-                    u32::from(offset & 31),
-                    u32::from((offset >> 5) & 31),
-                ]);
+            for (index, &[lo, hi]) in detail.bounds.as_chunks::<2>().0.iter().enumerate() {
+                let [first, last] = detail.witnesses(index);
+                data.push([lo.to_bits(), hi.to_bits(), first, last]);
             }
         } else {
             data.reserve(page.extrema.len());
@@ -145,6 +144,7 @@ impl Detail {
             Resident {
                 page: Arc::downgrade(page),
                 words,
+                draw: self.draw,
                 spectrum: spectrum.map(|(start, end, offset)| (start, end, first + offset)),
             },
         );
@@ -155,19 +155,13 @@ impl Detail {
         self.resident.retain(|_, item| item.page.strong_count() > 0);
         self.samples.retain(|_, item| item.tile.strong_count() > 0);
         let words = data.len() as u32;
-        let mut occupied: Vec<_> = self
-            .resident
-            .values()
-            .map(|p| p.words.clone())
-            .chain(self.samples.values().map(|s| s.words.clone()))
-            .collect();
-        occupied.sort_unstable_by_key(|r| r.start);
-        let mut first = 0;
-        for used in occupied {
-            if first + words <= used.start {
-                break;
-            }
-            first = used.end;
+        let mut first = self.free_words(words);
+        if (first + words) * WORD_BYTES > RESIDENT_BYTES {
+            // Residency on the CPU pins every visible view. The shared GPU
+            // heap can recycle uploads belonging to other draws under pressure.
+            self.resident.retain(|_, page| page.draw == self.draw);
+            self.samples.retain(|_, tile| tile.draw == self.draw);
+            first = self.free_words(words);
         }
         ensure!(
             (first + words) * WORD_BYTES <= RESIDENT_BYTES,
@@ -188,6 +182,24 @@ impl Detail {
         Ok(first..first + words)
     }
 
+    fn free_words(&self, words: u32) -> u32 {
+        let mut occupied: Vec<_> = self
+            .resident
+            .values()
+            .map(|p| &p.words)
+            .chain(self.samples.values().map(|s| &s.words))
+            .collect();
+        occupied.sort_unstable_by_key(|r| r.start);
+        let mut first = 0;
+        for used in occupied {
+            if first + words <= used.start {
+                break;
+            }
+            first = used.end;
+        }
+        first
+    }
+
     pub fn prepare(
         &mut self,
         device: &ID3D11Device,
@@ -198,6 +210,17 @@ impl Detail {
         params: &mut Parameters,
     ) -> Result<()> {
         let pages = &input.pages;
+        self.draw += 1;
+        for page in pages {
+            if let Some(held) = self.resident.get_mut(&(Arc::as_ptr(page) as usize)) {
+                held.draw = self.draw;
+            }
+        }
+        for tile in &input.samples {
+            if let Some(held) = self.samples.get_mut(&(Arc::as_ptr(tile) as usize)) {
+                held.draw = self.draw;
+            }
+        }
         let rate = f64::from(view.rate);
         let partition = Partition::new(view.rate, view.pixels_per_second);
         let first_cell = partition.cell(view.first) - 1;
@@ -394,7 +417,7 @@ impl Detail {
         let bin = page.frames_per_column as f64;
         params.source[2] = columns.len() as u32;
         params.preview = [
-            ((view.first as f64 * frames_per_pixel) / bin) as f32,
+            ((view.first as f64 * frames_per_pixel - input.overview_start as f64) / bin) as f32,
             (frames_per_pixel / bin) as f32,
             (page.frame_count as f64 / bin) as f32,
             0.0,
@@ -441,6 +464,7 @@ impl Detail {
                     Samples {
                         tile: Arc::downgrade(tile),
                         words,
+                        draw: self.draw,
                     },
                 );
             }

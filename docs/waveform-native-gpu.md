@@ -1,8 +1,8 @@
 # Native Stroke waveform
 
-Disqro uses the accepted Dekzer Stroke appearance in the detailed Waveform panel and the compact Track and Full CD views. The detail deck holds the playhead at the center and scrolls source geometry underneath it. Follow mode zooms around the playhead. Panning holds an inspection position with pointer-anchored zoom. Clicking seeks through the existing transport at the exact decoded frame. **Follow playback** returns the deck to the playhead.
+Disqro uses the accepted Dekzer Stroke appearance in the detailed Waveform panel and the compact Track and Full CD views. The detail deck holds the playhead at the center and scrolls physical-source geometry underneath it. Each Waveform panel keeps its chosen zoom in seconds when playback moves to another recording. Adjacent CUE chapters in the same image share the source coordinates and resident detail pages. Follow mode zooms around the playhead. Panning holds an inspection position with pointer-anchored zoom. **Follow playback** returns the deck to the playhead.
 
-The detail projection uses the current viewport density on each draw. At three frames per device pixel the same Stroke view starts revealing separate left and right source-sample lines. The lines grow into the full presentation by 0.75 frames per pixel. They connect consecutive decoded samples and clip to the playable interval, including CUE joins.
+The detail projection uses the current viewport density on each draw. At three frames per device pixel the same Stroke view starts revealing separate left and right source-sample lines. The lines grow into the full presentation by 0.75 frames per pixel. They connect consecutive decoded samples within the physical source. A seek targets the logical interval drawn with the gesture and is checked again by the playback transport. Musical context outside that interval remains visible for inspection.
 
 ## Renderer
 
@@ -12,7 +12,7 @@ The Windows dependency graph has no active wgpu dependency. The checked-in backe
 
 The detail shader selects source-owned extrema from the finest held interval, folds the 44.1 and 48 kHz octave cells into Stroke colour, and evaluates the reference core and fringe coverage. The CPU supplies the reference f64-to-integer partition for the current viewport so large offsets retain the accepted boundary decisions. Compact overviews and other-rate palette pooling keep the reference f64 projection and send one-dimensional geometry or colour parameters to the shaders. The application has one device-owned set of pipelines and a 16 MiB detail evidence arena shared by all panels. Immutable pages and PCM tiles upload on admission. Device replacement invalidates the associated GPU state. Pixel and geometry readbacks live in the qualification build.
 
-The worker retains complementary evidence on bounded source tiles, including loaded finer pages during zoom reversals. A missing detail interval can use projected overview bins while evidence arrives. Missing and measured silence have distinct states. The overview starts with signed extrema and stereo RMS from decoded material. They become the geometry for the final spectral overview. The analyzer uses the existing planned real FFT and reuses overlapping resampled windows while retaining the reference power calculation. Fine analysis is scheduled for the visible detail range and held independently of whole-source overview work. SQLite stores packed, versioned evidence. The old waveform tables held derived data and are retired independently of library, queue, and listening data.
+The worker retains complementary evidence on bounded source tiles, including loaded pages during zoom reversals. A missing detail interval can use projected overview bins while evidence arrives. Missing and measured silence have distinct states. The overview starts with signed extrema and stereo RMS from decoded material. They become the geometry for the final spectral overview. The analyzer uses the existing planned real FFT and reuses overlapping resampled windows while retaining the reference power calculation. SQLite stores packed, versioned evidence. The old waveform tables held derived data and are retired independently of library, queue, and listening data. [Final hardening and Windows qualification](waveform-final-hardening.md)
 
 ## Visual qualification
 
@@ -75,7 +75,7 @@ The GPU timestamp run used 180 offscreen zoom updates per view with warm source 
 | 2 s at 1,920 × 166 | 0.06 / 0.09 / 0.10 ms | 0.15 / 0.19 / 2.98 ms | 5.44 ms |
 | 8 s at 2,560 × 420 | 0.08 / 0.11 / 0.14 ms | 0.10 / 0.13 / 0.16 ms | 4.15 ms |
 
-## Foreground display observations
+## Initial foreground display observations
 
 The foreground run used the 2560 × 1600 display at 240 Hz and 150% scaling. It used two detail panels, compact Full CD, a cold profile, and continuous muted playback. PresentMon could not start ETW under the standard account. DXGI reported a 4.167 ms refresh period in the foreground. The table counts distinct display updates observed by the swap-chain sampler. An observation can skip intervening display updates. The interval columns therefore describe the recorded gaps.
 

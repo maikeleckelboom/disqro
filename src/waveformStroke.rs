@@ -266,10 +266,9 @@ fn leaves(pages: &[&Page], origin: usize, lo: usize, hi: usize) -> Vec<Leaf> {
             let cell = base + index * leaf_width;
             let (from, to) = (cell.max(start), (cell + leaf_width).min(end));
             let (bounds, frames, endpoints) = if let Some(detail) = detail {
-                let offsets = usize::from(detail.offsets[index]);
                 (
                     [detail.bounds[index * 2], detail.bounds[index * 2 + 1]],
-                    [cell + (offsets & 31), cell + ((offsets >> 5) & 31)],
+                    detail.witnesses(index).map(|offset| cell + offset as usize),
                     None,
                 )
             } else {

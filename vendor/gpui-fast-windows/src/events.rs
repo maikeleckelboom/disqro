@@ -1391,12 +1391,17 @@ impl WindowsWindowInner {
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
+        let retained = self.state.retained_present_pending.take();
+        #[cfg(feature = "frame-statistics")]
+        let start = crate::frame_statistics::start();
         request_frame(RequestFrameOptions {
-            require_presentation: false,
+            require_presentation: retained,
             force_render,
             signal_at,
             signal_source,
         });
+        #[cfg(feature = "frame-statistics")]
+        crate::frame_statistics::stage(start, "window_frame", handle.0 as u64, u64::from(retained));
 
         self.state.callbacks.request_frame.set(Some(request_frame));
         self.update_ime_enabled(handle);

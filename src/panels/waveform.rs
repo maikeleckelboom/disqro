@@ -1,11 +1,13 @@
-//! The detail deck follows playback at a fixed centre. Panning holds a source
-//! position for inspection until the listener seeks or returns to playback.
+//! The detail deck follows a physical source at a fixed centre. Each instance
+//! owns its zoom and may hold a separate position for inspection.
 use super::{Home, Instances, PaneContent, PanelType, Services};
 use crate::{
+    audio::{PlaybackIdentity, WaveSeekAnchor},
     overview::{self, Surface, Texture, Viewport},
-    player::{Player, WaveTrack},
+    player::{Player, PlayerEvent, WaveTrack},
     theme::materials,
-    waveform_detail::{Key, Tile, View},
+    timeline::Source,
+    waveform_detail::{Coverage, Key, Tile, View},
     waveform_port_analysis::DETAIL_SECONDS,
     waveform_render::Role,
 };
@@ -19,7 +21,12 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::{Arc, atomic::Ordering::Relaxed},
+    time::Instant,
+};
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.waveform",
@@ -30,23 +37,163 @@ pub static TYPE: PanelType = PanelType {
     build: |services, _, _, cx| Rc::new(cx.new(|cx| Waveform::new(services, cx))),
 };
 
+/// All decks in the workspace use one native frame request. Motion updates
+/// textures the scene already references. Layout owns bounds and hit testing.
+#[derive(Clone, Default)]
+pub(crate) struct Motion(Rc<RefCell<MotionState>>);
+
+#[derive(Default)]
+struct MotionState {
+    panels: Vec<WeakEntity<Waveform>>,
+    armed: bool,
+}
+
+impl Motion {
+    fn request(&self, panel: WeakEntity<Waveform>, window: &mut Window) {
+        let mut state = self.0.borrow_mut();
+        if !state
+            .panels
+            .iter()
+            .any(|held| held.entity_id() == panel.entity_id())
+        {
+            state.panels.push(panel);
+        }
+        if state.armed {
+            return;
+        }
+        state.armed = true;
+        drop(state);
+        let start = crate::diagnostics::begin_stage();
+        #[cfg(windows)]
+        gpui_windows_gpu::present_retained_next_frame(window);
+        let motion = self.clone();
+        crate::diagnostics::stage(start, "wave_request", 0, 0);
+        window.on_next_frame(move |window, cx| {
+            let panels = std::mem::take(&mut *motion.0.borrow_mut()).panels;
+            let now = Instant::now();
+            let start = crate::diagnostics::begin_stage();
+            let count = panels.len() as u64;
+            for panel in panels {
+                let _ = panel.update(cx, |deck, cx| {
+                    if deck.animate(now, window, cx) {
+                        motion.request(cx.weak_entity(), window);
+                    }
+                });
+            }
+            crate::diagnostics::stage(start, "wave_frame", count, 0);
+        });
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Layout {
+    bounds: Bounds<Pixels>,
+    scale: f32,
+}
+
+impl Layout {
+    fn fraction(self, x: Pixels) -> f64 {
+        let width = f64::from(f32::from(self.bounds.size.width)).max(1.);
+        (f64::from(f32::from(x - self.bounds.origin.x)) / width).clamp(0., 1.)
+    }
+}
+
+struct Displayed {
+    anchor: WaveSeekAnchor,
+    viewport: Viewport,
+    layout: Layout,
+}
+
+impl Displayed {
+    fn seek(&self, x: Pixels) -> Option<(WaveSeekAnchor, usize)> {
+        let frame = self.viewport.frame_at(self.layout.fraction(x)).round();
+        if frame < 0. || !self.anchor.playable.contains(&(frame as usize)) {
+            return None;
+        }
+        Some((self.anchor.clone(), frame as usize))
+    }
+}
+
+struct DeckPosition {
+    source: Option<Arc<Source>>,
+    last: Option<(PlaybackIdentity, f64)>,
+    seconds: f64,
+    inspecting: Option<f64>,
+    viewport: Viewport,
+}
+
+impl Default for DeckPosition {
+    fn default() -> Self {
+        Self {
+            source: None,
+            last: None,
+            seconds: 8.,
+            inspecting: None,
+            viewport: Viewport::fit(0),
+        }
+    }
+}
+
+impl DeckPosition {
+    fn update(&mut self, track: &WaveTrack, at: Instant) -> bool {
+        if self.source.as_ref() != Some(&track.source) {
+            self.source = Some(track.source.clone());
+            self.inspecting = None;
+            self.last = None;
+        }
+        let previous = self
+            .last
+            .filter(|(identity, _)| track.identity.continues(*identity));
+        let sample = track.position(at);
+        let mut frame = sample.map_or_else(
+            || previous.map_or(track.frame as f64, |(_, frame)| frame),
+            |p| p.frame,
+        );
+        if let Some((_, previous)) = previous {
+            frame = frame.max(previous);
+        }
+        frame = frame.clamp(0., track.source.frames.saturating_sub(1) as f64);
+        if let (Some(d), Some(sample)) = (crate::diagnostics::get(), sample) {
+            d.wave_clock_age_us
+                .fetch_max(sample.observation_age_ns / 1000, Relaxed);
+        }
+        self.last = Some((track.identity, frame));
+        let rate = f64::from(track.source.rate);
+        self.viewport = Viewport::centered(
+            self.inspecting.unwrap_or(frame),
+            (self.seconds * rate).clamp(32., DETAIL_SECONDS * rate),
+        );
+        self.inspecting.is_none() && (track.playing || sample.is_some_and(|p| p.advancing))
+    }
+}
+
 struct Waveform {
     player: Entity<Player>,
     detail: View,
+    motion: Motion,
     focus: FocusHandle,
-    bounds: Rc<Cell<Bounds<Pixels>>>,
-    identity: Option<(u64, Arc<crate::timeline::Source>, Range<usize>)>,
-    viewport: Viewport,
-    inspecting: Option<f64>,
+    layout: Rc<Cell<Option<Layout>>>,
+    displayed: Rc<RefCell<Option<Displayed>>>,
+    position: DeckPosition,
+    coverage: Option<&'static str>,
     presented: bool,
     texture: Texture,
-    input_at: Option<std::time::Instant>,
+    input_at: Option<Instant>,
+    zoom_label_pending: bool,
 }
 
 impl Waveform {
     fn new(services: &Services, cx: &mut Context<Self>) -> Self {
-        cx.observe(&services.player, |panel, _, cx| {
-            if panel.presented {
+        cx.subscribe(&services.player, |panel, player, event, cx| {
+            if panel.presented
+                && (matches!(event, PlayerEvent::WaveChanged)
+                    || (matches!(event, PlayerEvent::WaveEvidence)
+                        && (!player.read(cx).status.playing
+                            || panel.position.inspecting.is_some())))
+            {
+                if let Some(d) = crate::diagnostics::get() {
+                    d.wave_invalidations.fetch_add(1, Relaxed);
+                }
                 cx.notify();
             }
         })
@@ -54,92 +201,208 @@ impl Waveform {
         Self {
             player: services.player.clone(),
             detail: services.player.read(cx).wave_view(),
+            motion: services.wave_motion.clone(),
             focus: cx.focus_handle(),
-            bounds: Rc::default(),
-            identity: None,
-            viewport: Viewport::fit(0),
-            inspecting: None,
+            layout: Rc::default(),
+            displayed: Rc::default(),
+            position: DeckPosition::default(),
+            coverage: None,
             presented: false,
             texture: Default::default(),
             input_at: None,
+            zoom_label_pending: false,
         }
     }
 
-    fn follow(&mut self, track: &WaveTrack) {
-        let key = (track.generation, track.source.clone(), track.range.clone());
-        if self.identity.as_ref() != Some(&key) {
-            let span = f64::from(track.source.rate) * 8.0;
-            self.viewport.span = span.min(track.range.len().max(1) as f64);
-            self.identity = Some(key);
-            self.inspecting = None;
-        }
-        self.viewport = Viewport::centered(
-            self.inspecting.unwrap_or_else(|| track.current_frame()),
-            self.viewport.span,
-        );
-    }
-
-    fn position(&self, point: Point<Pixels>) -> f64 {
-        let bounds = self.bounds.get();
-        let width = f64::from(f32::from(bounds.size.width)).max(1.);
-        (f64::from(f32::from(point.x - bounds.origin.x)) / width).clamp(0., 1.)
-    }
-
-    fn wheel(&mut self, e: &ScrollEvent, cx: &mut Context<Self>) {
-        let Some(track) = self.player.read(cx).wave_track() else {
+    fn wheel(&mut self, e: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(track), Some(layout)) = (self.player.read(cx).wave_track(), self.layout.get())
+        else {
             return;
         };
-        self.input_at = crate::diagnostics::get().map(|_| std::time::Instant::now());
+        self.position.update(&track, Instant::now());
+        self.input_at = crate::diagnostics::get().map(|_| Instant::now());
         let delta = e.delta.pixel_delta(px(40.));
         let (dx, dy) = (f64::from(f32::from(delta.x)), f64::from(f32::from(delta.y)));
+        let state = &mut self.position;
+        let followed = state.inspecting.is_none();
         if e.modifiers.shift || dx.abs() > dy.abs() {
             let input = if dx.abs() > dy.abs() { dx } else { dy };
-            let width = f64::from(f32::from(self.bounds.get().size.width)).max(1.);
-            let moved = self.viewport.frame_at(0.5) - input * self.viewport.span / width;
-            let centre = moved.clamp(0.0, track.range.len().saturating_sub(1) as f64);
-            self.viewport = Viewport::centered(centre, self.viewport.span);
-            self.inspecting = Some(centre);
+            let width = f64::from(f32::from(layout.bounds.size.width)).max(1.);
+            let moved = state.viewport.frame_at(0.5) - input * state.viewport.span / width;
+            state.inspecting = Some(moved.clamp(0., track.source.frames.saturating_sub(1) as f64));
         } else if dy != 0. {
-            let anchor = if self.inspecting.is_some() {
-                self.position(e.position)
+            let anchor = if state.inspecting.is_some() {
+                layout.fraction(e.position.x)
             } else {
                 0.5
             };
-            let span = self.viewport.span * (-dy * 0.0035).clamp(-3., 3.).exp();
-            let limit = track
-                .range
-                .len()
-                .min((f64::from(track.source.rate) * DETAIL_SECONDS) as usize);
-            self.viewport = self.viewport.zoom(span, anchor, limit, track.range.len());
-            if self.inspecting.is_some() {
-                self.inspecting = Some(self.viewport.frame_at(0.5));
+            let rate = f64::from(track.source.rate);
+            let span = state.viewport.span * (-dy * 0.0035).clamp(-3., 3.).exp();
+            let zoomed = state.viewport.zoom(
+                span,
+                anchor,
+                (rate * DETAIL_SECONDS) as usize,
+                track.source.frames,
+            );
+            state.seconds = zoomed.span / rate;
+            if state.inspecting.is_some() {
+                state.inspecting = Some(zoomed.frame_at(0.5));
+            }
+            // Keep the status label current without rebuilding the scene for
+            // every fractional wheel or trackpad event.
+            if !self.zoom_label_pending {
+                self.zoom_label_pending = true;
+                let panel = cx.weak_entity();
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(60))
+                            .await;
+                        let _ = panel.update(cx, |deck, cx| {
+                            deck.zoom_label_pending = false;
+                            cx.notify();
+                        });
+                    })
+                    .detach();
             }
         }
         cx.stop_propagation();
-        cx.notify();
+        if followed && state.inspecting.is_some() {
+            cx.notify();
+        }
+        self.motion.request(cx.weak_entity(), window);
     }
 
-    fn keys(&self, track: &WaveTrack, surface: &Surface, width: f64) -> Vec<Key> {
-        let view = surface.view(width.round() as usize, 1);
-        let range = view.required_range();
-        let mut keys = if self.viewport.span < width * 3.0 && self.viewport.span < 40_960.0 {
-            let left = (self.viewport.first.floor() as usize).saturating_sub(2);
-            let right = (self.viewport.frame_at(1.0).ceil() as usize + 2).min(track.range.len());
-            Key::samples(
-                &track.source,
-                track.range.start + left..track.range.start + right,
-            )
+    fn prepare(
+        &self,
+        track: &WaveTrack,
+        layout: Option<Layout>,
+        active: bool,
+    ) -> (Surface, overview::Evidence, Coverage) {
+        let viewport = self.position.viewport;
+        let surface = Surface {
+            role: Role::Detail,
+            rate: track.source.rate,
+            playable: 0..track.source.frames,
+            viewport,
+        };
+        let mut evidence = overview::Evidence {
+            overview: Some(track.overview.clone()),
+            overview_start: track.range.start,
+            ..Default::default()
+        };
+        let Some((_, view)) = layout
+            .filter(|_| active)
+            .and_then(|layout| surface.target(layout.bounds, layout.scale))
+        else {
+            self.detail.clear();
+            return (surface, evidence, Coverage::default());
+        };
+        let physical = view.required_range();
+        let width = view.width as f64;
+        let mut keys = if viewport.span < width * 3. && viewport.span < 40_960. {
+            let first = (viewport.first.floor() as usize).saturating_sub(4);
+            let end = (viewport.frame_at(1.).ceil() as usize + 5).min(track.source.frames);
+            Key::samples(&track.source, first..end)
         } else {
             vec![]
         };
         keys.extend(Key::geometry(
             &track.source,
-            track.range.clone(),
-            range,
+            surface.playable.clone(),
+            physical,
             width,
-            self.viewport.span / f64::from(track.source.rate),
+            viewport.span / f64::from(track.source.rate),
         ));
-        keys
+        let preview = (!track.overview.facts.is_empty())
+            .then(|| track.range.start..track.range.start + track.overview.frame_count);
+        let loaded = self.detail.tiles(track.generation, keys, preview);
+        for tile in loaded.tiles {
+            match tile.as_ref() {
+                Tile::Evidence(page) => evidence.pages.push(page.clone()),
+                Tile::Samples { .. } => evidence.samples.push(tile),
+            }
+        }
+        (surface, evidence, loaded.coverage)
+    }
+
+    fn coverage(coverage: Coverage, available: bool) -> Option<&'static str> {
+        if !available || coverage.unavailable > 0 {
+            Some(if coverage.approximate > 0 {
+                "Approximate · detail unavailable"
+            } else {
+                "Detail unavailable"
+            })
+        } else if coverage.pending > 0 {
+            Some(if coverage.approximate > 0 {
+                "Refining waveform"
+            } else {
+                "Loading detail"
+            })
+        } else {
+            None
+        }
+    }
+
+    fn animate(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.presented || window.visibility() != WindowVisibility::Visible {
+            return false;
+        }
+        let (Some(track), Some(layout)) = (self.player.read(cx).wave_track(), self.layout.get())
+        else {
+            return false;
+        };
+        let moving = self.position.update(&track, now);
+        let start = crate::diagnostics::begin_stage();
+        let (surface, evidence, coverage) = self.prepare(&track, Some(layout), true);
+        let status = Self::coverage(coverage, track.source.available);
+        crate::diagnostics::stage(
+            start,
+            "wave_evidence_projection",
+            coverage.exact as u64,
+            coverage.pending as u64,
+        );
+        let Some((bounds, view)) = surface.target(layout.bounds, window.scale_factor()) else {
+            return moving;
+        };
+        #[cfg(windows)]
+        {
+            let failed = self.texture.unavailable();
+            let ready = self
+                .texture
+                .repaint(window, cx, view, &evidence, surface.viewport.first);
+            let retry = self.texture.retry_due();
+            if !ready {
+                *self.displayed.borrow_mut() = None;
+            } else {
+                if let (Some(input), Some(d)) = (self.input_at.take(), crate::diagnostics::get()) {
+                    d.wave_input_us
+                        .fetch_max(input.elapsed().as_micros() as u64, Relaxed);
+                }
+                crate::diagnostics::stage(
+                    crate::diagnostics::begin_stage(),
+                    "wave_playhead",
+                    surface.viewport.frame_at(0.5).to_bits(),
+                    surface.viewport.span.to_bits(),
+                );
+                *self.displayed.borrow_mut() = track.seek.map(|anchor| Displayed {
+                    anchor,
+                    viewport: surface.viewport,
+                    layout: Layout { bounds, ..layout },
+                });
+            }
+            if self.coverage != status
+                || (!ready && (retry || !failed || !self.texture.unavailable()))
+            {
+                cx.notify();
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (bounds, view, evidence, status);
+            cx.notify();
+        }
+        moving
     }
 }
 
@@ -162,6 +425,8 @@ impl PaneContent for Entity<Waveform> {
             if !presented {
                 panel.detail.clear();
                 panel.texture.clear();
+                panel.layout.set(None);
+                panel.displayed.borrow_mut().take();
             }
             cx.notify();
         });
@@ -178,7 +443,7 @@ impl Render for Waveform {
         let Some(track) = self.player.read(cx).wave_track() else {
             self.detail.clear();
             self.texture.clear();
-            self.identity = None;
+            self.displayed.borrow_mut().take();
             return layout.child(
                 div()
                     .p_3()
@@ -186,49 +451,29 @@ impl Render for Waveform {
                     .child("Play a recording to see its waveform."),
             );
         };
-        self.follow(&track);
-        let viewport = self.viewport;
-        let surface = Surface {
-            role: Role::Detail,
-            rate: track.source.rate,
-            playable: track.range.clone(),
-            viewport,
-        };
+        let moving = self.position.update(&track, Instant::now());
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
-        if active && track.playing && self.inspecting.is_none() {
-            let entity = cx.entity().entity_id();
-            window.on_next_frame(move |_, cx| cx.notify(entity));
+        let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
+        self.coverage = Self::coverage(coverage, track.source.available);
+        if active && moving {
+            self.motion.request(cx.weak_entity(), window);
         }
-        let width =
-            f64::from(f32::from(self.bounds.get().size.width) * window.scale_factor()).max(1.);
-        let mut evidence = overview::Evidence {
-            overview: Some(track.overview.clone()),
-            input_at: self.input_at.take(),
-            ..Default::default()
-        };
-        if active {
-            // A newly laid-out panel schedules again with its measured width.
-            for tile in self
-                .detail
-                .tiles(track.generation, self.keys(&track, &surface, width))
-            {
-                match tile.as_ref() {
-                    Tile::Evidence(page) => evidence.pages.push(page.clone()),
-                    Tile::Samples { .. } => evidence.samples.push(tile),
-                }
-            }
+        let seconds = self.position.viewport.span / f64::from(track.source.rate);
+        let title = if seconds < 0.05 {
+            format!(
+                "{} samples visible",
+                self.position.viewport.span.round() as usize
+            )
         } else {
-            self.detail.clear();
-        }
-        let span_seconds = viewport.span / f64::from(surface.rate);
-        let title = if span_seconds < 0.05 {
-            format!("{} samples visible", viewport.span.round() as usize)
-        } else {
-            format!("{span_seconds:.3} s visible")
+            format!("{seconds:.3} s visible")
         };
-        let bounds = self.bounds.clone();
+        let bounds = self.layout.clone();
+        let displayed = self.displayed.clone();
         let panel = cx.weak_entity();
-        let inspecting = self.inspecting.is_some();
+        let texture = self.texture.clone();
+        let input = self.input_at.take();
+        let inspecting = self.position.inspecting.is_some();
+        let failed = self.texture.unavailable();
         layout
             .child(
                 h_flex()
@@ -238,6 +483,22 @@ impl Render for Waveform {
                     .border_b_1()
                     .border_color(material.line)
                     .child(div().text_xs().text_color(material.text_muted).child(title))
+                    .when_some(
+                        if failed {
+                            Some("Waveform display unavailable")
+                        } else {
+                            self.coverage
+                        },
+                        |header, status| {
+                            header.child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(material.text_muted)
+                                    .child(status),
+                            )
+                        },
+                    )
                     .when(inspecting, |header| {
                         header.child(
                             Button::new("follow-waveform")
@@ -245,7 +506,7 @@ impl Render for Waveform {
                                 .xsmall()
                                 .label("Follow playback")
                                 .on_click(cx.listener(|panel, _, _, cx| {
-                                    panel.inspecting = None;
+                                    panel.position.inspecting = None;
                                     cx.notify();
                                 })),
                         )
@@ -261,21 +522,62 @@ impl Render for Waveform {
                     .cursor_pointer()
                     .child(
                         canvas(
-                            move |b, window, _| {
-                                let previous = bounds.replace(b);
-                                if previous.size != b.size {
-                                    let panel = panel.clone();
+                            |_, _, _| (),
+                            move |b, _, window, cx| {
+                                let _timer = crate::diagnostics::Timer::measure(|d| &d.paint_us);
+                                if let Some(d) = crate::diagnostics::get() {
+                                    d.frames.fetch_add(1, Relaxed);
+                                }
+                                let scale = window.scale_factor();
+                                let previous = bounds.replace(Some(Layout { bounds: b, scale }));
+                                let Some((target, view)) = surface.target(b, scale) else {
+                                    displayed.borrow_mut().take();
+                                    return;
+                                };
+                                #[cfg(windows)]
+                                let ready = texture.paint(
+                                    window,
+                                    cx,
+                                    target,
+                                    view,
+                                    &evidence,
+                                    surface.viewport.first,
+                                );
+                                #[cfg(not(windows))]
+                                let ready = {
+                                    let _ = (&texture, cx, view, evidence);
+                                    false
+                                };
+                                *displayed.borrow_mut() = if ready {
+                                    track.seek.map(|anchor| Displayed {
+                                        anchor,
+                                        viewport: surface.viewport,
+                                        layout: Layout {
+                                            bounds: target,
+                                            scale,
+                                        },
+                                    })
+                                } else {
+                                    None
+                                };
+                                if let (true, Some(d), Some(input)) =
+                                    (ready, crate::diagnostics::get(), input)
+                                {
+                                    d.wave_input_us
+                                        .fetch_max(input.elapsed().as_micros() as u64, Relaxed);
+                                }
+                                if previous
+                                    .is_none_or(|p| p.bounds.size != b.size || p.scale != scale)
+                                    || failed != texture.unavailable()
+                                {
                                     window.on_next_frame(move |_, cx| {
                                         let _ = panel.update(cx, |_, cx| cx.notify());
                                     });
                                 }
                             },
-                            |_, _, _, _| {},
                         )
-                        .absolute()
                         .size_full(),
                     )
-                    .child(overview::paint(evidence, surface, self.texture.clone()))
                     .child(
                         div()
                             .absolute()
@@ -290,20 +592,24 @@ impl Render for Waveform {
                                 material.wave.cursor
                             }),
                     )
-                    .on_scroll(cx.listener(|panel, e, _, cx| panel.wheel(e, cx)))
+                    .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|panel, event: &MouseDownEvent, window, cx| {
                             panel.focus.focus(window, cx);
-                            let frame = panel
-                                .viewport
-                                .frame_at(panel.position(event.position))
-                                .round() as usize;
-                            panel.inspecting = None;
-                            panel
-                                .player
-                                .update(cx, |player, cx| player.seek_wave_track(frame, cx));
-                            cx.notify();
+                            let target = panel
+                                .displayed
+                                .borrow()
+                                .as_ref()
+                                .and_then(|shown| shown.seek(event.position.x));
+                            if let Some((anchor, frame)) = target
+                                && panel.player.update(cx, |player, cx| {
+                                    player.seek_wave_track(anchor, frame, cx)
+                                })
+                            {
+                                panel.position.inspecting = None;
+                                cx.notify();
+                            }
                         }),
                     ),
             )

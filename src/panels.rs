@@ -537,6 +537,7 @@ pub struct Services {
     /// Presented Stereo Field instances providing the workspace's stereo readouts.
     pub field_readouts: Entity<std::collections::HashSet<EntityId>>,
     pub player: Entity<Player>,
+    pub(crate) wave_motion: waveform::Motion,
     pub catalog: Entity<Catalog>,
     pub locations: Entity<locations::Locations>,
     pub router: Entity<Router>,

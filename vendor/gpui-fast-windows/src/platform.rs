@@ -449,7 +449,11 @@ impl WindowsPlatform {
                     &directx_device.device,
                 );
                 while crate::fast::frame_schedule::Worker::wait(&fast_worker, &stop) {
+                    #[cfg(feature = "frame-statistics")]
+                    let wait_start = crate::frame_statistics::start();
                     let signal_source = vsync_provider.wait_for_vsync();
+                    #[cfg(feature = "frame-statistics")]
+                    crate::frame_statistics::stage(wait_start, "vsync_wait", u64::from(signal_source == gpui::FrameRequestSource::NativeCallback), 0);
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
                         break;
@@ -457,6 +461,8 @@ impl WindowsPlatform {
                     if check_device_lost(&directx_device.device)
                         || invalidate_devices.fetch_and(false, Ordering::Acquire)
                     {
+                        #[cfg(feature = "frame-statistics")]
+                        let recovery = crate::frame_statistics::start();
                         if let Err(err) = handle_gpu_device_lost(
                             &mut directx_device,
                             platform_window.as_raw(),
@@ -469,6 +475,8 @@ impl WindowsPlatform {
                             &mut fast_worker,
                             &directx_device.device,
                         );
+                        #[cfg(feature = "frame-statistics")]
+                        crate::frame_statistics::stage(recovery, "device_recreated", 0, 0);
                     }
                     let Some(all_windows) = all_windows.upgrade() else {
                         break;
@@ -494,6 +502,8 @@ impl WindowsPlatform {
                             RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
                                 .ok()
                                 .log_err();
+                            #[cfg(feature = "frame-statistics")]
+                            crate::frame_statistics::stage(wait_start, "worker_invalidated", hwnd.as_raw().0 as u64, 0);
                             #[cfg(test)]
                             crate::fast::native_tests::paint_invalidated(hwnd.as_raw());
                         }

@@ -254,14 +254,14 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(
         cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v2", [], |r| r
+            .query_row("SELECT count(*) FROM wave_evidence_v3", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
         1
     );
     let leaf = cached.source_detail.unwrap();
-    let offset = (boundary - 1 - leaf.first_cell_frame) as u16;
-    assert_eq!(leaf.offsets[0], offset | (offset << 5));
+    let offset = (boundary - 1 - leaf.first_cell_frame) as u32;
+    assert_eq!(leaf.witnesses(0), [offset; 2]);
     assert_eq!(leaf.bounds[0], -1.0);
     assert!(leaf.bounds[1] > 0.99);
     assert_eq!(leaf.bounds, page.source_detail.unwrap().bounds);
@@ -327,6 +327,58 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
         sequential.octave.unwrap().powers,
         seek.octave.unwrap().powers
     );
+}
+
+#[test]
+fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
+    use crate::waveform_port_analysis::{Plan, Spectrum};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.wav");
+    fixture(&path, 96_000, 11_231);
+    let cache = Cache::open(dir.path()).unwrap();
+    let program =
+        Program::resolve(&Arc::new(Track::file(path)), DiscContext::Inferred, None).unwrap();
+    let source = &program.segments[0].source;
+    let request = waveform::Evidence {
+        playable: 117..11_169,
+        plan: Plan {
+            start_frame: 51,
+            end_frame: 9701,
+            frames_per_column: 1024,
+            leaf_frames: Some(512),
+            octave: Some(Spectrum::Blackman),
+            overview: false,
+            fallback_energy: false,
+            preview: false,
+        },
+    };
+    let page = waveform::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
+    let samples = waveform::samples(source, 168..9818, &mut None, &|| true).unwrap();
+    let detail = page.source_detail.as_ref().unwrap();
+    for (index, bounds) in detail.bounds.as_chunks::<2>().0.iter().enumerate() {
+        let first = detail.first_cell_frame + index * detail.leaf_frames;
+        let begin = first.max(168) - 168;
+        let end = (first + detail.leaf_frames).min(9818) - 168;
+        let extrema = samples[begin..end].iter().fold(
+            [f32::INFINITY, f32::NEG_INFINITY],
+            |[lo, hi], frame| {
+                [
+                    lo.min(frame.left.min(frame.right)),
+                    hi.max(frame.left.max(frame.right)),
+                ]
+            },
+        );
+        assert_eq!(*bounds, extrema);
+        let [a, b] = detail
+            .witnesses(index)
+            .map(|offset| samples[first + offset as usize - 168]);
+        assert_eq!(a.left.min(a.right), extrema[0]);
+        assert_eq!(b.left.max(b.right), extrema[1]);
+    }
+    let cached = waveform::cached(source, &request, Some(&cache)).unwrap();
+    assert_eq!(cached.spectrum, page.spectrum);
+    assert_eq!(cached.source_detail.unwrap().offsets, detail.offsets);
+    assert!(page.spectrum.unwrap().iter().any(|power| *power > 0.));
 }
 
 #[cfg(windows)]

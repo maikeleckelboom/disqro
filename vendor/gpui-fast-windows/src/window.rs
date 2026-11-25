@@ -75,6 +75,7 @@ pub struct WindowsWindowState {
     /// and when a forced render was requested while another draw was in
     /// progress and had to be deferred.
     pub force_render_pending: Cell<bool>,
+    pub(crate) retained_present_pending: Cell<bool>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -185,6 +186,7 @@ impl WindowsWindowState {
             last_visibility: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
+            retained_present_pending: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -1533,6 +1535,36 @@ pub(crate) fn window_from_hwnd(hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
     } else {
         None
     }
+}
+
+/// Allows the next scheduled frame to composite the existing scene after a
+/// producer has updated a texture already referenced by it. Call from the UI
+/// thread alongside `Window::on_next_frame`.
+pub fn present_retained_next_frame(window: &Window) -> bool {
+    let Some(inner) = from_gpui_window(window) else { return false };
+    inner.state.retained_present_pending.set(true);
+    true
+}
+
+/// Enters the normal device recovery path without resetting the system GPU.
+#[cfg(feature = "frame-statistics")]
+pub fn qualify_device_recreation(window: &Window) {
+    if let Some(inner) = from_gpui_window(window) {
+        inner.state.invalidate_devices.store(true, std::sync::atomic::Ordering::Release);
+        inner.state.fast_frame_request.request();
+    }
+}
+
+fn from_gpui_window(window: &Window) -> Option<Rc<WindowsWindowInner>> {
+    let handle = rwh::HasWindowHandle::window_handle(window).ok()?;
+    let rwh::RawWindowHandle::Win32(handle) = handle.as_raw() else { return None };
+    let hwnd = HWND(handle.hwnd.get() as *mut _);
+    // Only this platform class stores a WindowsWindowInner weak pointer.
+    let procedure = unsafe { GetClassLongPtrW(hwnd, GCLP_WNDPROC) };
+    if procedure != window_procedure as *const () as usize {
+        return None;
+    }
+    window_from_hwnd(hwnd)
 }
 
 fn get_module_handle() -> HMODULE {

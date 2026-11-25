@@ -23,12 +23,48 @@ pub struct Renderer {
 }
 
 #[cfg(feature = "qualification")]
+pub(super) fn fail_target_once() -> bool {
+    static PENDING: std::sync::OnceLock<std::sync::atomic::AtomicBool> = std::sync::OnceLock::new();
+    PENDING
+        .get_or_init(|| {
+            std::sync::atomic::AtomicBool::new(
+                crate::audio::silent_qualification()
+                    && std::env::var_os("DISQRO_QUALIFY_TARGET_FAILURE").is_some(),
+            )
+        })
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(feature = "qualification")]
+pub(crate) fn exercise_device_recreation(window: &mut Window, cx: &App) {
+    use std::time::Duration;
+    if !crate::audio::silent_qualification() {
+        return;
+    }
+    let Some(delay) = std::env::var("DISQRO_QUALIFY_DEVICE_RECREATION_MS")
+        .ok()
+        .and_then(|delay| delay.parse::<u64>().ok())
+    else {
+        return;
+    };
+    window
+        .spawn(cx, async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(delay))
+                .await;
+            let _ = cx.update(|window, _| gpui_windows_gpu::qualify_device_recreation(window));
+        })
+        .detach();
+}
+
+#[cfg(feature = "qualification")]
 pub fn start_presentation_trace() {
     use std::{
         fs::OpenOptions,
         io::{BufWriter, Write},
         sync::mpsc,
     };
+    start_stage_trace();
     let Some(path) = std::env::var_os("DISQRO_DXGI_TRACE") else {
         return;
     };
@@ -43,7 +79,12 @@ pub fn start_presentation_trace() {
     let _ = std::thread::Builder::new().name("disqro-dxgi-trace".into()).spawn(move || -> std::io::Result<()> {
         let mut out = BufWriter::new(file);
         writeln!(out, "qpc,foreground,queued,present_status,statistics_status,displayed,present_refresh,sync_refresh,sync_qpc")?;
-        for frame in receive {
+        loop {
+            let frame = match receive.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(frame) => frame,
+                Err(mpsc::RecvTimeoutError::Timeout) => { out.flush()?; continue; }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let d = frame.display;
             writeln!(out, "{},{},{},{},{},{},{},{},{}", frame.qpc, u8::from(frame.foreground), frame.queued,
                 frame.present_status, frame.statistics_status, d.PresentCount, d.PresentRefreshCount, d.SyncRefreshCount, d.SyncQPCTime)?;
@@ -51,6 +92,89 @@ pub fn start_presentation_trace() {
         }
         out.flush()
     });
+}
+
+#[cfg(feature = "qualification")]
+fn start_stage_trace() {
+    use gpui_kit::profiler::{FrameEvent, FrameTimingCollector, set_trace_enabled};
+    use gpui_windows_gpu::frame_statistics::{FrameStage, listen_to_stages, qpc};
+    use std::{
+        fs::OpenOptions,
+        io::{BufWriter, Write},
+        sync::{
+            atomic::{AtomicU64, Ordering::Relaxed},
+            mpsc,
+        },
+        time::{Duration, Instant},
+    };
+    static DROPPED: AtomicU64 = AtomicU64::new(0);
+    let Some(path) = std::env::var_os("DISQRO_PRESENTATION_STAGES") else {
+        return;
+    };
+    let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
+        return;
+    };
+    let (send, receive) = mpsc::sync_channel::<FrameStage>(8192);
+    listen_to_stages(move |record| {
+        if send.try_send(record).is_err() {
+            DROPPED.fetch_add(1, Relaxed);
+        }
+    });
+    let mut collector = FrameTimingCollector::new();
+    set_trace_enabled(true);
+    let _ = std::thread::Builder::new()
+        .name("disqro-frame-trace".into())
+        .spawn(move || -> std::io::Result<()> {
+            let mut frequency = 0;
+            // SAFETY: the output is an initialized counter-frequency slot.
+            unsafe {
+                windows::Win32::System::Performance::QueryPerformanceFrequency(&mut frequency)?;
+            }
+            let ticks = |time: Duration| (time.as_secs_f64() * frequency as f64).round() as i64;
+            let mut out = BufWriter::new(file);
+            writeln!(out, "qpc,ticks,stage,value,detail")?;
+            loop {
+                let limit = Instant::now() + Duration::from_millis(100);
+                while let Ok(phase) =
+                    receive.recv_timeout(limit.saturating_duration_since(Instant::now()))
+                {
+                    writeln!(
+                        out,
+                        "{},{},{},{},{}",
+                        phase.qpc, phase.ticks, phase.stage, phase.value, phase.detail
+                    )?;
+                    if Instant::now() >= limit {
+                        break;
+                    }
+                }
+                let now = Instant::now();
+                let counter = qpc();
+                for event in collector.collect_unseen() {
+                    let FrameEvent::Draw(frame) = event else {
+                        continue;
+                    };
+                    let end = counter - ticks(now.saturating_duration_since(frame.draw_end));
+                    writeln!(
+                        out,
+                        "{end},{},gpui_draw,{},0",
+                        ticks(frame.draw_duration()),
+                        frame.invalidations
+                    )?;
+                    for (stage, duration) in [
+                        ("gpui_request_layout", frame.phases.request_layout),
+                        ("gpui_prepaint", frame.phases.prepaint),
+                        ("gpui_scene_paint", frame.phases.paint),
+                    ] {
+                        writeln!(out, "{end},{},{stage},0,0", ticks(duration))?;
+                    }
+                }
+                let dropped = DROPPED.swap(0, Relaxed);
+                if dropped > 0 {
+                    writeln!(out, "{counter},0,dropped,{dropped},0")?;
+                }
+                out.flush()?;
+            }
+        });
 }
 
 #[cfg(feature = "qualification")]
@@ -512,4 +636,71 @@ fn silent_stroke_columns_stay_uncoloured_when_sample_inspection_is_absent() {
     };
     assert!(result.columns.iter().any(|column| column[7] == 0.0));
     assert!(result.columns.iter().all(|column| column[4..7] == [0.0; 3]));
+}
+
+#[test]
+fn wide_stroke_keeps_coarse_witnesses_across_the_full_surface_and_new_devices() {
+    let rate = 192_000;
+    let frames = rate as usize * 120;
+    let leaf = 1024;
+    let cells = frames.div_ceil(leaf);
+    let page = Arc::new(Page {
+        frame_count: frames,
+        frames_per_column: leaf,
+        spectrum: Some(vec![0.02; cells * 8]),
+        source_detail: Some(crate::waveform_render::SourceDetail {
+            first_cell_frame: 0,
+            start_frame: 0,
+            frame_count: frames,
+            leaf_frames: leaf,
+            bounds: [-0.5, 0.625].repeat(cells),
+            offsets: vec![128 | (997 << 10); cells],
+        }),
+        ..Page::default()
+    });
+    let view = View {
+        role: Role::Detail,
+        style: Default::default(),
+        rate,
+        origin: 0,
+        frame_count: frames,
+        first: 0,
+        pixels_per_second: 5120. / 120.,
+        width: 5120,
+        height: 100,
+    };
+    let evidence = Evidence {
+        pages: vec![page.clone()],
+        ..Default::default()
+    };
+    let (cpu, Geometry::Stroke(expected)) = crate::waveform_render::render(&[&page], &view) else {
+        panic!("expected Stroke")
+    };
+    let mut actual = Renderer::new().unwrap();
+    let image = actual.render(&evidence, &view, 0.).unwrap();
+    assert!(
+        image
+            .as_raw()
+            .iter()
+            .zip(cpu)
+            .all(|(a, b)| a.abs_diff(b) <= 1)
+    );
+    let Geometry::Stroke(geometry) = actual.geometry(&view).unwrap() else {
+        panic!("expected Stroke")
+    };
+    assert!(
+        geometry.cores.iter().zip(expected.cores).all(|(a, b)| {
+            a.held == b.held && a.witnesses == b.witnesses && a.bounds == b.bounds
+        })
+    );
+    let terminal = geometry
+        .cores
+        .iter()
+        .rev()
+        .find_map(|core| core.witnesses)
+        .unwrap();
+    assert!(terminal[1] > frames - 8192);
+    drop(actual);
+    let mut replacement = Renderer::new().unwrap();
+    assert_eq!(replacement.render(&evidence, &view, 0.).unwrap(), image);
 }

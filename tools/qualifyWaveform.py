@@ -8,16 +8,18 @@ import os
 from pathlib import Path
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import time
 import traceback
 
 from privateDesktop import run
-from qualifySpectrum import GpuTime, W, find_window, kernel, profile, sample, screenshot, user32
+from qualifySpectrum import (GpuTime, W, click_control, control_centers, find_window, kernel,
+                             profile, sample, screenshot, user32)
 
 
-def settings(source):
+def settings(source, panels):
     config = profile("baseline", source)
     browser = config["layout"]["center"]
 
@@ -28,20 +30,23 @@ def settings(source):
     def split(axis, sizes, *children):
         return dict(panel_name="StackPanel", children=children, info=dict(stack=dict(axis=axis, sizes=sizes)))
 
-    config["layout"]["center"] = split(
-        0, [430, 810], browser,
-        split(1, [360, 250], wave(2), wave(3)),
-    )
+    deck = wave(2) if panels == 1 else split(1, [360, 250], wave(2), wave(3))
+    config["layout"]["center"] = split(0, [430, 810], browser, deck)
     return config
 
 
-def wheel(hwnd, x, y, delta, shift=False):
+def screen_point(hwnd, x, y):
     bounds = W.RECT()
     user32.GetClientRect(hwnd, C.byref(bounds))
     point = W.POINT(int(x * bounds.right), int(y * bounds.bottom))
     user32.ClientToScreen(hwnd, C.byref(point))
+    return point
+
+
+def wheel(hwnd, x, y, delta, horizontal=False):
+    point = screen_point(hwnd, x, y)
     position = ((point.y & 0xffff) << 16) | (point.x & 0xffff)
-    user32.SendMessageW(hwnd, 0x20a, ((delta & 0xffff) << 16) | (0x4 if shift else 0), position)
+    user32.SendMessageW(hwnd, 0x20e if horizontal else 0x20a, (delta & 0xffff) << 16, position)
 
 
 def performance_counter():
@@ -51,14 +56,123 @@ def performance_counter():
     return ticks.value
 
 
+def counter_frequency():
+    frequency = C.c_longlong()
+    if not kernel.QueryPerformanceFrequency(C.byref(frequency)):
+        raise C.WinError()
+    return frequency.value
+
+
+def percentiles(values):
+    values = sorted(values)
+    return [values[round((len(values) - 1) * q)] for q in (0.5, 0.95, 0.99, 1)] if values else None
+
+
+def drive(rate, seconds, action):
+    start = time.perf_counter()
+    for index in range(round(rate * seconds)):
+        time.sleep(max(0, start + index / rate - time.perf_counter()))
+        action(index)
+
+
+def composed_statistics(output, phases, refresh_ms):
+    report = output / "composed.json"
+    if not report.is_file():
+        return None
+    summary = json.loads(report.read_text(encoding="utf-8"))
+    with report.with_suffix(".samples.tsv").open(newline="") as file:
+        frequency = int(file.readline().split("\t")[1])
+        rows = [tuple(map(int, (row[key] for key in ("qpc", "accumulated", "marker"))))
+                for row in csv.DictReader(file, delimiter="\t")]
+    stats = {"foreground_lost_samples": summary["foregroundLostSamples"],
+             "refresh_ms": refresh_ms, "phases": {}}
+    for start, end in zip(phases, phases[1:]):
+        observed = [row for row in rows if start["qpc"] <= row[0] < end["qpc"]]
+        if not observed:
+            continue
+        previous = None
+        changes = []
+        repeated = 0
+        skipped_markers = 0
+        for qpc, _, marker in observed:
+            if marker < 0:
+                continue
+            if marker == previous:
+                repeated += 1
+            else:
+                if previous is not None:
+                    skipped_markers += (marker - previous) % 6 - 1
+                changes.append(qpc)
+                previous = marker
+        intervals = [(b - a) * 1000 / frequency for a, b in zip(changes, changes[1:])]
+        elapsed = (end["qpc"] - start["qpc"]) / frequency
+        stats["phases"][start["name"]] = {
+            "distinct_composed_updates": len(changes),
+            "distinct_composed_hz": len(changes) / elapsed,
+            "interval_ms_p50_p95_p99_max": percentiles(intervals),
+            "gaps_over_two_refreshes": sum(dt > 2 * refresh_ms for dt in intervals),
+            "refresh_slots_without_a_new_observed_marker": sum(max(0, round(dt / refresh_ms) - 1) for dt in intervals),
+            "repeated_markers_on_observed_desktop_updates": repeated,
+            "coalesced_desktop_updates": sum(max(0, count - 1) for _, count, _ in observed),
+            "unreadable_samples": sum(marker < 0 for _, _, marker in observed),
+            "skipped_marker_steps_modulo_six": skipped_markers,
+        }
+    return stats
+
+
+def presentation_stages(path, phases):
+    if not path.is_file():
+        return None
+    with path.open(newline="") as file:
+        rows = sorted((dict(row, qpc=int(row["qpc"]), ticks=int(row["ticks"]),
+                            value=int(row["value"]), detail=int(row["detail"]))
+                       for row in csv.DictReader(file)), key=lambda row: row["qpc"])
+    frequency = counter_frequency()
+    stats = {"dropped_stage_records": sum(row["value"] for row in rows if row["stage"] == "dropped"),
+             "device_recreations": sum(row["stage"] == "device_recreated" for row in rows),
+             "phases": {}}
+    for start, end in zip(phases, phases[1:]):
+        groups = {}
+        for row in rows:
+            if start["qpc"] <= row["qpc"] < end["qpc"]:
+                groups.setdefault(row["stage"], []).append(row)
+        ms = 1000 / frequency
+        elapsed = (end["qpc"] - start["qpc"]) / frequency
+        result = stats["phases"][start["name"]] = {
+            "seconds": elapsed,
+            "stages": {stage: {"count": len(items), "duration_ms_p50_p95_p99_max": percentiles(
+                row["ticks"] * ms for row in items)} for stage, items in groups.items()},
+        }
+        presents = [row for row in groups.get("present", []) if row["detail"] == 0]
+        attempts = groups.get("present", [])
+        intervals = [(b["qpc"] - a["qpc"]) * ms for a, b in zip(attempts, attempts[1:])]
+        result["present_attempts_per_second"] = len(attempts) / elapsed
+        result["successful_present_calls_per_second"] = len(presents) / elapsed
+        result["occluded_present_calls"] = sum(row["detail"] == 0x087a0001 for row in attempts)
+        result["present_attempt_interval_ms_p50_p95_p99_max"] = percentiles(intervals)
+        result["present_attempt_gaps_over_two_240hz_refreshes"] = sum(ms > 1000 / 120 for ms in intervals)
+        result["gpui_entities_invalidated"] = sum(row["value"] for row in groups.get("gpui_draw", []))
+        result["retained_requests"] = sum(row["detail"] for row in groups.get("window_frame", []))
+        result["device_upload_bytes"] = sum(row["value"] for row in groups.get("shared_device_update", []))
+        result["native_vsync_signals"] = sum(row["value"] for row in groups.get("vsync_wait", []))
+        playhead = {}
+        for row in groups.get("wave_playhead", []):
+            frame, span = struct.unpack("<dd", struct.pack("<QQ", row["value"], row["detail"]))
+            playhead.setdefault(round(span, 5), []).append(frame)
+        result["wave_playhead"] = {span: {
+            "samples": len(frames), "distinct_source_positions": len(set(frames)),
+            "backward_steps": sum(a > b for a, b in zip(frames, frames[1:])),
+            "advance_frames_p50_p95_p99_max": percentiles(b - a for a, b in zip(frames, frames[1:]) if a != b),
+        } for span, frames in playhead.items()}
+    return stats
+
+
 def display_statistics(path, phases):
     if not path.is_file():
         return None
     with path.open(newline="") as file:
         rows = [dict((key, int(value)) for key, value in row.items()) for row in csv.DictReader(file)]
-    frequency = C.c_longlong()
-    if not kernel.QueryPerformanceFrequency(C.byref(frequency)):
-        raise C.WinError()
+    frequency = counter_frequency()
     valid = [row for row in rows if row["foreground"] and not row["statistics_status"]
              and row["displayed"] and row["present_refresh"] and row["sync_qpc"]]
     refresh_periods = []
@@ -66,7 +180,7 @@ def display_statistics(path, phases):
         refreshes = b["sync_refresh"] - a["sync_refresh"]
         ticks = b["sync_qpc"] - a["sync_qpc"]
         if refreshes > 0 and ticks > 0:
-            refresh_periods.append(1000 * ticks / (frequency.value * refreshes))
+            refresh_periods.append(1000 * ticks / (frequency * refreshes))
     stats = {"calls": len(rows), "valid_foreground_observations": len(valid)}
     if not refresh_periods:
         return stats
@@ -94,9 +208,10 @@ def display_statistics(path, phases):
             "distinct_observed_intervals": len(intervals),
             "displayed_present_id_advance": present_ids,
             "distinct_observed_hz": 1000 * len(intervals) / elapsed,
-            "interval_ms_p50_p95_p99_max": [intervals[round((len(intervals) - 1) * q)] for q in (0.5, 0.95, 0.99, 1)],
+            "interval_ms_p50_p95_p99_max": percentiles(intervals),
             "intervals_over_one_refresh": sum(advance > 1 for advance in advances),
             "intervals_over_two_refreshes": sum(advance > 2 for advance in advances),
+            "unexplained_refreshes_between_samples": max(0, sum(advances) - present_ids),
         }
     return stats
 
@@ -138,14 +253,20 @@ def measure(args):
     if args.warm_cache:
         shutil.copytree(args.warm_cache, args.output / "Cache")
     trace = args.output / "trace.csv"
-    (args.output / "workspace-v1.json").write_text(json.dumps(settings(args.source)), encoding="utf-8")
+    (args.output / "workspace-v1.json").write_text(json.dumps(settings(args.source, args.panels)), encoding="utf-8")
     env = dict(os.environ, DISQRO_PROFILE_DIR=str(args.output), DISQRO_PLAYBACK_TRACE=str(trace))
-    if args.foreground:
-        env["DISQRO_DXGI_TRACE"] = str(args.output / "dxgi.csv")
+    env["DISQRO_PRESENTATION_STAGES"] = str(args.output / "stages.csv")
+    env["DISQRO_DXGI_TRACE"] = str(args.output / "dxgi.csv")
+    if args.display_probe:
+        env["DISQRO_QUALIFY_PRESENT_MARKER"] = "1"
+    if args.exercise_host_recovery:
+        env["DISQRO_QUALIFY_TARGET_FAILURE"] = "1"
+        env["DISQRO_QUALIFY_DEVICE_RECREATION_MS"] = "5000"
     process = subprocess.Popen([str(args.exe), "--qualify-silent", str(args.source)], env=env)
     hwnd = thread = None
     memory = []
     present = None
+    probe = None
     phases = []
 
     def phase(name):
@@ -179,7 +300,9 @@ def measure(args):
             raise RuntimeError("No committed playback and waveform paint")
         if args.foreground:
             user32.GetForegroundWindow.restype = W.HWND
-            for _ in range(400):
+            if user32.GetForegroundWindow() != hwnd:
+                user32.SetForegroundWindow(hwnd)
+            for _ in range(1200):
                 if user32.GetForegroundWindow() == hwnd:
                     break
                 time.sleep(0.05)
@@ -196,17 +319,25 @@ def measure(args):
         start = sample(process, thread)
         memory.append(start[3])
         screenshot(hwnd, args.output / "overview.png")
-        phase("Playback and full-CD analysis")
-        time.sleep(1.5 if args.foreground else 0.35)
-        phase("Continuous zoom and library scrolling")
-        if args.foreground:
-            for notch in range(96):
-                wheel(hwnd, args.anchor_fraction, 0.29, 36 if notch % 24 < 12 else -36)
-                if notch % 4 == 0:
-                    wheel(hwnd, 0.23, 0.35, 120 if notch % 8 else -120)
-                    wheel(hwnd, args.anchor_fraction, 0.65, 36 if notch % 24 < 12 else -36)
-                time.sleep(0.018)
-        phase("Step zoom and library scrolling")
+        if args.display_probe:
+            with (args.output / "desktop-probe.log").open("w", encoding="utf-8") as log:
+                probe = subprocess.Popen([str(args.display_probe), str(hwnd), str(4 * args.steady_seconds + 14),
+                                          str(args.output / "composed.json")],
+                                         stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
+            time.sleep(0.25)
+        phase("Playback during startup analysis")
+        time.sleep(args.steady_seconds)
+        phase("Steady playback")
+        time.sleep(args.steady_seconds)
+        phase("Continuous zoom")
+        drive(240, 3, lambda step: wheel(hwnd, args.anchor_fraction, 0.29, 8 if step % 96 < 48 else -8))
+        phase("Library browsing")
+        for notch in range(72):
+            wheel(hwnd, 0.23, 0.35, 120 if notch % 4 else -120)
+            if notch % 5 == 0:
+                click_control(hwnd, screen_point(hwnd, 0.13, 0.2 + (notch % 6) * 0.05))
+            time.sleep(0.022)
+        phase("Step zoom to samples")
         for _ in range(8):
             wheel(hwnd, args.anchor_fraction, 0.29, 120)
             wheel(hwnd, 0.23, 0.35, -120)
@@ -214,7 +345,6 @@ def measure(args):
             time.sleep(0.09)
         time.sleep(0.35)
         screenshot(hwnd, args.output / "detail.png")
-        phase("Sample zoom, pan, and rapid reversals")
         additional = args.detail_notches
         if additional is None:
             additional = 12
@@ -222,26 +352,35 @@ def measure(args):
             wheel(hwnd, args.anchor_fraction, 0.29, 480)
             memory.append(sample(process, thread)[3])
             time.sleep(0.055)
-        time.sleep(0.35)
-        wheel(hwnd, args.anchor_fraction, 0.29, 120, shift=True)
-        time.sleep(0.15)
+        phase("Extreme zoom playback")
+        time.sleep(args.steady_seconds)
         screenshot(hwnd, args.output / "samples.png")
         gpu_residency = gpu_memory(process.pid)
-        for delta in [-120, -120, 120, -120, 120, 120] * 4:
-            wheel(hwnd, args.anchor_fraction, 0.29, delta)
-            wheel(hwnd, 0.23, 0.35, 120)
-            time.sleep(0.045)
+        phase("Continuous pan")
+        drive(240, 3, lambda step: wheel(hwnd, args.anchor_fraction, 0.29,
+                                        12 if step % 96 < 48 else -12, horizontal=True))
         phase("Resize")
-        if not user32.SetWindowPos(hwnd, 0, 0, 0, round(720 * dpi / 96), round(460 * dpi / 96), 0x16):
-            raise C.WinError()
+        frame = W.RECT()
+        user32.GetWindowRect(hwnd, C.byref(frame))
+        for width, height in [(720, 460), (1240, 780), (950, 650), (720, 460)] * 3:
+            height = round(height * dpi / 96)
+            # Keep the Desktop Duplication probe inside the lower-left marker.
+            if not user32.SetWindowPos(hwnd, 0, frame.left, frame.bottom - height, round(width * dpi / 96), height, 0x14):
+                raise C.WinError()
+            time.sleep(0.045)
         time.sleep(1.1)
-        phase("End")
         screenshot(hwnd, args.output / "compact.png")
+        click_control(hwnd, control_centers(hwnd, ("Pause",))[0])
+        time.sleep(0.5)
+        phase("Paused idle")
+        time.sleep(args.steady_seconds)
+        phase("End")
         end = sample(process, thread)
         memory.append(end[3])
         observations = rows()
         stats = dict(
             dpi=dpi,
+            panels=args.panels,
             duration_seconds=end[0] - start[0],
             process_cpu_seconds=end[1] - start[1],
             ui_cpu_seconds=end[2] - start[2],
@@ -265,9 +404,15 @@ def measure(args):
             stats[error] = sum(int(row.get(error, 0)) for row in observations)
         (args.output / "report.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
         (args.output / "phases.json").write_text(json.dumps(phases, indent=2), encoding="utf-8")
-        if not stats["callbacks"] or any(stats[x] for x in errors):
+        if not stats["callbacks"] or any(stats[x] for x in errors[:-1]) or stats["wave_gpu_errors"] != int(args.exercise_host_recovery):
             raise RuntimeError("Playback trace failed during the waveform journey")
     finally:
+        if probe:
+            try:
+                probe.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                probe.terminate()
+                probe.wait()
         if thread:
             kernel.CloseHandle(thread)
         if hwnd:
@@ -277,8 +422,10 @@ def measure(args):
         except subprocess.TimeoutExpired:
             process.terminate()
             process.wait()
-        if args.foreground and (args.output / "report.json").is_file():
+        if (args.output / "report.json").is_file():
+            stats["presentation_stages"] = presentation_stages(args.output / "stages.csv", phases)
             stats["dxgi"] = display_statistics(args.output / "dxgi.csv", phases)
+            stats["composed"] = composed_statistics(args.output, phases, (stats["dxgi"] or {}).get("refresh_ms", 1000 / 240))
             (args.output / "report.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
         if present:
             try:
@@ -296,12 +443,19 @@ if __name__ == "__main__":
     parser.add_argument("--warm-cache", type=lambda path: Path(path).resolve(strict=True))
     parser.add_argument("--anchor-fraction", type=float, default=0.602)
     parser.add_argument("--detail-notches", type=int)
+    parser.add_argument("--panels", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--steady-seconds", type=float, default=3.0)
+    parser.add_argument("--exercise-host-recovery", action="store_true")
     parser.add_argument("--foreground", action="store_true")
     parser.add_argument("--presentmon", type=lambda path: Path(path).resolve(strict=True))
+    parser.add_argument("--display-probe", type=lambda path: Path(path).resolve(strict=True),
+                        help="Dekzer present-probe executable for Desktop Duplication with a frame marker")
     parser.add_argument("--desktop-worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.presentmon and not args.foreground:
-        parser.error("PresentMon requires a foreground qualification run")
+    if not 1 <= args.steady_seconds <= 10:
+        parser.error("Use phase durations between 1 and 10 seconds")
+    if args.display_probe and not args.foreground:
+        parser.error("The composed-frame probe requires an explicitly authorized foreground run")
     if not 0.36 <= args.anchor_fraction < 1. or (args.detail_notches is not None and not 1 <= args.detail_notches <= 24):
         parser.error("The zoom anchor must be inside the waveform pane and the detail step count must be 1–24")
     if not args.desktop_worker and not args.foreground:

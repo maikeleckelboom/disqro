@@ -45,5 +45,8 @@ pub(crate) use wrapper::*;
 
 pub use platform::WindowsPlatform;
 pub use fast::dynamic_textures::{GpuTexture, with_d3d11};
+pub use window::present_retained_next_frame;
+#[cfg(feature = "frame-statistics")]
+pub use window::qualify_device_recreation;
 
 pub(crate) use windows::Win32::Foundation::HWND;

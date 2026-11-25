@@ -111,11 +111,13 @@ impl Buffer {
     }
 
     fn write(&self, context: &ID3D11DeviceContext, offset: u32, bytes: &[u8], constant: bool) {
+        let start = crate::diagnostics::begin_stage();
         let right = offset + bytes.len() as u32;
         assert!(right <= self.bytes && (!constant || right == self.bytes));
         if bytes.is_empty() {
             return;
         }
+        crate::diagnostics::stage(start, "shared_device_update", bytes.len() as u64, 0);
         let region = D3D11_BOX {
             left: offset,
             right,
@@ -193,6 +195,7 @@ impl Pipeline {
         exact_first: f64,
     ) -> Result<()> {
         let mut params = Parameters::new(view);
+        let start = crate::diagnostics::begin_stage();
         let bindings = if view.role == Role::Detail {
             if self.detail.is_none() {
                 self.detail = Some(stroke::Detail::new(&self.device)?);
@@ -206,6 +209,12 @@ impl Pipeline {
                 exact_first,
                 &mut params,
             )?;
+            crate::diagnostics::stage(
+                start,
+                "shader_projection",
+                view.width as u64,
+                view.height as u64,
+            );
             self.parameters
                 .write(context, 0, bytemuck::bytes_of(&params), true);
             detail.dispatch(context, &params, &self.parameters);
@@ -219,6 +228,7 @@ impl Pipeline {
                 .write(context, 0, bytemuck::bytes_of(&params), true);
             [self.columns.srv.clone(), None, None, None, None]
         };
+        let submit = crate::diagnostics::begin_stage();
         let (width, height) = (view.width, view.height);
         let viewport = D3D11_VIEWPORT {
             Width: width as f32,
@@ -246,6 +256,7 @@ impl Pipeline {
             context.OMSetRenderTargets(None, None);
             context.RSSetState(rasterizer.ok().as_ref());
         }
+        crate::diagnostics::stage(submit, "shader_draw", view.width as u64, view.height as u64);
         Ok(())
     }
 }
@@ -256,7 +267,19 @@ struct DeviceResources(Option<Pipeline>);
 impl Global for DeviceResources {}
 
 #[derive(Default, Clone)]
-pub(crate) struct SurfaceTexture(Rc<RefCell<Option<Painted>>>);
+pub(crate) struct SurfaceTexture(Rc<RefCell<SurfaceState>>);
+
+#[derive(Default)]
+struct SurfaceState {
+    painted: Option<Painted>,
+    failure: Option<Failure>,
+}
+
+struct Failure {
+    device: ID3D11Device,
+    size: (usize, usize),
+    at: std::time::Instant,
+}
 
 struct Painted {
     device: ID3D11Device,
@@ -264,6 +287,7 @@ struct Painted {
     view: View,
     pages: Vec<Weak<Page>>,
     overview: Option<Weak<Page>>,
+    overview_start: usize,
     samples: Vec<Weak<Tile>>,
     sample_phase: f64,
     valid: bool,
@@ -271,7 +295,19 @@ struct Painted {
 
 impl SurfaceTexture {
     pub fn clear(&self) {
-        self.0.borrow_mut().take();
+        *self.0.borrow_mut() = SurfaceState::default();
+    }
+
+    pub fn unavailable(&self) -> bool {
+        self.0.borrow().failure.is_some()
+    }
+
+    pub fn retry_due(&self) -> bool {
+        self.0
+            .borrow()
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.at.elapsed() >= std::time::Duration::from_millis(500))
     }
 
     pub fn paint(
@@ -282,80 +318,191 @@ impl SurfaceTexture {
         view: View,
         evidence: &Evidence,
         exact_first: f64,
-    ) -> Result<()> {
-        ensure!(
-            (1..=16_384).contains(&view.width) && (1..=16_384).contains(&view.height),
-            "waveform target exceeds D3D11 dimensions"
-        );
-        with_d3d11(window, |window, device, context| {
-            let mut held = self.0.borrow_mut();
-            let reusable = held.as_ref().is_some_and(|painted| {
-                painted.device == *device
-                    && painted.view.width == view.width
-                    && painted.view.height == view.height
+    ) -> bool {
+        self.draw(window, cx, Some(bounds), view, evidence, exact_first)
+    }
+
+    /// Updates the existing scene binding without a GPUI layout or scene rebuild.
+    pub fn repaint(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+        view: View,
+        evidence: &Evidence,
+        exact_first: f64,
+    ) -> bool {
+        self.draw(window, cx, None, view, evidence, exact_first)
+    }
+
+    fn draw(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+        bounds: Option<Bounds<Pixels>>,
+        view: View,
+        evidence: &Evidence,
+        exact_first: f64,
+    ) -> bool {
+        let mut surface = self.0.borrow_mut();
+        let result = with_d3d11(window, |window, device, context| {
+            let size = (view.width, view.height);
+            if surface.failure.as_ref().is_some_and(|failure| {
+                failure.device == *device
+                    && failure.size == size
+                    && failure.at.elapsed() < std::time::Duration::from_millis(500)
+            }) {
+                return Ok(false);
+            }
+            let result = surface.draw(
+                window,
+                cx,
+                device,
+                context,
+                bounds,
+                view,
+                evidence,
+                exact_first,
+            );
+            match result {
+                Ok(ready) => {
+                    if ready {
+                        surface.failure = None;
+                    }
+                    Ok(ready)
+                }
+                Err(error) => {
+                    surface.painted = None;
+                    if surface
+                        .failure
+                        .as_ref()
+                        .is_none_or(|failure| failure.device != *device || failure.size != size)
+                    {
+                        eprintln!("Waveform display: {error:#}");
+                    }
+                    if let Some(trace) = crate::diagnostics::get() {
+                        trace
+                            .wave_gpu_errors
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    surface.failure = Some(Failure {
+                        device: device.clone(),
+                        size,
+                        at: std::time::Instant::now(),
+                    });
+                    Ok(false)
+                }
+            }
+        });
+        if result.is_err() {
+            surface.painted = None;
+        }
+        result.unwrap_or(false)
+    }
+}
+
+impl SurfaceState {
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        bounds: Option<Bounds<Pixels>>,
+        view: View,
+        evidence: &Evidence,
+        exact_first: f64,
+    ) -> Result<bool> {
+        let resources = &mut cx.default_global::<DeviceResources>().0;
+        if resources
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.device != *device)
+        {
+            resources.take();
+        }
+        let reusable = self.painted.as_ref().is_some_and(|painted| {
+            painted.device == *device
+                && painted.view.width == view.width
+                && painted.view.height == view.height
+        });
+        if !reusable {
+            self.painted = None;
+            if bounds.is_none() {
+                return Ok(false);
+            }
+            ensure!(
+                (1..=16_384).contains(&view.width) && (1..=16_384).contains(&view.height),
+                "waveform target exceeds D3D11 dimensions"
+            );
+            #[cfg(feature = "qualification")]
+            ensure!(
+                view.role != Role::Detail || !qualification::fail_target_once(),
+                "injected waveform target allocation failure"
+            );
+            let target = GpuTexture::new(
+                device,
+                size(
+                    DevicePixels(view.width as i32),
+                    DevicePixels(view.height as i32),
+                ),
+            )?;
+            self.painted = Some(Painted {
+                device: device.clone(),
+                target,
+                view,
+                pages: Vec::new(),
+                overview: None,
+                overview_start: 0,
+                samples: Vec::new(),
+                sample_phase: 0.0,
+                valid: false,
             });
-            if !reusable {
-                let target = GpuTexture::new(
-                    device,
-                    size(
-                        DevicePixels(view.width as i32),
-                        DevicePixels(view.height as i32),
-                    ),
-                )?;
-                *held = Some(Painted {
-                    device: device.clone(),
-                    target,
-                    view,
-                    pages: Vec::new(),
-                    overview: None,
-                    samples: Vec::new(),
-                    sample_phase: 0.0,
-                    valid: false,
-                });
+        }
+        let painted = self.painted.as_mut().unwrap();
+        let sample_phase = if evidence.samples.is_empty() {
+            0.0
+        } else {
+            exact_first
+        };
+        if !painted.valid
+            || painted.view != view
+            || painted.sample_phase != sample_phase
+            || !same_data(&painted.pages, &evidence.pages)
+            || !same_data(&painted.samples, &evidence.samples)
+            || painted.overview.as_ref().map(Weak::as_ptr)
+                != evidence.overview.as_ref().map(Arc::as_ptr)
+            || painted.overview_start != evidence.overview_start
+        {
+            if resources.is_none() {
+                *resources = Some(Pipeline::new(device)?);
             }
-            let painted = held.as_mut().unwrap();
-            let sample_phase = if evidence.samples.is_empty() {
-                0.0
-            } else {
-                exact_first
-            };
-            if !painted.valid
-                || painted.view != view
-                || painted.sample_phase != sample_phase
-                || !same_data(&painted.pages, &evidence.pages)
-                || !same_data(&painted.samples, &evidence.samples)
-                || painted.overview.as_ref().map(Weak::as_ptr)
-                    != evidence.overview.as_ref().map(Arc::as_ptr)
-            {
-                let resources = &mut cx.default_global::<DeviceResources>().0;
-                if resources
-                    .as_ref()
-                    .is_none_or(|pipeline| pipeline.device != *device)
-                {
-                    *resources = Some(Pipeline::new(device)?);
-                }
-                resources.as_mut().unwrap().draw(
-                    context,
-                    painted.target.target(),
-                    evidence,
-                    &view,
-                    exact_first,
-                )?;
+            resources.as_mut().unwrap().draw(
+                context,
+                painted.target.target(),
+                evidence,
+                &view,
+                exact_first,
+            )?;
+            if bounds.is_some() {
                 painted.target.written(window)?;
-                painted.view = view;
-                painted.pages = evidence.pages.iter().map(Arc::downgrade).collect();
-                painted.overview = evidence.overview.as_ref().map(Arc::downgrade);
-                painted.samples = evidence.samples.iter().map(Arc::downgrade).collect();
-                painted.sample_phase = sample_phase;
-                painted.valid = true;
-                if let Some(trace) = crate::diagnostics::get() {
-                    trace
-                        .wave_gpu_draws
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
             }
-            painted.target.paint(window, bounds)
-        })
+            painted.view = view;
+            painted.pages = evidence.pages.iter().map(Arc::downgrade).collect();
+            painted.overview = evidence.overview.as_ref().map(Arc::downgrade);
+            painted.overview_start = evidence.overview_start;
+            painted.samples = evidence.samples.iter().map(Arc::downgrade).collect();
+            painted.sample_phase = sample_phase;
+            painted.valid = true;
+            if let Some(trace) = crate::diagnostics::get() {
+                trace
+                    .wave_gpu_draws
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(bounds) = bounds {
+            painted.target.paint(window, bounds)?;
+        }
+        Ok(true)
     }
 }
 
