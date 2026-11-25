@@ -150,6 +150,7 @@ pub struct Player {
     shapes: Vec<Shape>,
     unavailable: Option<String>,
     run: std::ops::Range<usize>,
+    waveform_scrub: Option<Arc<crate::audio::scrub::Gesture>>,
     visible: bool,
     drawn_position: f64,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
@@ -218,6 +219,7 @@ impl Player {
             shapes: vec![],
             unavailable: None,
             run: 0..0,
+            waveform_scrub: None,
             visible: true,
             drawn_position: 0.,
             queue_shown: true,
@@ -294,8 +296,23 @@ impl Player {
     }
     fn sync(&mut self, cx: &mut Context<Self>) {
         let (status, queue) = self.transport.state();
+        let closed_scrub = self
+            .waveform_scrub
+            .as_ref()
+            .is_some_and(|scrub| scrub.closed());
+        if closed_scrub {
+            self.waveform_scrub = None;
+        }
         if status == self.status {
+            if closed_scrub {
+                cx.emit(PlayerEvent::WaveChanged);
+            }
             return;
+        }
+        if status.scrub_error != self.status.scrub_error
+            && let Some((_, message)) = &status.scrub_error
+        {
+            cx.emit(PlayerEvent::Notice(message.clone()));
         }
         if status.skipped != self.status.skipped
             && let Some((_, text)) = &status.skipped
@@ -351,14 +368,20 @@ impl Player {
         let position_only = !track_changed && {
             let mut a = self.status.clone();
             a.position = status.position;
+            if a.scrub.map(|position| position.id) == status.scrub.map(|position| position.id) {
+                a.scrub = status.scrub;
+            }
             a == status
         };
         let _transition =
             track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
         let identity_changed = self.status.playback_identity() != status.playback_identity();
-        let wave_changed = track_changed
+        let wave_changed = closed_scrub
+            || track_changed
             || queue_changed
             || identity_changed
+            || self.status.scrub.map(|position| position.id)
+                != status.scrub.map(|position| position.id)
             || self.status.playing != status.playing
             || (!status.playing && self.status.position != status.position);
         self.status = status;
@@ -391,7 +414,7 @@ impl Player {
             }
             cx.emit(PlayerEvent::TrackChanged);
         }
-        if identity_changed || track_changed {
+        if identity_changed || track_changed || self.status.scrub.is_some() {
             self.scrub = None;
         }
         if queue_changed || track_changed {
@@ -618,6 +641,7 @@ impl Render for Player {
             .map(|n| n.title.clone())
             .unwrap_or_else(|| "Nothing playing".into());
         let subtitle = s.error.clone().unwrap_or_else(|| match &now {
+            Some(_) if s.scrub.is_some() => "Scrubbing".into(),
             None => "Double-click a track to start listening".into(),
             Some(n) => {
                 let parts: Vec<&str> = [n.artist.as_str(), n.album.as_str()]
@@ -632,10 +656,11 @@ impl Render for Player {
             }
         });
 
+        let play_will_pause = s.scrub.map_or(s.playing, |scrub| scrub.was_playing);
         let play = div()
             .id("play-pause")
             .role(Role::Button)
-            .aria_label(if s.playing { "Pause" } else { "Play" })
+            .aria_label(if play_will_pause { "Pause" } else { "Play" })
             .size(px(34.))
             .flex_shrink_0()
             .rounded_full()
@@ -652,7 +677,7 @@ impl Render for Player {
             .when(!active && !self.can_start, |d| d.opacity(0.4))
             .tooltip(|w, cx| Tooltip::new("Play or pause · Space").build(w, cx))
             .child(
-                Icon::new(if s.playing {
+                Icon::new(if play_will_pause {
                     IconName::Pause
                 } else {
                     IconName::Play

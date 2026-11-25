@@ -309,7 +309,9 @@ mod imp {
             } else {
                 match s.playback_state() {
                     TransportState::Playing => MediaPlaybackStatus::Playing,
-                    TransportState::Paused => MediaPlaybackStatus::Paused,
+                    TransportState::Paused | TransportState::Scrubbing => {
+                        MediaPlaybackStatus::Paused
+                    }
                     TransportState::Stopped | TransportState::Finished => {
                         MediaPlaybackStatus::Stopped
                     }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::audio::scrub::{End as ScrubEnd, Gesture};
 use crate::audio::{PlaybackIdentity, Presentation, WaveSeekAnchor};
 use crate::theme::Materials;
 use crate::{
@@ -45,6 +46,7 @@ pub(crate) struct WaveTrack {
     pub frame: usize,
     presentation: Option<Presentation>,
     pub playing: bool,
+    pub scrub_frame: Option<f64>,
 }
 
 impl WaveTrack {
@@ -87,7 +89,52 @@ impl Player {
             frame: segment.elapsed_frame(self.status.position),
             presentation: self.status.presentation.clone(),
             playing: self.status.playing,
+            scrub_frame: self
+                .waveform_scrub
+                .as_ref()
+                .filter(|gesture| !gesture.closed() && gesture.anchor.identity == identity)
+                .and_then(|gesture| gesture.frame()),
         })
+    }
+
+    pub(crate) fn waveform_grabbed(&self) -> bool {
+        self.waveform_scrub
+            .as_ref()
+            .is_some_and(|gesture| !gesture.closed())
+    }
+
+    pub(crate) fn begin_waveform_scrub(
+        &mut self,
+        anchor: WaveSeekAnchor,
+        origin: f64,
+        was_playing: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Gesture>> {
+        if self.waveform_grabbed()
+            || self.status.playing != was_playing
+            || self.wave_track().and_then(|track| track.seek).as_ref() != Some(&anchor)
+        {
+            return None;
+        }
+        let (_, bounds) = crate::audio::scrub_run(&self.queue, &anchor.source)?;
+        let gesture = Arc::new(Gesture::new(
+            self.transport.sender().scrub_control,
+            anchor,
+            origin,
+            was_playing,
+            bounds,
+        ));
+        match self
+            .transport
+            .send(Command::BeginWaveScrub(gesture.clone()), self.status.entry)
+        {
+            Ok(()) => self.waveform_scrub = Some(gesture.clone()),
+            Err(error) => {
+                cx.emit(PlayerEvent::Notice(error.to_string()));
+                return None;
+            }
+        }
+        Some(gesture)
     }
 
     pub(crate) fn seek_wave_track(
@@ -105,6 +152,9 @@ impl Player {
         true
     }
     pub(super) fn request_wave(&mut self) {
+        if let Some(gesture) = self.waveform_scrub.take() {
+            gesture.finish(ScrubEnd::Cancel);
+        }
         self.program = None;
         self.segment = None;
         self.shapes.clear();
@@ -256,11 +306,11 @@ impl Player {
         cx.notify();
     }
     pub(super) fn wave_time(&self) -> (f64, f64) {
-        let Some((p, i)) = self.program.as_ref().zip(self.segment) else {
+        let Some((p, (i, frame))) = self.program.as_ref().zip(self.visible_wave_segment()) else {
             return (self.status.position, self.status.duration);
         };
         let s = &p.segments[i];
-        let ns = s.at(s.elapsed_frame(self.status.position));
+        let ns = s.at(frame.unwrap_or_else(|| s.elapsed_frame(self.status.position)));
         if self.disc_view() {
             (ns as f64 / SECOND as f64, p.duration as f64 / SECOND as f64)
         } else {
@@ -272,6 +322,23 @@ impl Player {
     }
     pub(super) fn scrub_fraction(&self) -> Option<f64> {
         self.scrub.and_then(|seek| seek.preview)
+    }
+
+    fn visible_wave_segment(&self) -> Option<(usize, Option<usize>)> {
+        let active = self.segment?;
+        if let Some(position) = self.status.scrub {
+            let program = self.program.as_ref()?;
+            let source = &program.segments[active].source;
+            let frame = position.frame.floor() as usize;
+            if let Some(index) = program
+                .segments
+                .iter()
+                .position(|segment| segment.source == *source && segment.frames.contains(&frame))
+            {
+                return Some((index, Some(frame)));
+            }
+        }
+        Some((active, None))
     }
 
     fn target_in(&self, fraction: f64, disc: bool) -> Result<Command, &'static str> {
@@ -474,7 +541,7 @@ impl Player {
                 .absolute()
                 .size_full(),
             );
-        if let Some((p, k)) = self.program.as_ref().zip(self.segment) {
+        if let Some((p, (k, _))) = self.program.as_ref().zip(self.visible_wave_segment()) {
             let full = self.disc_view();
             let indices = if full { 0..p.segments.len() } else { k..k + 1 };
             for i in indices {

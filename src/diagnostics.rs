@@ -12,6 +12,9 @@ use std::{
 
 #[derive(Default)]
 pub struct Counters {
+    pub scrub_rendered: AtomicU64,
+    pub scrub_render_us: AtomicU64,
+    pub scrub_decoder_opens: AtomicU64,
     pub commands: AtomicU64,
     pub opens: AtomicU64,
     pub voices: AtomicU64,
@@ -117,6 +120,9 @@ pub fn start() {
                 ("wave_gpu_draws", &d.wave_gpu_draws),
                 ("wave_gpu_errors", &d.wave_gpu_errors),
                 ("wave_input_to_draw_max_us", &d.wave_input_us),
+                ("scrub_rendered_movements", &d.scrub_rendered),
+                ("scrub_pointer_to_audio_max_us", &d.scrub_render_us),
+                ("scrub_decoder_opens", &d.scrub_decoder_opens),
                 ("wave_clock_observation_age_max_us", &d.wave_clock_age_us),
                 ("wave_entity_invalidations", &d.wave_invalidations),
                 ("player_render_max_us", &d.ui_us),

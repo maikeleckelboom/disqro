@@ -315,6 +315,7 @@ impl Entries {
                     match status.playback_state() {
                         TransportState::Playing => "Now playing",
                         TransportState::Paused => "Paused",
+                        TransportState::Scrubbing => "Scrubbing",
                         TransportState::Finished => "Finished",
                         TransportState::Stopped => "Stopped",
                     }

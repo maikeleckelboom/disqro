@@ -25,7 +25,7 @@ pub struct Reader {
     used: usize,
 }
 impl Reader {
-    fn open(s: &Source) -> Result<Self> {
+    pub(crate) fn open(s: &Source) -> Result<Self> {
         let decoder = Recording::open(&Track::file(s.path.clone()), None)?;
         ensure!(
             decoder.stamp.as_ref() == Some(&s.stamp)
@@ -52,6 +52,19 @@ impl Reader {
             self.used = 0;
         }
         Ok(())
+    }
+
+    pub(crate) fn read_into(
+        &mut self,
+        start: usize,
+        output: &mut [Frame],
+        current: &impl Fn() -> bool,
+    ) -> Result<()> {
+        self.position(start)?;
+        self.visit(start + output.len(), current, |first, chunk| {
+            let index = first - start;
+            output[index..index + chunk.len()].copy_from_slice(chunk);
+        })
     }
 
     fn visit(
