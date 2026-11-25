@@ -84,13 +84,23 @@ fn timeline_waveform_baseline() {
             vec![]
         };
         let detail = RefCell::new(std::collections::VecDeque::from(detail));
+        let load_visible = |session: &mut DecoderSession<'_>| {
+            let mut pending = detail.borrow_mut();
+            if let Some(key) = pending.pop_front() {
+                key.load(session.cache, session.reader, &|| true).unwrap();
+                if pending.is_empty() {
+                    detail_time.set(Some(began.elapsed()));
+                }
+            }
+        };
+        let mut reader = None;
         analyse(
             &program,
             active,
             &focus,
             DecoderSession {
                 cache: Some(&cache),
-                reader: &mut None,
+                reader: &mut reader,
             },
             || true,
             &|update| {
@@ -112,16 +122,17 @@ fn timeline_waveform_baseline() {
                 }
                 true
             },
-            &|session| {
-                let mut pending = detail.borrow_mut();
-                if let Some(key) = pending.pop_front() {
-                    key.load(session.cache, session.reader, &|| true).unwrap();
-                    if pending.is_empty() {
-                        detail_time.set(Some(began.elapsed()));
-                    }
-                }
-            },
+            &load_visible,
         );
+        // The live worker drains remaining detail requests during its idle pass.
+        // A cached single-source overview can finish after loading just one tile.
+        let mut session = DecoderSession {
+            cache: Some(&cache),
+            reader: &mut reader,
+        };
+        while !detail.borrow().is_empty() {
+            load_visible(&mut session);
+        }
         let finished = began.elapsed();
         let (shapes, first, full_overview) = observations.into_inner();
         assert!(

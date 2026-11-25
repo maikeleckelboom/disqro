@@ -20,7 +20,17 @@ The recovered CPU renderer remains a frozen oracle in the test and qualification
 
 All 103 Stroke views met the original limits on a Radeon 780M, including the 44.1 and 48 kHz recordings, CUE segment, and anti-phase control. The same 103 views also passed with fresh evidence from the new analyzer. The replay used 560, 1,200, and 1,920 device-pixel widths and 100%, 150%, and 200% scale. Where the reference exposes detail columns, source boundaries, extrema witnesses, and coverage states matched exactly. Core bounds differed from Rust by at most 0.000016 device pixels. The maximum composed channel difference from Rust was one 8-bit code. The highest active-pixel P99 against Electron was one code. The largest individual composed difference against Electron was 30 codes, inside the Canvas fallback limits.
 
-The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agrees pixel-for-pixel with Rust and exceeds the Electron limit along a single scanline. The maximum difference is 63 codes over 728 pixels at 32 kHz and 649 at 96 kHz. At these scales the live deck introduces decoded sample geometry as evidence becomes available. Separate shader checks verify decoded stereo and CUE clipping, along with the spectral fallback at 40,123 Hz in both themes. The Project, Baddadan, and independently identified drum and bass, rock and metal, acoustic, and classical recordings remain unqualified pending authorized sources.
+The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agrees pixel-for-pixel with Rust and exceeds the Electron limit along a single scanline. The maximum difference is 63 codes over 728 pixels at 32 kHz and 649 at 96 kHz. At these scales the live deck introduces decoded sample geometry as evidence becomes available. Separate shader checks verify decoded stereo and CUE clipping, along with the spectral fallback at 40,123 Hz in both themes.
+
+Five openly licensed recordings passed 45 additional views using fresh evidence. Each recording has an overview and 8 s and 2 s detail at all three sizes and scales. Both applications independently decoded the same converted float WAV to identical PCM. The native GPU and Rust differed by at most one code. The highest active-pixel P99 against Electron was one code. The conversion preserved the original sample rates and limited the long recordings to their first 180 s. The Project and Baddadan still need authorized recordings.
+
+| Material | Rate | Detail center | Recording and license |
+| --- | ---: | ---: | --- |
+| Drum and bass | 48 kHz | 65 s | TetraHydroCannabolis, [Liquid Drum And Bass](https://commons.wikimedia.org/wiki/File:Liquid_Drum_And_Bass.wav), [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/) |
+| Rock | 44.1 kHz | 11 s | Skimel, [pop-rock double-tracking example](https://commons.wikimedia.org/wiki/File:Example_of_double_tracking_in_a_pop-rock_song_(3_guitar_tracks).ogg), [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) |
+| Metal | 44.1 kHz | 54 s | Carmina, [En mon nom](https://commons.wikimedia.org/wiki/File:Carmina_-_En_mon_nom.ogg), [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) |
+| Acoustic guitar | 44.1 kHz | 24 s | RyGuy, [Acoustic Guitar Sample](https://commons.wikimedia.org/wiki/File:AcousticGuitarSample.ogg), public domain |
+| Classical | 48 kHz | 129 s | Czech National Symphony Orchestra via Musopen, [Beethoven's Eroica, II. Marcia funebre](https://commons.wikimedia.org/wiki/File:Beethoven_SymphonyNo.3Eroica_LudwigVanBeethoven-SymphonyNo.3InEFlatMajorEroicaOp.55-02-MarciaFunebreAdagioAssai.ogg), [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
 
 To replay accepted matches from the local checkpoint against the shader, build with `qualification` and run the following command. The runner compares the GPU's own source witnesses and column data with Rust, and compares pixels with Rust and Electron. The local manifests identify the registered physical extent and source frames of each view.
 
@@ -38,9 +48,11 @@ The 75-minute fixture is a 44.1 kHz stereo FLAC image registered as 15 CUE chapt
 | Original Disqro, cold / warm | 3.32 / 0.78 ms | 2.70 s / 88.91 ms | — | 2.70 s / 88.91 ms |
 | Accepted CPU Stroke, cold / warm | 16.32 / 10.87 ms | 14.67 s / 95.72 ms | — | 14.67 s / 95.72 ms |
 | Native Stroke, cold / warm | 1.71 / 1.82 ms | 2.82 s / 15.99 ms | — | 9.47 s / 16.00 ms |
-| Native Stroke with visible detail demand, cold / warm | 17.57 / 2.38 ms | 2.98 s / 10.61 ms | 16.62 / 2.69 ms | 10.32 s / 10.61 ms |
+| Native Stroke with visible detail demand, cold / warm | 16.17 / 2.01 ms | 2.91 s / 13.64 ms | 15.49 / 2.42 ms | 9.32 s / 13.65 ms |
 
 The original Disqro overview measured extrema and RMS. The accepted CPU checkpoint performed spectral analysis before publishing the full overview. Each row is one run in the stated cache state. The new overview held 6.33 MiB of source measurements in memory and 5.86 MiB of SQLite payload, excluding indexes. Cold and warm geometry digests matched. [Original baseline measurements](evidence/waveform-baseline.csv)
+
+The three-hour single-file FLAC opened with first geometry in 17.93 ms cold and 2.22 ms cached. Exact visible detail arrived in 24.19 / 3.21 ms, full overview geometry in 10.31 s / 2.22 ms, and all requested evidence in 26.54 s / 3.21 ms. It held 432 KiB of overview measurements and 832 KiB of SQLite payload including the visible tiles. The original RMS-only run took 9.98 s / 440.06 ms for full overview coverage.
 
 ```powershell
 $env:DISQRO_WAVE_BASELINE_SOURCE=(Resolve-Path .local/waveform-mission/fixtures/disc.cue).Path
@@ -67,13 +79,13 @@ The GPU timestamp run used 180 offscreen zoom updates per view with warm source 
 
 The foreground run used the 2560 × 1600 display at 240 Hz and 150% scaling. It used two detail panels, compact Full CD, a cold profile, and continuous muted playback. PresentMon could not start ETW under the standard account. DXGI reported a 4.167 ms refresh period in the foreground. The table counts distinct display updates observed by the swap-chain sampler. An observation can skip intervening display updates. The interval columns therefore describe the recorded gaps.
 
-| Final workload | Distinct observed updates/s | P50 | P95 | P99 |
-| --- | ---: | ---: | ---: | ---: |
-| Playback and full-CD analysis | 76.7 | 8.33 ms | 25.00 ms | 33.33 ms |
-| Continuous zoom and library scrolling | 92.7 | 8.33 ms | 25.00 ms | 33.33 ms |
-| Step zoom and library scrolling | 92.1 | 8.33 ms | 16.67 ms | 33.33 ms |
-| Sample zoom, pan, and rapid reversals | 104.1 | 8.33 ms | 16.67 ms | 16.67 ms |
-| Resize | 85.7 | 8.33 ms | 29.17 ms | 50.00 ms |
+| Final workload | Distinct observed updates/s | P50 | P95 | P99 | Gaps over two refreshes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Playback and full-CD analysis | 76.7 | 8.33 ms | 25.00 ms | 33.33 ms | 48 of 115 |
+| Continuous zoom and library scrolling | 92.7 | 8.33 ms | 25.00 ms | 33.33 ms | 40 of 173 |
+| Step zoom and library scrolling | 92.1 | 8.33 ms | 16.67 ms | 33.33 ms | 26 of 112 |
+| Sample zoom, pan, and rapid reversals | 104.1 | 8.33 ms | 16.67 ms | 16.67 ms | 43 of 256 |
+| Resize | 85.7 | 8.33 ms | 29.17 ms | 50.00 ms | 23 of 95 |
 
 An earlier run observed 218 updates/s during continuous zoom and library scrolling, with an 8.33 ms P95. Its sample phase reached 50.00 ms P99 before sample-segment lookup moved into the per-column compute pass. Sustained 120 and 240 Hz remain unqualified across the complete workload.
 
