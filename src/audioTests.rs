@@ -110,6 +110,12 @@ fn check_chapter_render(silent: bool) {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(voice.state(), PlaybackState::Stopped);
+    let presented = voice
+        .clock
+        .position(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(presented.frame, 9600.0);
+    assert!(!presented.advancing);
     assert!(
         reader
             .latest()
@@ -221,6 +227,7 @@ fn delayed_transport_fixture(
         voice: Some(OutputVoice {
             rate: 1_000_000.,
             state: state.clone(),
+            clock: Arc::new(clock::Clock::new(0)),
         }),
         credit: Some(VoiceCredit {
             progress,
@@ -506,6 +513,7 @@ fn cue_queue_edit_uses_the_same_completed_block_for_the_playhead_and_credit() {
         voice: Some(OutputVoice {
             state: state.clone(),
             rate: 8000.,
+            clock: Arc::new(clock::Clock::new(0)),
         }),
         credit: Some(VoiceCredit {
             progress,
@@ -1147,6 +1155,138 @@ fn restoring_a_final_chapter_without_tag_duration_keeps_saved_position() {
     e.command(Command::Restore(Box::new(q), 12.25)).unwrap();
     assert_eq!(e.status.position, 12.25);
     assert!(!e.status.playing && e.voice.is_none());
+}
+
+#[test]
+fn waveform_seek_rejects_rapid_obsolete_gestures_and_file_replacements() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    let sheet = dir.path().join("disc.cue");
+    fixture(&path, 48_000, 96_000);
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:01",
+    )
+    .unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let program =
+        crate::timeline::Program::resolve(&tracks[0], DiscContext::Selected, None).unwrap();
+    let mut engine = Engine::default();
+    engine.queue.replace(tracks.clone().into(), 0);
+    engine.select(Some(0), 0.);
+    engine.refresh_flags();
+    let anchor = |engine: &Engine, index| {
+        let segment: &crate::timeline::Segment = &program.segments[index];
+        WaveSeekAnchor {
+            identity: engine.status.playback_identity().unwrap(),
+            source: segment.source.clone(),
+            playable: segment.frames.clone(),
+            sheet: program.sheet.clone(),
+        }
+    };
+    let command = |anchor, frame| Command::SeekWave { anchor, frame };
+    let initial = anchor(&engine, 0);
+    engine.command(command(initial.clone(), 24_000)).unwrap();
+    assert_eq!(engine.status.position, 0.5);
+    engine.command(command(initial, 12_000)).unwrap();
+    assert_eq!(engine.status.position, 0.5);
+    let before_edit = anchor(&engine, 0);
+    engine.queue.clear_upcoming();
+    engine
+        .command(command(before_edit.clone(), 12_000))
+        .unwrap();
+    assert_eq!(engine.status.position, 0.5);
+    engine.queue.replace(tracks.into(), 1);
+    engine.select(Some(1), 0.);
+    engine.refresh_flags();
+    engine.command(command(before_edit, 12_000)).unwrap();
+    let next = anchor(&engine, 1);
+    let start = next.playable.start;
+    assert!(engine.accepts_wave_seek(&next, start));
+    assert!(!engine.accepts_wave_seek(&next, start - 1));
+    let file = std::fs::File::open(&sheet).unwrap();
+    let modified = file.metadata().unwrap().modified().unwrap();
+    drop(file);
+    let old = dir.path().join("old.cue");
+    std::fs::rename(&sheet, &old).unwrap();
+    std::fs::copy(&old, &sheet).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&sheet)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert!(!engine.accepts_wave_seek(&next, start));
+    let mut replaced = next;
+    replaced.sheet = crate::cache::Revision::read(&sheet).map(|revision| (sheet, revision));
+    assert!(engine.accepts_wave_seek(&replaced, start));
+    fixture(&path, 48_000, 96_003);
+    engine.command(command(replaced, start + 4_800)).unwrap();
+    assert_eq!(engine.status.position, 0.0);
+}
+
+#[test]
+fn guarded_seek_checks_the_rendered_cue_boundary_before_the_next_transport_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    let sheet = dir.path().join("disc.cue");
+    fixture(&path, 48_000, 96_000);
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+    )
+    .unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let program =
+        crate::timeline::Program::resolve(&tracks[0], DiscContext::Selected, None).unwrap();
+    let mut engine = Engine::default();
+    engine.queue.replace(tracks.into(), 0);
+    engine.select(Some(0), 0.);
+    engine.refresh_flags();
+    engine.status.playing = true;
+    engine.status.duration = 1.;
+    engine.group = vec![
+        Chapter {
+            id: engine.queue.entries[0].id,
+            offset: 0.,
+        },
+        Chapter {
+            id: engine.queue.entries[1].id,
+            offset: 1.,
+        },
+    ];
+    engine.limit = 2.;
+    engine.voice = Some(OutputVoice {
+        state: Arc::new(OutputState {
+            cursor: AtomicUsize::new(48_480),
+            ..OutputState::default()
+        }),
+        rate: 48_000.,
+        clock: Arc::new(clock::Clock::new(0)),
+    });
+    let anchor = WaveSeekAnchor {
+        identity: engine.status.playback_identity().unwrap(),
+        source: program.segments[0].source.clone(),
+        playable: program.segments[0].frames.clone(),
+        sheet: program.sheet.clone(),
+    };
+    engine
+        .command(Command::SeekWave {
+            anchor,
+            frame: 12_000,
+        })
+        .unwrap();
+    assert_eq!(engine.status.entry, Some(engine.queue.entries[1].id));
+    assert!((engine.status.position - 0.01).abs() < 1e-9);
+    assert!(engine.voice.is_some() && engine.device.is_none());
 }
 
 #[test]

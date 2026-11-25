@@ -118,7 +118,7 @@ def find_window(pid):
         user32.GetWindowThreadProcessId(hwnd, C.byref(owner))
         name = C.create_unicode_buffer(96)
         user32.GetClassNameW(hwnd, name, len(name))
-        if owner.value == pid and name.value == "Zed::Window" and user32.IsWindowVisible(hwnd):
+        if owner.value == pid and name.value in {"Zed::Window", "GpuiFast::Window"} and user32.IsWindowVisible(hwnd):
             matches.append(hwnd)
         return True
     user32.EnumWindows(visit, 0)
@@ -201,7 +201,7 @@ def profile(scenario, source):
                 window=dict(close_to_tray=False), layout=dict(version=3, center=center))
 
 
-def control_centers(hwnd, labels):
+def control_centers(hwnd, labels, *, min_y=None):
     # Query once. Every input message below targets this private HWND.
     script = r"""
 Add-Type -AssemblyName UIAutomationClient
@@ -209,7 +209,19 @@ Add-Type -AssemblyName UIAutomationTypes
 $root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]HWND)
 foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
     $match = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $label)
-    $element = $root.FindFirst([Windows.Automation.TreeScope]::Descendants, $match)
+    if ($env:DISQRO_CONTROL_MIN_Y) {
+        $element = $null
+        $matches = $root.FindAll([Windows.Automation.TreeScope]::Descendants, $match)
+        for ($i=0; $i -lt $matches.Count; $i++) {
+            $candidate = $matches.Item($i)
+            if ($candidate.Current.BoundingRectangle.Y -ge [int]$env:DISQRO_CONTROL_MIN_Y) {
+                $element = $candidate
+                break
+            }
+        }
+    } else {
+        $element = $root.FindFirst([Windows.Automation.TreeScope]::Descendants, $match)
+    }
     if ($null -eq $element) { throw "Missing native control $label" }
     $r = $element.Current.BoundingRectangle
     Write-Output ([int]($r.X+$r.Width/2))
@@ -217,7 +229,8 @@ foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
 }
 """
     output = subprocess.check_output(["powershell", "-NoProfile", "-Command", script.replace("HWND", str(hwnd))],
-                                     env=dict(os.environ, DISQRO_CONTROL_LABELS=json.dumps(labels)),
+                                     env=dict(os.environ, DISQRO_CONTROL_LABELS=json.dumps(labels),
+                                              DISQRO_CONTROL_MIN_Y='' if min_y is None else str(min_y)),
                                      creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
     coords = list(map(int, output.split()))
     return [W.POINT(x, y) for x, y in zip(coords[::2], coords[1::2], strict=True)]

@@ -29,6 +29,22 @@ impl Stamp {
         })
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revision {
+    pub stamp: Stamp,
+    pub object: Option<crate::store::NativeFile>,
+}
+
+impl Revision {
+    pub fn read(path: &Path) -> Option<Self> {
+        let file = fs::File::open(path).ok()?;
+        Some(Self {
+            stamp: Stamp::from_metadata(&file.metadata().ok()?)?,
+            object: crate::store::NativeFile::of(&file),
+        })
+    }
+}
 impl Cache {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         fs::create_dir_all(dir)?;
@@ -44,8 +60,12 @@ impl Cache {
             CREATE INDEX IF NOT EXISTS chapters_artist ON chapters(artist COLLATE NOCASE);
             CREATE INDEX IF NOT EXISTS chapters_album ON chapters(album COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS wave_pages_v1(path BLOB, bytes INTEGER, modified INTEGER,
-                page INTEGER, data BLOB, UNIQUE(path,page));
+            DROP TABLE IF EXISTS wave_pages_v1;
+            DROP TABLE IF EXISTS wave_pages_v2;
+            DROP TABLE IF EXISTS wave_evidence_v1;
+            DROP TABLE IF EXISTS wave_evidence_v2;
+            CREATE TABLE IF NOT EXISTS wave_evidence_v3(path BLOB, requested BLOB, size INTEGER, modified INTEGER,
+                volume INTEGER, object INTEGER, data BLOB, UNIQUE(path,requested));
             CREATE TABLE IF NOT EXISTS disc_sources_v1(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
                 path BLOB, bytes INTEGER, modified INTEGER, rate INTEGER, frames INTEGER, PRIMARY KEY(sheet,path)) WITHOUT ROWID;")?;
         Ok(Self(db))

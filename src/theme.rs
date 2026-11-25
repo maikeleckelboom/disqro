@@ -56,10 +56,6 @@ pub struct Materials {
 /// The waveform keeps its own colors so it never tints the interface.
 #[derive(Clone, Copy)]
 pub struct Wave {
-    pub played_peak: Hsla,
-    pub played_body: Hsla,
-    pub ahead_peak: Hsla,
-    pub ahead_body: Hsla,
     pub cursor: Hsla,
 }
 
@@ -95,10 +91,6 @@ impl Materials {
             danger: hex(0xe5675f),
             warning: hex(0xd8ad5c),
             wave: Wave {
-                played_peak: hexa(0x91afcb, 0.5),
-                played_body: hex(0xa9c3db),
-                ahead_peak: hex(0x34353b),
-                ahead_body: hex(0x4d4f57),
                 cursor: hex(0xf1f1f3),
             },
         }

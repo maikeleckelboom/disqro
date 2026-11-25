@@ -31,6 +31,7 @@ use std::{
 #[path = "player_wave.rs"]
 mod wave;
 use crate::level_meter::LevelMeter;
+pub(crate) use wave::WaveTrack;
 
 /// The perspective tabs above the timeline lane.
 const PERSPECTIVE_HEIGHT: f32 = 20.;
@@ -49,6 +50,8 @@ pub enum PlayerEvent {
     PlaySelection,
     ToggleQueue,
     QueueChanged,
+    WaveChanged,
+    WaveEvidence,
     /// Play state, position jumps or availability of Previous and Next.
     StateChanged,
 }
@@ -132,7 +135,7 @@ pub struct Player {
     muted_from: Option<f32>,
     level_bounds: Rc<Cell<Bounds<Pixels>>>,
     panel_height: Rc<Cell<Option<Pixels>>>,
-    scrub: Option<f32>,
+    scrub: Option<wave::StripSeek>,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     source_info: artwork::MediaInfo,
     cover_path: Option<PathBuf>,
@@ -147,7 +150,6 @@ pub struct Player {
     shapes: Vec<Shape>,
     unavailable: Option<String>,
     run: std::ops::Range<usize>,
-    scrub_entry: Option<(u64, u64)>,
     visible: bool,
     drawn_position: f64,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
@@ -216,7 +218,6 @@ impl Player {
             shapes: vec![],
             unavailable: None,
             run: 0..0,
-            scrub_entry: None,
             visible: true,
             drawn_position: 0.,
             queue_shown: true,
@@ -341,7 +342,8 @@ impl Player {
         let track_changed = context_changed
             || self.status.track.as_deref() != status.track.as_deref()
             || self.status.entry != status.entry
-            || self.status.source_revision != status.source_revision;
+            || self.status.source_revision != status.source_revision
+            || self.status.source_object != status.source_object;
         let state_changed = self.status.playback_state() != status.playback_state()
             || self.status.next != status.next
             || self.status.previous != status.previous
@@ -353,6 +355,12 @@ impl Player {
         };
         let _transition =
             track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
+        let identity_changed = self.status.playback_identity() != status.playback_identity();
+        let wave_changed = track_changed
+            || queue_changed
+            || identity_changed
+            || self.status.playing != status.playing
+            || (!status.playing && self.status.position != status.position);
         self.status = status;
         if self.show_levels && self.visible {
             self.sync_meter(cx);
@@ -370,6 +378,10 @@ impl Player {
                                 .source_revision
                                 .as_ref()
                                 .is_none_or(|r| r == &p.segments[i].source.stamp)
+                            && self
+                                .status
+                                .source_object
+                                .is_none_or(|file| Some(file) == p.segments[i].source.object)
                     })
                 });
             if let Some(i) = self.segment {
@@ -379,13 +391,17 @@ impl Player {
             }
             cx.emit(PlayerEvent::TrackChanged);
         }
-        if queue_changed || track_changed {
+        if identity_changed || track_changed {
             self.scrub = None;
-            self.scrub_entry = None;
+        }
+        if queue_changed || track_changed {
             self.update_run();
         }
         if state_changed {
             cx.emit(PlayerEvent::StateChanged);
+        }
+        if wave_changed {
+            cx.emit(PlayerEvent::WaveChanged);
         }
         // Redraw for position alone only when the playhead moves on screen or
         // the clock turns over; a long track then redraws a few times a second
@@ -485,7 +501,7 @@ impl Render for Player {
         let s = &self.status;
         let active = s.track.is_some();
         let (position, duration) = self.wave_time();
-        let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
+        let shown_position = self.scrub_fraction().map_or(position, |f| f * duration);
 
         let mut art = div()
             .size(px(CONTROL_ROW))
@@ -869,6 +885,9 @@ impl Render for Player {
                             .items_center()
                             .child(
                                 div()
+                                    .id("now-playing-title")
+                                    .role(Role::Label)
+                                    .aria_value(title.clone())
                                     .truncate()
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::SEMIBOLD)

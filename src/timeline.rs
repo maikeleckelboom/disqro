@@ -1,6 +1,6 @@
 //! Authored listening time. Frame zero is the decoder's trimmed source origin.
 use crate::{
-    cache::{Cache, Stamp},
+    cache::{Cache, Revision, Stamp},
     library::{DiscContext, Track, TrackList},
     recording::{Recording, disc_frame},
 };
@@ -95,13 +95,42 @@ impl Overview {
 pub fn frame_time(frame: usize, rate: u32) -> u64 {
     ((frame as u128 * u128::from(SECOND) + u128::from(rate / 2)) / u128::from(rate)) as u64
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Source {
     pub path: PathBuf,
     pub stamp: Stamp,
+    pub object: Option<crate::store::NativeFile>,
     pub rate: u32,
     pub frames: usize,
     pub available: bool,
+}
+
+impl Source {
+    pub fn playable(&self, track: &Track) -> Option<Range<usize>> {
+        let disc = track.disc.as_ref();
+        let first = disc.map_or(0, |d| disc_frame(d.start, self.rate));
+        let end = disc
+            .and_then(|d| d.end)
+            .map_or(self.frames, |e| disc_frame(e, self.rate));
+        (self.path == track.source && first < end && end <= self.frames).then_some(first..end)
+    }
+
+    pub fn unchanged(&self) -> bool {
+        if !self.available {
+            return Stamp::read(&self.path).is_none();
+        }
+        let Ok(file) = std::fs::File::open(&self.path) else {
+            return false;
+        };
+        file.metadata()
+            .ok()
+            .and_then(|m| Stamp::from_metadata(&m))
+            .as_ref()
+            == Some(&self.stamp)
+            && self
+                .object
+                .is_none_or(|known| crate::store::NativeFile::of(&file) == Some(known))
+    }
 }
 #[derive(Debug)]
 pub struct Segment {
@@ -138,7 +167,7 @@ pub struct Program {
     pub duration: u64,
     pub full_cd: bool,
     pub limitation: Option<String>,
-    pub sheet: Option<(PathBuf, Stamp)>,
+    pub sheet: Option<(PathBuf, Revision)>,
     kind: ProgramKind,
     watch: Vec<(PathBuf, Option<Stamp>)>,
 }
@@ -163,18 +192,18 @@ impl Program {
         let program = (|| -> Result<Self> {
             ensure!(context.allows(track), "No program context");
             let (tracks, sheet): (TrackList, _) = if let Some(d) = &track.disc {
-                let stamp = Stamp::read(&d.sheet);
-                watch.push((d.sheet.clone(), stamp.clone()));
-                let stamp = stamp.context("CUE sheet unavailable")?;
+                let revision = Revision::read(&d.sheet);
+                watch.push((d.sheet.clone(), revision.as_ref().map(|r| r.stamp.clone())));
+                let revision = revision.context("CUE sheet unavailable")?;
                 let list = crate::cue::read(&d.sheet)?
                     .into_iter()
                     .map(Arc::new)
                     .collect();
                 ensure!(
-                    Stamp::read(&d.sheet).as_ref() == Some(&stamp),
+                    Revision::read(&d.sheet).as_ref() == Some(&revision),
                     "CUE sheet changed"
                 );
-                (list, Some((d.sheet.clone(), stamp)))
+                (list, Some((d.sheet.clone(), revision)))
             } else {
                 let local = crate::discovery::local_program(
                     track.source.parent().context("Missing folder")?,
@@ -218,7 +247,7 @@ impl Program {
     }
     fn build(
         tracks: &[Arc<Track>],
-        sheet: Option<(PathBuf, Stamp)>,
+        sheet: Option<(PathBuf, Revision)>,
         cache: Option<&Cache>,
         full_cd: bool,
         kind: ProgramKind,
@@ -235,23 +264,17 @@ impl Program {
                     s
                 }
             };
-            let d = t.disc.as_ref();
-            let first = d.map_or(0, |d| disc_frame(d.start, source.rate));
-            let end = d
-                .and_then(|d| d.end)
-                .map_or(source.frames, |e| disc_frame(e, source.rate));
-            ensure!(
-                first < end && end <= source.frames,
-                "Invalid chapter boundary"
-            );
+            let frames = source.playable(t).context("Invalid chapter boundary")?;
             let start = duration;
             duration = duration
-                .checked_add(frame_time(end, source.rate) - frame_time(first, source.rate))
+                .checked_add(
+                    frame_time(frames.end, source.rate) - frame_time(frames.start, source.rate),
+                )
                 .context("Program duration overflow")?;
             segments.push(Segment {
                 track: t.clone(),
                 source,
-                frames: first..end,
+                frames,
                 time: start..duration,
             });
         }
@@ -271,7 +294,7 @@ impl Program {
             return false;
         }
         if let Some((p, s)) = &self.sheet
-            && Stamp::read(p).as_ref() != Some(s)
+            && Revision::read(p).as_ref() != Some(s)
         {
             return false;
         }
@@ -281,14 +304,13 @@ impl Program {
                 return true;
             }
             last = Some(&seg.source.path);
-            Stamp::read(&seg.source.path).as_ref()
-                == seg.source.available.then_some(&seg.source.stamp)
+            seg.source.unchanged()
         })
     }
 }
 fn describe(
     path: &Path,
-    sheet: Option<&(PathBuf, Stamp)>,
+    sheet: Option<&(PathBuf, Revision)>,
     cache: Option<&Cache>,
 ) -> Result<Source> {
     let key = path.as_os_str().as_encoded_bytes();
@@ -306,8 +328,8 @@ fn describe(
                 "INSERT OR REPLACE INTO disc_sources_v1 VALUES(?,?,?,?,?,?,?,?)",
                 params![
                     p.as_os_str().as_encoded_bytes(),
-                    s.bytes,
-                    s.modified,
+                    s.stamp.bytes,
+                    s.stamp.modified,
                     key,
                     stamp.bytes,
                     stamp.modified,
@@ -319,6 +341,7 @@ fn describe(
         Source {
             path: path.into(),
             stamp,
+            object: recording.object,
             rate,
             frames,
             available: true,
@@ -326,7 +349,7 @@ fn describe(
     } else {
         let known=cache.zip(sheet).and_then(|(c,(p,s))|c.0.query_row(
             "SELECT bytes,modified,rate,frames FROM disc_sources_v1 WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
-            params![p.as_os_str().as_encoded_bytes(),s.bytes,s.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
+            params![p.as_os_str().as_encoded_bytes(),s.stamp.bytes,s.stamp.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},object:None,rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
         known.with_context(|| {
             format!(
                 "Unknown duration for {}",

@@ -299,6 +299,7 @@ impl Workspace {
         let services = Services {
             field_readouts: cx.new(|_| Default::default()),
             player: player.clone(),
+            wave_motion: Default::default(),
             catalog: catalog.clone(),
             locations: locations.clone(),
             router: router.clone(),
@@ -408,7 +409,9 @@ impl Workspace {
                     w.push_notification(text.clone(), cx);
                 }
                 PlayerEvent::ToggleQueue => s.toggle_queue(w, cx),
-                PlayerEvent::PlaySelection => {}
+                PlayerEvent::PlaySelection
+                | PlayerEvent::WaveChanged
+                | PlayerEvent::WaveEvidence => {}
             }),
             cx.observe_window_visibility(window, |s: &mut Self, visibility, _, cx| {
                 let visible = visibility == WindowVisibility::Visible;
@@ -649,7 +652,15 @@ impl Workspace {
                 },
             );
         }
-        self.panes.retain(|id, _| ids.contains(id));
+        self.panes.retain(|id, tracked| {
+            let present = ids.contains(id);
+            if !present {
+                tracked
+                    .pane
+                    .update(cx, |pane, cx| pane.set_presented(false, cx));
+            }
+            present
+        });
         self.sync_panel_display(cx);
         // An identity appears once, even in a layout edited by hand.
         let mut seen = Vec::new();

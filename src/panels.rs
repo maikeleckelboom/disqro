@@ -27,6 +27,7 @@ pub mod locations;
 pub mod nav;
 pub mod queue;
 pub mod spectrum;
+pub mod waveform;
 
 use crate::{
     browser::{Browser, Location},
@@ -112,6 +113,7 @@ pub static TYPES: &[&PanelType] = &[
     &queue::HISTORY,
     &listening::HISTORY,
     &listening::STATISTICS,
+    &waveform::TYPE,
     &spectrum::TYPE,
     &instruments::SPECTROGRAM,
     &instruments::STEREO_FIELD,
@@ -285,6 +287,9 @@ impl Pane {
             self.sidebar_hidden = hidden;
             self.refresh(cx);
         }
+        self.set_presented(presented, cx);
+    }
+    pub(crate) fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
         if self.presented != presented {
             self.presented = presented;
             self.content.set_presented(presented, cx);
@@ -535,6 +540,7 @@ pub struct Services {
     /// Presented Stereo Field instances providing the workspace's stereo readouts.
     pub field_readouts: Entity<std::collections::HashSet<EntityId>>,
     pub player: Entity<Player>,
+    pub(crate) wave_motion: waveform::Motion,
     pub catalog: Entity<Catalog>,
     pub locations: Entity<locations::Locations>,
     pub router: Entity<Router>,

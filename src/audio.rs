@@ -15,21 +15,27 @@ use kira::{
 
 use std::{
     io,
+    ops::Range,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+#[path = "audioClock.rs"]
+mod clock;
+
 pub use crate::recording::Recording;
+pub(crate) use clock::Position as RendererPosition;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub track: Option<Arc<Track>>,
     /// The queue entry that is playing, which tells two copies of a track apart.
     pub entry: Option<u64>,
     pub source_revision: Option<crate::cache::Stamp>,
+    pub source_object: Option<crate::store::NativeFile>,
     pub position: f64,
     pub duration: f64,
     pub playing: bool,
@@ -40,6 +46,59 @@ pub struct Status {
     pub shuffle: bool,
     pub repeat: Repeat,
     pub queue_revision: u64,
+    occurrence_revision: u64,
+    seek_revision: u64,
+    pub(crate) presentation: Option<Presentation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PlaybackIdentity {
+    entry: u64,
+    occurrence: u64,
+    seek: u64,
+    voice: Option<u64>,
+    queue: u64,
+}
+
+impl PlaybackIdentity {
+    /// A queue occurrence preserves position across pause or output recovery.
+    /// Adjacent CUE occurrences can also continue on the same physical voice.
+    pub(crate) fn continues(self, previous: Self) -> bool {
+        self.seek == previous.seek
+            && (self.occurrence == previous.occurrence
+                || (self.voice.is_some() && self.voice == previous.voice))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Presentation {
+    id: u64,
+    origin: usize,
+    limit: usize,
+    clock: Arc<clock::Clock>,
+}
+
+impl PartialEq for Presentation {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.limit == other.limit
+    }
+}
+
+impl Presentation {
+    pub(crate) fn position(&self, at: Instant) -> Option<RendererPosition> {
+        let mut position = self.clock.position(at)?;
+        position.frame = (position.frame + self.origin as f64).min(self.limit as f64);
+        position.advancing &= position.frame < self.limit as f64;
+        Some(position)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WaveSeekAnchor {
+    pub identity: PlaybackIdentity,
+    pub source: Arc<crate::timeline::Source>,
+    pub playable: Range<usize>,
+    pub sheet: Option<(std::path::PathBuf, crate::cache::Revision)>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -50,6 +109,16 @@ pub enum TransportState {
     Stopped,
 }
 impl Status {
+    pub(crate) fn playback_identity(&self) -> Option<PlaybackIdentity> {
+        Some(PlaybackIdentity {
+            entry: self.entry?,
+            occurrence: self.occurrence_revision,
+            seek: self.seek_revision,
+            voice: self.presentation.as_ref().map(|clock| clock.id),
+            queue: self.queue_revision,
+        })
+    }
+
     pub fn playback_state(&self) -> TransportState {
         if self.playing {
             TransportState::Playing
@@ -82,6 +151,10 @@ pub enum Command {
     Seek(f64),
     /// Seek to a time in seconds within the current track.
     SeekTo(f64),
+    SeekWave {
+        anchor: WaveSeekAnchor,
+        frame: usize,
+    },
     SeekOnDisc {
         target: u64,
         source_revision: crate::cache::Stamp,
@@ -143,19 +216,25 @@ struct Pending {
 }
 impl Pending {
     fn replaces(&self, old: &Self) -> bool {
-        matches!(
+        let replace = matches!(
             (&self.command, &old.command),
             (Command::Volume(_), Command::Volume(_))
                 | (
                     Command::Seek(_) | Command::SeekTo(_),
                     Command::Seek(_) | Command::SeekTo(_)
                 )
-        ) && self.entry == old.entry
+        ) || matches!((&self.command, &old.command), (
+            Command::SeekWave { anchor, .. }, Command::SeekWave { anchor: previous, .. }
+        ) if anchor == previous);
+        replace && self.entry == old.entry
     }
     fn applies_to(&self, entry: Option<u64>) -> bool {
         !matches!(
             self.command,
-            Command::Seek(_) | Command::SeekTo(_) | Command::SeekOnDisc { .. }
+            Command::Seek(_)
+                | Command::SeekTo(_)
+                | Command::SeekOnDisc { .. }
+                | Command::SeekWave { .. }
         ) || self.entry == entry
     }
 }
@@ -417,6 +496,7 @@ struct Engine {
     retry_next: bool,
     volume: f32,
     status: Status,
+    voice_id: u64,
 }
 
 const RENDERING: u8 = 1;
@@ -460,6 +540,7 @@ impl OutputState {
 struct OutputVoice {
     state: Arc<OutputState>,
     rate: f64,
+    clock: Arc<clock::Clock>,
 }
 
 impl OutputVoice {
@@ -550,11 +631,15 @@ struct ObservedSound {
     frames: usize,
     volume: u32,
     cursor: i64,
+    clock: Arc<clock::Clock>,
+    timing: clock::Writer,
+    rendered: f64,
     progress: Option<rtrb::Producer<RenderProgress>>,
 }
 
 impl kira::sound::Sound for ObservedSound {
     fn on_start_processing(&mut self) {
+        self.timing.begin(&self.clock, Instant::now());
         match self.state.command.swap(0, Ordering::AcqRel) {
             PAUSE => self.handle.pause(Tween::default()),
             RESUME => self.handle.resume(Tween::default()),
@@ -585,6 +670,7 @@ impl kira::sound::Sound for ObservedSound {
         self.inner.on_start_processing();
         let frames = self.state.decoded.load(Ordering::Acquire);
         let state = self.handle.state();
+        let rendered = (self.handle.position() * self.rate).min(frames as f64);
         // Kira's position can stay at the previous ring cursor after it drains
         // the last block. The immutable voice has no Kira stop or seek command.
         // Only a renderer transition to Stopped with every frame decoded
@@ -596,7 +682,7 @@ impl kira::sound::Sound for ObservedSound {
         {
             frames
         } else {
-            ((self.handle.position() * self.rate + 1e-6).floor() as usize).min(frames)
+            ((rendered + 1e-6).floor() as usize).min(frames)
         };
         let position = position_us(frame as f64 / self.rate);
         if position > self.cursor {
@@ -617,6 +703,15 @@ impl kira::sound::Sound for ObservedSound {
             );
             self.cursor = position;
         }
+        let to = rendered.max(frame as f64).max(self.rendered);
+        self.timing.rendered(
+            &self.clock,
+            self.rendered,
+            to,
+            out.len() as f64 * dt,
+            self.rate,
+        );
+        self.rendered = to;
         self.state.state.store(state as u8, Ordering::Release);
         self.state.gate.fetch_and(!RENDERING, Ordering::Release);
     }
@@ -641,6 +736,7 @@ impl kira::sound::SoundData for ObservedData {
         let rate = f64::from(self.recording.sample_rate());
         let frames = self.recording.num_frames();
         let cursor = position_us(self.start as f64 / rate);
+        let clock = Arc::new(clock::Clock::new(self.start));
         let state = Arc::new(OutputState {
             cursor: AtomicUsize::new(self.start),
             volume: AtomicU32::new(self.volume.to_bits()),
@@ -664,9 +760,12 @@ impl kira::sound::SoundData for ObservedData {
                 frames,
                 volume: self.volume.to_bits(),
                 cursor,
+                clock: clock.clone(),
+                timing: clock::Writer::default(),
+                rendered: self.start as f64,
                 progress: self.progress,
             }),
-            OutputVoice { state, rate },
+            OutputVoice { state, rate, clock },
         ))
     }
 }
@@ -755,7 +854,9 @@ impl Engine {
         self.pause_checkpoint = false;
         self.position_probe = None;
         self.voice = None;
+        self.status.presentation = None;
         self.status.source_revision = None;
+        self.status.source_object = None;
         self.group.clear();
         self.status.playing = false;
     }
@@ -868,6 +969,9 @@ impl Engine {
         self.queue.set_current(index);
         let entry = self.queue.current_entry();
         self.status.track = entry.map(|e| e.track.clone());
+        if self.status.entry != entry.map(|e| e.id) {
+            self.status.occurrence_revision += 1;
+        }
         self.status.entry = entry.map(|e| e.id);
         let duration = entry.and_then(|e| e.track.duration);
         self.status.duration = duration.unwrap_or(0.);
@@ -880,6 +984,14 @@ impl Engine {
     }
     fn play(&mut self, index: usize, position: f64) -> Result<()> {
         self.end_voice(End::Replaced);
+        if self
+            .queue
+            .entries
+            .get(index)
+            .is_some_and(|entry| Some(entry.id) == self.status.entry)
+        {
+            self.status.occurrence_revision += 1;
+        }
         self.start_voice(index, position)
     }
     fn start_voice(&mut self, index: usize, position: f64) -> Result<()> {
@@ -939,6 +1051,7 @@ impl Engine {
             recording.playback_probe = Some(std::time::Instant::now());
         }
         self.status.source_revision = recording.stamp.clone();
+        self.status.source_object = recording.object;
         self.rate = recording.sample_rate();
         let first = crate::recording::disc_frame(disc_start(&entry.track), self.rate);
         for (chapter, queued) in group.iter_mut().zip(&self.queue.entries[index..]) {
@@ -947,8 +1060,8 @@ impl Engine {
         }
         self.decoder_end = end;
         self.length = recording.num_frames() as f64 / f64::from(recording.sample_rate());
-        let start =
-            ((position * f64::from(self.rate)).round() as usize).min(recording.num_frames() - 1);
+        let frame_count = recording.num_frames();
+        let start = ((position * f64::from(self.rate)).round() as usize).min(frame_count - 1);
         if self.device.is_none() {
             self.device = Some(
                 AudioManager::<DefaultBackend>::new(AudioManagerSettings {
@@ -1007,12 +1120,20 @@ impl Engine {
             volume: self.volume,
             progress,
         });
-        self.voice = Some(played.map_err(|e| match e {
+        let voice = played.map_err(|e| match e {
             kira::PlaySoundError::IntoSoundError(e) => {
                 anyhow::Error::new(e).context(RecordingFailure(entry.track.title.clone()))
             }
             other => anyhow::Error::new(other).context("Cannot start the output voice"),
-        })?);
+        })?;
+        self.voice_id += 1;
+        self.status.presentation = Some(Presentation {
+            id: self.voice_id,
+            origin: first,
+            limit: first + frame_count,
+            clock: voice.clock.clone(),
+        });
+        self.voice = Some(voice);
         if let Some(d) = crate::diagnostics::get() {
             d.voices.fetch_add(1, Ordering::Relaxed);
         }
@@ -1034,6 +1155,7 @@ impl Engine {
             self.queue.set_current(index);
             let entry = self.queue.current_entry();
             self.status.track = entry.map(|e| e.track.clone());
+            self.status.occurrence_revision += 1;
             self.status.entry = entry.map(|e| e.id);
         }
         let start = self.group[k].offset;
@@ -1088,6 +1210,9 @@ impl Engine {
             .as_ref()
             .and_then(|d| d.end)
             .map_or(self.length, |end| offset(end).min(self.length));
+        if let Some(clock) = &mut self.status.presentation {
+            clock.limit = clock.origin + (self.limit * f64::from(self.rate)).round() as usize;
+        }
         if let Some(credit) = &mut self.credit {
             // The queued prefix has already been attributed. A queue edit
             // can change the identity of a later entry at the same offset.
@@ -1173,9 +1298,12 @@ impl Engine {
         let Some(index) = self.queue.current.or_else(|| self.queue.next_index(false)) else {
             return Ok(());
         };
-        let position = if self.queue.current == Some(index)
-            && (self.status.duration == 0. || self.status.position < self.status.duration)
-        {
+        let position = if self.queue.current == Some(index) {
+            if self.status.duration > 0. && self.status.position >= self.status.duration {
+                // Replaying the selected entry from its start is a new
+                // occurrence, even though the queue entry itself is stable.
+                return self.play(index, 0.);
+            }
             self.status.position
         } else {
             0.
@@ -1188,7 +1316,7 @@ impl Engine {
         {
             v.state.command.store(PAUSE, Ordering::Release);
             self.position_probe = None;
-            self.pause_checkpoint = self.credit.is_some();
+            self.pause_checkpoint = true;
         }
         self.status.playing = false;
         self.credit_output();
@@ -1208,7 +1336,10 @@ impl Engine {
                     self.status.playing = on;
                     return Ok(());
                 }
-                Command::Seek(_) | Command::SeekTo(_) | Command::SeekOnDisc { .. } => return Ok(()),
+                Command::Seek(_)
+                | Command::SeekTo(_)
+                | Command::SeekOnDisc { .. }
+                | Command::SeekWave { .. } => return Ok(()),
                 _ => {}
             }
         }
@@ -1216,7 +1347,10 @@ impl Engine {
         if self.voice.is_some()
             && !matches!(
                 &c,
-                Command::Seek(_) | Command::SeekTo(_) | Command::SeekOnDisc { .. }
+                Command::Seek(_)
+                    | Command::SeekTo(_)
+                    | Command::SeekOnDisc { .. }
+                    | Command::SeekWave { .. }
             )
         {
             let position = self.credit_output();
@@ -1285,6 +1419,7 @@ impl Engine {
             Command::SetPlaying(false) => self.pause(),
             Command::Stop => {
                 self.stop_voice();
+                self.status.occurrence_revision += 1;
                 self.status.position = 0.;
             }
             Command::Step(delta) => {
@@ -1318,6 +1453,29 @@ impl Engine {
                 self.seek_to(position)?;
             }
             Command::SeekTo(position) => self.seek_to(position)?,
+            Command::SeekWave { anchor, frame } => {
+                if self.accepts_wave_seek(&anchor, frame) {
+                    // The backend may already have reached the next chapter
+                    // while the transport or the file checks were pending.
+                    let at_end = if self.voice.is_some() {
+                        let position = self.credit_output();
+                        self.update_position(position.min(self.limit));
+                        self.status.playing && position >= self.limit
+                    } else {
+                        false
+                    };
+                    if !at_end
+                        && self.status.playback_identity() == Some(anchor.identity)
+                        && self.queue.revision == anchor.identity.queue
+                    {
+                        let rate = f64::from(anchor.source.rate);
+                        if !self.status.playing {
+                            self.status.duration = anchor.playable.len() as f64 / rate;
+                        }
+                        self.seek_position((frame - anchor.playable.start) as f64 / rate)?;
+                    }
+                }
+            }
             Command::SeekOnDisc {
                 target,
                 source_revision,
@@ -1352,6 +1510,7 @@ impl Engine {
                             self.end_voice(End::Replaced);
                         }
                         self.select(Some(i), 0.);
+                        self.status.seek_revision += 1;
                         self.status.duration = duration;
                         self.status.position = seconds;
                     }
@@ -1429,6 +1588,35 @@ impl Engine {
         }
         Ok(())
     }
+    fn accepts_wave_seek(&self, anchor: &WaveSeekAnchor, frame: usize) -> bool {
+        let Some(entry) = self.queue.current_entry() else {
+            return false;
+        };
+        self.status.playback_identity() == Some(anchor.identity)
+            && self.queue.revision == anchor.identity.queue
+            && anchor.playable.contains(&frame)
+            && anchor.source.playable(&entry.track).as_ref() == Some(&anchor.playable)
+            && self
+                .status
+                .source_revision
+                .as_ref()
+                .is_none_or(|stamp| stamp == &anchor.source.stamp)
+            && self
+                .status
+                .source_object
+                .is_none_or(|object| Some(object) == anchor.source.object)
+            && match (&entry.track.disc, &anchor.sheet) {
+                (None, None) => true,
+                (Some(disc), Some((path, revision))) => {
+                    disc.sheet == *path
+                        && crate::cache::Revision::read(path).as_ref() == Some(revision)
+                }
+                _ => false,
+            }
+            && anchor.source.available
+            && anchor.source.unchanged()
+    }
+
     fn seek_to(&mut self, position: f64) -> Result<()> {
         if self.status.duration <= 0. {
             return Ok(());
@@ -1439,6 +1627,11 @@ impl Engine {
         } else {
             position
         };
+        self.seek_position(position)
+    }
+
+    fn seek_position(&mut self, position: f64) -> Result<()> {
+        self.status.seek_revision += 1;
         if self.status.playing {
             if let Some(i) = self.queue.current {
                 self.detach_voice();
@@ -1473,6 +1666,8 @@ impl Engine {
             return Ok(());
         }
         self.retry_next = false;
+        let position = self.credit_output();
+        self.update_position(position.min(self.limit));
         self.end_voice(End::OutputFailed);
         self.device = None;
         self.discarded_errors = 0;
