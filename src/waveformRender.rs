@@ -1,10 +1,13 @@
-//! The CPU renderer used for waveform parity and native presentation.
+//! Source evidence and display projection shared with the visual reference.
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+#[path = "waveformGpu.rs"]
+pub(crate) mod gpu;
 #[path = "waveformStroke.rs"]
 mod stroke;
 
-pub const FACTS: usize = 13;
+pub const FACTS: usize = 7;
 pub const SUPPORTED_OCTAVE_RATES: [u32; 14] = [
     8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000, 176400,
     192000,
@@ -26,8 +29,12 @@ pub struct Page {
     pub start_frame: usize,
     pub frames_per_column: usize,
     pub frame_count: usize,
+    #[serde(default)]
+    pub preview: bool,
     pub facts: Vec<f32>,
     pub extrema: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_energy: Option<Vec<[f32; 3]>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_detail: Option<SourceDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +62,10 @@ impl Page {
         std::mem::size_of_val(self.facts.as_slice())
             + std::mem::size_of_val(self.extrema.as_slice())
             + self
+                .fallback_energy
+                .as_ref()
+                .map_or(0, |v| std::mem::size_of_val(v.as_slice()))
+            + self
                 .spectrum
                 .as_ref()
                 .map_or(0, |v| std::mem::size_of_val(v.as_slice()))
@@ -73,16 +84,21 @@ impl Page {
         if self.start_frame != plan.start_frame
             || self.frame_count != frames
             || self.frames_per_column != plan.frames_per_column
+            || self.preview != plan.preview
         {
             return false;
         }
         let width = self.frames_per_column;
-        let columns = if plan.with_bands || plan.leaf_frames.is_none() {
+        let columns = if plan.measure_columns() {
             frames.div_ceil(width)
         } else {
             0
         };
-        if self.facts.len() != columns * FACTS || self.extrema.len() != columns * 2 {
+        if self.facts.len() != columns * FACTS
+            || self.extrema.len() != columns * 2
+            || self.fallback_energy.as_ref().map(Vec::len)
+                != plan.fallback_energy.then_some(columns)
+        {
             return false;
         }
         let leaves = match (plan.leaf_frames, &self.source_detail) {
@@ -139,19 +155,20 @@ pub struct Octave {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum Mode {
-    Stroke,
-    ThreeBand,
-    Precision,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 pub struct Style {
-    pub mode: Mode,
     pub gain: f64,
     pub intensity: f64,
     pub light: bool,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            intensity: 1.0,
+            light: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
@@ -181,6 +198,7 @@ impl View {
         height / 2.0 - (amplitude * self.style.gain).clamp(-1.0, 1.0) * (height * 0.46)
     }
 
+    #[cfg(any(test, feature = "qualification"))]
     fn core(&self, lo: f32, hi: f32) -> (f64, f64) {
         let (top, bottom) = (self.y(f64::from(hi)), self.y(f64::from(lo)));
         if bottom - top < 2.0 {
@@ -229,236 +247,50 @@ impl View {
     }
 }
 
+#[cfg(any(test, feature = "qualification"))]
 #[derive(Serialize)]
 pub enum Geometry {
     Stroke(stroke::Columns),
-    Bands(Vec<Projected>),
     Overview,
 }
 
-impl Geometry {
-    pub fn refinement(&self, view: &View) -> Vec<std::ops::Range<usize>> {
-        let Geometry::Stroke(columns) = self else {
-            return vec![];
-        };
-        columns
-            .cores
-            .iter()
-            .enumerate()
-            .filter(|(_, core)| core.held && core.bounds.is_none())
-            .filter_map(|(i, _)| {
-                let start = columns.starts[i].max(0) as usize;
-                let end = (columns.starts[i + 1].max(0) as usize).min(view.frame_count);
-                (end > start && end - start <= 8192).then_some(start..end)
-            })
-            .take(16)
-            .collect()
-    }
-}
-
+#[cfg(any(test, feature = "qualification"))]
 pub fn render(pages: &[&Page], view: &View) -> (Vec<u8>, Geometry) {
-    let rgb = view.background().map(|v| v as u8);
-    let mut rgba = [rgb[0], rgb[1], rgb[2], 255].repeat(view.width * view.height);
+    let [r, g, b] = view.background().map(|v| v as u8);
+    let mut rgba = [r, g, b, 255].repeat(view.width * view.height);
     let geometry = if view.role == Role::Overview {
         if let Some(page) = pages.first() {
             overview(page, view, &mut rgba);
         }
         Geometry::Overview
-    } else if view.style.mode == Mode::Stroke {
+    } else {
         let columns = stroke::columns(pages, view);
         stroke::raster(&columns.columns, view, &mut rgba);
         Geometry::Stroke(columns)
-    } else {
-        let columns = project(pages, view);
-        if view.style.mode == Mode::ThreeBand {
-            draw_bands(&columns, view, &mut rgba);
-        } else {
-            let mut coverage = vec![0.0; view.width * view.height];
-            for c in &columns {
-                accumulate(
-                    &mut coverage,
-                    view,
-                    c.start,
-                    c.end,
-                    view.y(c.max),
-                    view.y(c.min),
-                );
-            }
-            blend(&mut rgba, &coverage, 1.0, |_| [150.0, 168.0, 180.0]);
-        }
-        Geometry::Bands(columns)
     };
     (rgba, geometry)
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Projected {
+#[derive(Clone, Copy, Default)]
+struct OverviewColumn {
     start: f64,
     end: f64,
     min: f64,
     max: f64,
     rms: f64,
-    low: f64,
-    mid: f64,
-    high: f64,
-    high_peak: f64,
+    fallback: [f64; 3],
 }
 
-fn project(pages: &[&Page], view: &View) -> Vec<Projected> {
-    let range = |pixel: f64| pixel * f64::from(view.rate) / view.pixels_per_second;
-    let start = range(view.first as f64).floor() as usize;
-    let end = range(view.first as f64 + view.width as f64).ceil() as usize;
-    let x = |frame: usize| {
-        frame as f64 * view.pixels_per_second / f64::from(view.rate) - view.first as f64
-    };
-    let pages: Vec<_> = pages
-        .iter()
-        .copied()
-        .filter(|p| !p.facts.is_empty() && p.start_frame < end && p.end() > start)
-        .collect();
-    let mut result = Vec::new();
-    for (from, to, page) in stroke::page_slices(&pages) {
-        let width = page.frames_per_column;
-        let mut bin: Option<(Projected, usize)> = None;
-        let first = (from.max(start) - page.start_frame) / width;
-        let count = (to.min(end) - page.start_frame).div_ceil(width);
-        for i in first..count {
-            let a = from.max(page.start_frame + i * width);
-            let b = to.min(page.start_frame + (i + 1) * width);
-            let (x0, x1) = (x(a), x(b));
-            if !bin.is_some_and(|(c, _)| x0.floor() == c.start.floor() && c.end == x0) {
-                if let Some((previous, frames)) = bin.take() {
-                    result.push(rms_column(previous, frames));
-                }
-                bin = Some((
-                    Projected {
-                        start: x0,
-                        end: x1,
-                        min: f64::INFINITY,
-                        max: f64::NEG_INFINITY,
-                        ..Default::default()
-                    },
-                    0,
-                ));
-            }
-            let (c, frames) = bin.as_mut().unwrap();
-            let f = page.fact(i).map(f64::from);
-            c.end = x1;
-            c.min = c.min.min(f[0]);
-            c.max = c.max.max(f[1]);
-            let n = (b - a) as f64;
-            c.rms += f[2].powi(2) * n;
-            c.low += f[10].powi(2) * n;
-            c.mid += f[11].powi(2) * n;
-            c.high += f[12].powi(2) * n;
-            c.high_peak = c.high_peak.max(f[9]);
-            *frames += b - a;
-        }
-        if let Some((c, frames)) = bin {
-            result.push(rms_column(c, frames));
-        }
-    }
-    result
-}
+type Rect = [f64; 4];
 
-fn rms_column(mut column: Projected, frames: usize) -> Projected {
-    for v in [
-        &mut column.rms,
-        &mut column.low,
-        &mut column.mid,
-        &mut column.high,
-    ] {
-        *v = (*v / frames as f64).sqrt();
-    }
-    column
-}
+const COVERAGE_SAMPLES: [[f64; 2]; 4] = [
+    [0.375, 0.125],
+    [0.875, 0.375],
+    [0.125, 0.625],
+    [0.625, 0.875],
+];
 
-fn smoothstep(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn draw_bands(columns: &[Projected], view: &View, rgba: &mut [u8]) {
-    let overview = view.role == Role::Overview;
-    let summary = smoothstep(((1.0 / view.pixels_per_second).max(1e-9) / 0.001).log2() / 4.0);
-    let colours = if view.style.light {
-        [[29.0, 90.0, 216.0], [18.0, 154.0, 82.0], [38.0, 49.0, 61.0]]
-    } else {
-        [
-            [53.0, 120.0, 246.0],
-            [59.0, 213.0, 129.0],
-            [244.0, 248.0, 255.0],
-        ]
-    };
-    let intensity = (0.65 + view.style.intensity * 0.35).min(1.0);
-    let mut masks = vec![[0_u8; 3]; view.width * view.height];
-    let mut atlased = [false; 3];
-    for (band, atlas) in atlased.iter_mut().enumerate() {
-        let mut body = Vec::with_capacity(columns.len());
-        for column in columns {
-            if column.min == 0.0 && column.max == 0.0 {
-                continue;
-            }
-            let sine = std::f64::consts::SQRT_2;
-            let radius = match band {
-                0 => column.low * sine,
-                1 => column.mid * sine * 0.78,
-                _ => {
-                    let energy = (column.high * sine).min(column.high_peak);
-                    let peak = column.high_peak;
-                    let high = if overview {
-                        energy
-                    } else {
-                        peak + (energy - peak) * summary * 0.85
-                    };
-                    let ratio =
-                        column.high / column.low.max(column.mid).max(column.high).max(1e-12);
-                    high * smoothstep((ratio - 0.25) / 0.35) * 0.8
-                }
-            };
-            body.push([column.start, column.end, view.y(radius), view.y(-radius)]);
-        }
-        *atlas = raster_body(&mut masks, band, view, &body);
-    }
-    let opacity = [
-        intensity,
-        intensity,
-        intensity * if overview { 0.75 } else { 1.0 },
-    ];
-    for (rgba, mask) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(masks) {
-        if mask == [0; 3] {
-            continue;
-        }
-        let background = [rgba[0], rgba[1], rgba[2]].map(f64::from);
-        let composite = |rgb: &mut [f64; 3], band: usize, cover: f64| {
-            let alpha = opacity[band] * cover;
-            for (channel, tone) in rgb.iter_mut().zip(colours[band]) {
-                *channel = *channel * (1.0 - alpha) + tone * alpha;
-            }
-        };
-        let mut rgb = [0.0; 3];
-        for sample in 0..4 {
-            let mut colour = background;
-            for (band, mask) in mask.into_iter().enumerate() {
-                let coverage = if atlased[band] {
-                    f64::from(mask.count_ones()) / 4.0
-                } else {
-                    f64::from(mask & (1 << sample) != 0)
-                };
-                composite(&mut colour, band, coverage);
-            }
-            for (sum, channel) in rgb.iter_mut().zip(colour) {
-                *sum += channel / 4.0;
-            }
-        }
-        for (channel, value) in rgba.iter_mut().zip(rgb) {
-            *channel = value.round_ties_even() as u8;
-        }
-    }
-}
-
-fn raster_body(mask: &mut [[u8; 3]], band: usize, view: &View, intervals: &[[f64; 4]]) -> bool {
+fn snapped_path(intervals: &[Rect]) -> (bool, impl Iterator<Item = Rect> + '_) {
     // Skia Ganesh routes small paths through an independently resolved A8
     // mask. Large paths are composited on the multisampled destination.
     let body = || {
@@ -487,7 +319,7 @@ fn raster_body(mask: &mut [[u8; 3]], band: usize, view: &View, intervals: &[[f64
     let height = (bounds[3].ceil() - bounds[2].floor()).max(0.0);
     let atlas = width.max(height) <= 1024.0 && width * height <= 128.0 * 128.0;
     let extent = (width.max(height) as usize).max(512).next_power_of_two() as f32;
-    let snap = |v: f64| {
+    let snap = move |v: f64| {
         let v = v as f32;
         // Preserve mask-space f32 rounding before fixed pixel samples.
         let raster = if atlas {
@@ -498,17 +330,16 @@ fn raster_body(mask: &mut [[u8; 3]], band: usize, view: &View, intervals: &[[f64
         };
         f64::from((raster * 16.0).round_ties_even()) / 16.0
     };
-    const SAMPLES: [[f64; 2]; 4] = [
-        [0.375, 0.125],
-        [0.875, 0.375],
-        [0.125, 0.625],
-        [0.625, 0.875],
-    ];
-    for interval in body() {
-        let [x0, x1, y0, y1] = interval.map(snap);
+    (atlas, body().map(move |interval| interval.map(snap)))
+}
+
+#[cfg(any(test, feature = "qualification"))]
+fn raster_body(mask: &mut [[u8; 3]], band: usize, view: &View, intervals: &[Rect]) -> bool {
+    let (atlas, body) = snapped_path(intervals);
+    for [x0, x1, y0, y1] in body {
         for x in (x0.floor().max(0.0) as usize)..(x1.ceil() as usize).min(view.width) {
             for y in (y0.floor().max(0.0) as usize)..(y1.ceil() as usize).min(view.height) {
-                for (i, [dx, dy]) in SAMPLES.into_iter().enumerate() {
+                for (i, [dx, dy]) in COVERAGE_SAMPLES.into_iter().enumerate() {
                     if (x0..x1).contains(&(x as f64 + dx)) && (y0..y1).contains(&(y as f64 + dy)) {
                         mask[y * view.width + x][band] |= 1 << i;
                     }
@@ -519,18 +350,7 @@ fn raster_body(mask: &mut [[u8; 3]], band: usize, view: &View, intervals: &[[f64
     atlas
 }
 
-fn accumulate(mask: &mut [f32], view: &View, x0: f64, x1: f64, y0: f64, y1: f64) {
-    for x in (x0.floor().max(0.0) as usize)..(x1.ceil() as usize).min(view.width) {
-        let px = x as f64;
-        let x_coverage = (x1.min(px + 1.0) - x0.max(px)).max(0.0);
-        for y in (y0.floor().max(0.0) as usize)..(y1.ceil() as usize).min(view.height) {
-            let py = y as f64;
-            let area = x_coverage * (y1.min(py + 1.0) - y0.max(py)).max(0.0);
-            mask[y * view.width + x] += area as f32;
-        }
-    }
-}
-
+#[cfg(any(test, feature = "qualification"))]
 fn blend(rgba: &mut [u8], mask: &[f32], opacity: f64, mut colour: impl FnMut(usize) -> [f64; 3]) {
     for (i, (rgba, &mask)) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(mask).enumerate() {
         let alpha = f64::from(mask.min(1.0)) * opacity;
@@ -543,9 +363,9 @@ fn blend(rgba: &mut [u8], mask: &[f32], opacity: f64, mut colour: impl FnMut(usi
     }
 }
 
-fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
+fn overview_columns(page: &Page, view: &View) -> Vec<OverviewColumn> {
     if page.frame_count == 0 || page.facts.is_empty() {
-        return;
+        return vec![];
     }
     let source_columns = page.facts.len() / FACTS;
     let span = view.width as f64 * f64::from(view.rate) / view.pixels_per_second;
@@ -560,7 +380,7 @@ fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
     for first in (0..source_columns).step_by(group) {
         let last = (first + group).min(source_columns);
         let frame = |i: usize| (i * page.frames_per_column).min(page.frame_count);
-        let mut p = Projected {
+        let mut p = OverviewColumn {
             start: x(frame(first)),
             end: x(frame(last)),
             min: f64::INFINITY,
@@ -573,28 +393,26 @@ fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
             p.min = p.min.min(f[0]);
             p.max = p.max.max(f[1]);
             p.rms += f[2].powi(2) * n;
-            p.low += f[10].powi(2) * n;
-            p.mid += f[11].powi(2) * n;
-            p.high += f[12].powi(2) * n;
-            p.high_peak = p.high_peak.max(f[9]);
+            if let Some(energy) = &page.fallback_energy {
+                for (total, power) in p.fallback.iter_mut().zip(energy[i]) {
+                    *total += f64::from(power).powi(2) * n;
+                }
+            }
         }
-        let mut column = rms_column(p, frame(last) - frame(first));
-        for v in [
-            &mut column.rms,
-            &mut column.low,
-            &mut column.mid,
-            &mut column.high,
-        ] {
-            *v = f64::from(*v as f32);
-        }
-        columns.push(column);
+        let frames = (frame(last) - frame(first)) as f64;
+        p.rms = f64::from((p.rms / frames).sqrt() as f32);
+        p.fallback = p.fallback.map(|v| f64::from((v / frames).sqrt() as f32));
+        columns.push(p);
     }
-    if view.style.mode == Mode::ThreeBand {
-        draw_bands(&columns, view, pixels);
-        return;
+    columns
+}
+
+fn overview_colours(page: &Page, columns: &[OverviewColumn], view: &View) -> Vec<[f64; 3]> {
+    if page.preview {
+        return vec![[150.0, 168.0, 180.0]; view.width];
     }
     let mut octave = octave_nodes(&[page], view, true);
-    let colours: Vec<_> = (0..view.width)
+    (0..view.width)
         .map(|x| {
             octave(view.first + x as i64)
                 .map(|rgb| rgb.map(f64::round_ties_even))
@@ -604,23 +422,34 @@ fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
                     let first = columns.partition_point(|column| column.end <= a);
                     for p in columns[first..].iter().take_while(|p| p.start < b) {
                         let weight = b.min(p.end) - a.max(p.start);
-                        for (sum, rms) in energy.iter_mut().zip([p.low, p.mid, p.high]) {
+                        for (sum, rms) in energy.iter_mut().zip(p.fallback) {
                             *sum += rms * rms * weight;
                         }
                     }
                     band_colour(energy.map(f64::sqrt), &view.style)
                 })
         })
-        .collect();
-    let mut masks = vec![[0; 3]; view.width * view.height];
+        .collect()
+}
+
+fn overview_paths(columns: &[OverviewColumn], view: &View) -> [Vec<Rect>; 2] {
     let mut peak = Vec::with_capacity(columns.len());
     let mut body = Vec::with_capacity(columns.len());
-    for p in &columns {
+    for p in columns {
         let (lo, hi) = (p.min.min(0.0), p.max.max(0.0));
         let rms = p.rms * std::f64::consts::SQRT_2;
         peak.push([p.start, p.end, view.y(hi), view.y(lo)]);
         body.push([p.start, p.end, view.y(hi.min(rms)), view.y(lo.max(-rms))]);
     }
+    [peak, body]
+}
+
+#[cfg(any(test, feature = "qualification"))]
+fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
+    let columns = overview_columns(page, view);
+    let colours = overview_colours(page, &columns, view);
+    let [peak, body] = overview_paths(&columns, view);
+    let mut masks = vec![[0; 3]; view.width * view.height];
     let atlas_peak = raster_body(&mut masks, 0, view, &peak);
     let atlas_body = raster_body(&mut masks, 1, view, &body);
     let coverage: Vec<_> = masks
@@ -635,10 +464,6 @@ fn overview(page: &Page, view: &View, pixels: &mut [u8]) {
             }
         })
         .collect();
-    if view.style.mode == Mode::Precision {
-        blend(pixels, &coverage, 1.0, |_| [150.0, 168.0, 180.0]);
-        return;
-    }
     blend(pixels, &coverage, 1.0, |i| colours[i % view.width]);
 }
 
@@ -771,7 +596,7 @@ fn fallback_colour<'a>(
     let mut octave = octave_nodes(pages, view, false);
     let pages = {
         let mut p = pages.to_vec();
-        p.retain(|p| !p.facts.is_empty());
+        p.retain(|p| p.fallback_energy.is_some());
         p.sort_by_key(|p| (p.frames_per_column, p.start_frame));
         p
     };
@@ -791,7 +616,7 @@ fn fallback_colour<'a>(
             let i = (at as usize - p.start_frame) / p.frames_per_column;
             let until = end.min(p.end().min(p.start_frame + (i + 1) * p.frames_per_column) as f64);
             let fraction = (until - at) / (end - start);
-            for (s, &rms) in energy.iter_mut().zip(&p.fact(i)[10..13]) {
+            for (s, &rms) in energy.iter_mut().zip(p.fallback_energy.as_ref()?.get(i)?) {
                 *s += f64::from(rms).powi(2) * fraction;
             }
             at = until;

@@ -1,5 +1,7 @@
 # Dekzer waveform recovery
 
+This document records the accepted visual checkpoint and its historical layered comparisons. The production follow-up uses Stroke as the single waveform presentation. [Native GPU renderer and qualification](waveform-native-gpu.md)
+
 The checkpoint ports the Electron Stroke and layered Three-band presentations
 to Disqro's native surfaces. It uses decoded source frames for waveform
 analysis, keeps track and disc transport coordinates in the program timeline,
@@ -224,4 +226,4 @@ decoder and device errors and worst CPU waveform paint calls of 21.8 ms and
 paint callbacks. GPU pass timing, device recovery and physical presentation
 cadence remain pending. Review sheets, numeric JSON and native captures are
 retained under `.local/waveform-parity/checkpoint`. Owner visual approval
-remains pending.
+was confirmed for Stroke before the native GPU follow-up.

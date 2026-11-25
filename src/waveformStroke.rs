@@ -1,10 +1,16 @@
 //! Dekzer Stroke, from waveformStroke.ts, waveformSourceCells.ts and waveformDirect.ts.
 //! The partition and coverage are display laws. They never feed a seek coordinate.
-use super::{Page, View};
+use super::Page;
+#[cfg(any(test, feature = "qualification"))]
+use super::View;
+#[cfg(any(test, feature = "qualification"))]
 use serde::Serialize;
 
+#[cfg(any(test, feature = "qualification"))]
 const HOP: f64 = 256.0;
+#[cfg(any(test, feature = "qualification"))]
 const LOG_K: f64 = 2.8606101989383417;
+#[cfg(any(test, feature = "qualification"))]
 const COEFFICIENTS: [[f64; 3]; 24] = [
     [30.995394, -0.90819, -0.263928],
     [19.333413, -3.313851, -1.72278],
@@ -186,6 +192,7 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
+#[cfg(any(test, feature = "qualification"))]
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(crate) struct Core {
     pub held: bool,
@@ -193,6 +200,7 @@ pub(crate) struct Core {
     pub witnesses: Option<[usize; 2]>,
 }
 
+#[cfg(any(test, feature = "qualification"))]
 #[derive(Clone, Copy)]
 struct Leaf {
     start: usize,
@@ -240,6 +248,7 @@ pub(super) fn page_slices<'a>(pages: &[&'a Page]) -> Vec<(usize, usize, &'a Page
     slices
 }
 
+#[cfg(any(test, feature = "qualification"))]
 fn leaves(pages: &[&Page], origin: usize, lo: usize, hi: usize) -> Vec<Leaf> {
     let mut result = Vec::new();
     for (start, end, page) in page_slices(pages) {
@@ -300,6 +309,7 @@ fn leaves(pages: &[&Page], origin: usize, lo: usize, hi: usize) -> Vec<Leaf> {
     result
 }
 
+#[cfg(any(test, feature = "qualification"))]
 fn cores(pages: &[&Page], view: &View, starts: &[i64]) -> Vec<Core> {
     let clip = |local: i64| view.origin + (local.max(0) as usize).min(view.frame_count);
     let leaves = leaves(
@@ -373,12 +383,14 @@ fn cores(pages: &[&Page], view: &View, starts: &[i64]) -> Vec<Core> {
         .collect()
 }
 
+#[cfg(any(test, feature = "qualification"))]
 struct ColourField<'a> {
     pages: Vec<&'a super::Octave>,
     computed: std::collections::HashMap<i64, [f32; 3]>,
     last: i64,
 }
 
+#[cfg(any(test, feature = "qualification"))]
 impl<'a> ColourField<'a> {
     fn new(pages: &[&'a Page], frame_count: usize) -> Self {
         let mut pages: Vec<_> = pages
@@ -440,6 +452,7 @@ impl<'a> ColourField<'a> {
     }
 }
 
+#[cfg(any(test, feature = "qualification"))]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Columns {
@@ -449,6 +462,7 @@ pub(crate) struct Columns {
     pub columns: Vec<[f32; 8]>,
 }
 
+#[cfg(any(test, feature = "qualification"))]
 pub(super) fn columns(pages: &[&Page], view: &View) -> Columns {
     let partition = Partition::new(view.rate, view.pixels_per_second);
     let first_cell = partition.cell(view.first) - 1;
@@ -511,6 +525,7 @@ pub(super) fn columns(pages: &[&Page], view: &View) -> Columns {
 
 /// Device-row integral of the exact direct fragment transfer. All inputs
 /// have already passed through the reference column texture's f32 boundary.
+#[cfg(any(test, feature = "qualification"))]
 pub(super) fn raster(columns: &[[f32; 8]], view: &View, pixels: &mut [u8]) {
     let background = view.background();
     let neutral = if view.style.light { 0.0 } else { 54.0 };
@@ -575,7 +590,7 @@ pub(super) fn raster(columns: &[[f32; 8]], view: &View, pixels: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::waveform_render::{Mode, Role, SourceDetail, Style};
+    use crate::waveform_render::{Role, SourceDetail, Style};
 
     #[test]
     fn complementary_leaves_distinguish_silence_missing_and_out_of_cell_witnesses() {
@@ -597,12 +612,7 @@ mod tests {
         let fine = leaf(0, 2, vec![0.0, 0.0], vec![0]);
         let view = View {
             role: Role::Detail,
-            style: Style {
-                mode: Mode::Stroke,
-                gain: 1.0,
-                intensity: 1.0,
-                light: false,
-            },
+            style: Style::default(),
             rate: 48_000,
             origin: 96,
             frame_count: 10,

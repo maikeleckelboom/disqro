@@ -70,6 +70,8 @@ fn main() {
         source = args.next();
     }
     diagnostics::start();
+    #[cfg(all(windows, feature = "qualification"))]
+    waveform_render::gpu::qualification::start_presentation_trace();
     let arg = source
         .map(std::path::PathBuf::from)
         .and_then(|p| std::path::absolute(p).ok());

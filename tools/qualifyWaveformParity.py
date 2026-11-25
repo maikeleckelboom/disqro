@@ -203,7 +203,7 @@ def cases(args, metadata, revision):
     frame_count = min(total - args.origin, args.frames or total)
     if not 0 <= args.origin < total or frame_count <= 0:
         raise ValueError("Invalid decoded source segment")
-    modes = ("stroke", "threeBand") if revision == "stroke" else ("spectral", "layered")
+    modes = ("stroke",) if revision == "stroke" else ("spectral", "layered")
     dimensions = [(1920, 166, 1.5), (1200, 132, 1), (560, 36, 2)]
     result = []
     for mode in modes:
@@ -312,6 +312,98 @@ def disqro(exe, output, *args):
         raise
 
 
+def pixel_score(reference, actual):
+    import numpy as np
+
+    a, b = (np.asarray(p, dtype=np.int16) for p in (reference, actual))
+    diff = np.abs(a - b)
+    local = diff[a.any(axis=-1) | b.any(axis=-1)]
+    return {
+        "pixelMaxCodes": int(diff.max()),
+        "pixelMeanCodes": float(diff.mean()),
+        "activePixelMeanCodes": float(local.mean()) if local.size else 0.0,
+        "activePixelP99Codes": float(np.percentile(local, 99)) if local.size else 0.0,
+    }
+
+
+def outside_limits(score, direct, limits):
+    if direct:
+        return (score["pixelMaxCodes"] > limits["strokePixelMaximumCodes"]
+                or score["pixelMeanCodes"] > limits["strokePixelMeanCodes"])
+    return (score["pixelMaxCodes"] > limits["canvasPixelMaximumCodes"]
+            or score["activePixelMeanCodes"] > limits["canvasActiveMeanCodes"]
+            or score["activePixelP99Codes"] > limits["canvasActiveP99Codes"])
+
+
+def score_gpu_case(reference, oracle, actual, case, limits):
+    import numpy as np
+    from PIL import Image
+
+    name = case["id"]
+    reference_image, cpu_image, gpu_image = (
+        Image.open(folder / f"{name}.png").convert("RGB") for folder in (reference, oracle, actual)
+    )
+    detail = case["role"] == "detail"
+    direct = "starts" in read(reference / f"{name}.json")
+    source_score = pixel_score(reference_image, gpu_image)
+    cpu_score = pixel_score(cpu_image, gpu_image)
+    # Canvas snapping and coverage remain independent from the shader. Keep
+    # the frozen Electron image limits and also budget only one code vs Rust.
+    failed = outside_limits(source_score, direct, limits) or cpu_score["pixelMaxCodes"] > 1
+    geometry = None
+    if detail:
+        cpu = read(oracle / f"{name}.json")["Stroke"]
+        gpu = read(actual / f"{name}.json")["Stroke"]
+        a, b = (np.asarray(data["columns"], dtype=np.float32) for data in (cpu, gpu))
+        geometry = {
+            "boundariesExact": cpu["firstCell"] == gpu["firstCell"] and cpu["starts"] == gpu["starts"],
+            "extremaAndWitnessesExact": cpu["cores"] == gpu["cores"],
+            "statesExact": bool(np.array_equal(a[:, 7], b[:, 7])),
+            "geometryMaxPx": float(np.max(np.abs(a[:, :4] - b[:, :4]))),
+            "rgbMaxCodes": float(np.max(np.abs(a[:, 4:7] - b[:, 4:7]))),
+        }
+        failed |= (not all(geometry[key] for key in ("boundariesExact", "extremaAndWitnessesExact", "statesExact"))
+                   or geometry["geometryMaxPx"] > limits["geometryDevicePixels"]
+                   or geometry["rgbMaxCodes"] > limits["strokeRgbCodes"])
+    return {"electron": source_score, "rust": cpu_score, "geometry": geometry, "passed": not failed}
+
+
+def checkpoint_gpu(args):
+    args.output.mkdir(parents=True, exist_ok=False)
+    limits = read(TOOLS / "tolerances.json")
+    batch = {}
+    for stored in sorted(args.checkpoint.iterdir()):
+        if not (stored / "parity.json").is_file():
+            continue
+        reference = args.checkpoint.parent / stored.name
+        approved = read(stored / "parity.json")
+        if approved["failures"] or approved["reference"]["commit"] != REFERENCE:
+            raise ValueError(f"{stored.name}: checkpoint did not pass the frozen reference gate")
+        cases = [case for case in read(reference / "render.json")["cases"]
+                 if case["id"].startswith("stroke-") and case["id"] in approved["cases"]]
+        target = args.output / stored.name
+        target.mkdir()
+        cases_path = target / "cases.json"
+        write(cases_path, {"cases": cases})
+        facts = stored / "facts"
+        disqro(args.exe, target, "render-gpu", cases_path, facts, target)
+        batch[stored.name] = {
+            "adapter": read(target / "adapter.json"),
+            "pcmSha256": approved["pcmSha256"],
+            "cases": {case["id"]: score_gpu_case(reference, stored / "candidate", target, case, limits)
+                      for case in cases},
+        }
+    if not batch:
+        raise ValueError("No accepted Stroke comparisons were present")
+    failures = [f"{recording}/{case}" for recording, result in batch.items()
+                for case, score in result["cases"].items() if not score["passed"]]
+    write(args.output / "parity.json", {"exeSha256": digest(args.exe), "recordings": batch, "failures": failures})
+    count = sum(len(recording["cases"]) for recording in batch.values())
+    print(f"{count - len(failures)}/{count} frozen Stroke views passed on D3D11")
+    if failures:
+        raise SystemExit("Failed " + ", ".join(failures))
+
+
 def compare(args):
     import numpy as np
     from PIL import Image, ImageDraw
@@ -331,12 +423,14 @@ def compare(args):
     isolated.mkdir()
     candidate = output / "candidate"
     candidate.mkdir()
-    cases = read(reference / "render.json")["cases"]
+    cases = [case for case in read(reference / "render.json")["cases"] if case["id"].startswith("stroke-")]
+    manifest = output / "cases.json"
+    write(manifest, {"cases": cases})
     baseline_dir = args.baseline or output / "rejected"
     if not args.baseline:
         baseline_dir.mkdir()
         command(args.work / "rejected-source" / "target" / "release" / "disqro-rejected-waveform.exe",
-                reference / "render.json", pcm, baseline_dir)
+                manifest, pcm, baseline_dir)
     report = {"facts": {}, "cases": {}, "tolerances": limits, "pcmSha256": original["pcmSha256"],
               "reference": original["reference"], "rejected": REJECTED, "candidateExeSha256": digest(args.exe)}
     problems = []
@@ -358,7 +452,7 @@ def compare(args):
         destination = native_facts / name
         disqro(args.exe, output, "facts", pcm, request, destination)
         ref_pages, actual_pages = read(reference / name), read(destination)
-        scores = {"bandFactsMax": 0.0, "amplitudesExact": True, "witnessesExact": True,
+        scores = {"geometryFactsMax": 0.0, "amplitudesExact": True, "witnessesExact": True,
                   "octaveMax": 0.0, "octaveWithinTolerance": True}
         if len(ref_pages) != len(actual_pages):
             raise ValueError(f"{name}: the two analyzers returned unequal page counts")
@@ -367,10 +461,10 @@ def compare(args):
                 if ref[key] != actual[key]:
                     raise ValueError(f"{name}: unequal analysis page boundary {key}")
             if ref["facts"]:
-                a = np.asarray(ref["facts"], dtype=np.float32).reshape(-1, 13)
-                b = np.asarray(actual["facts"], dtype=np.float32).reshape(-1, 13)
+                a = np.asarray(ref["facts"], dtype=np.float32).reshape(-1, 13)[:, :7]
+                b = np.asarray(actual["facts"], dtype=np.float32).reshape(-1, 7)
                 scores["amplitudesExact"] &= bool(np.array_equal(a[:, :2], b[:, :2]))
-                scores["bandFactsMax"] = max(scores["bandFactsMax"], float(np.max(np.abs(a - b))))
+                scores["geometryFactsMax"] = max(scores["geometryFactsMax"], float(np.max(np.abs(a - b))))
                 scores["witnessesExact"] &= ref["extrema"] == actual["extrema"]
             if "sourceDetail" in ref:
                 a, b = ref["sourceDetail"], actual["sourceDetail"]
@@ -389,11 +483,15 @@ def compare(args):
                     a, b, rtol=limits["octavePowerRelative"], atol=limits["octavePowerAbsolute"]))
         report["facts"][name] = scores
         if (not all(scores[k] for k in ("amplitudesExact", "witnessesExact", "octaveWithinTolerance"))
-                or scores["bandFactsMax"] > limits["bandFactsAbsolute"]):
+                or scores["geometryFactsMax"] > limits["amplitudeAbsolute"]):
             problems.append(f"analysis {name}")
 
-    disqro(args.exe, output, "render", reference / "render.json", reference, isolated)
-    disqro(args.exe, output, "render", reference / "render.json", native_facts, candidate)
+    disqro(args.exe, output, "render", manifest, reference, isolated)
+    disqro(args.exe, output, "render", manifest, native_facts, candidate)
+    gpu = output / "gpu"
+    gpu.mkdir()
+    disqro(args.exe, gpu, "render-gpu", manifest, native_facts, gpu)
+    report["gpu"] = read(gpu / "adapter.json")
     for case in cases:
         name = case["id"]
         ref = read(reference / f"{name}.json")
@@ -431,16 +529,6 @@ def compare(args):
                     or score["rgbMaxCodes"] > limits["strokeRgbCodes"]
                     or score["analysisRgbMaxCodes"] > limits["strokeRgbCodes"]):
                 problems.append(f"geometry or colour {name}")
-        elif "Bands" in actual and "columns" in ref:
-            a, b = ref["columns"], actual["Bands"]
-            score["projectedIntervalsExact"] = len(a) == len(b) and all(
-                max(abs(r[k] - c[k]) for k in ("start", "end")) <= limits["geometryDevicePixels"]
-                for r, c in zip(a, b))
-            score["projectedFactsMax"] = max((
-                max(abs(r[k] - c[k]) for k in ("min", "max", "rms", "low", "mid", "high", "highPeak"))
-                for r, c in zip(a, b)), default=0)
-            if not score["projectedIntervalsExact"] or score["projectedFactsMax"] > limits["bandFactsAbsolute"]:
-                problems.append(f"band geometry {name}")
         ref_png, actual_png = (Image.open(p / f"{name}.png").convert("RGB") for p in (reference, candidate))
         a, b = (np.asarray(p, dtype=np.int16) for p in (ref_png, actual_png))
         diff = np.abs(a - b)
@@ -462,6 +550,9 @@ def compare(args):
                       or score["activePixelP99Codes"] > limits["canvasActiveP99Codes"])
         if failed:
             problems.append(f"pixels {name}")
+        score["gpu"] = score_gpu_case(reference, candidate, gpu, case, limits)
+        if not score["gpu"]["passed"]:
+            problems.append(f"GPU {name}")
         report["cases"][name] = score
         baseline = baseline_dir / f"{name}.png" if baseline_dir else None
         images = [("Dekzer Electron", ref_png)]
@@ -520,6 +611,11 @@ def main():
     diff.add_argument("--pcm", type=Path)
     diff.add_argument("--baseline", type=Path)
     diff.set_defaults(do=compare)
+    frozen = actions.add_parser("checkpoint-gpu")
+    frozen.add_argument("--checkpoint", type=Path, required=True)
+    frozen.add_argument("--output", type=Path, required=True)
+    frozen.add_argument("--exe", type=Path, required=True)
+    frozen.set_defaults(do=checkpoint_gpu)
     args = parser.parse_args()
     for key, value in vars(args).items():
         if isinstance(value, Path):

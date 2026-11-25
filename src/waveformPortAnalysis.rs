@@ -9,7 +9,7 @@ use std::ops::Range;
 mod filters;
 #[path = "waveformOctave.rs"]
 mod octave;
-use filters::Bands;
+use filters::FallbackSpectrum;
 use octave::{OCTAVE_BANDS, OctaveAnalyzer, OctaveDescriptor, SOURCE_HOP};
 
 pub const LEAF: usize = 32;
@@ -46,7 +46,9 @@ pub struct Plan {
     pub octave: Option<Spectrum>,
     pub overview: bool,
     #[serde(default)]
-    pub with_bands: bool,
+    pub fallback_energy: bool,
+    #[serde(default)]
+    pub preview: bool,
 }
 
 impl Plan {
@@ -58,8 +60,22 @@ impl Plan {
             leaf_frames: None,
             octave: Spectrum::available(rate, false),
             overview: true,
-            with_bands: true,
+            fallback_energy: !OctaveAnalyzer::supports_rate(rate, false),
+            preview: false,
         }
+    }
+
+    pub fn preview(self) -> Self {
+        Self {
+            octave: None,
+            fallback_energy: false,
+            preview: true,
+            ..self
+        }
+    }
+
+    pub fn measure_columns(self) -> bool {
+        self.leaf_frames.is_none() || self.fallback_energy
     }
 }
 
@@ -69,7 +85,6 @@ struct Column {
     witnesses: [usize; 2],
     edges: [[f32; 2]; 2],
     power: f64,
-    band_peak: [f64; 3],
     band_power: [f64; 3],
 }
 
@@ -81,14 +96,13 @@ impl Default for Column {
             witnesses: [0; 2],
             edges: [[0.0; 2]; 2],
             power: 0.0,
-            band_peak: [0.0; 3],
             band_power: [0.0; 3],
         }
     }
 }
 
 impl Column {
-    fn push(&mut self, f: [f32; 2], bounds: [f32; 2], peaks: [f64; 3], powers: [f64; 3]) {
+    fn observe_geometry(&mut self, f: [f32; 2], bounds: [f32; 2]) {
         if bounds[0] < self.bounds[0] {
             self.bounds[0] = bounds[0];
             self.witnesses[0] = self.frames;
@@ -103,34 +117,40 @@ impl Column {
         self.edges[1] = bounds;
         let [left, right] = f.map(f64::from);
         self.power += (left * left + right * right) * 0.5;
-        for c in 0..3 {
-            self.band_peak[c] = self.band_peak[c].max(peaks[c]);
-            self.band_power[c] += powers[c];
-        }
-        self.frames += 1;
     }
 
-    fn flush(&mut self, page: &mut Page) {
+    fn observe_fallback(&mut self, powers: [f64; 3]) {
+        for (total, power) in self.band_power.iter_mut().zip(powers) {
+            *total += power;
+        }
+    }
+
+    fn flush(&mut self, page: &mut Page, geometry: Option<&Page>) {
         if self.frames == 0 {
             return;
         }
         let rms = |energy: f64| (energy / self.frames as f64).sqrt() as f32;
-        page.facts.extend([
-            self.bounds[0],
-            self.bounds[1],
-            rms(self.power),
-            self.edges[0][0],
-            self.edges[0][1],
-            self.edges[1][0],
-            self.edges[1][1],
-            self.band_peak[0] as f32,
-            self.band_peak[1] as f32,
-            self.band_peak[2] as f32,
-            rms(self.band_power[0]),
-            rms(self.band_power[1]),
-            rms(self.band_power[2]),
-        ]);
-        page.extrema.extend(self.witnesses);
+        let index = page.extrema.len() / 2;
+        if let Some(geometry) = geometry {
+            page.facts
+                .extend_from_slice(&geometry.facts[index * FACTS..][..FACTS]);
+            page.extrema
+                .extend_from_slice(&geometry.extrema[index * 2..][..2]);
+        } else {
+            page.facts.extend([
+                self.bounds[0],
+                self.bounds[1],
+                rms(self.power),
+                self.edges[0][0],
+                self.edges[0][1],
+                self.edges[1][0],
+                self.edges[1][1],
+            ]);
+            page.extrema.extend(self.witnesses);
+        }
+        if let Some(energy) = &mut page.fallback_energy {
+            energy.push(self.band_power.map(rms));
+        }
         *self = Self::default();
     }
 }
@@ -141,7 +161,6 @@ struct OctaveWork {
     sums: Vec<[f64; OCTAVE_BANDS]>,
     powers: Vec<f64>,
     width: usize,
-    reached: usize,
 }
 
 impl OctaveWork {
@@ -151,12 +170,8 @@ impl OctaveWork {
             sums,
             powers,
             width,
-            reached,
         } = self;
-        analyzer.push(frames, |cell| {
-            *reached = cell.end_frame as usize;
-            collect_octave(cell, sums, powers, *width);
-        })?;
+        analyzer.push(frames, |cell| collect_octave(cell, sums, powers, *width))?;
         Ok(())
     }
 
@@ -205,7 +220,8 @@ pub struct Analyzer {
     source_frames: usize,
     cursor: usize,
     page: Page,
-    bands: Option<Bands>,
+    fallback: Option<FallbackSpectrum>,
+    geometry: Option<std::sync::Arc<Page>>,
     column: Column,
     octave: Option<OctaveWork>,
 }
@@ -231,8 +247,8 @@ impl Analyzer {
         let frame_count = plan.end_frame - start;
         let width = plan.frames_per_column;
         let columns = frame_count.div_ceil(width);
-        let measure = plan.with_bands || plan.leaf_frames.is_none();
-        let decode_start = if measure {
+        let measure = plan.measure_columns();
+        let decode_start = if plan.fallback_energy || plan.octave == Some(Spectrum::Blackman) {
             start.saturating_sub(rate as usize / 5)
         } else if plan.octave.is_some() {
             (start / SOURCE_HOP as usize * SOURCE_HOP as usize)
@@ -263,7 +279,6 @@ impl Analyzer {
                     },
                     powers: Vec::new(),
                     width,
-                    reached: 0,
                 })
             })
             .transpose()?;
@@ -281,12 +296,15 @@ impl Analyzer {
             plan,
             cursor: decode_start,
             octave,
-            bands: measure.then(|| Bands::new(rate)),
+            fallback: plan.fallback_energy.then(|| FallbackSpectrum::new(rate)),
+            geometry: None,
             column: Column::default(),
             page: Page {
                 start_frame: start,
                 frames_per_column: width,
                 frame_count,
+                preview: plan.preview,
+                fallback_energy: plan.fallback_energy.then(|| Vec::with_capacity(columns)),
                 source_detail: detail,
                 facts: if measure {
                     Vec::with_capacity(columns * FACTS)
@@ -307,25 +325,25 @@ impl Analyzer {
         self.decode.clone()
     }
 
+    pub fn reuse_geometry(&mut self, geometry: std::sync::Arc<Page>) -> Result<()> {
+        ensure!(
+            self.plan.overview && geometry.matches(&self.plan.preview(), 0),
+            "overview geometry must cover the entire measurement"
+        );
+        self.geometry = Some(geometry);
+        Ok(())
+    }
+
     pub fn overview_prefix(&self) -> Option<Page> {
         let width = self.page.frames_per_column;
         let count = self.page.extrema.len() / 2;
-        let count = self
-            .octave
-            .as_ref()
-            .map_or(count, |work| count.min(work.reached / width));
-        (count > 0 && self.plan.overview).then(|| Page {
+        (count > 0 && self.plan.preview).then(|| Page {
             start_frame: 0,
             frames_per_column: width,
             frame_count: count * width,
+            preview: self.plan.preview,
             facts: self.page.facts[..count * FACTS].to_vec(),
             extrema: self.page.extrema[..count * 2].to_vec(),
-            spectrum: self.octave.as_ref().map(|work| {
-                work.sums[..count]
-                    .iter()
-                    .flat_map(|row| row.map(|v| v / width as f64))
-                    .collect()
-            }),
             ..Default::default()
         })
     }
@@ -338,6 +356,7 @@ impl Analyzer {
         if let Some(octave) = &mut self.octave {
             octave.push(frames)?;
         }
+        let measure = self.plan.measure_columns();
         for &frame in frames {
             ensure!(
                 frame[0].is_finite() && frame[1].is_finite(),
@@ -348,7 +367,7 @@ impl Analyzer {
             if at >= self.plan.end_frame {
                 continue;
             }
-            let filtered = self.bands.as_mut().map(|bands| bands.push(frame));
+            let filtered = self.fallback.as_mut().map(|spectrum| spectrum.push(frame));
             if at < self.plan.start_frame {
                 continue;
             }
@@ -357,16 +376,22 @@ impl Analyzer {
                 let position = leaves.start_frame + at - self.plan.start_frame;
                 push_leaf(leaves, bounds, position);
             }
-            if let Some((peaks, powers)) = filtered {
+            if measure {
+                if self.geometry.is_none() {
+                    self.column.observe_geometry(frame, bounds);
+                }
+                self.column.frames += 1;
+            }
+            if let Some(powers) = filtered {
                 let limit = f64::from(f32::MAX);
                 ensure!(
-                    peaks.iter().all(|p| *p <= limit) && powers.iter().all(|p| *p <= limit * limit),
-                    "Waveform bands exceed the finite summary range"
+                    powers.iter().all(|p| *p <= limit * limit),
+                    "Waveform spectral energy exceeds the finite summary range"
                 );
-                self.column.push(frame, bounds, peaks, powers);
-                if self.column.frames == self.plan.frames_per_column {
-                    self.column.flush(&mut self.page);
-                }
+                self.column.observe_fallback(powers);
+            }
+            if self.column.frames == self.plan.frames_per_column {
+                self.column.flush(&mut self.page, self.geometry.as_deref());
             }
         }
         Ok(())
@@ -377,7 +402,7 @@ impl Analyzer {
             self.cursor == self.decode.end,
             "Source ended before the evidence range"
         );
-        self.column.flush(&mut self.page);
+        self.column.flush(&mut self.page, self.geometry.as_deref());
         if let Some(mut octave) = self.octave {
             octave.finish(self.cursor == self.source_frames)?;
             if self.plan.overview {

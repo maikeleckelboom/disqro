@@ -1,19 +1,33 @@
 use super::*;
 use crate::theme::Materials;
 use crate::{
-    overview::{self, Style, Surface, Texture, Viewport},
+    overview::{self, Surface, Texture, Viewport},
     timeline::{Overview, Source},
     waveform_render::{Page, Role as WaveRole},
 };
 use gpui_kit::component::Selectable;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 pub(crate) struct WaveTrack {
     pub generation: u64,
     pub source: Arc<Source>,
     pub range: std::ops::Range<usize>,
     pub overview: Arc<Page>,
-    pub position: usize,
+    frame: usize,
+    observed: Instant,
+    pub playing: bool,
+}
+
+impl WaveTrack {
+    pub fn current_frame(&self) -> f64 {
+        let advance = if self.playing {
+            self.observed.elapsed().as_secs_f64().min(0.04) * f64::from(self.source.rate)
+        } else {
+            0.0
+        };
+        (self.frame as f64 + advance).min(self.range.len().saturating_sub(1) as f64)
+    }
 }
 
 impl Player {
@@ -29,7 +43,9 @@ impl Player {
             source: segment.source.clone(),
             range: segment.frames.clone(),
             overview: self.shapes.get(index)?.track.clone(),
-            position: segment.elapsed_frame(self.status.position) - segment.frames.start,
+            frame: segment.elapsed_frame(self.status.position) - segment.frames.start,
+            observed: self.wave_observed,
+            playing: self.status.playing,
         })
     }
 
@@ -350,16 +366,17 @@ impl Player {
                 if page.frame_count > 0 {
                     let surface = Surface {
                         role: WaveRole::Overview,
-                        style: Style::Spectral.drawing(false),
                         rate: s.source.rate,
                         playable: s.frames.clone(),
                         viewport: Viewport::fit(s.frames.len()),
                     };
                     part = part.child(overview::paint(
-                        vec![page.clone()],
+                        overview::Evidence {
+                            overview: Some(page.clone()),
+                            ..Default::default()
+                        },
                         surface,
                         images.entry(i).or_default().clone(),
-                        |_, _, _| {},
                     ));
                     if full && i == k {
                         part = part.child(
@@ -455,19 +472,11 @@ pub(super) struct WaveStrip {
 impl WaveStrip {
     pub(super) fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
-        cx.on_release(|strip, cx| strip.clear(cx)).detach();
         Self {
             player: player.downgrade(),
             images: BTreeMap::new(),
             generation: 0,
         }
-    }
-
-    fn clear(&mut self, cx: &mut App) {
-        for image in self.images.values() {
-            image.clear(cx);
-        }
-        self.images.clear();
     }
 }
 
@@ -477,7 +486,7 @@ impl Render for WaveStrip {
             .clone()
             .update(cx, |p, cx| {
                 if self.generation != p.generation {
-                    self.clear(cx);
+                    self.images.clear();
                     self.generation = p.generation;
                 }
                 let (position, duration) = p.wave_time();

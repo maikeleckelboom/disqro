@@ -236,7 +236,8 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
             leaf_frames: Some(32),
             octave: None,
             overview: false,
-            with_bands: false,
+            fallback_energy: false,
+            preview: false,
         },
     };
     let page = waveform::load(source, &exact, Some(&cache), &mut None, &|| true).unwrap();
@@ -253,7 +254,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(
         cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v1", [], |r| r
+            .query_row("SELECT count(*) FROM wave_evidence_v2", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
         1
@@ -306,19 +307,26 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
         plan: crate::waveform_port_analysis::Plan {
             start_frame,
             end_frame,
-            frames_per_column: 32,
-            leaf_frames: None,
-            octave: None,
+            frames_per_column: 256,
+            leaf_frames: Some(32),
+            octave: Some(crate::waveform_port_analysis::Spectrum::Blackman),
             overview: false,
-            with_bands: true,
+            fallback_energy: false,
+            preview: false,
         },
     };
     waveform::load(source, &request(0, 32000), None, &mut decoder, &|| true).unwrap();
     let next = request(32000, 48000);
     let sequential = waveform::load(source, &next, None, &mut decoder, &|| true).unwrap();
     let seek = waveform::load(source, &next, None, &mut None, &|| true).unwrap();
-    assert_eq!(sequential.facts, seek.facts);
-    assert_eq!(sequential.extrema, seek.extrema);
+    assert_eq!(
+        sequential.source_detail.unwrap().offsets,
+        seek.source_detail.unwrap().offsets
+    );
+    assert_eq!(
+        sequential.octave.unwrap().powers,
+        seek.octave.unwrap().powers
+    );
 }
 
 #[cfg(windows)]

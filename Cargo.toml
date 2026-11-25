@@ -6,12 +6,12 @@ publish = false
 description = "Native local music player for Windows"
 
 [features]
-qualification = []
+qualification = ["gpui-windows-gpu/frame-statistics"]
 
 [dependencies]
 async-lock = "3.5"
 hashlink = "0.12"
-gpui-kit = "=0.10.0"
+gpui-kit = { version = "=0.10.0", features = ["gpui-fast"] }
 kira = { version = "=0.12.6", default-features = false, features = ["cpal"] }
 rtrb = "=0.4.1"
 realfft = "3.5"
@@ -32,11 +32,16 @@ rusqlite = { version = "=0.40.2", features = ["bundled", "hooks"] }
 chrono = "=0.4.45"
 
 [target.'cfg(windows)'.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+gpui-windows-gpu = { package = "gpui-fast-windows", version = "=0.1.17" }
 windows = { version = "=0.62.2", features = [
     "Foundation",
     "Media",
     "Storage_Streams",
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
@@ -49,6 +54,10 @@ windows = { version = "=0.62.2", features = [
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
+windows = { version = "=0.62.2", features = ["Win32_Graphics_Direct3D_Fxc"] }
+
+[patch.crates-io]
+gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
 
 [profile.dev]
 debug = 0

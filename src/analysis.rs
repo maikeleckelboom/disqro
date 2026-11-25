@@ -205,84 +205,127 @@ fn analyse(
     send: &impl Fn(Update) -> bool,
     before_chunk: &impl Fn(&mut DecoderSession<'_>),
 ) {
-    let mut done = vec![false; program.segments.len()];
-    let mut active = start;
-    while current() {
-        let Some(i) = (active..done.len()).chain(0..active).find(|&i| !done[i]) else {
-            break;
+    let mut held = vec![None::<Arc<Page>>; program.segments.len()];
+    for preview in [true, false] {
+        let mut done = vec![false; held.len()];
+        let mut active = if preview {
+            start
+        } else {
+            focus.load(Relaxed).min(held.len().saturating_sub(1))
         };
-        active = focus.load(Relaxed).min(done.len() - 1);
-        done[i] = true;
-        let segment = &program.segments[i];
-        let source = &segment.source;
-        if !source.available {
-            continue;
-        }
-        let request = Evidence {
-            playable: segment.frames.clone(),
-            plan: Plan::overview(source.rate, segment.frames.len(), OVERVIEW_COLUMNS),
-        };
-        let publish = |page| {
-            send(Update::Wave(
-                i,
-                Shape {
-                    track: Arc::new(page),
-                },
-            ))
-        };
-        if let Some(page) = waveform::cached(source, &request, session.cache) {
-            if !publish(page) {
-                return;
+        while current() {
+            let Some(i) = (active..done.len()).chain(0..active).find(|&i| !done[i]) else {
+                break;
+            };
+            active = focus.load(Relaxed).min(done.len() - 1);
+            done[i] = true;
+            let segment = &program.segments[i];
+            if !segment.source.available || held[i].as_ref().is_some_and(|page| !page.preview) {
+                continue;
             }
-            continue;
-        }
-        let result = (|| -> anyhow::Result<bool> {
-            let mut analyzer = request.begin(source.rate)?;
-            let range = analyzer.decode_range();
-            let origin = segment.frames.start;
-            let mut published = None;
-            for first in (range.start..range.end).step_by(EVIDENCE_FRAMES) {
-                if !current() {
-                    return Ok(false);
+            let plan = Plan::overview(segment.source.rate, segment.frames.len(), OVERVIEW_COLUMNS);
+            let exact = Evidence {
+                playable: segment.frames.clone(),
+                plan,
+            };
+            let publish = |page| send(Update::Wave(i, Shape { track: page }));
+            before_chunk(&mut session);
+            if preview && let Some(page) = waveform::cached(&segment.source, &exact, session.cache)
+            {
+                let page = Arc::new(page);
+                held[i] = Some(page.clone());
+                if !publish(page) {
+                    return;
                 }
-                before_chunk(&mut session);
-                let end = (first + EVIDENCE_FRAMES).min(range.end);
-                waveform::feed(
-                    source,
-                    origin + first..origin + end,
-                    &mut analyzer,
-                    session.reader,
-                    &current,
-                )?;
-                if end < range.end
-                    && published.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(70))
-                    && let Some(page) = analyzer.overview_prefix()
-                {
-                    if !publish(page) {
-                        return Ok(false);
+                continue;
+            }
+            let request = if preview {
+                Evidence {
+                    plan: plan.preview(),
+                    ..exact
+                }
+            } else {
+                exact
+            };
+            let result = measure_overview(
+                &segment.source,
+                &request,
+                held[i].clone(),
+                &mut session,
+                &current,
+                before_chunk,
+                &publish,
+            );
+            match result {
+                Ok(Some(page)) => held[i] = Some(page),
+                Ok(None) => return,
+                Err(error) => {
+                    if !current() {
+                        return;
                     }
-                    published = Some(Instant::now());
+                    if !program.unchanged() {
+                        send(Update::Changed);
+                        return;
+                    }
+                    send(Update::Failed(format!("Waveform unavailable · {error}")));
                 }
-            }
-            let page = analyzer.finish()?;
-            waveform::store(source, &request, session.cache, &page);
-            Ok(publish(page))
-        })();
-        match result {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                if !current() {
-                    return;
-                }
-                if !program.unchanged() {
-                    send(Update::Changed);
-                    return;
-                }
-                send(Update::Failed(format!("Waveform unavailable · {error}")));
             }
         }
     }
+}
+
+fn measure_overview(
+    source: &crate::timeline::Source,
+    request: &Evidence,
+    geometry: Option<Arc<Page>>,
+    session: &mut DecoderSession<'_>,
+    current: &impl Fn() -> bool,
+    before_chunk: &impl Fn(&mut DecoderSession<'_>),
+    publish: &impl Fn(Arc<Page>) -> bool,
+) -> anyhow::Result<Option<Arc<Page>>> {
+    let mut analyzer = request.begin(source.rate)?;
+    if let Some(geometry) = geometry {
+        analyzer.reuse_geometry(geometry)?;
+    }
+    let range = analyzer.decode_range();
+    let origin = request.playable.start;
+    let mut published = None;
+    let mut first = range.start;
+    while first < range.end {
+        if !current() {
+            return Ok(None);
+        }
+        before_chunk(session);
+        let count = if request.plan.preview && published.is_none() {
+            (request.plan.frames_per_column * 4).clamp(4096, EVIDENCE_FRAMES)
+        } else {
+            EVIDENCE_FRAMES
+        };
+        let end = (first + count).min(range.end);
+        waveform::feed(
+            source,
+            origin + first..origin + end,
+            &mut analyzer,
+            session.reader,
+            current,
+        )?;
+        first = end;
+        if request.plan.preview
+            && end < range.end
+            && published.is_none_or(|t: Instant| t.elapsed() >= Duration::from_millis(70))
+            && let Some(page) = analyzer.overview_prefix()
+        {
+            if !publish(Arc::new(page)) {
+                return Ok(None);
+            }
+            published = Some(Instant::now());
+        }
+    }
+    let page = Arc::new(analyzer.finish()?);
+    if !request.plan.preview {
+        waveform::store(source, request, session.cache, &page);
+    }
+    Ok(publish(page.clone()).then_some(page))
 }
 
 #[cfg(test)]

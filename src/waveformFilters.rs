@@ -1,4 +1,4 @@
-//! Display band descriptors, never used by the audio callback. Independent
+//! Stroke colour fallback for rates outside the qualified octave grid. Independent
 //! second-order Butterworth low/high pass sections; the middle is HP then LP.
 //! These overlapping descriptive bands are not a reconstruction crossover.
 #[derive(Clone, Copy)]
@@ -36,12 +36,12 @@ impl Biquad {
     }
 }
 
-pub(super) struct Bands {
+pub(super) struct FallbackSpectrum {
     filters: [Biquad; 4],
     energy: [f64; 3],
     attack: f64,
 }
-impl Bands {
+impl FallbackSpectrum {
     pub fn new(rate: u32) -> Self {
         Self {
             filters: [
@@ -57,8 +57,7 @@ impl Bands {
         }
     }
 
-    pub fn push(&mut self, frame: [f32; 2]) -> ([f64; 3], [f64; 3]) {
-        let mut peaks = [0.0f64; 3];
+    pub fn push(&mut self, frame: [f32; 2]) -> [f64; 3] {
         let mut power = [0.0; 3];
         let x = frame.map(f64::from);
         let middle = self.filters[1].push(x);
@@ -68,13 +67,12 @@ impl Bands {
             self.filters[3].push(x),
         ];
         for i in 0..3 {
-            peaks[i] = bands[i][0].abs().max(bands[i][1].abs());
             power[i] = bands[i][0] * bands[i][0] * 0.5 + bands[i][1] * bands[i][1] * 0.5;
         }
         for (energy, power) in self.energy.iter_mut().zip(power) {
             *energy += self.attack * (power - *energy);
         }
-        (peaks, self.energy)
+        self.energy
     }
 }
 
@@ -87,7 +85,7 @@ mod tests {
     #[test]
     fn paired_channels_match_scalar_facts_bit_for_bit() {
         for rate in [8000, 44100, 48000, 96000, 192000] {
-            let mut paired = Bands::new(rate);
+            let mut paired = FallbackSpectrum::new(rate);
             let coefficients = paired.filters;
             let mut states = [[[0.0; 2]; 4]; 2];
             let mut energy = [0.0; 3];
@@ -102,7 +100,6 @@ mod tests {
                         (seed as i32 as f64 / i32::MAX as f64 * 1.5) as f32
                     }
                 });
-                let mut peak = [0.0_f64; 3];
                 let mut power = [0.0; 3];
                 for c in 0..2 {
                     let x = f64::from(frame[c]);
@@ -117,19 +114,13 @@ mod tests {
                     let middle = section(1, x);
                     let bands = [section(0, x), section(2, middle), section(3, x)];
                     for i in 0..3 {
-                        peak[i] = peak[i].max(bands[i].abs());
                         power[i] += bands[i] * bands[i] * 0.5;
                     }
                 }
                 for i in 0..3 {
                     energy[i] += paired.attack * (power[i] - energy[i]);
                 }
-                let (actual_peak, actual_energy) = paired.push(frame);
-                assert_eq!(
-                    actual_peak.map(f64::to_bits),
-                    peak.map(f64::to_bits),
-                    "rate {rate}, frame {frame_index}"
-                );
+                let actual_energy = paired.push(frame);
                 assert_eq!(
                     actual_energy.map(f64::to_bits),
                     energy.map(f64::to_bits),

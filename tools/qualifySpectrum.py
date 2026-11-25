@@ -118,7 +118,7 @@ def find_window(pid):
         user32.GetWindowThreadProcessId(hwnd, C.byref(owner))
         name = C.create_unicode_buffer(96)
         user32.GetClassNameW(hwnd, name, len(name))
-        if owner.value == pid and name.value == "Zed::Window" and user32.IsWindowVisible(hwnd):
+        if owner.value == pid and name.value in {"Zed::Window", "GpuiFast::Window"} and user32.IsWindowVisible(hwnd):
             matches.append(hwnd)
         return True
     user32.EnumWindows(visit, 0)

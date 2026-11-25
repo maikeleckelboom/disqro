@@ -30,7 +30,11 @@ function typedPage(page: WaveformPage): WaveformPage {
     facts: Float32Array.from(page.facts),
     extrema: Uint32Array.from(page.extrema),
     spectrum: page.spectrum && Float64Array.from(page.spectrum),
-    octave: page.octave && { ...page.octave, powers: Float64Array.from(page.octave.powers) },
+    octave: page.octave && {
+      ...page.octave,
+      analysis: page.octave.analysis ?? undefined,
+      powers: Float64Array.from(page.octave.powers),
+    },
     sourceDetail: page.sourceDetail && {
       ...page.sourceDetail,
       bounds: Float32Array.from(page.sourceDetail.bounds),

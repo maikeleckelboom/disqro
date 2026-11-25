@@ -56,61 +56,39 @@ impl Key {
         range: Range<usize>,
         pixels: f64,
         seconds: f64,
-        stroke: bool,
     ) -> Vec<Self> {
         let range = range.start.min(playable.len())..range.end.min(playable.len());
         if range.is_empty() || !source.available {
             return vec![];
         }
         let fitted = matches!(source.rate, 44_100 | 48_000);
-        let columns = if stroke {
-            let close = (8.0 / seconds).log2().clamp(0.0, 1.0);
-            ((pixels * 10.0).clamp(128.0, 16384.0) * (1.0 + 3.0 * close))
-                .ceil()
-                .min(49152.0)
-        } else {
-            (pixels * 2.0).max(128.0)
-        };
-        let tier = (seconds * f64::from(source.rate) / (columns - 1.0))
+        let close = (8.0 / seconds).log2().clamp(0.0, 1.0);
+        let columns = ((pixels * 10.0).clamp(128.0, 16384.0) * (1.0 + 3.0 * close))
             .ceil()
-            .max(1.0) as usize;
-        let tier = tier.next_power_of_two();
-        let mut keys = Vec::new();
-        if stroke && fitted {
-            keys.extend(Self::pages(
-                source,
-                &playable,
-                range.clone(),
-                Plan {
-                    start_frame: 0,
-                    end_frame: 0,
-                    frames_per_column: 256,
-                    leaf_frames: Some(LEAF),
-                    octave: Spectrum::available(source.rate, true),
-                    overview: false,
-                    with_bands: false,
-                },
-                EVIDENCE_FRAMES,
-            ));
-            if tier < LEAF {
-                keys.extend(Self::pages(
-                    source,
-                    &playable,
-                    range,
-                    Plan {
-                        start_frame: 0,
-                        end_frame: 0,
-                        frames_per_column: tier,
-                        leaf_frames: Some(tier),
-                        octave: None,
-                        overview: false,
-                        with_bands: false,
-                    },
-                    (tier * 8192).min(EVIDENCE_FRAMES),
-                ));
-            }
-        } else {
-            let tier = tier.min(if stroke { 1024 } else { EVIDENCE_FRAMES });
+            .min(49152.0);
+        let tier = ((seconds * f64::from(source.rate) / (columns - 1.0))
+            .ceil()
+            .max(1.0) as usize)
+            .next_power_of_two();
+        let spectrum = Spectrum::available(source.rate, fitted);
+        let mut keys: Vec<_> = Self::pages(
+            source,
+            &playable,
+            range.clone(),
+            Plan {
+                start_frame: 0,
+                end_frame: 0,
+                frames_per_column: 256,
+                leaf_frames: Some(LEAF),
+                octave: spectrum,
+                overview: false,
+                fallback_energy: spectrum.is_none(),
+                preview: false,
+            },
+            EVIDENCE_FRAMES,
+        )
+        .collect();
+        if tier < LEAF {
             keys.extend(Self::pages(
                 source,
                 &playable,
@@ -119,38 +97,16 @@ impl Key {
                     start_frame: 0,
                     end_frame: 0,
                     frames_per_column: tier,
-                    leaf_frames: stroke.then_some(tier.min(LEAF)),
-                    octave: if stroke {
-                        Spectrum::available(source.rate, false)
-                    } else {
-                        None
-                    },
+                    leaf_frames: Some(tier),
+                    octave: None,
                     overview: false,
-                    with_bands: true,
+                    fallback_energy: false,
+                    preview: false,
                 },
-                tier * 1024,
+                tier * 8192,
             ));
         }
         keys
-    }
-
-    pub fn refine(source: &Arc<Source>, playable: &Range<usize>, range: Range<usize>) -> Vec<Self> {
-        Self::pages(
-            source,
-            playable,
-            range,
-            Plan {
-                start_frame: 0,
-                end_frame: 0,
-                frames_per_column: 1,
-                leaf_frames: Some(1),
-                octave: None,
-                overview: false,
-                with_bands: false,
-            },
-            1024,
-        )
-        .collect()
     }
 
     fn pages(
@@ -163,8 +119,15 @@ impl Key {
         let first = range.start / size;
         let last = (range.end - 1) / size;
         let centre = (first + last) / 2;
-        (centre..=last)
-            .chain((first..centre).rev())
+        (0..=last - first)
+            .map(move |offset| {
+                if offset % 2 == 0 {
+                    centre - offset / 2
+                } else {
+                    centre + offset.div_ceil(2)
+                }
+            })
+            .filter(move |tile| (first..=last).contains(tile))
             .take(VIEW_TILES)
             .map(move |tile| Self {
                 source: source.clone(),
@@ -203,6 +166,20 @@ impl Key {
             }
         })
     }
+
+    fn complements(&self, requested: &Self) -> bool {
+        let (Request::Evidence(held), Request::Evidence(wanted)) =
+            (&self.request, &requested.request)
+        else {
+            return false;
+        };
+        self.source == requested.source
+            && held.playable == wanted.playable
+            && held.plan.fallback_energy == wanted.plan.fallback_energy
+            && held.plan.leaf_frames.is_some() == wanted.plan.leaf_frames.is_some()
+            && held.plan.start_frame < wanted.plan.end_frame
+            && wanted.plan.start_frame < held.plan.end_frame
+    }
 }
 
 #[derive(Default)]
@@ -238,7 +215,11 @@ impl Store {
     }
 
     pub fn publish(&mut self, revision: u64, key: Key, value: Option<Tile>) -> bool {
-        if self.revision != revision || !self.wanted().any(|wanted| *wanted == key) {
+        if self.revision != revision || self.entries.contains_key(&key) {
+            return false;
+        }
+        let wanted = self.wanted().any(|wanted| *wanted == key);
+        if !wanted && value.is_none() {
             return false;
         }
         if self.entries.len() == RESIDENT {
@@ -256,7 +237,7 @@ impl Store {
             }
         }
         self.entries.insert(key, value.map(Arc::new));
-        true
+        wanted
     }
 }
 
@@ -280,6 +261,11 @@ impl View {
             .iter()
             .filter_map(|key| store.entries.get(key)?.clone())
             .collect();
+        tiles.extend(store.entries.iter().filter_map(|(held, tile)| {
+            (!keys.contains(held) && keys.iter().any(|wanted| held.complements(wanted)))
+                .then(|| tile.clone())
+                .flatten()
+        }));
         tiles.sort_unstable_by_key(|tile| match tile.as_ref() {
             Tile::Evidence(page) => (page.start_frame, page.frames_per_column),
             Tile::Samples { first, .. } => (*first, 0),

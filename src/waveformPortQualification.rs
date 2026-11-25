@@ -13,6 +13,7 @@ use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[derive(Deserialize)]
@@ -99,10 +100,23 @@ fn execute(args: &[OsString]) -> Result<()> {
             }
             serde_json::to_writer(BufWriter::new(File::create(output)?), &pages)?;
         }
-        [command, cases, facts, output] if command == "render" => {
+        [command, cases, facts, output]
+            if command == "render" || command == "render-gpu" || command == "bench-gpu" =>
+        {
             let cases: Replay = serde_json::from_reader(BufReader::new(File::open(cases)?))?;
             let facts = Path::new(facts);
             let output = Path::new(output);
+            #[cfg(windows)]
+            let mut gpu = (command != "render")
+                .then(crate::waveform_render::gpu::qualification::Renderer::new)
+                .transpose()?;
+            #[cfg(windows)]
+            if let Some(gpu) = &gpu {
+                serde_json::to_writer(
+                    File::create(output.join("adapter.json"))?,
+                    &serde_json::json!({ "adapter": gpu.adapter, "software": gpu.software }),
+                )?;
+            }
             for case in cases.cases {
                 let view = case.view;
                 ensure!(
@@ -112,9 +126,44 @@ fn execute(args: &[OsString]) -> Result<()> {
                         && view.pixels_per_second > 0.0,
                     "Invalid waveform viewport"
                 );
-                let pages: Vec<Page> =
+                let mut pages: Vec<Page> =
                     serde_json::from_reader(BufReader::new(File::open(facts.join(case.pages))?))?;
-                let (pixels, geometry) = render(&pages.iter().collect::<Vec<_>>(), &view);
+                for page in &mut pages {
+                    read_reference_facts(page, view.rate);
+                }
+                let pages: Vec<_> = pages.into_iter().map(Arc::new).collect();
+                #[cfg(windows)]
+                if let Some(gpu) = &mut gpu {
+                    let evidence = if view.role == crate::waveform_render::Role::Overview {
+                        crate::overview::Evidence {
+                            overview: pages.first().cloned(),
+                            ..Default::default()
+                        }
+                    } else {
+                        crate::overview::Evidence {
+                            pages,
+                            ..Default::default()
+                        }
+                    };
+                    let first = view.first as f64 * f64::from(view.rate) / view.pixels_per_second;
+                    if command == "bench-gpu" {
+                        let timing = gpu.benchmark(&evidence, &view)?;
+                        serde_json::to_writer(
+                            BufWriter::new(File::create(output.join(format!("{}.json", case.id)))?),
+                            &timing,
+                        )?;
+                        continue;
+                    }
+                    gpu.render(&evidence, &view, first)?
+                        .save(output.join(format!("{}.png", case.id)))?;
+                    serde_json::to_writer(
+                        BufWriter::new(File::create(output.join(format!("{}.json", case.id)))?),
+                        &gpu.geometry(&view)?,
+                    )?;
+                    continue;
+                }
+                let (pixels, geometry) =
+                    render(&pages.iter().map(Arc::as_ref).collect::<Vec<_>>(), &view);
                 image::save_buffer(
                     output.join(format!("{}.png", case.id)),
                     &pixels,
@@ -129,8 +178,25 @@ fn execute(args: &[OsString]) -> Result<()> {
             }
         }
         _ => bail!(
-            "Expected decode INPUT PCM META, facts PCM REQUEST OUTPUT, or render CASES FACTS OUTPUT"
+            "Expected decode INPUT PCM META, facts PCM REQUEST OUTPUT, or render[-gpu] CASES FACTS OUTPUT"
         ),
     }
     Ok(())
+}
+
+// Electron's saved qualification records predate the single-style player.
+// Keep their wire format out of the production page and cache types.
+fn read_reference_facts(page: &mut Page, rate: u32) {
+    if !page.facts.is_empty() && page.facts.len() == page.extrema.len() / 2 * 13 {
+        let historical = std::mem::take(&mut page.facts);
+        let rows = historical.as_chunks::<13>().0;
+        page.facts = rows
+            .iter()
+            .flat_map(|row| row[..7].iter().copied())
+            .collect();
+        if !crate::waveform_render::SUPPORTED_OCTAVE_RATES.contains(&rate) {
+            page.fallback_energy =
+                Some(rows.iter().map(|row| [row[10], row[11], row[12]]).collect());
+        }
+    }
 }

@@ -1,7 +1,13 @@
 //! Dekzer's Hann512 Stroke and fixed-grid Blackman512 overview measurements.
 //! Time and power remain source facts. The renderer owns display colour.
 
-use std::{collections::VecDeque, f64::consts::PI, fmt, sync::OnceLock};
+use realfft::{RealFftPlanner, RealToComplex, num_complex::Complex64};
+use std::{
+    collections::VecDeque,
+    f64::consts::PI,
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 pub const OCTAVE_BANDS: usize = 8;
 pub const SOURCE_HOP: u64 = 256;
@@ -58,12 +64,16 @@ pub struct OctaveAnalyzer {
     received: u64,
     buffer_start: u64,
     mono: VecDeque<f64>,
+    fft: Arc<dyn RealToComplex<f64>>,
+    bins: Vec<Complex64>,
+    scratch: Vec<Complex64>,
     window: [f64; WINDOW],
     power_scale: f64,
     // scipy.signal.resample_poly default: symmetric Kaiser beta5, DC normalized,
     // multiplied by the reduced upsampling factor. At 48k this remains exactly
     // firwin(3201,1/160)*147. Direct phases remove the zero-phase FIR delay.
     resample_filter: Vec<f64>,
+    resampled_window: Option<(i64, [f64; WINDOW])>,
     up: u32,
     down: u32,
     preroll: u64,
@@ -128,6 +138,8 @@ impl OctaveAnalyzer {
         }
         let up = ANALYSIS_RATE / a;
         let down = sample_rate / a;
+        static TRANSFORM: OnceLock<Arc<dyn RealToComplex<f64>>> = OnceLock::new();
+        let fft = TRANSFORM.get_or_init(|| RealFftPlanner::new().plan_fft_forward(WINDOW));
         Ok(Self {
             rate: sample_rate,
             stroke,
@@ -137,6 +149,9 @@ impl OctaveAnalyzer {
             received: decode_start,
             buffer_start: decode_start,
             mono: VecDeque::with_capacity((preroll + lookahead) as usize),
+            fft: fft.clone(),
+            bins: fft.make_output_vec(),
+            scratch: fft.make_scratch_vec(),
             window,
             power_scale,
             resample_filter: if sample_rate != ANALYSIS_RATE && !stroke {
@@ -144,6 +159,7 @@ impl OctaveAnalyzer {
             } else {
                 Vec::new()
             },
+            resampled_window: None,
             up,
             down,
             preroll,
@@ -173,18 +189,23 @@ impl OctaveAnalyzer {
         {
             return Err(OctaveError::InvalidRange);
         }
-        for frame in frames {
-            if self.cell < self.represented_end {
-                self.mono
-                    .push_back((f64::from(frame[0]) + f64::from(frame[1])) * 0.5);
-            }
-            self.received += 1;
-            if self.cell < self.represented_end && self.received >= self.cell + self.lookahead {
+        let mut pending = frames;
+        while !pending.is_empty() && self.cell < self.represented_end {
+            let next = self.cell + self.lookahead;
+            let count = (next - self.received).min(pending.len() as u64) as usize;
+            self.mono.extend(
+                pending[..count]
+                    .iter()
+                    .map(|f| (f64::from(f[0]) + f64::from(f[1])) * 0.5),
+            );
+            self.received += count as u64;
+            pending = &pending[count..];
+            if self.received == next {
                 emit(self.descriptor(None));
                 self.advance();
             }
-            self.trim();
         }
+        self.received += pending.len() as u64;
         Ok(())
     }
 
@@ -221,13 +242,11 @@ impl OctaveAnalyzer {
         } else {
             self.cell.saturating_sub(self.preroll).min(self.received)
         };
-        while self.buffer_start < keep {
-            self.mono.pop_front();
-            self.buffer_start += 1;
-        }
+        self.mono.drain(..(keep - self.buffer_start) as usize);
+        self.buffer_start = keep;
     }
 
-    fn descriptor(&self, eof: Option<u64>) -> OctaveDescriptor {
+    fn descriptor(&mut self, eof: Option<u64>) -> OctaveDescriptor {
         let end = (self.cell + SOURCE_HOP).min(eof.unwrap_or(u64::MAX));
         let centre = (self.cell as f64 + end as f64) * 0.5;
         let grid_centre = if self.stroke {
@@ -236,13 +255,46 @@ impl OctaveAnalyzer {
             centre * f64::from(ANALYSIS_RATE) / f64::from(self.rate)
         };
         let first = (grid_centre - 255.5).floor() as i64;
-        let samples =
-            std::array::from_fn(|j| self.grid_sample(first + j as i64, eof) * self.window[j]);
-        let (real, imag) = fft(samples);
+        let mut samples = [0.0; WINDOW];
+        if self.resample_filter.is_empty() {
+            let start = first.max(self.buffer_start as i64);
+            let end = (first + WINDOW as i64).min(self.received as i64);
+            if end > start {
+                let source = (start as u64 - self.buffer_start) as usize
+                    ..(end as u64 - self.buffer_start) as usize;
+                let target = (start - first) as usize..(end - first) as usize;
+                for (value, input) in samples[target].iter_mut().zip(self.mono.range(source)) {
+                    *value = *input;
+                }
+            }
+        } else {
+            // Consecutive 512-sample windows overlap at every supported rate
+            // above 22.05 kHz. A grid sample has the same Kaiser support in
+            // both windows, including when the last window reaches EOF.
+            let reused = if let Some((before, previous)) = &self.resampled_window {
+                let advance = (first - before).clamp(0, WINDOW as i64) as usize;
+                let reused = WINDOW - advance;
+                samples[..reused].copy_from_slice(&previous[advance..]);
+                reused
+            } else {
+                0
+            };
+            for (j, value) in samples.iter_mut().enumerate().skip(reused) {
+                *value = self.grid_sample(first + j as i64, eof);
+            }
+            self.resampled_window = Some((first, samples));
+        }
+        for (sample, weight) in samples.iter_mut().zip(self.window) {
+            *sample *= weight;
+        }
+        self.fft
+            .process_with_scratch(&mut samples, &mut self.bins, &mut self.scratch)
+            .expect("fixed 512-point real transform and matching scratch");
         let edges = [1, 3, 5, 9, 17, 33, 65, 129, 257];
         let energy = std::array::from_fn(|band| {
-            (edges[band]..edges[band + 1])
-                .map(|i| real[i] * real[i] + imag[i] * imag[i])
+            self.bins[edges[band]..edges[band + 1]]
+                .iter()
+                .map(Complex64::norm_sqr)
                 .sum::<f64>()
                 * self.power_scale
         });
@@ -254,9 +306,6 @@ impl OctaveAnalyzer {
     }
 
     fn grid_sample(&self, index: i64, eof: Option<u64>) -> f64 {
-        if self.stroke {
-            return self.source(index, eof);
-        }
         // scipy resample_poly returns exactly ceil(source_frames *up/down)
         // samples. Its FIR tail beyond that finite output is not source data.
         let output_len = eof.map(|n| (n * u64::from(self.up)).div_ceil(u64::from(self.down)));
@@ -267,9 +316,6 @@ impl OctaveAnalyzer {
     }
 
     fn resampled(&self, index: i64, eof: Option<u64>) -> f64 {
-        if self.rate == ANALYSIS_RATE {
-            return self.source(index, eof);
-        }
         let up = i64::from(self.up);
         let half = i64::from(self.up.max(self.down)) * 10;
         let at = index * i64::from(self.down);
@@ -333,50 +379,4 @@ fn polyphase_filter(up: u32, down: u32) -> Vec<f64> {
         *tap *= f64::from(up) / sum;
     }
     taps
-}
-
-// Fixed radix-2 transform: no planning, heap scratch or external FFT dependency.
-fn fft(mut real: [f64; WINDOW]) -> ([f64; WINDOW], [f64; WINDOW]) {
-    // Every window uses the same 511 rotations. Cache the exact original
-    // expression once rather than recomputing trigonometry for a whole CD.
-    static ROTATIONS: OnceLock<[(f64, f64); WINDOW - 1]> = OnceLock::new();
-    let rotations = ROTATIONS.get_or_init(|| {
-        let mut values = [(0.0, 0.0); WINDOW - 1];
-        let mut width = 2;
-        while width <= WINDOW {
-            let half = width / 2;
-            for j in 0..half {
-                let angle = -2.0 * PI * j as f64 / width as f64;
-                values[half - 1 + j] = angle.sin_cos();
-            }
-            width *= 2;
-        }
-        values
-    });
-    let mut imag = [0.0; WINDOW];
-    for i in 0..WINDOW {
-        let reversed = i.reverse_bits() >> (usize::BITS - 9);
-        if i < reversed {
-            real.swap(i, reversed);
-        }
-    }
-    let mut width = 2;
-    while width <= WINDOW {
-        let half = width / 2;
-        for j in 0..half {
-            let (s, c) = rotations[half - 1 + j];
-            for start in (0..WINDOW).step_by(width) {
-                let a = start + j;
-                let b = a + half;
-                let tr = c * real[b] - s * imag[b];
-                let ti = s * real[b] + c * imag[b];
-                real[b] = real[a] - tr;
-                imag[b] = imag[a] - ti;
-                real[a] += tr;
-                imag[a] += ti;
-            }
-        }
-        width *= 2;
-    }
-    (real, imag)
 }

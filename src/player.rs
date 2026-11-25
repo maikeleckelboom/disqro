@@ -151,6 +151,7 @@ pub struct Player {
     scrub_entry: Option<(u64, u64)>,
     visible: bool,
     drawn_position: f64,
+    wave_observed: std::time::Instant,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
     /// The workspace keeps it current for the player's Queue button.
     pub queue_shown: bool,
@@ -220,6 +221,7 @@ impl Player {
             scrub_entry: None,
             visible: true,
             drawn_position: 0.,
+            wave_observed: std::time::Instant::now(),
             queue_shown: true,
         }
     }
@@ -355,6 +357,9 @@ impl Player {
         };
         let _transition =
             track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
+        if self.status.position != status.position || self.status.playing != status.playing {
+            self.wave_observed = std::time::Instant::now();
+        }
         self.status = status;
         if self.show_levels && self.visible {
             self.sync_meter(cx);

@@ -27,7 +27,7 @@ fn geometry(shapes: &[Shape]) -> Geometry {
             hash(witness as u64);
         }
         if let Some(power) = &page.spectrum {
-            // Compare the spectrally relevant precision across JSON cache reopen.
+            // Round at the display-input precision for comparisons with the checkpoint.
             for &value in power {
                 hash(u64::from((value as f32).to_bits()));
             }
@@ -56,7 +56,7 @@ fn timeline_waveform_baseline() {
     let temp = tempfile::tempdir().unwrap();
     let mut cold_geometry = None;
     println!(
-        "cache,segments,source_seconds,first_geometry_ms,active_complete_ms,program_complete_ms,retained_bins_bytes,sqlite_wave_pages,geometry_digest"
+        "cache,segments,source_seconds,first_geometry_ms,full_overview_ms,exact_visible_ms,complete_ms,retained_bins_bytes,sqlite_pages,sqlite_bytes,geometry_digest"
     );
     for kind in ["cold", "warm"] {
         let cache = Cache::open(temp.path()).unwrap();
@@ -67,6 +67,23 @@ fn timeline_waveform_baseline() {
         let focus = AtomicUsize::new(active);
         let observations =
             RefCell::new((vec![Shape::default(); program.segments.len()], None, None));
+        let detail_time = std::cell::Cell::new(None);
+        let measure_detail = env::var_os("DISQRO_WAVE_BASELINE_DETAIL").is_some();
+        let segment = &program.segments[active];
+        let span = (segment.source.rate as usize * 8).min(segment.frames.len());
+        let first = (segment.frames.len() - span) / 2;
+        let detail = if measure_detail {
+            crate::waveform_detail::Key::geometry(
+                &segment.source,
+                segment.frames.clone(),
+                first.saturating_sub(2048)..(first + span + 2048).min(segment.frames.len()),
+                1920.0,
+                span as f64 / f64::from(segment.source.rate),
+            )
+        } else {
+            vec![]
+        };
+        let detail = RefCell::new(std::collections::VecDeque::from(detail));
         analyse(
             &program,
             active,
@@ -80,46 +97,68 @@ fn timeline_waveform_baseline() {
                 let Update::Wave(index, shape) = update else {
                     panic!("expected waveform geometry from an unchanged fixture");
                 };
-                let (shapes, first, active_complete) = &mut *observations.borrow_mut();
+                let (shapes, first, full_overview) = &mut *observations.borrow_mut();
                 let elapsed = began.elapsed();
-                if index == active {
-                    if shape.track.frame_count > 0 {
-                        first.get_or_insert(elapsed);
-                    }
-                    if shape.track.frame_count == program.segments[index].frames.len() {
-                        active_complete.get_or_insert(elapsed);
-                    }
+                if index == active && shape.track.frame_count > 0 {
+                    first.get_or_insert(elapsed);
                 }
                 shapes[index] = shape;
+                if shapes
+                    .iter()
+                    .zip(&program.segments)
+                    .all(|(s, p)| s.track.frame_count == p.frames.len())
+                {
+                    full_overview.get_or_insert(elapsed);
+                }
                 true
             },
-            &|_| {},
+            &|session| {
+                let mut pending = detail.borrow_mut();
+                if let Some(key) = pending.pop_front() {
+                    key.load(session.cache, session.reader, &|| true).unwrap();
+                    if pending.is_empty() {
+                        detail_time.set(Some(began.elapsed()));
+                    }
+                }
+            },
         );
         let finished = began.elapsed();
-        let (shapes, first, active_complete) = observations.into_inner();
+        let (shapes, first, full_overview) = observations.into_inner();
         assert!(
             shapes
                 .iter()
                 .zip(&program.segments)
-                .all(|(s, segment)| s.track.frame_count == segment.frames.len())
+                .all(|(s, segment)| !s.track.preview && s.track.frame_count == segment.frames.len())
         );
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v1", [], |row| {
+            .query_row("SELECT count(*) FROM wave_evidence_v2", [], |row| {
                 row.get(0)
             })
             .unwrap();
         let ms = |time: Duration| time.as_secs_f64() * 1000.0;
         println!(
-            "{kind},{},{:.3},{:.3},{:.3},{:.3},{},{},{:016x}",
+            "{kind},{},{:.3},{:.3},{:.3},{},{:.3},{},{},{},{:016x}",
             shapes.len(),
             program.duration as f64 / crate::timeline::SECOND as f64,
             ms(first.unwrap()),
-            ms(active_complete.unwrap()),
+            ms(full_overview.unwrap()),
+            detail_time
+                .get()
+                .map(|t| format!("{:.3}", ms(t)))
+                .unwrap_or_default(),
             ms(finished),
             geometry.bytes,
             pages,
+            cache
+                .0
+                .query_row(
+                    "SELECT sum(length(data)) FROM wave_evidence_v2",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
             geometry.digest,
         );
         if let Some(cold) = &cold_geometry {
