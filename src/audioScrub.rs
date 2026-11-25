@@ -1,7 +1,7 @@
 //! Pointer-driven audition on the existing Kira mixer. A decoder worker
 //! exchanges preallocated PCM pages with the sound in both directions.
 use super::WaveSeekAnchor;
-use crate::{timeline::Source, waveform::Reader};
+use crate::{timeline::Source, waveform_source::Reader};
 use anyhow::Result;
 use kira::{AudioManager, Frame, backend::Backend, info::Info, sound::Sound, sound::SoundData};
 use rtrb::{Consumer, Producer, RingBuffer};

@@ -18,15 +18,15 @@ fn geometry(shapes: &[Shape]) -> Geometry {
     for shape in shapes {
         let page = &shape.track;
         bytes += page.bytes();
-        hash(page.frame_count as u64);
-        hash(page.frames_per_column as u64);
-        for &fact in &page.facts {
+        hash(page.frame_count() as u64);
+        hash(page.frames_per_column() as u64);
+        for &fact in page.facts() {
             hash(u64::from(fact.to_bits()));
         }
-        for &witness in &page.extrema {
+        for &witness in page.extrema() {
             hash(witness as u64);
         }
-        if let Some(power) = &page.spectrum {
+        if let Some(power) = page.pooled_spectrum() {
             // Round at the display-input precision for comparisons with the checkpoint.
             for &value in power {
                 hash(u64::from((value as f32).to_bits()));
@@ -116,14 +116,14 @@ fn timeline_waveform_baseline() {
                 };
                 let (shapes, first, full_overview) = &mut *observations.borrow_mut();
                 let elapsed = began.elapsed();
-                if index == active && shape.track.frame_count > 0 {
+                if index == active && shape.track.frame_count() > 0 {
                     first.get_or_insert(elapsed);
                 }
                 shapes[index] = shape;
                 if shapes
                     .iter()
                     .zip(&program.segments)
-                    .all(|(s, p)| s.track.frame_count == p.frames.len())
+                    .all(|(s, p)| s.track.frame_count() == p.frames.len())
                 {
                     full_overview.get_or_insert(elapsed);
                 }
@@ -146,12 +146,13 @@ fn timeline_waveform_baseline() {
             shapes
                 .iter()
                 .zip(&program.segments)
-                .all(|(s, segment)| !s.track.preview && s.track.frame_count == segment.frames.len())
+                .all(|(s, segment)| !s.track.is_preview()
+                    && s.track.frame_count() == segment.frames.len())
         );
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v3", [], |row| {
+            .query_row("SELECT count(*) FROM wave_evidence_v4", [], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -172,7 +173,7 @@ fn timeline_waveform_baseline() {
             cache
                 .0
                 .query_row(
-                    "SELECT sum(length(data)) FROM wave_evidence_v3",
+                    "SELECT sum(length(data)) FROM wave_evidence_v4",
                     [],
                     |row| row.get::<_, i64>(0)
                 )

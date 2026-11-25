@@ -1,5 +1,7 @@
 # Dekzer waveform recovery
 
+The implementation now lives in Waveform Native; file paths in this record refer to the historical Disqro revisions it describes. [Waveform Native in Disqro](waveform-native.md)
+
 This document records the accepted visual checkpoint and its historical layered comparisons. The production follow-up uses Stroke as the single waveform presentation. [Native GPU renderer and qualification](waveform-native-gpu.md)
 
 The checkpoint ports the Electron Stroke and layered Three-band presentations

@@ -63,6 +63,7 @@ Open a music folder and choose **Add Folder to Library** in the Music Browser me
 - **Rust** — Native application and audio processing.
 - **GPUI + GPUI Kit** — Interface, components, icons, and docking system.
 - **SQLite** — Local music library, metadata, playlists, and preferences.
+- **Waveform Native** — Source-accurate waveform analysis and the native Stroke renderer. [Waveform Native in Disqro](docs/waveform-native.md)
 - **Modular visualization engine** — Extensible audio-driven visualizations sharing playback and analysis data.
 
 ## Philosophy

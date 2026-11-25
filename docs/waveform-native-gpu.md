@@ -1,5 +1,7 @@
 # Native Stroke waveform
 
+The implementation now lives in Waveform Native; file paths in this record refer to the historical Disqro revisions it describes. [Waveform Native in Disqro](waveform-native.md)
+
 Disqro uses the accepted Dekzer Stroke appearance in the detailed Waveform panel and the compact Track and Full CD views. The detail deck holds the playhead at the center and scrolls physical-source geometry underneath it. Each Waveform panel keeps its chosen zoom in seconds when playback moves to another recording. Adjacent CUE chapters in the same image share the source coordinates and resident detail pages. Follow mode zooms around the playhead. Panning holds an inspection position with pointer-anchored zoom. **Follow playback** returns the deck to the playhead.
 
 The detail projection uses the current viewport density on each draw. At three frames per device pixel the same Stroke view starts revealing separate left and right source-sample lines. The lines grow into the full presentation by 0.75 frames per pixel. They connect consecutive decoded samples within the physical source. A seek targets the logical interval drawn with the gesture and is checked again by the playback transport. Musical context outside that interval remains visible for inspection.

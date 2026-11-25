@@ -41,7 +41,6 @@ mod system;
 mod table;
 mod theme;
 mod timeline;
-mod waveform;
 #[path = "waveformDetail.rs"]
 mod waveform_detail;
 #[path = "waveformPortAnalysis.rs"]
@@ -51,6 +50,8 @@ mod waveform_port_analysis;
 mod waveform_port_qualification;
 #[path = "waveformRender.rs"]
 mod waveform_render;
+#[path = "waveform.rs"]
+mod waveform_source;
 mod workspace;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};
@@ -71,7 +72,10 @@ fn main() {
     }
     diagnostics::start();
     #[cfg(all(windows, feature = "qualification"))]
-    waveform_render::gpu::qualification::start_presentation_trace();
+    {
+        waveform_port_qualification::start_presentation_trace();
+        waveform_port_qualification::arm_target_failure();
+    }
     let arg = source
         .map(std::path::PathBuf::from)
         .and_then(|p| std::path::absolute(p).ok());
@@ -97,7 +101,7 @@ fn main() {
             gpui_kit::open_window(options, cx, move |window, cx| {
                 window.set_window_title("Disqro");
                 #[cfg(all(windows, feature = "qualification"))]
-                waveform_render::gpu::qualification::exercise_device_recreation(window, cx);
+                waveform_port_qualification::exercise_device_recreation(window, cx);
                 cx.new(|cx| Workspace::new(arg, window, cx))
             })
             .expect("Could not open Disqro");

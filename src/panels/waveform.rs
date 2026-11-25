@@ -7,7 +7,7 @@ use crate::{
     player::{Player, PlayerEvent, WaveTrack},
     theme::materials,
     timeline::Source,
-    waveform_detail::{Coverage, Key, Tile, View},
+    waveform_detail::{Coverage, Key, View},
     waveform_port_analysis::DETAIL_SECONDS,
     waveform_render::Role,
 };
@@ -391,15 +391,11 @@ impl Waveform {
             width,
             viewport.span / f64::from(track.source.rate),
         ));
-        let preview = (!track.overview.facts.is_empty())
-            .then(|| track.range.start..track.range.start + track.overview.frame_count);
+        let preview = (!track.overview.facts().is_empty())
+            .then(|| track.range.start..track.range.start + track.overview.frame_count());
         let loaded = self.detail.tiles(track.generation, keys, preview);
-        for tile in loaded.tiles {
-            match tile.as_ref() {
-                Tile::Evidence(page) => evidence.pages.push(page.clone()),
-                Tile::Samples { .. } => evidence.samples.push(tile),
-            }
-        }
+        evidence.pages = loaded.pages;
+        evidence.samples = loaded.samples;
         (surface, evidence, loaded.coverage)
     }
 
@@ -410,7 +406,7 @@ impl Waveform {
             } else {
                 "Detail unavailable"
             })
-        } else if coverage.pending > 0 {
+        } else if coverage.pending > 0 || coverage.deferred > 0 {
             Some(if coverage.approximate > 0 {
                 "Refining waveform"
             } else {

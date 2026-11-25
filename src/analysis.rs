@@ -4,10 +4,10 @@ use crate::{
     cache::Cache,
     library::{DiscContext, Track},
     timeline::Program,
-    waveform::{self, Evidence, Reader},
     waveform_detail::{Store, View},
     waveform_port_analysis::{EVIDENCE_FRAMES, OVERVIEW_COLUMNS, Plan},
     waveform_render::Page,
+    waveform_source::{self, Evidence, Reader},
 };
 use std::{
     sync::{
@@ -220,7 +220,8 @@ fn analyse(
             active = focus.load(Relaxed).min(done.len() - 1);
             done[i] = true;
             let segment = &program.segments[i];
-            if !segment.source.available || held[i].as_ref().is_some_and(|page| !page.preview) {
+            if !segment.source.available || held[i].as_ref().is_some_and(|page| !page.is_preview())
+            {
                 continue;
             }
             let plan = Plan::overview(segment.source.rate, segment.frames.len(), OVERVIEW_COLUMNS);
@@ -230,7 +231,8 @@ fn analyse(
             };
             let publish = |page| send(Update::Wave(i, Shape { track: page }));
             before_chunk(&mut session);
-            if preview && let Some(page) = waveform::cached(&segment.source, &exact, session.cache)
+            if preview
+                && let Some(page) = waveform_source::cached(&segment.source, &exact, session.cache)
             {
                 let page = Arc::new(page);
                 held[i] = Some(page.clone());
@@ -302,7 +304,7 @@ fn measure_overview(
             EVIDENCE_FRAMES
         };
         let end = (first + count).min(range.end);
-        waveform::feed(
+        waveform_source::feed(
             source,
             origin + first..origin + end,
             &mut analyzer,
@@ -323,7 +325,7 @@ fn measure_overview(
     }
     let page = Arc::new(analyzer.finish()?);
     if !request.plan.preview {
-        waveform::store(source, request, session.cache, &page);
+        waveform_source::store(source, request, session.cache, &page);
     }
     Ok(publish(page.clone()).then_some(page))
 }

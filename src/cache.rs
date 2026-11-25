@@ -64,7 +64,8 @@ impl Cache {
             DROP TABLE IF EXISTS wave_pages_v2;
             DROP TABLE IF EXISTS wave_evidence_v1;
             DROP TABLE IF EXISTS wave_evidence_v2;
-            CREATE TABLE IF NOT EXISTS wave_evidence_v3(path BLOB, requested BLOB, size INTEGER, modified INTEGER,
+            DROP TABLE IF EXISTS wave_evidence_v3;
+            CREATE TABLE IF NOT EXISTS wave_evidence_v4(path BLOB, requested BLOB, size INTEGER, modified INTEGER,
                 volume INTEGER, object INTEGER, data BLOB, UNIQUE(path,requested));
             CREATE TABLE IF NOT EXISTS disc_sources_v1(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
                 path BLOB, bytes INTEGER, modified INTEGER, rate INTEGER, frames INTEGER, PRIMARY KEY(sheet,path)) WITHOUT ROWID;")?;

@@ -3,7 +3,7 @@ use crate::{
     cache::Cache,
     library::{DiscContext, Track},
     timeline::*,
-    waveform,
+    waveform_source,
 };
 use lofty::{
     config::WriteOptions,
@@ -227,7 +227,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     let cache = Cache::open(dir.path()).unwrap();
     let p = Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
     let source = &p.segments[0].source;
-    let exact = waveform::Evidence {
+    let exact = waveform_source::Evidence {
         playable: 0..source.frames,
         plan: crate::waveform_port_analysis::Plan {
             start_frame: boundary - 1,
@@ -240,9 +240,9 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
             preview: false,
         },
     };
-    let page = waveform::load(source, &exact, Some(&cache), &mut None, &|| true).unwrap();
+    let page = waveform_source::load(source, &exact, Some(&cache), &mut None, &|| true).unwrap();
     let mut reader = None;
-    let cached = waveform::load(
+    let cached = waveform_source::load(
         &p.segments[1].source,
         &exact,
         Some(&cache),
@@ -254,35 +254,36 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(
         cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v3", [], |r| r
+            .query_row("SELECT count(*) FROM wave_evidence_v4", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
         1
     );
-    let leaf = cached.source_detail.unwrap();
-    let offset = (boundary - 1 - leaf.first_cell_frame) as u32;
+    let leaf = cached.leaves().unwrap();
+    let offset = (boundary - 1 - leaf.first_cell_frame()) as u32;
     assert_eq!(leaf.witnesses(0), [offset; 2]);
-    assert_eq!(leaf.bounds[0], -1.0);
-    assert!(leaf.bounds[1] > 0.99);
-    assert_eq!(leaf.bounds, page.source_detail.unwrap().bounds);
-    let next_chapter = waveform::Evidence {
+    assert_eq!(leaf.bounds()[0], -1.0);
+    assert!(leaf.bounds()[1] > 0.99);
+    assert_eq!(leaf.bounds(), page.leaves().unwrap().bounds());
+    let next_chapter = waveform_source::Evidence {
         playable: p.segments[1].frames.clone(),
         plan: crate::waveform_port_analysis::Plan::overview(rate, p.segments[1].frames.len(), 128),
     };
     let silent =
-        waveform::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
-    assert!(silent.facts.iter().all(|value| *value == 0.0));
+        waveform_source::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
+    assert!(silent.facts().iter().all(|value| *value == 0.0));
     let samples =
-        waveform::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true).unwrap();
+        waveform_source::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true)
+            .unwrap();
     assert_eq!(samples[0].right, -1.);
     assert!(samples[0].left > 0.99);
     assert_eq!([samples[1].left, samples[1].right], [0., 0.]);
     fixture(&path, rate, frames + 1);
     assert!(!p.unchanged());
-    assert!(waveform::load(source, &exact, Some(&cache), &mut None, &|| true).is_err());
+    assert!(waveform_source::load(source, &exact, Some(&cache), &mut None, &|| true).is_err());
     let changed = Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
     assert!(
-        waveform::load(
+        waveform_source::load(
             &changed.segments[0].source,
             &exact,
             Some(&cache),
@@ -302,7 +303,7 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
     let program = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
     let source = &program.segments[0].source;
     let mut decoder = None;
-    let request = |start_frame, end_frame| waveform::Evidence {
+    let request = |start_frame, end_frame| waveform_source::Evidence {
         playable: 0..source.frames,
         plan: crate::waveform_port_analysis::Plan {
             start_frame,
@@ -315,17 +316,17 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
             preview: false,
         },
     };
-    waveform::load(source, &request(0, 32000), None, &mut decoder, &|| true).unwrap();
+    waveform_source::load(source, &request(0, 32000), None, &mut decoder, &|| true).unwrap();
     let next = request(32000, 48000);
-    let sequential = waveform::load(source, &next, None, &mut decoder, &|| true).unwrap();
-    let seek = waveform::load(source, &next, None, &mut None, &|| true).unwrap();
+    let sequential = waveform_source::load(source, &next, None, &mut decoder, &|| true).unwrap();
+    let seek = waveform_source::load(source, &next, None, &mut None, &|| true).unwrap();
     assert_eq!(
-        sequential.source_detail.unwrap().offsets,
-        seek.source_detail.unwrap().offsets
+        sequential.leaves().unwrap().offsets(),
+        seek.leaves().unwrap().offsets()
     );
     assert_eq!(
-        sequential.octave.unwrap().powers,
-        seek.octave.unwrap().powers
+        sequential.octave().unwrap().powers(),
+        seek.octave().unwrap().powers()
     );
 }
 
@@ -339,7 +340,7 @@ fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
     let program =
         Program::resolve(&Arc::new(Track::file(path)), DiscContext::Inferred, None).unwrap();
     let source = &program.segments[0].source;
-    let request = waveform::Evidence {
+    let request = waveform_source::Evidence {
         playable: 117..11_169,
         plan: Plan {
             start_frame: 51,
@@ -352,13 +353,13 @@ fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
             preview: false,
         },
     };
-    let page = waveform::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
-    let samples = waveform::samples(source, 168..9818, &mut None, &|| true).unwrap();
-    let detail = page.source_detail.as_ref().unwrap();
-    for (index, bounds) in detail.bounds.as_chunks::<2>().0.iter().enumerate() {
-        let first = detail.first_cell_frame + index * detail.leaf_frames;
+    let page = waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
+    let samples = waveform_source::samples(source, 168..9818, &mut None, &|| true).unwrap();
+    let detail = page.leaves().unwrap();
+    for (index, bounds) in detail.bounds().as_chunks::<2>().0.iter().enumerate() {
+        let first = detail.first_cell_frame() + index * detail.leaf_frames();
         let begin = first.max(168) - 168;
-        let end = (first + detail.leaf_frames).min(9818) - 168;
+        let end = (first + detail.leaf_frames()).min(9818) - 168;
         let extrema = samples[begin..end].iter().fold(
             [f32::INFINITY, f32::NEG_INFINITY],
             |[lo, hi], frame| {
@@ -375,10 +376,15 @@ fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
         assert_eq!(a.left.min(a.right), extrema[0]);
         assert_eq!(b.left.max(b.right), extrema[1]);
     }
-    let cached = waveform::cached(source, &request, Some(&cache)).unwrap();
-    assert_eq!(cached.spectrum, page.spectrum);
-    assert_eq!(cached.source_detail.unwrap().offsets, detail.offsets);
-    assert!(page.spectrum.unwrap().iter().any(|power| *power > 0.));
+    let cached = waveform_source::cached(source, &request, Some(&cache)).unwrap();
+    assert_eq!(cached.pooled_spectrum(), page.pooled_spectrum());
+    assert_eq!(cached.leaves().unwrap().offsets(), detail.offsets());
+    assert!(
+        page.pooled_spectrum()
+            .unwrap()
+            .iter()
+            .any(|power| *power > 0.)
+    );
 }
 
 #[cfg(windows)]
@@ -394,11 +400,12 @@ fn replacing_a_source_with_the_same_length_and_time_invalidates_wave_pages() {
     let original = resolve();
     let source = &original.segments[0].source;
     assert!(source.object.is_some());
-    let request = waveform::Evidence {
+    let request = waveform_source::Evidence {
         playable: 0..source.frames,
         plan: crate::waveform_port_analysis::Plan::overview(source.rate, source.frames, 128),
     };
-    let old_page = waveform::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
+    let old_page =
+        waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
     let mut bytes = fs::read(&path).unwrap();
     bytes[44..].fill(0);
     fs::write(&replacement, bytes).unwrap();
@@ -416,8 +423,9 @@ fn replacing_a_source_with_the_same_length_and_time_invalidates_wave_pages() {
     let changed = &new.segments[0].source;
     assert_eq!(source.stamp, changed.stamp);
     assert_ne!(source.object, changed.object);
-    assert!(waveform::cached(changed, &request, Some(&cache)).is_none());
-    let new_page = waveform::load(changed, &request, Some(&cache), &mut None, &|| true).unwrap();
-    assert!(old_page.facts.iter().any(|m| *m != 0.));
-    assert!(new_page.facts.iter().all(|m| *m == 0.));
+    assert!(waveform_source::cached(changed, &request, Some(&cache)).is_none());
+    let new_page =
+        waveform_source::load(changed, &request, Some(&cache), &mut None, &|| true).unwrap();
+    assert!(old_page.facts().iter().any(|m| *m != 0.));
+    assert!(new_page.facts().iter().all(|m| *m == 0.));
 }

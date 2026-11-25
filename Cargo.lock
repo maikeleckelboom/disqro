@@ -1395,7 +1395,6 @@ dependencies = [
  "anyhow",
  "async-channel",
  "async-lock",
- "bytemuck",
  "chrono",
  "embed-resource",
  "encoding_rs",
@@ -1415,6 +1414,7 @@ dependencies = [
  "symphonia",
  "symphonia-adapter-libopus",
  "tempfile",
+ "waveform-native",
  "windows 0.62.2",
 ]
 
@@ -2531,6 +2531,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-windows"
 version = "0.1.17"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=33125d50e8fba82988d59bc8dc25acd588b4d689#33125d50e8fba82988d59bc8dc25acd588b4d689"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -7921,6 +7922,50 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "waveform-core"
+version = "0.1.0"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=33125d50e8fba82988d59bc8dc25acd588b4d689#33125d50e8fba82988d59bc8dc25acd588b4d689"
+dependencies = [
+ "realfft",
+ "serde",
+]
+
+[[package]]
+name = "waveform-d3d11"
+version = "0.1.0"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=33125d50e8fba82988d59bc8dc25acd588b4d689#33125d50e8fba82988d59bc8dc25acd588b4d689"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "waveform-core",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "waveform-gpui"
+version = "0.1.0"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=33125d50e8fba82988d59bc8dc25acd588b4d689#33125d50e8fba82988d59bc8dc25acd588b4d689"
+dependencies = [
+ "anyhow",
+ "gpui-fast-windows",
+ "gpui-kit",
+ "raw-window-handle",
+ "waveform-core",
+ "waveform-d3d11",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "waveform-native"
+version = "0.1.0"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=33125d50e8fba82988d59bc8dc25acd588b4d689#33125d50e8fba82988d59bc8dc25acd588b4d689"
+dependencies = [
+ "waveform-core",
+ "waveform-d3d11",
+ "waveform-gpui",
 ]
 
 [[package]]

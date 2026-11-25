@@ -562,7 +562,7 @@ impl Player {
                     .w(relative(width))
                     .when(full && i == k, |d| d.bg(m.selected.opacity(0.65)))
                     .when(can_seek, |d| d.cursor_pointer());
-                if page.frame_count > 0 {
+                if page.frame_count() > 0 {
                     let surface = Surface {
                         role: WaveRole::Overview,
                         rate: s.source.rate,
