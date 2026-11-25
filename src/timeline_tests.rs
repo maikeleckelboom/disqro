@@ -295,6 +295,159 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
 }
 
 #[test]
+fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records() {
+    use crate::{
+        listening::{Occurrence, Recording},
+        profile::{Profile, SavedQueue},
+        queue::Queue,
+        store::{Locator, Store},
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let root = profile.path();
+    let cache_path = root.join("Cache");
+    let library_path = root.join("library.sqlite3");
+    let workspace = root.join("workspace-v1.json");
+    let audio = root.join("original.wav");
+    fixture(&audio, 32_000, 32_003);
+    let track = Arc::new(Track::file(audio));
+    let mut queue = Queue::default();
+    queue.replace([track.clone(), track.clone()].into_iter().collect(), 1);
+    let queue_ids: Vec<_> = queue.entries.iter().map(|entry| entry.id).collect();
+    let profile_bytes = serde_json::to_vec(&Profile {
+        queue: Some(SavedQueue {
+            queue,
+            position: 0.25,
+        }),
+        full_cd: true,
+        ..Default::default()
+    })
+    .unwrap();
+    fs::write(&workspace, &profile_bytes).unwrap();
+    let (track_id, marks, totals) = {
+        let mut store = Store::open(&library_path).unwrap();
+        let ids = store.resolve(std::slice::from_ref(&track)).unwrap();
+        let id = ids[0];
+        store.set_rating(&ids, 4).unwrap();
+        store.set_liked(&ids, true).unwrap();
+        let recording = Recording {
+            track: track.clone(),
+            source: crate::cache::Stamp::read(&track.source),
+            source_object: crate::store::NativeFile::of(&fs::File::open(&track.source).unwrap()),
+            sheet: None,
+            sheet_object: None,
+        };
+        let at = 1_700_000_000_000_000;
+        let mut play = Occurrence::new(recording, at);
+        let checkpoint = play.credit(Some(10.), at, 6_000_000).unwrap();
+        store.checkpoint_listening(&checkpoint).unwrap();
+        let totals = store.listening_totals(id).unwrap();
+        assert_eq!(totals.credited_us, 6_000_000);
+        (id, store.marks_for(&ids).unwrap(), totals)
+    };
+    fs::create_dir(&cache_path).unwrap();
+    let database = cache_path.join("music-cache-v1.sqlite3");
+    {
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE wave_evidence_v3(path BLOB, requested BLOB, size INTEGER,
+                modified INTEGER, volume INTEGER, object INTEGER, data BLOB, UNIQUE(path, requested));
+            INSERT INTO wave_evidence_v3 VALUES (x'01', x'02', 19, 20, NULL, NULL, x'0304');
+            CREATE TABLE tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
+            INSERT INTO tags VALUES (x'41', 19, 20, x'42');").unwrap();
+    }
+
+    let p = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let segment = &p.segments[0];
+    let source = &segment.source;
+    let request = waveform_source::Evidence {
+        playable: segment.frames.clone(),
+        plan: crate::waveform_port_analysis::Plan::overview(source.rate, segment.frames.len(), 128),
+    };
+    let expected = {
+        let cache = Cache::open(&cache_path).unwrap();
+        let old: i64 = cache
+            .0
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='wave_evidence_v3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0);
+        assert!(waveform_source::cached(source, &request, Some(&cache)).is_none());
+        waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap()
+    };
+    let record = waveform::evidence_codec::encode(&expected, &request.request().unwrap()).unwrap();
+    let mut invalid_facts = record.clone();
+    invalid_facts[24..28].copy_from_slice(&f32::NAN.to_le_bytes());
+    let mut incompatible = record.clone();
+    incompatible[4] ^= 0x80;
+    for corrupt in [
+        &invalid_facts[..],
+        &record[..record.len() - 1],
+        &incompatible,
+    ] {
+        let cache = Cache::open(&cache_path).unwrap();
+        assert_eq!(
+            cache
+                .0
+                .execute("UPDATE wave_evidence_v4 SET data=?1", [corrupt])
+                .unwrap(),
+            1
+        );
+        assert!(waveform_source::cached(source, &request, Some(&cache)).is_none());
+        let mut reader = None;
+        let rebuilt =
+            waveform_source::load(source, &request, Some(&cache), &mut reader, &|| true).unwrap();
+        assert!(reader.is_some());
+        assert_eq!(expected, rebuilt);
+    }
+    let cache = Cache::open(&cache_path).unwrap();
+    let mut reader = None;
+    assert_eq!(
+        waveform_source::load(source, &request, Some(&cache), &mut reader, &|| true).unwrap(),
+        expected
+    );
+    assert!(reader.is_none());
+    assert_eq!(
+        cache
+            .0
+            .query_row("SELECT data FROM wave_evidence_v4", [], |r| r
+                .get::<_, Vec<u8>>(0))
+            .unwrap(),
+        record
+    );
+    assert_eq!(
+        cache
+            .0
+            .query_row("SELECT data FROM tags WHERE path=x'41'", [], |r| r
+                .get::<_, Vec<u8>>(0))
+            .unwrap(),
+        b"B"
+    );
+
+    assert_eq!(fs::read(&workspace).unwrap(), profile_bytes);
+    let (profile, warning) = crate::profile::restore(&workspace).unwrap();
+    assert!(warning.is_none());
+    assert!(profile.full_cd);
+    let saved = profile.queue.unwrap();
+    assert_eq!(
+        saved
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        queue_ids
+    );
+    assert_eq!(saved.queue.current, Some(1));
+    assert_eq!(saved.position, 0.25);
+    let library = Store::open(&library_path).unwrap();
+    assert_eq!(library.find(&Locator::of(&track)).unwrap(), Some(track_id));
+    assert_eq!(library.marks_for(&[track_id]).unwrap(), marks);
+    assert_eq!(library.listening_totals(track_id).unwrap(), totals);
+}
+
+#[test]
 fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stereo.wav");

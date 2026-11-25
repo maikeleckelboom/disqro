@@ -31,6 +31,7 @@ pub struct Counters {
     pub frames: AtomicU64,
     pub paint_us: AtomicU64,
     pub wave_upload_bytes: AtomicU64,
+    pub wave_total_upload_bytes: AtomicU64,
     pub wave_gpu_draws: AtomicU64,
     pub wave_gpu_errors: AtomicU64,
     pub wave_input_us: AtomicU64,
@@ -117,6 +118,7 @@ pub fn start() {
                 ("wave_paints", &d.frames),
                 ("wave_paint_max_us", &d.paint_us),
                 ("wave_source_upload_bytes", &d.wave_upload_bytes),
+                ("wave_total_upload_bytes", &d.wave_total_upload_bytes),
                 ("wave_gpu_draws", &d.wave_gpu_draws),
                 ("wave_gpu_errors", &d.wave_gpu_errors),
                 ("wave_input_to_draw_max_us", &d.wave_input_us),
@@ -223,7 +225,10 @@ pub fn observe_waveform_surfaces(cx: &mut gpui_kit::App) {
         match event {
             waveform::gpui::SurfaceEvent::Drawn(stats) => {
                 d.wave_gpu_draws.fetch_add(1, Relaxed);
-                d.wave_upload_bytes.fetch_add(stats.uploaded_bytes, Relaxed);
+                d.wave_upload_bytes
+                    .fetch_add(stats.source_uploaded_bytes, Relaxed);
+                d.wave_total_upload_bytes
+                    .fetch_add(stats.uploaded_bytes, Relaxed);
                 stage(
                     begin_stage(),
                     "shared_device_update",

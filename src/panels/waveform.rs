@@ -406,7 +406,13 @@ impl Waveform {
             } else {
                 "Detail unavailable"
             })
-        } else if coverage.pending > 0 || coverage.deferred > 0 {
+        } else if coverage.deferred > 0 {
+            Some(if coverage.approximate > 0 {
+                "Approximate · detail limit reached"
+            } else {
+                "Detail limit reached"
+            })
+        } else if coverage.pending > 0 {
             Some(if coverage.approximate > 0 {
                 "Refining waveform"
             } else {
@@ -432,6 +438,7 @@ impl Waveform {
         if !self.presented
             || window.visibility() != WindowVisibility::Visible
             || self.texture.unavailable()
+            || self.texture.limited()
         {
             return false;
         }
@@ -565,7 +572,8 @@ impl Render for Waveform {
         let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
         self.coverage = Self::coverage(coverage, track.source.available);
         let failed = self.texture.unavailable();
-        if active && moving && !failed {
+        let limited = self.texture.limited();
+        if active && moving && !failed && !limited {
             self.motion.request(cx.weak_entity(), window);
         }
         let seconds = self.position.viewport.span / f64::from(track.source.rate);
@@ -595,6 +603,8 @@ impl Render for Waveform {
                     .when_some(
                         if failed {
                             Some("Waveform display unavailable")
+                        } else if limited {
+                            Some("Waveform display limit reached")
                         } else {
                             self.coverage
                         },
@@ -690,6 +700,7 @@ impl Render for Waveform {
                                 if previous
                                     .is_none_or(|p| p.bounds.size != b.size || p.scale != scale)
                                     || failed != texture.unavailable()
+                                    || limited != texture.limited()
                                 {
                                     window.on_next_frame(move |_, cx| {
                                         let _ = panel.update(cx, |deck, cx| {

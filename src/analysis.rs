@@ -185,7 +185,8 @@ fn load_detail(
     let Some(key) = detail.lock().unwrap().next(revision) else {
         return false;
     };
-    let tile = key.load(session.cache, session.reader, current).ok();
+    let still_wanted = || current() && detail.lock().unwrap().is_current(revision, &key);
+    let tile = key.load(session.cache, session.reader, &still_wanted).ok();
     if detail.lock().unwrap().publish(revision, key, tile) {
         let _ = updates.try_send((revision, Update::Detail));
     }
