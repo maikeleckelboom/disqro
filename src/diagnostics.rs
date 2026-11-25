@@ -214,3 +214,28 @@ impl ViewTrace {
         }
     }
 }
+
+/// Counts Waveform Native surface draws, uploads and failures in the trace.
+pub fn observe_waveform_surfaces(cx: &mut gpui_kit::App) {
+    #[cfg(windows)]
+    waveform::gpui::observe_surfaces(cx, |event| {
+        let Some(d) = get() else { return };
+        match event {
+            waveform::gpui::SurfaceEvent::Drawn(stats) => {
+                d.wave_gpu_draws.fetch_add(1, Relaxed);
+                d.wave_upload_bytes.fetch_add(stats.uploaded_bytes, Relaxed);
+                stage(
+                    begin_stage(),
+                    "shared_device_update",
+                    stats.uploaded_bytes,
+                    0,
+                );
+            }
+            waveform::gpui::SurfaceEvent::Failed => {
+                d.wave_gpu_errors.fetch_add(1, Relaxed);
+            }
+        }
+    });
+    #[cfg(not(windows))]
+    let _ = cx;
+}

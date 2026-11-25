@@ -83,6 +83,7 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            diagnostics::observe_waveform_surfaces(cx);
             theme::install(theme::Appearance::Dark, cx);
             workspace::bind_keys(cx);
             location::bind_keys(cx);
