@@ -2,12 +2,13 @@
 use super::{Page, Role, View};
 use crate::{overview::Evidence, waveform_detail::Tile};
 use anyhow::{Context as _, Result, ensure};
-use gpui_kit::{App, Bounds, DevicePixels, Global, Pixels, Window, size};
+use gpui_kit::{App, Bounds, DevicePixels, Global, Pixels, Task, Window, WindowVisibility, size};
 use gpui_windows_gpu::{GpuTexture, with_d3d11};
 use std::{
     cell::RefCell,
     rc::Rc,
     sync::{Arc, Weak},
+    time::{Duration, Instant},
 };
 use windows::Win32::Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Direct3D11::*};
 
@@ -276,10 +277,13 @@ struct SurfaceState {
 }
 
 struct Failure {
-    device: ID3D11Device,
+    device: Option<ID3D11Device>,
     size: (usize, usize),
-    at: std::time::Instant,
+    at: Instant,
+    retry: Option<Task<()>>,
 }
+
+const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 struct Painted {
     device: ID3D11Device,
@@ -302,14 +306,6 @@ impl SurfaceTexture {
         self.0.borrow().failure.is_some()
     }
 
-    pub fn retry_due(&self) -> bool {
-        self.0
-            .borrow()
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.at.elapsed() >= std::time::Duration::from_millis(500))
-    }
-
     pub fn paint(
         &self,
         window: &mut Window,
@@ -319,7 +315,24 @@ impl SurfaceTexture {
         evidence: &Evidence,
         exact_first: f64,
     ) -> bool {
-        self.draw(window, cx, Some(bounds), view, evidence, exact_first)
+        let ready = self.draw(window, cx, Some(bounds), view, evidence, exact_first);
+        if let Some(failure) = self.0.borrow_mut().failure.as_mut()
+            && failure.retry.is_none()
+        {
+            let owner = window.current_view();
+            let delay = RETRY_DELAY.saturating_sub(failure.at.elapsed());
+            // The surface owns the wakeup. Hiding or replacing it cancels the
+            // task, and a paused deck can recover without scheduling animation.
+            failure.retry = Some(window.spawn(cx, async move |cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = cx.update(|window, cx| {
+                    if window.visibility() == WindowVisibility::Visible {
+                        cx.notify(owner);
+                    }
+                });
+            }));
+        }
+        ready
     }
 
     /// Updates the existing scene binding without a GPUI layout or scene rebuild.
@@ -344,59 +357,62 @@ impl SurfaceTexture {
         exact_first: f64,
     ) -> bool {
         let mut surface = self.0.borrow_mut();
+        let size = (view.width, view.height);
+        let mut failed_device = None;
         let result = with_d3d11(window, |window, device, context| {
-            let size = (view.width, view.height);
             if surface.failure.as_ref().is_some_and(|failure| {
-                failure.device == *device
+                failure.device.as_ref() == Some(device)
                     && failure.size == size
-                    && failure.at.elapsed() < std::time::Duration::from_millis(500)
+                    && failure.at.elapsed() < RETRY_DELAY
             }) {
                 return Ok(false);
             }
-            let result = surface.draw(
-                window,
-                cx,
-                device,
-                context,
-                bounds,
-                view,
-                evidence,
-                exact_first,
-            );
-            match result {
-                Ok(ready) => {
-                    if ready {
-                        surface.failure = None;
-                    }
-                    Ok(ready)
-                }
-                Err(error) => {
-                    surface.painted = None;
-                    if surface
-                        .failure
-                        .as_ref()
-                        .is_none_or(|failure| failure.device != *device || failure.size != size)
-                    {
-                        eprintln!("Waveform display: {error:#}");
-                    }
-                    if let Some(trace) = crate::diagnostics::get() {
-                        trace
-                            .wave_gpu_errors
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    surface.failure = Some(Failure {
-                        device: device.clone(),
-                        size,
-                        at: std::time::Instant::now(),
-                    });
-                    Ok(false)
-                }
-            }
+            surface
+                .draw(
+                    window,
+                    cx,
+                    device,
+                    context,
+                    bounds,
+                    view,
+                    evidence,
+                    exact_first,
+                )
+                .inspect_err(|_| failed_device = Some(device.clone()))
         });
-        if result.is_err() {
-            surface.painted = None;
+        match result {
+            Ok(ready) => {
+                if ready {
+                    surface.failure = None;
+                }
+                ready
+            }
+            Err(error) => {
+                surface.painted = None;
+                let previous = surface
+                    .failure
+                    .as_ref()
+                    .filter(|failure| failure.device == failed_device && failure.size == size);
+                if previous.is_some_and(|failure| failure.at.elapsed() < RETRY_DELAY) {
+                    return false;
+                }
+                if previous.is_none() {
+                    eprintln!("Waveform display: {error:#}");
+                }
+                if let Some(trace) = crate::diagnostics::get() {
+                    trace
+                        .wave_gpu_errors
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                surface.failure = Some(Failure {
+                    device: failed_device,
+                    size,
+                    at: Instant::now(),
+                    retry: None,
+                });
+                false
+            }
         }
-        result.unwrap_or(false)
     }
 }
 

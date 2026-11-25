@@ -179,7 +179,7 @@ struct Waveform {
     presented: bool,
     texture: Texture,
     input_at: Option<Instant>,
-    zoom_label_pending: bool,
+    zoom_label: Option<Task<()>>,
 }
 
 impl Waveform {
@@ -210,7 +210,7 @@ impl Waveform {
             presented: false,
             texture: Default::default(),
             input_at: None,
-            zoom_label_pending: false,
+            zoom_label: None,
         }
     }
 
@@ -219,6 +219,9 @@ impl Waveform {
         else {
             return;
         };
+        if !self.presented || layout.scale != window.scale_factor() {
+            return;
+        }
         self.position.update(&track, Instant::now());
         self.input_at = crate::diagnostics::get().map(|_| Instant::now());
         let delta = e.delta.pixel_delta(px(40.));
@@ -250,20 +253,17 @@ impl Waveform {
             }
             // Keep the status label current without rebuilding the scene for
             // every fractional wheel or trackpad event.
-            if !self.zoom_label_pending {
-                self.zoom_label_pending = true;
+            if self.zoom_label.is_none() {
                 let panel = cx.weak_entity();
-                window
-                    .spawn(cx, async move |cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(60))
-                            .await;
-                        let _ = panel.update(cx, |deck, cx| {
-                            deck.zoom_label_pending = false;
-                            cx.notify();
-                        });
-                    })
-                    .detach();
+                self.zoom_label = Some(window.spawn(cx, async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(60))
+                        .await;
+                    let _ = panel.update(cx, |deck, cx| {
+                        deck.zoom_label = None;
+                        cx.notify();
+                    });
+                }));
             }
         }
         cx.stop_propagation();
@@ -344,14 +344,31 @@ impl Waveform {
         }
     }
 
+    fn release_surface(&mut self) {
+        self.detail.clear();
+        self.texture.clear();
+        self.layout.set(None);
+        self.displayed.borrow_mut().take();
+        self.zoom_label = None;
+        self.input_at = None;
+    }
+
     fn animate(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.presented || window.visibility() != WindowVisibility::Visible {
+        if !self.presented
+            || window.visibility() != WindowVisibility::Visible
+            || self.texture.unavailable()
+        {
             return false;
         }
         let (Some(track), Some(layout)) = (self.player.read(cx).wave_track(), self.layout.get())
         else {
             return false;
         };
+        if layout.scale != window.scale_factor() {
+            self.displayed.borrow_mut().take();
+            cx.notify();
+            return false;
+        }
         let moving = self.position.update(&track, now);
         let start = crate::diagnostics::begin_stage();
         let (surface, evidence, coverage) = self.prepare(&track, Some(layout), true);
@@ -362,16 +379,14 @@ impl Waveform {
             coverage.exact as u64,
             coverage.pending as u64,
         );
-        let Some((bounds, view)) = surface.target(layout.bounds, window.scale_factor()) else {
-            return moving;
+        let Some((bounds, view)) = surface.target(layout.bounds, layout.scale) else {
+            return false;
         };
         #[cfg(windows)]
         {
-            let failed = self.texture.unavailable();
             let ready = self
                 .texture
                 .repaint(window, cx, view, &evidence, surface.viewport.first);
-            let retry = self.texture.retry_due();
             if !ready {
                 *self.displayed.borrow_mut() = None;
             } else {
@@ -391,18 +406,17 @@ impl Waveform {
                     layout: Layout { bounds, ..layout },
                 });
             }
-            if self.coverage != status
-                || (!ready && (retry || !failed || !self.texture.unavailable()))
-            {
+            if self.coverage != status || !ready {
                 cx.notify();
             }
+            moving && ready
         }
         #[cfg(not(windows))]
         {
             let _ = (bounds, view, evidence, status);
             cx.notify();
+            moving
         }
-        moving
     }
 }
 
@@ -423,10 +437,7 @@ impl PaneContent for Entity<Waveform> {
         self.update(cx, |panel, cx| {
             panel.presented = presented;
             if !presented {
-                panel.detail.clear();
-                panel.texture.clear();
-                panel.layout.set(None);
-                panel.displayed.borrow_mut().take();
+                panel.release_surface();
             }
             cx.notify();
         });
@@ -441,9 +452,7 @@ impl Render for Waveform {
             .bg(material.canvas)
             .track_focus(&self.focus);
         let Some(track) = self.player.read(cx).wave_track() else {
-            self.detail.clear();
-            self.texture.clear();
-            self.displayed.borrow_mut().take();
+            self.release_surface();
             return layout.child(
                 div()
                     .p_3()
@@ -455,7 +464,8 @@ impl Render for Waveform {
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
         self.coverage = Self::coverage(coverage, track.source.available);
-        if active && moving {
+        let failed = self.texture.unavailable();
+        if active && moving && !failed {
             self.motion.request(cx.weak_entity(), window);
         }
         let seconds = self.position.viewport.span / f64::from(track.source.rate);
@@ -473,7 +483,6 @@ impl Render for Waveform {
         let texture = self.texture.clone();
         let input = self.input_at.take();
         let inspecting = self.position.inspecting.is_some();
-        let failed = self.texture.unavailable();
         layout
             .child(
                 h_flex()
@@ -524,6 +533,9 @@ impl Render for Waveform {
                         canvas(
                             |_, _, _| (),
                             move |b, _, window, cx| {
+                                if !active {
+                                    return;
+                                }
                                 let _timer = crate::diagnostics::Timer::measure(|d| &d.paint_us);
                                 if let Some(d) = crate::diagnostics::get() {
                                     d.frames.fetch_add(1, Relaxed);
@@ -534,6 +546,7 @@ impl Render for Waveform {
                                     displayed.borrow_mut().take();
                                     return;
                                 };
+                                let start = crate::diagnostics::begin_stage();
                                 #[cfg(windows)]
                                 let ready = texture.paint(
                                     window,
@@ -548,6 +561,12 @@ impl Render for Waveform {
                                     let _ = (&texture, cx, view, evidence);
                                     false
                                 };
+                                crate::diagnostics::stage(
+                                    start,
+                                    "wave_deck_paint",
+                                    u64::from(ready),
+                                    (scale * 96.).round() as u64,
+                                );
                                 *displayed.borrow_mut() = if ready {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
@@ -571,7 +590,11 @@ impl Render for Waveform {
                                     || failed != texture.unavailable()
                                 {
                                     window.on_next_frame(move |_, cx| {
-                                        let _ = panel.update(cx, |_, cx| cx.notify());
+                                        let _ = panel.update(cx, |deck, cx| {
+                                            if deck.presented {
+                                                cx.notify();
+                                            }
+                                        });
                                     });
                                 }
                             },
@@ -596,11 +619,15 @@ impl Render for Waveform {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|panel, event: &MouseDownEvent, window, cx| {
+                            if !panel.presented {
+                                return;
+                            }
                             panel.focus.focus(window, cx);
                             let target = panel
                                 .displayed
                                 .borrow()
                                 .as_ref()
+                                .filter(|shown| shown.layout.scale == window.scale_factor())
                                 .and_then(|shown| shown.seek(event.position.x));
                             if let Some((anchor, frame)) = target
                                 && panel.player.update(cx, |player, cx| {

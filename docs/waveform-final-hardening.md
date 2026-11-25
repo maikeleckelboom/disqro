@@ -53,6 +53,21 @@ Deterministic tests cover the 120 s planner at all supported octave rates and un
 
 The native instrument smoke ran live spectrum, stereo field and history through steady playback, 240 resize operations, and minimize. Metering ran in a separate 25-second test. The phases recorded zero audio-device errors, decode errors and dropped capture blocks. The minimized phase produced no spectrum or field work. The foreground runs exercised library row selection and transport pause.
 
+## Deck lifecycle qualification
+
+Hiding, minimizing, or removing a deck releases its detail request, GPU surface, and pending zoom label update. Removing a dock pane explicitly ends presentation even if the entity still has another reference. A change of display scale invalidates the old hit transform until the deck paints at the new scale.
+
+When a GPU draw fails, the texture releases the failed target and owns one delayed retry. The next scene paint can recover while paused. A change of device or target size can recover immediately. A failed deck stops requesting retained motion during the retry interval.
+
+The private Windows journey used the muted 75-minute synthetic FLAC/CUE image and injected the first detail allocation failure after pausing. The deck repainted without additional input in 513.68 ms with an empty analysis cache and 525.22 ms with a warm cache. Both passes recorded zero waveform animation requests during recovery, zero deck work after minimize or closure, and continued audio callbacks after both tabs closed. The restored deck resumed motion and painted at each synthetic 96, 192, and 144 DPI change. Each pass recorded one injected GPU error and zero decode or audio-device errors. Physical monitor transfer and a physical driver reset remain unqualified.
+
+The separate two-deck private run exercised live device recreation, an injected target failure, zoom, pan, and resize. It recorded one recreation, one expected GPU error, and 1,601 audio callbacks with zero decode or device errors. The Windows release build passed all 103 frozen Stroke views and the 45 additional music views on D3D11.
+
+```powershell
+cargo build --release --locked --features qualification
+python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
+```
+
 ## Full-CD loading
 
 The optimized headless benchmark opened a new cache for each cold pass and reopened it for its warm pair. The 4,500-second, 15-chapter fixture requested exact detail using the live deck's physical-source plan. Cold describes an empty analysis cache. Windows file caching operated normally. All four runs produced the same geometry digest `977f1aeb40e0f543`. Final overview measurements occupied 6.33 MiB. SQLite held 18 evidence records with 6.33 MiB of raw payload.

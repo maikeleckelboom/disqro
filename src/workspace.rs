@@ -652,7 +652,15 @@ impl Workspace {
                 },
             );
         }
-        self.panes.retain(|id, _| ids.contains(id));
+        self.panes.retain(|id, tracked| {
+            let present = ids.contains(id);
+            if !present {
+                tracked
+                    .pane
+                    .update(cx, |pane, cx| pane.set_presented(false, cx));
+            }
+            present
+        });
         self.sync_panel_display(cx);
         // An identity appears once, even in a layout edited by hand.
         let mut seen = Vec::new();

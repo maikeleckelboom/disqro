@@ -287,6 +287,9 @@ impl Pane {
             self.sidebar_hidden = hidden;
             self.refresh(cx);
         }
+        self.set_presented(presented, cx);
+    }
+    pub(crate) fn set_presented(&mut self, presented: bool, cx: &mut Context<Self>) {
         if self.presented != presented {
             self.presented = presented;
             self.content.set_presented(presented, cx);

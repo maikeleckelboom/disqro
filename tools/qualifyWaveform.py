@@ -435,6 +435,140 @@ def measure(args):
                 present.wait()
 
 
+def qualify_deck_lifecycle(args):
+    output = args.output
+    output.mkdir(parents=True, exist_ok=False)
+    if args.warm_cache:
+        shutil.copytree(args.warm_cache, output / "Cache")
+    config = settings(args.source, 2)
+    center = config["layout"]["center"]
+    browser, decks = center["children"]
+    first, second = [group["children"][0] for group in decks["children"]]
+    first["info"]["panel"]["name"] = "First deck"
+    second["info"]["panel"]["name"] = "Second deck"
+    queue = dict(panel_name="disqro.queue", children=[], info=dict(panel=dict(id=4, state=None)))
+    tabs = dict(panel_name="TabPanel", children=[queue, first, second],
+                info=dict(tabs=dict(active_index=0)))
+    center["children"] = [browser, tabs]
+    (output / "workspace-v1.json").write_text(json.dumps(config), encoding="utf-8")
+    trace, stages = output / "trace.csv", output / "stages.csv"
+    env = dict(os.environ, DISQRO_PROFILE_DIR=str(output), DISQRO_PLAYBACK_TRACE=str(trace),
+               DISQRO_PRESENTATION_STAGES=str(stages), DISQRO_QUALIFY_TARGET_FAILURE="1")
+
+    def rows(path):
+        if not path.is_file():
+            return []
+        with path.open(newline="", encoding="utf-8") as file:
+            return [row for row in csv.DictReader(file) if None not in row.values()]
+
+    def matching(stages_after, *names):
+        return [row for row in rows(stages) if row["stage"] in names
+                and int(row["qpc"]) >= stages_after]
+
+    def wait_for(probe, description):
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            result = probe()
+            if result:
+                return result
+            time.sleep(0.04)
+        raise RuntimeError(f"Timed out waiting for {description}")
+
+    def click(label):
+        click_control(hwnd, control_centers(hwnd, [label])[0])
+
+    def close_tab(label):
+        p = control_centers(hwnd, [label])[0]
+        user32.ScreenToClient(hwnd, C.byref(p))
+        position = (p.y << 16) | (p.x & 0xffff)
+        for message, key in [(0x200, 0), (0x204, 2), (0x205, 0)]:
+            user32.SendMessageW(hwnd, message, key, position)
+        click("Close Tab")
+
+    def quiet_decks():
+        # Allow a previously queued frame, then observe the inactive interval.
+        time.sleep(0.4)
+        since = performance_counter()
+        time.sleep(0.65)
+        return len(matching(since, "wave_request", "wave_playhead", "wave_deck_paint"))
+
+    hwnd = None
+    with (output / "player.log").open("x", encoding="utf-8") as log:
+        process = subprocess.Popen([str(args.exe), "--qualify-silent", str(args.source)],
+                                   env=env, stdout=log, stderr=log)
+        try:
+            hwnd = wait_for(lambda: find_window(process.pid), "the private player window")
+            wait_for(lambda: any(int(row["callbacks"]) for row in rows(trace)), "playback")
+            click("Pause")
+            play = control_centers(hwnd, ["Play"])[0]
+            shown = performance_counter()
+            click("First deck")
+
+            def recovered():
+                draws = matching(shown, "wave_deck_paint")
+                if draws and draws[0]["value"] == "0":
+                    return next(((int(draws[0]["qpc"]), int(row["qpc"])) for row in draws
+                                 if row["value"] == "1"), None)
+                return None
+
+            failure, recovery = wait_for(recovered, "paused deck recovery without input")
+            recovery_ms = (recovery - failure) * 1000 / counter_frequency()
+            assert recovery_ms >= 450, recovery_ms
+            assert not matching(shown, "wave_request", "wave_playhead"), "Paused deck requested animation"
+            screenshot(hwnd, output / "recovered-paused.png")
+
+            resumed = performance_counter()
+            click_control(hwnd, play)
+            wait_for(lambda: matching(resumed, "wave_playhead"), "resumed deck motion")
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            wait_for(lambda: user32.IsIconic(hwnd), "minimization")
+            minimized_frames = quiet_decks()
+            assert minimized_frames == 0, "Minimized deck still painted"
+            restored = performance_counter()
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            wait_for(lambda: matching(restored, "wave_playhead"), "restored deck motion")
+
+            previous_dpi = user32.GetDpiForWindow(hwnd)
+            for dpi in (96, 192, 144):
+                rect = W.RECT()
+                user32.GetWindowRect(hwnd, C.byref(rect))
+                rect.right = rect.left + round((rect.right - rect.left) * dpi / previous_dpi)
+                rect.bottom = rect.top + round((rect.bottom - rect.top) * dpi / previous_dpi)
+                moved = performance_counter()
+                user32.SendMessageW(hwnd, 0x02e0, dpi | (dpi << 16), C.byref(rect))  # WM_DPICHANGED
+                wait_for(lambda: any(row["value"] == "1" and int(row["detail"]) == dpi
+                                     for row in matching(moved, "wave_deck_paint")), f"DPI {dpi} paint")
+                previous_dpi = dpi
+
+            switched = performance_counter()
+            click("Second deck")
+            wait_for(lambda: any(row["value"] == "1" for row in matching(switched, "wave_deck_paint")),
+                     "second deck paint")
+            close_tab("First deck")
+            close_tab("Second deck")
+            closed_frames = quiet_decks()
+            assert closed_frames == 0, "Closed deck still painted"
+            previous = int(rows(trace)[-1]["ms"])
+            wait_for(lambda: any(int(row["ms"]) > previous and int(row["callbacks"]) > 0
+                                 for row in rows(trace)), "playback callbacks after deck closure")
+            observations = rows(trace)
+            errors = {name: sum(int(row[name]) for row in observations)
+                      for name in ("decode_errors", "device_errors", "wave_gpu_errors")}
+            assert errors == dict(decode_errors=0, device_errors=0, wave_gpu_errors=1), errors
+            report = dict(paused_recovery_ms=round(recovery_ms, 2), minimized_frames=minimized_frames,
+                          frames_after_close=closed_frames, closed_tabs=2, synthetic_dpi=[96, 192, 144],
+                          playback_after_close=True, **errors)
+            (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        finally:
+            if hwnd:
+                user32.PostMessageW(hwnd, 0x10, 0, 0)
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.wait()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=lambda path: Path(path).resolve(strict=True))
@@ -446,6 +580,7 @@ if __name__ == "__main__":
     parser.add_argument("--panels", type=int, choices=(1, 2), default=2)
     parser.add_argument("--steady-seconds", type=float, default=3.0)
     parser.add_argument("--exercise-host-recovery", action="store_true")
+    parser.add_argument("--exercise-deck-lifecycle", action="store_true")
     parser.add_argument("--foreground", action="store_true")
     parser.add_argument("--presentmon", type=lambda path: Path(path).resolve(strict=True))
     parser.add_argument("--display-probe", type=lambda path: Path(path).resolve(strict=True),
@@ -456,6 +591,8 @@ if __name__ == "__main__":
         parser.error("Use phase durations between 1 and 10 seconds")
     if args.display_probe and not args.foreground:
         parser.error("The composed-frame probe requires an explicitly authorized foreground run")
+    if args.exercise_deck_lifecycle and (args.foreground or args.exercise_host_recovery):
+        parser.error("Run deck lifecycle qualification on its own private desktop")
     if not 0.36 <= args.anchor_fraction < 1. or (args.detail_notches is not None and not 1 <= args.detail_notches <= 24):
         parser.error("The zoom anchor must be inside the waveform pane and the detail step count must be 1–24")
     if not args.desktop_worker and not args.foreground:
@@ -463,7 +600,10 @@ if __name__ == "__main__":
         print((args.output / "report.json").read_text(encoding="utf-8"))
     else:
         try:
-            measure(args)
+            if args.exercise_deck_lifecycle:
+                qualify_deck_lifecycle(args)
+            else:
+                measure(args)
             if args.foreground:
                 print((args.output / "report.json").read_text(encoding="utf-8"))
         except Exception:
