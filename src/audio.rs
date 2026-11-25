@@ -61,6 +61,8 @@ pub(crate) struct PlaybackIdentity {
 }
 
 impl PlaybackIdentity {
+    /// A queue occurrence preserves position across pause or output recovery.
+    /// Adjacent CUE occurrences can also continue on the same physical voice.
     pub(crate) fn continues(self, previous: Self) -> bool {
         self.seek == previous.seek
             && (self.occurrence == previous.occurrence
@@ -1296,9 +1298,12 @@ impl Engine {
         let Some(index) = self.queue.current.or_else(|| self.queue.next_index(false)) else {
             return Ok(());
         };
-        let position = if self.queue.current == Some(index)
-            && (self.status.duration == 0. || self.status.position < self.status.duration)
-        {
+        let position = if self.queue.current == Some(index) {
+            if self.status.duration > 0. && self.status.position >= self.status.duration {
+                // Replaying the selected entry from its start is a new
+                // occurrence, even though the queue entry itself is stable.
+                return self.play(index, 0.);
+            }
             self.status.position
         } else {
             0.

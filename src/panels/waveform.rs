@@ -163,6 +163,14 @@ impl DeckPosition {
             self.inspecting.unwrap_or(frame),
             (self.seconds * rate).clamp(32., DETAIL_SECONDS * rate),
         );
+        if let Some(at) = crate::diagnostics::begin_stage() {
+            crate::diagnostics::stage(
+                Some(at),
+                "wave_deck_position",
+                self.viewport.frame_at(0.5).to_bits(),
+                sample.map_or(f64::NAN, |sample| sample.frame).to_bits(),
+            );
+        }
         self.inspecting.is_none() && (track.playing || sample.is_some_and(|p| p.advancing))
     }
 }

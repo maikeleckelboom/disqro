@@ -10,6 +10,31 @@ use gpui_kit::component::Selectable;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+const OUTSIDE_QUEUE: &str = "This recording is outside the current queue sequence.";
+const UNAVAILABLE_POSITION: &str = "This waveform position is unavailable.";
+
+#[derive(Clone, Copy)]
+pub(super) struct StripSeek {
+    identity: PlaybackIdentity,
+    disc: bool,
+    bounds: Bounds<Pixels>,
+    preview: Option<f64>,
+}
+
+impl StripSeek {
+    fn applies_to(self, player: &Player) -> bool {
+        player.status.playback_identity() == Some(self.identity)
+            && player.disc_view() == self.disc
+            && player.seek_bounds.get() == self.bounds
+    }
+
+    fn fraction(self, x: Pixels) -> f64 {
+        let width = f64::from(f32::from(self.bounds.size.width)).max(1.);
+        let offset = f64::from(f32::from(x)) - f64::from(f32::from(self.bounds.origin.x));
+        (offset / width).clamp(0., 1.)
+    }
+}
+
 pub(crate) struct WaveTrack {
     pub generation: u64,
     pub source: Arc<Source>,
@@ -85,7 +110,6 @@ impl Player {
         self.shapes.clear();
         self.unavailable = None;
         self.scrub = None;
-        self.scrub_entry = None;
         self.generation = 0;
         self.view_trace
             .request
@@ -229,7 +253,6 @@ impl Player {
         }
         self.full_cd = full_cd;
         self.scrub = None;
-        self.scrub_entry = None;
         cx.notify();
     }
     pub(super) fn wave_time(&self) -> (f64, f64) {
@@ -247,13 +270,13 @@ impl Player {
             )
         }
     }
-    fn target(&self, f: f32) -> Option<Command> {
-        self.target_in(f64::from(f), self.disc_view())
+    pub(super) fn scrub_fraction(&self) -> Option<f64> {
+        self.scrub.and_then(|seek| seek.preview)
     }
 
-    fn target_in(&self, fraction: f64, disc: bool) -> Option<Command> {
+    fn target_in(&self, fraction: f64, disc: bool) -> Result<Command, &'static str> {
         let Some((p, active)) = self.program.as_ref().zip(self.segment) else {
-            return Some(Command::Seek(fraction));
+            return Ok(Command::Seek(fraction));
         };
         let seg = &p.segments[active];
         let range = if disc {
@@ -261,24 +284,36 @@ impl Player {
         } else {
             seg.time.clone()
         };
-        let time =
-            (range.start + (fraction * (range.end - range.start) as f64) as u64).min(range.end - 1);
-        let (i, frame) = p.locate(time)?;
+        let length = range.end - range.start;
+        // Keep the click in f64 and round once to timeline nanoseconds. A
+        // boundary pixel belongs to the chapter which starts there.
+        let time = range.start + ((fraction * length as f64).round() as u64).min(length - 1);
+        let (i, frame) = p.locate(time).ok_or(UNAVAILABLE_POSITION)?;
         self.target_frame(p, active, i, frame)
     }
 
-    fn target_frame(&self, p: &Program, active: usize, i: usize, frame: usize) -> Option<Command> {
+    fn target_frame(
+        &self,
+        p: &Program,
+        active: usize,
+        i: usize,
+        frame: usize,
+    ) -> Result<Command, &'static str> {
         if !self.run.contains(&i) {
-            return None;
+            return Err(OUTSIDE_QUEUE);
         }
         let seg = &p.segments[i];
         if !seg.source.available {
-            return None;
+            return Err("This recording is unavailable.");
         }
-        let q = self.queue.current?.checked_add(i)?.checked_sub(active)?;
-        let target = self.queue.entries.get(q)?.id;
-        Some(Command::SeekOnDisc {
-            target,
+        let target = self
+            .queue
+            .current
+            .and_then(|current| current.checked_add(i)?.checked_sub(active))
+            .and_then(|index| self.queue.entries.get(index))
+            .ok_or(OUTSIDE_QUEUE)?;
+        Ok(Command::SeekOnDisc {
+            target: target.id,
             source_revision: seg.source.stamp.clone(),
             sheet_revision: p.sheet.as_ref().map(|(_, s)| s.stamp.clone()),
             revision: self.status.queue_revision,
@@ -286,16 +321,39 @@ impl Player {
             duration: seg.frames.len() as f64 / f64::from(seg.source.rate),
         })
     }
-    fn end_scrub(&mut self, cx: &mut Context<Self>) {
-        if let Some(f) = self.scrub.take()
-            && let Some((entry, revision)) = self.scrub_entry.take()
-            && Some(entry) == self.status.entry
-            && self.status.queue_revision == revision
-            && let Some(c) = self.target(f)
-        {
-            self.command(c, cx);
+    fn move_scrub(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let Some(mut seek) = self.scrub.take() else {
+            return;
+        };
+        if seek.applies_to(self) {
+            let fraction = seek.fraction(x);
+            seek.preview = self
+                .target_in(fraction, seek.disc)
+                .is_ok()
+                .then_some(fraction);
+            self.scrub = Some(seek);
         }
-        self.scrub_entry = None;
+        cx.notify();
+    }
+
+    fn end_scrub(&mut self, x: Pixels, cx: &mut Context<Self>) {
+        let Some(seek) = self.scrub.take() else {
+            return;
+        };
+        if seek.applies_to(self) {
+            match self.target_in(seek.fraction(x), seek.disc) {
+                Ok(command) => self.command(command, cx),
+                Err(reason) => {
+                    crate::diagnostics::stage(
+                        crate::diagnostics::begin_stage(),
+                        "wave_compact_blocked",
+                        u64::from(reason == OUTSIDE_QUEUE),
+                        0,
+                    );
+                    cx.emit(PlayerEvent::Notice(reason.into()));
+                }
+            }
+        }
         cx.notify();
     }
     /// Tabs on the timeline lane's upper edge name what the lane shows. The
@@ -362,6 +420,20 @@ impl Player {
     ) -> impl IntoElement {
         let bounds = self.seek_bounds.clone();
         let trace = self.view_trace.clone();
+        let phase = if self.disc_view() {
+            "wave_compact_disc"
+        } else {
+            "wave_compact_track"
+        };
+        let entry = self.status.entry.unwrap_or(0);
+        let queue_entry = self.queue.current_entry().map_or(0, |entry| entry.id);
+        let queue_len = self.queue.entries.len() as u64;
+        let queue_state = if self.status.playing {
+            "wave_compact_playing"
+        } else {
+            "wave_compact_paused"
+        };
+        let settled = self.scrub_fraction().is_none();
         let mut wave = div()
             .id("seek")
             .relative()
@@ -372,7 +444,32 @@ impl Player {
             .child(
                 canvas(
                     move |b, _, _| bounds.set(b),
-                    move |_, _, _, _| trace.painted(),
+                    move |b, _, window, _| {
+                        trace.painted();
+                        if settled && let Some(at) = crate::diagnostics::begin_stage() {
+                            let scale = window.scale_factor();
+                            let left = f64::from(f32::from(b.origin.x) * scale);
+                            let width = f64::from(f32::from(b.size.width) * scale);
+                            crate::diagnostics::stage(
+                                Some(at),
+                                "wave_compact_bounds",
+                                left.to_bits(),
+                                width.to_bits(),
+                            );
+                            crate::diagnostics::stage(
+                                Some(at),
+                                phase,
+                                f64::from(progress).to_bits(),
+                                entry,
+                            );
+                            crate::diagnostics::stage(
+                                Some(at),
+                                queue_state,
+                                queue_entry,
+                                queue_len,
+                            );
+                        }
+                    },
                 )
                 .absolute()
                 .size_full(),
@@ -433,7 +530,7 @@ impl Player {
                     if !s.source.available {
                         label.push_str(" · Recording unavailable");
                     } else if !can_seek {
-                        label.push_str(" · Outside this queue run");
+                        label.push_str(" · Outside the current queue sequence");
                     }
                     part = part.tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx));
                     if i > 0 {
@@ -465,11 +562,14 @@ impl Player {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|p, e: &MouseDownEvent, _, cx| {
-                    let f = p.fraction_at(e.position.x, p.seek_bounds.get());
-                    if p.target(f).is_some() {
-                        p.scrub_entry = p.status.entry.map(|id| (id, p.status.queue_revision));
-                        p.scrub = Some(f);
-                        cx.notify();
+                    if let Some(identity) = p.status.playback_identity() {
+                        p.scrub = Some(StripSeek {
+                            identity,
+                            disc: p.disc_view(),
+                            bounds: p.seek_bounds.get(),
+                            preview: None,
+                        });
+                        p.move_scrub(e.position.x, cx);
                     }
                 }),
             )
@@ -478,19 +578,15 @@ impl Player {
                 cx.new(|_| Scrub)
             })
             .on_drag_move(cx.listener(|p, e: &DragMoveEvent<Scrub>, _, cx| {
-                if p.scrub_entry.is_some() {
-                    let f = p.fraction_at(e.event.position.x, e.bounds);
-                    p.scrub = p.target(f).is_some().then_some(f);
-                    cx.notify();
-                }
+                p.move_scrub(e.event.position.x, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|p, _, _, cx| p.end_scrub(cx)),
+                cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|p, _, _, cx| p.end_scrub(cx)),
+                cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
             )
         })
     }
@@ -525,11 +621,11 @@ impl Render for WaveStrip {
                     self.generation = p.generation;
                 }
                 let (position, duration) = p.wave_time();
-                let progress = p.scrub.unwrap_or(if duration > 0. {
-                    (position / duration).clamp(0., 1.) as f32
+                let progress = p.scrub_fraction().unwrap_or(if duration > 0. {
+                    (position / duration).clamp(0., 1.)
                 } else {
                     0.
-                });
+                }) as f32;
                 p.waveform(
                     progress,
                     p.status.track.is_some(),

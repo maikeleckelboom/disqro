@@ -68,6 +68,27 @@ cargo build --release --locked --features qualification
 python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
 ```
 
+## Replay after natural completion
+
+Play at the end of a completed recording starts a fresh playback occurrence on the same queue entry. The detailed deck can then reconcile against the new renderer from the first source sample. Ordinary pause and resume keep the existing occurrence, and contiguous chapters in one image can share the same renderer and continuous source position.
+
+The native regression lets a three-second WAV finish on its own, then presses Play. The reviewed build left the deck at source frame 143,999 after restarting. In the corrected release run, the compact cursor returned to zero and the first sampled deck center matched the renderer at frame 148, about 3 ms into the source. Both runs retained the original queue entry.
+
+## Full CD overview seeking
+
+The native test starts the middle chapter from the Music Browser with Track selected. Both the single-image and mixed-rate multi-file CDs use three authored chapters. The test switches to Full CD and immediately clicks the current, earlier, and later chapters while playing and paused. It checks the compact cursor against the queue occurrence and recording title and compares the detailed deck with the renderer's physical source position. Each layout passed 13 seeks and a natural transition into the next chapter after resuming.
+
+The reviewed build rounded the click fraction to 32 bits before resolving the target. At the aligned 30-second chapter boundary, that rounding selected the previous chapter's final sample. The compact strip now retains the captured click transform at 64-bit precision through timeline conversion. It cancels an in-flight seek when the playback identity, perspective, or lane bounds change. The boundary regression passed on the pixels immediately before, on, and after both aligned boundaries. The deck and renderer agreed on the first sample of each destination chapter.
+
+Full CD continues to show the authored program. A seek can select any chapter in the contiguous matching queue sequence, including chapters before the current entry and chapters in a different physical file. An attempted seek to a chapter that is absent or out of order shows an explanation and leaves the queue and current position alone. **Play Only This Track** therefore permits seeking within that chapter while retaining the rest of the CD as context.
+
+```powershell
+cargo build --release --locked --features qualification
+python -B tools/qualifyWaveformTransport.py target/release/disqro.exe .local/waveform-transport
+```
+
+The native runs use a private desktop and muted output. The release build also passed all 103 frozen Stroke views and 45 music views. In the two-deck lifecycle recheck, the paused surface repainted in 519 ms after the injected allocation failure. There was zero waveform work after minimize or closure, and audio callbacks continued after both decks closed.
+
 ## Full-CD loading
 
 The optimized headless benchmark opened a new cache for each cold pass and reopened it for its warm pair. The 4,500-second, 15-chapter fixture requested exact detail using the live deck's physical-source plan. Cold describes an empty analysis cache. Windows file caching operated normally. All four runs produced the same geometry digest `977f1aeb40e0f543`. Final overview measurements occupied 6.33 MiB. SQLite held 18 evidence records with 6.33 MiB of raw payload.

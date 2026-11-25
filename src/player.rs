@@ -135,7 +135,7 @@ pub struct Player {
     muted_from: Option<f32>,
     level_bounds: Rc<Cell<Bounds<Pixels>>>,
     panel_height: Rc<Cell<Option<Pixels>>>,
-    scrub: Option<f32>,
+    scrub: Option<wave::StripSeek>,
     seek_bounds: Rc<Cell<Bounds<Pixels>>>,
     source_info: artwork::MediaInfo,
     cover_path: Option<PathBuf>,
@@ -150,7 +150,6 @@ pub struct Player {
     shapes: Vec<Shape>,
     unavailable: Option<String>,
     run: std::ops::Range<usize>,
-    scrub_entry: Option<(u64, u64)>,
     visible: bool,
     drawn_position: f64,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
@@ -219,7 +218,6 @@ impl Player {
             shapes: vec![],
             unavailable: None,
             run: 0..0,
-            scrub_entry: None,
             visible: true,
             drawn_position: 0.,
             queue_shown: true,
@@ -357,9 +355,10 @@ impl Player {
         };
         let _transition =
             track_changed.then(|| crate::diagnostics::Timer::measure(|d| &d.transition_us));
+        let identity_changed = self.status.playback_identity() != status.playback_identity();
         let wave_changed = track_changed
             || queue_changed
-            || self.status.playback_identity() != status.playback_identity()
+            || identity_changed
             || self.status.playing != status.playing
             || (!status.playing && self.status.position != status.position);
         self.status = status;
@@ -392,9 +391,10 @@ impl Player {
             }
             cx.emit(PlayerEvent::TrackChanged);
         }
-        if queue_changed || track_changed {
+        if identity_changed || track_changed {
             self.scrub = None;
-            self.scrub_entry = None;
+        }
+        if queue_changed || track_changed {
             self.update_run();
         }
         if state_changed {
@@ -501,7 +501,7 @@ impl Render for Player {
         let s = &self.status;
         let active = s.track.is_some();
         let (position, duration) = self.wave_time();
-        let shown_position = self.scrub.map_or(position, |f| f64::from(f) * duration);
+        let shown_position = self.scrub_fraction().map_or(position, |f| f * duration);
 
         let mut art = div()
             .size(px(CONTROL_ROW))
@@ -885,6 +885,9 @@ impl Render for Player {
                             .items_center()
                             .child(
                                 div()
+                                    .id("now-playing-title")
+                                    .role(Role::Label)
+                                    .aria_value(title.clone())
                                     .truncate()
                                     .text_size(px(13.5))
                                     .font_weight(FontWeight::SEMIBOLD)
