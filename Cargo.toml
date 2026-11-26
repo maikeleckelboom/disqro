@@ -67,7 +67,6 @@ gpui-fast-windows = { git = "https://github.com/maikeleckelboom/waveform-native"
 
 [profile.dev]
 debug = 0
-incremental = false
 
 [profile.release]
 strip = "debuginfo"

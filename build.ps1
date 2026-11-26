@@ -1,5 +1,8 @@
-[CmdletBinding()]
-param([switch]$Release)
+[CmdletBinding(DefaultParameterSetName = 'Development')]
+param(
+    [Parameter(ParameterSetName = 'Release')][switch]$Release,
+    [Parameter(ParameterSetName = 'Optimized')][switch]$Optimized
+)
 $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
@@ -12,6 +15,7 @@ try {
     }
     $arguments = @('build', '--locked')
     if ($Release) { $arguments += '--release' }
+    if ($Optimized) { $arguments += @('--config', 'profile.dev.package.disqro.opt-level=1') }
     & cargo @arguments
     if ($LASTEXITCODE -ne 0) { throw "Disqro build failed ($LASTEXITCODE)." }
 } finally {

@@ -9,6 +9,8 @@ customizable desktop application.
 The goal is simple: **excellent music playback and library management, with new ways to explore and experience your
 music.**
 
+For day-to-day changes, use the incremental development build. [Windows development workflow and timings](docs/development-builds.md)
+
 ## Run the Windows player
 
 Build on Windows x64 with Rustup, Visual Studio C++ Build Tools, the Windows SDK, and CMake. The repository pins Rust and the dependency graph.

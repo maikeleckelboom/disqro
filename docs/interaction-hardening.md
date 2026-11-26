@@ -2,6 +2,28 @@
 
 Disqro draft PR #42 stacks on #41, from `fix/interaction-hardening` into `feat/library-destinations`. The most consequential change is that visiting an expanded folder no longer makes its payload permanently resident. The same 40,960-folder workload peaked at 43,520 resident nodes on PR #41 and 17,408 here. [Draft PR](https://github.com/maikeleckelboom/disqro/pull/42)
 
+## Final corrections
+
+A filtered arrival stays in the browser until the descendant index and root page have both published. A private-desktop test delivers these states in order and checks GPUI's selected row and deferred center request. The original implementation consumed the arrival while the filter worker still owned the next projection.
+
+An evicted parent keeps the cursors and row counts of its expanded child pages. Reloading the parent reattaches those descriptors before projection, including when the second child page returns first. The original 18-sibling fixture shrank from 28 rows to 19 between completions. The corrected projection keeps all 28 positions.
+
+When full sibling pages would consume too much of the node budget, reveal keeps a window around each path member. Adjacent ranges reload from the same source cursor. Eviction considers the selected recording and its ancestors together. Three eight-node levels with a 20-node test budget lost the target on the original implementation. The regression checks rank 14, selection and the budget through sibling reads and a second reveal. Production uses the existing 4,096-item read size, four resident pages per branch and 32,768 resident nodes across the Tree. The resident-node count excludes in-flight reader results.
+
+The large expansion, authored-release and historical descendant-cutoff fixtures are opt-in. Ordinary collection and filter tests cross a 64-node budget with eight-item pages. Three CUE sheets and their sources span separate two-entry pages in the physical ownership test, which also checks the loose recordings. [Development build measurements and workflow](development-builds.md)
+
+The locked default suite took **13.68 s before** (259 passed, 15 ignored) and **1.07 s after** (256 passed, 18 ignored). These are test-harness execution times with default parallelism on the same Windows host. Cargo reported 6.55 s and 0.77 s of preparation respectively. The final measurement reused the executable from the focused test. The before and after had 274 registered tests each.
+
+The corrected qualification player passed four 144-DPI arrivals using the existing isolated music fixture. Go to Playing Track selected both the loose recording and the third authored chapter on CD 2. For each recording, a matching filter survived and an excluding filter cleared. Each case verified the saved recording identity after closing the player. Restarting the CUE workspace reproduced a catalog rescan canceling its reader. The browser now retains the pending target until landing, so the replacement root can resume the same reveal. The private-desktop regression exercises this ordering before checking the selected row and deferred center request. The final corrections affect browser state and paging. The frozen waveform results below belong to the preceding revision.
+
+The final Windows x64 production executable is 50,555,392 bytes, SHA-256 `bba9775dd85fc64e16f1739342743d33e5e9eef71e915340688798f7cc1d4196`. The separate qualification executable is `ceca329cfcfa8a1ba79ab48680fa1eca1d7ebb85ce183d09f72ddfeee02a573f`.
+
+## Proposed integration
+
+1. After review and hosted dependency access are resolved, fetch both repositories and verify the reviewed heads and trees. In Waveform Native, include the two foundation commits on `fix/reusable-waveform-hardening` and the dependency stack through #5. The standalone development profile in #6 can follow independently. Disqro already pins the reviewed #5 commit.
+2. In Disqro, #26 and #27 both branch from #25. Their histories join in #28, followed by #29 through #42. Use the reviewed #42 head for an integration PR against `main` and preserve its ancestry in the merge. Compare `git merge-tree --write-tree origin/main <reviewed-head>` with the verified tree. If the trees differ, qualify the combined tree before integration.
+3. After the authorized merge, check that the heads of the covered PRs are ancestors of `origin/main` before closing any remaining stacked PRs.
+
 ## Baselines and custody
 
 | Revision | Commit | Tree |
@@ -24,7 +46,7 @@ The continuation has its own worktree. The existing worktrees, PRs, engine visib
 | Personal and derived state | [Cache](../src/cache.rs) opens a versioned, disposable database with current table definitions. The old database is left in place. Waveform callers now use the engine directly for measurement and rendering, while Disqro owns its source adaptation. | Old database, recording identity, ratings, favorites, listening totals, queue and workspace preservation tested in temporary profiles. Corrupt measurement data rebuilds in the current cache. |
 | Engineering policy | [AGENTS.md](../AGENTS.md) and [Windows CI](../.github/workflows/windows.yml) specify ownership, platform qualification, personal-data handling, language conventions, naming and review. | Locked formatting, naming, American English, comparator unit test and all-feature Clippy. Existing runtime dependency pins preserved. |
 
-## Process memory and scale
+## Process memory and scale before the final corrections
 
 Windows x64 debug test processes ran one fixture at a time. Working set is the Windows process peak observed during execution. Private memory is the highest sample at 25 ms intervals. Both include the test process, database connections and temporary allocations. Timing includes fixture setup and teardown unless the column names a particular operation. Other machine activity was uncontrolled.
 
@@ -39,7 +61,7 @@ Windows x64 debug test processes ran one fixture at a time. Working set is the W
 
 The PR #41 comparison used an archived checkout with the same batched fixture injected for measurement. The new folder fixture also checks backward reload after the forward peak. One recursive intent covered each run. Both new Tree fixtures had zero outstanding requests at the reconciled samples and no persisted ancestry links for their root-wide expansion. The node count excludes objects reachable through a release's disc list, projected rows and in-flight buffers. Process memory includes them. These experiments do not establish a simultaneous four-request memory peak or individual allocator costs.
 
-In the sampled shelf process, building ranks took 817 ms for artists and 2.063 s for releases. Four page reads plus four identity seeks took 11.1 and 25.5 ms respectively. The 100,001-recording fixture resolved its sorted snapshot in 933 ms. In the physical CUE fixture, discovery took 2.493 s, grouping 80 ms and the recording query 85 ms. Reproduce the fixtures with `cargo test --locked <test-name> -- --ignored --nocapture` for opt-in tests. The expanded folder and release fixtures run in the default suite. [Tree fixtures](../src/browser/tree/tests.rs) · [Catalog fixtures](../src/store/tests.rs) · [Physical discovery fixture](../src/discovery/tests.rs)
+In the sampled shelf process, building ranks took 817 ms for artists and 2.063 s for releases. Four page reads plus four identity seeks took 11.1 and 25.5 ms respectively. The 100,001-recording fixture resolved its sorted snapshot in 933 ms. In the physical CUE fixture, discovery took 2.493 s, grouping 80 ms and the recording query 85 ms. Reproduce the fixtures with `cargo test --locked <test-name> -- --ignored --nocapture` for opt-in tests. The expanded folder and release fixtures are opt-in scale measurements. The default Tree tests use small paging and grouping limits. [Tree fixtures](../src/browser/tree/tests.rs) · [Catalog fixtures](../src/store/tests.rs) · [Physical discovery fixture](../src/discovery/tests.rs)
 
 ## Framework conformance
 
@@ -54,7 +76,7 @@ The versioned design and coding guides informed the review. The implemented cont
 | Materials and geometry | [Theme](../src/theme.rs), shared navigation dimensions and the 20-logical-pixel disclosure own common compact geometry. Table rows and panel gutters remain intentionally different from navigation rows. Native waveform sampling and retained texture extents use physical pixels. | Matched 144-DPI screenshots and named-control rectangles in normal, narrow and wide layouts. A 96-DPI compatibility process was measured separately. No native 96/192-DPI monitors were available for this run. |
 | Entity lifetimes and rendering | [Workspace](../src/workspace.rs) owns pane event subscriptions. Locations owns its expansion subscription, availability task and per-panel observer. Browser/page jobs own cancellation tickets and publish through weak entities. [Waveform panels](../src/panels/waveform.rs) and the compact cursor share a frame pump. | The lifecycle test closes two detailed decks while playback continues, checks zero deck clients dispatched and zero deck paints, and verifies continued compact draws. No comprehensive allocator or listener-count soak was performed for every visualizer. |
 
-## Native and build evidence
+## Native and build evidence before the final corrections
 
 - The locked suite passed **259 tests** with **15 opt-in tests skipped**. Separate runs passed the 100,001-recording store, 100,089-recording physical catalog, 40,960-artist/release shelf, delayed browser result and native focus-identity tests. Formatting, spelling, naming, comparator regression, all-target/all-feature warnings-denied Clippy and locked Windows debug/release builds passed.
 - **Native rendering passed 103/103**. All **206 PNG and geometry files** matched PR #41's SHA-256 values. The gate reads local frozen facts and replay parameters. A unit test independently rejects a changed image and missing geometry. The obsolete renderer host, replay adapters, rejected-renderer build and tolerance configuration were removed. [Reproduction](waveform-visual-recovery.md)
@@ -70,8 +92,8 @@ The synthetic window-DPI transitions in the deck lifecycle harness exercise reso
 ## Reproducing the scale checks
 
 ~~~powershell
-cargo test --locked expanded_pages_release_empty_and_nested_branches_and_reload_backward -- --nocapture
-cargo test --locked expanded_indexed_releases_reload_their_authored_discs_after_eviction -- --nocapture
+cargo test --locked expanded_pages_release_empty_and_nested_branches_and_reload_backward -- --ignored --nocapture
+cargo test --locked expanded_indexed_releases_reload_their_authored_discs_after_eviction -- --ignored --nocapture
 cargo test --locked independent_large_artist_and_release_shelves_page_in_both_directions -- --ignored --nocapture
 cargo test --locked six_figure_listening_snapshot -- --ignored --nocapture
 python -B tools/qualify_catalog_playback.py <qualification-exe> <test-exe> <new-output-directory>
@@ -82,7 +104,7 @@ The native folder and catalog journey creates its own audio, database and worksp
 ## Remaining engineering limits
 
 - Physical folder search covers open branches and labels its scope. Native filesystem enumeration does not provide an indexed ordering. Initial multi-page index construction and an unsorted seek may reread directory entries. Once a sorted snapshot exists, page movement uses indexed ranks. Construction latency on remote filesystems remains unmeasured.
-- A released page retains one resume descriptor and its logical spans. Metadata therefore scales with visited pages. The resident node cap does not separately cap the byte size of a single authored CUE or release family. Shelf construction retains one family while assigning its ranks.
+- A released page retains its resume descriptor, logical spans and the page boundaries of expanded descendants needed for rehydration. Metadata therefore scales with visited pages. The resident node cap does not separately cap the byte size of a single authored CUE or release family. Shelf construction retains one family while assigning its ranks.
 - An old workspace that omitted intermediate ancestry cannot supply the missing information on its own. New saves retain complete known ancestry. No personal data conversion ran. The inert serialized toolbar preference still round-trips because it belongs to saved workspace data.
 - Sorting and reveal rely on the current source generation. Concurrent external filesystem changes at every gap between directory reads, arbitrary pathological depth and every combination of filter, sort and late prefetch were not exhaustively qualified. The model regression checks the target rank and siblings after prefetch. The native journey covers ordinary viewport restoration. A device-pixel scroll-offset assertion for every deep and evicted case remains open.
 - Hosted Windows verification cannot fetch the pinned private platform dependency. Private repository access and distribution policy remain owner decisions.
