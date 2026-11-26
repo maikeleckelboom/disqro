@@ -313,7 +313,7 @@ impl History {
                             cx.notify();
                         });
                     }
-                    Err(error) if !crate::store::is_cancelled(&error) => {
+                    Err(error) if !crate::store::is_canceled(&error) => {
                         s.error = Some(format!("{error:#}"))
                     }
                     Err(_) => {}

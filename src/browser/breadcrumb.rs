@@ -86,6 +86,8 @@ impl Browser {
                 .collect(),
             _ => [
                 Location::Library(None),
+                Location::Artists,
+                Location::Releases,
                 Location::Collections,
                 Location::Playlists,
                 Location::Liked,

@@ -267,7 +267,7 @@ def measure(exe, output, case):
     source, rates = fixture(output / "fixture", case)
     config = settings(source, 1)
     config["full_cd"] = False
-    config["collection"] = dict(albums=False, subfolders=[])
+    config["collection"] = dict(mode="tracks", subfolders=[])
     profile = output / "workspace-v1.json"
     profile.write_text(json.dumps(config), encoding="utf-8")
     stages, trace = output / "stages.csv", output / "trace.csv"

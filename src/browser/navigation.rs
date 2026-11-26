@@ -23,11 +23,43 @@ pub(crate) struct Route {
     pub location: Location,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<Page>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shelf: Option<ShelfOrigin>,
+}
+
+#[derive(Clone, Debug, Hash, Serialize, Deserialize)]
+pub(crate) enum ShelfOrigin {
+    Releases,
+    Artist(crate::store::ArtistId, String),
+}
+
+impl ShelfOrigin {
+    fn of(location: &Location) -> Option<Self> {
+        match location {
+            Location::Artist { id, name } => Some(Self::Artist(*id, name.clone())),
+            Location::Releases => Some(Self::Releases),
+            _ => None,
+        }
+    }
+
+    pub(super) fn location(&self) -> Location {
+        match self {
+            Self::Artist(id, name) => Location::Artist {
+                id: *id,
+                name: name.clone(),
+            },
+            Self::Releases => Location::Releases,
+        }
+    }
 }
 
 impl Route {
     pub fn new(location: Location, page: Option<Page>) -> Self {
-        Self { location, page }
+        Self {
+            location,
+            page,
+            shelf: None,
+        }
     }
 
     pub(crate) fn same(&self, other: &Self) -> bool {
@@ -37,6 +69,11 @@ impl Route {
             (a, b) => a == b,
         };
         same_page
+            && match (&self.shelf, &other.shelf) {
+                (Some(ShelfOrigin::Artist(a, _)), Some(ShelfOrigin::Artist(b, _))) => a == b,
+                (None, None) | (Some(ShelfOrigin::Releases), Some(ShelfOrigin::Releases)) => true,
+                _ => false,
+            }
             && match (&self.location, &other.location) {
                 (Location::Folder(a), Location::Folder(b)) => crate::places::same_path(a, b),
                 (
@@ -55,6 +92,7 @@ impl Route {
                         root: br, id: b, ..
                     },
                 ) => a == b && ar == br,
+                (Location::Artist { id: a, .. }, Location::Artist { id: b, .. }) => a == b,
                 (a, b) => a == b,
             }
     }
@@ -66,13 +104,13 @@ impl Route {
         match &self.location {
             Location::Folder(path) => crate::places::path_key(path).hash(&mut hash),
             Location::Library(root) => root.hash(&mut hash),
+            Location::Artist { id, .. } => id.hash(&mut hash),
             Location::Playlist(id) | Location::Album { id, .. } | Location::Release { id, .. } => {
-                // Indexed disc ids are unique across the catalog, even before
-                // a legacy visit with an unspecified root resolves its root.
                 id.hash(&mut hash);
             }
             _ => {}
         }
+        self.shelf.hash(&mut hash);
         std::mem::discriminant(&self.page).hash(&mut hash);
         if let Some(page) = &self.page {
             std::mem::discriminant(page).hash(&mut hash);
@@ -133,7 +171,9 @@ impl Route {
                 .parent()
                 .is_some_and(|parent| !parent.as_os_str().is_empty()),
             (Location::Folder(_), Some(_))
-            | (Location::Album { .. } | Location::Release { .. }, _) => true,
+            | (Location::Album { .. } | Location::Release { .. } | Location::Artist { .. }, _) => {
+                true
+            }
             _ => false,
         }
     }
@@ -166,12 +206,18 @@ impl Route {
                             title: m.title.clone(),
                         })
                     })
-                    .unwrap_or(Location::Library(*root)),
+                    .unwrap_or_else(|| {
+                        self.shelf
+                            .as_ref()
+                            .map_or(Location::Library(*root), ShelfOrigin::location)
+                    }),
                 None,
                 Some(RowKey::Disc(DiscId::Library(*id))),
             ),
             (Location::Release { root, id, .. }, _) => (
-                Location::Library(*root),
+                self.shelf
+                    .as_ref()
+                    .map_or(Location::Library(*root), ShelfOrigin::location),
                 None,
                 Some(RowKey::Release(DiscId::Library(*id))),
             ),
@@ -188,9 +234,16 @@ impl Route {
             (Location::Liked | Location::RecentlyPlayed, _) => {
                 (Location::Library(None), None, None)
             }
+            (Location::Artist { id, .. }, _) => {
+                (Location::Artists, None, Some(RowKey::Artist(*id)))
+            }
             _ => return None,
         };
-        Some((Route::new(location, page), child))
+        let mut parent = Route::new(location, page);
+        if matches!(parent.location, Location::Release { .. }) {
+            parent.shelf.clone_from(&self.shelf);
+        }
+        Some((parent, child))
     }
 }
 
@@ -200,11 +253,7 @@ impl Route {
 pub(crate) struct SavedVisit {
     #[serde(flatten)]
     pub route: Route,
-    #[serde(
-        default,
-        alias = "albums",
-        deserialize_with = "crate::collection::read_view_mode"
-    )]
+    #[serde(default)]
     pub mode: ViewMode,
     #[serde(default)]
     pub query: String,
@@ -290,13 +339,6 @@ pub(crate) struct Bookmark {
 }
 
 impl Bookmark {
-    pub fn legacy(scroll: f32) -> Self {
-        Self {
-            viewport: Viewport::legacy(scroll),
-            ..Self::default()
-        }
-    }
-
     fn has_context(&self) -> bool {
         self.selected.is_some() || self.marked.is_some() || !self.viewport.is_at_start()
     }
@@ -398,6 +440,7 @@ impl History {
 pub(super) struct Pending {
     bookmark: Bookmark,
     target: Option<RowKey>,
+    recording: bool,
 }
 
 impl Pending {
@@ -415,24 +458,37 @@ pub(super) enum Arrival {
     Place(PathBuf),
     File(Reveal),
     Row(RowKey),
+    Recording(RowKey, ViewMode),
     FolderChild(PathBuf),
     Sequence(bool),
 }
 
-impl Destination {
-    fn prefers_current_view(self, location: &Location) -> bool {
-        matches!(self, Self::Current(origin)
-            if origin.is_none_or(|origin| *location != Location::Playlist(origin.playlist)))
-    }
-
-    fn playlist_fallback(self) -> Option<Self> {
-        matches!(self, Self::Current(Some(_))).then_some(Self::Current(None))
-    }
+#[derive(Default)]
+struct RecordingSite {
+    row: Option<Arc<Track>>,
+    registration: Option<crate::store::query::RegisteredDisc>,
+    in_scope: Option<i64>,
+    in_playlist: Option<i64>,
 }
 
 impl Browser {
     pub(crate) fn route(&self) -> Route {
-        Route::new(self.location.clone(), self.page.clone())
+        Route {
+            location: self.location.clone(),
+            page: self.page.clone(),
+            shelf: self.shelf_origin.clone(),
+        }
+    }
+
+    pub(super) fn open_indexed_program(
+        &mut self,
+        location: Location,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut route = Route::new(location, None);
+        route.shelf = ShelfOrigin::of(&self.location).or_else(|| self.shelf_origin.clone());
+        self.move_to(route, Arrival::Regular, w, cx);
     }
 
     pub(crate) fn navigation_revision(&self) -> u64 {
@@ -535,18 +591,15 @@ impl Browser {
         self.intent.next();
         self.navigation += 1;
         self.pending = None;
-        self.pending_playing = None;
     }
 
     /// Supersedes destination lookups at the point of interaction. A history
     /// bookmark still belongs to its visit when focus moves to another control.
     pub fn begin_navigation(&mut self, cx: &mut Context<Self>) -> u64 {
         let revision = self.intent.next();
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|p| matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..))))
-        {
+        if self.pending.as_ref().is_some_and(|p| {
+            p.recording || matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..)))
+        }) {
             self.navigation += 1;
             self.pending = None;
             cx.notify();
@@ -565,11 +618,9 @@ impl Browser {
     }
 
     pub(crate) fn waiting_for_context(&self) -> bool {
-        !self.listing_tree()
-            && self
-                .pending
-                .as_ref()
-                .is_some_and(|p| p.target.is_some() || p.bookmark.has_context())
+        self.pending.as_ref().is_some_and(|p| {
+            p.recording || !self.listing_tree() && (p.target.is_some() || p.bookmark.has_context())
+        })
     }
 
     pub(super) fn move_to(
@@ -585,7 +636,11 @@ impl Browser {
             self.begin_navigation(cx);
             return;
         }
-        if (!same || matches!(arrival, Arrival::Row(_) | Arrival::File(_)))
+        if (!same
+            || matches!(
+                arrival,
+                Arrival::Row(_) | Arrival::Recording(..) | Arrival::File(_)
+            ))
             && !matches!(&current.route.location, Location::Folder(p) if p.as_os_str().is_empty())
         {
             self.history.record(current.clone());
@@ -609,6 +664,7 @@ impl Browser {
         };
         // Names may change between visits to the same destination.
         visit.route = route;
+        let recording = matches!(arrival, Arrival::Recording(..));
         let (file, target) = match arrival {
             Arrival::Place(root) => {
                 visit.root = Some(root);
@@ -633,14 +689,19 @@ impl Browser {
                 }
                 (None, Some(key))
             }
+            Arrival::Recording(key, mode) => {
+                visit.mode = mode;
+                (None, Some(key))
+            }
             Arrival::Regular => (None, None),
         };
-        if visit.mode == ViewMode::Tree
-            && (file.is_some() || matches!(target, Some(RowKey::Track(..) | RowKey::Key(_))))
-        {
-            visit.mode = ViewMode::Tracks;
-        }
-        self.apply_visit(visit, TreeReveal::Ancestors, (file, target), window, cx);
+        self.apply_visit(
+            visit,
+            TreeReveal::Ancestors,
+            (file, target, recording),
+            window,
+            cx,
+        );
     }
 
     pub(super) fn up_to_collection(
@@ -666,7 +727,13 @@ impl Browser {
             Some(Arrival::Row(key)) => Some(key),
             _ => None,
         };
-        self.apply_visit(visit, TreeReveal::Ancestors, (None, target), window, cx);
+        self.apply_visit(
+            visit,
+            TreeReveal::Ancestors,
+            (None, target, false),
+            window,
+            cx,
+        );
     }
 
     pub(crate) fn restore_visit(
@@ -678,7 +745,7 @@ impl Browser {
         self.apply_visit(
             visit,
             TreeReveal::PreserveExpansion,
-            (None, None),
+            (None, None, false),
             window,
             cx,
         );
@@ -688,7 +755,7 @@ impl Browser {
         &mut self,
         mut visit: SavedVisit,
         tree_reveal: TreeReveal,
-        (file, target): (Option<Reveal>, Option<RowKey>),
+        (file, target, recording): (Option<Reveal>, Option<RowKey>, bool),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -698,6 +765,7 @@ impl Browser {
             .route
             .page
             .filter(|_| visit.route.location.is_folder());
+        self.shelf_origin = visit.route.shelf;
         self.prefs.mode = if visit.mode == ViewMode::Tree && file.is_some() {
             ViewMode::Tracks
         } else {
@@ -730,12 +798,9 @@ impl Browser {
                 },
             )
         });
-        let shelf = visit.mode == ViewMode::Albums
-            && self.page.is_none()
-            && matches!(
-                visit.route.location,
-                Location::Folder(_) | Location::Library(_)
-            );
+        let shelf = self.page.is_none()
+            && (visit.route.location.is_directory()
+                || visit.route.location.presentation(visit.mode) == Some(ViewMode::Albums));
         if visit.mode == ViewMode::Tree
             && self.page.is_none()
             && matches!(
@@ -757,6 +822,7 @@ impl Browser {
                 visit.bookmark
             },
             target,
+            recording,
         });
         let location = visit.route.location;
         self.membership = None;
@@ -807,6 +873,9 @@ impl Browser {
             self.sync_tree_with(TreeReveal::PreserveExpansion, cx);
             self.load_indexed_sequence(cx);
             self.filter(cx);
+            if self.listing_tree() {
+                self.finish_listing(cx);
+            }
             let catalog = self.catalog.read(cx);
             let unavailable = self.location.unavailable(catalog).or_else(|| {
                 catalog
@@ -943,36 +1012,24 @@ impl Browser {
         }
     }
 
-    pub(super) fn resume_playing_reveal(&mut self, cx: &mut Context<Self>) {
-        if self.busy || self.table.read(cx).delegate().is_loading() {
-            return;
-        }
-        if let Some((request, track, context, dest)) = self.pending_playing.take() {
-            let browser = cx.entity();
-            let window = self.window;
-            cx.defer(move |cx| {
-                let _ = window.update(cx, |_, w, cx| {
-                    browser.update(cx, |b, cx| {
-                        if b.navigation_is_current(request) {
-                            b.locate(track, context, dest, w, cx);
-                        }
-                    })
-                });
-            });
-        }
-    }
-
     pub(super) fn finish_listing(&mut self, cx: &mut Context<Self>) {
-        self.resume_playing_reveal(cx);
         if self.listing_tree() {
             if let Some(pending) = self.pending.take() {
-                let selected = pending
-                    .target
-                    .as_ref()
-                    .or(pending.bookmark.selected.as_ref());
-                self.tree.update(cx, |t, cx| {
-                    TreeTable::restore_bookmark(t, selected, pending.bookmark.viewport, cx)
-                });
+                let center = pending.target.is_some();
+                let selected = pending.target.or(pending.bookmark.selected);
+                match selected {
+                    Some(key) if let Some(target) = tree::recording_identity(&key) => {
+                        self.finish_tree_reveal(target, key, pending.bookmark.viewport, center, cx);
+                    }
+                    selected => self.tree.update(cx, |t, cx| {
+                        TreeTable::restore_bookmark(
+                            t,
+                            selected.as_ref(),
+                            pending.bookmark.viewport,
+                            cx,
+                        )
+                    }),
+                }
             }
             return;
         }
@@ -984,7 +1041,20 @@ impl Browser {
             |discs: &Discs, key: &RowKey| discs.rows.iter().position(|r| r.key() == *key);
         let target = pending.target.as_ref().and_then(|key| {
             if listing_shelf {
-                shelf_position(self.discs.read(cx).delegate(), key)
+                let shelf = self.discs.read(cx).delegate();
+                if pending.recording
+                    && let RowKey::Disc(id) = key
+                {
+                    shelf.rows.iter().position(|row| match row {
+                        Shelf::Release(release) => {
+                            release.discs.iter().any(|disc| disc.id.same(id))
+                        }
+                        Shelf::Disc(disc) => disc.id.same(id),
+                        _ => false,
+                    })
+                } else {
+                    shelf_position(shelf, key)
+                }
             } else {
                 let table = self.table.read(cx).delegate();
                 table.position(key).or_else(|| match key {
@@ -1011,37 +1081,26 @@ impl Browser {
                 })
             }
         });
-        if let Some(key) = &pending.target
-            && target.is_none()
-        {
-            let show_tracks = listing_shelf && matches!(key, RowKey::Key(_) | RowKey::Track(..));
-            let clear_search = !show_tracks && !self.query.is_empty();
-            if show_tracks || clear_search {
-                self.pending = Some(pending);
-                let browser = cx.entity();
-                let navigation = self.navigation;
-                let window = self.window;
-                cx.defer(move |cx| {
-                    let _ = window.update(cx, |_, window, cx| {
-                        browser.update(cx, |b, cx| {
-                            if b.navigation != navigation || b.pending.is_none() {
-                                return;
-                            }
-                            if clear_search {
-                                b.clear_search(window, cx);
-                            }
-                            if show_tracks {
-                                b.prefs.mode = ViewMode::Tracks;
-                            }
-                            b.filter(cx);
-                            if b.location.is_folder() && !b.busy {
-                                b.finish_listing(cx);
-                            }
-                        });
+        if pending.target.is_some() && target.is_none() && !self.query.is_empty() {
+            self.pending = Some(pending);
+            let browser = cx.entity();
+            let navigation = self.navigation;
+            let window = self.window;
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    browser.update(cx, |b, cx| {
+                        if b.navigation != navigation || b.pending.is_none() {
+                            return;
+                        }
+                        b.clear_search(window, cx);
+                        b.filter(cx);
+                        if b.location.is_folder() && !b.busy {
+                            b.finish_listing(cx);
+                        }
                     });
                 });
-                return;
-            }
+            });
+            return;
         }
         let mark = pending.bookmark;
         let reveal = |scroll: &UniformListScrollHandle, row| {
@@ -1126,22 +1185,31 @@ impl Browser {
         w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.move_to(
-            Route::new(Location::Library(None), None),
-            Arrival::Row(RowKey::Key(id)),
-            w,
-            cx,
-        );
-    }
-
-    pub fn show_search_artist(&mut self, name: String, w: &mut Window, cx: &mut Context<Self>) {
-        let current = self.saved_visit(cx);
-        self.history.record(current);
-        let mut visit =
-            SavedVisit::new(Route::new(Location::Library(None), None), ViewMode::Tracks);
-        visit.query = format!("artist:={name}");
-        self.filter_open = true;
-        self.restore_visit(visit, w, cx);
+        let request = self.begin_navigation(cx);
+        let Some(store) = self.catalog.read(cx).handle() else {
+            return;
+        };
+        let lookup = store.query(&self.intent, request, move |s| {
+            s.rows(Scope::Library(None), &[id])
+        });
+        cx.spawn_in(w, async move |browser, cx| {
+            let result = lookup.await;
+            let _ = browser.update_in(cx, |b, w, cx| {
+                if b.navigation_is_current(request)
+                    && let Ok(rows) = result
+                    && let Some(row) = rows.into_iter().find(|row| row.available)
+                {
+                    b.locate(
+                        row.track,
+                        library::DiscContext::Inferred,
+                        Destination::Library,
+                        w,
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn reveal_recording(
@@ -1194,16 +1262,14 @@ impl Browser {
                 }
                 match found {
                     Ok(Some(track)) => {
-                        let anchor = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
-                        if let Some(folder) = anchor.parent() {
-                            b.open_revealing(
-                                folder.to_path_buf(),
-                                Some(Reveal::Track(track)),
-                                w,
-                                cx,
-                            );
-                            router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal(target)));
-                        }
+                        b.locate(
+                            track,
+                            library::DiscContext::Inferred,
+                            Destination::Locations,
+                            w,
+                            cx,
+                        );
+                        router.update(cx, |_, cx| cx.emit(RouterEvent::Reveal(target)));
                     }
                     Ok(None) => w.push_notification("This recording is unavailable.", cx),
                     Err(error) => w.push_notification(error.to_string(), cx),
@@ -1221,231 +1287,249 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         let request = self.begin_navigation(cx);
-        let contextual = matches!(dest, Destination::Current(_));
-        if contextual {
-            if self.busy
-                || (self.scope().is_some()
-                    && self.catalog.read(cx).handle().is_some()
-                    && self.table.read(cx).delegate().is_loading())
-            {
-                self.pending_playing = Some((request, track, context, dest));
-                return;
-            }
-            if dest.prefers_current_view(&self.location)
-                && self.reveal_listed(&track, track.library_id, w, cx)
-            {
-                return;
-            }
+        let scope = match &self.location {
+            Location::Library(root) if self.listing_tree() => Some(Scope::Library(*root)),
+            _ => self.scope(),
+        };
+        let on_shelf = self.listing_discs();
+        if matches!(dest, Destination::Current(_))
+            && self.location.is_folder()
+            && !on_shelf
+            && !self.listing_tree()
+            && let Some(key) = self
+                .table
+                .read(cx)
+                .delegate()
+                .recording_key(&track, track.library_id)
+        {
+            self.reveal_row(self.route(), key, ViewMode::Tracks, w, cx);
+            return;
         }
-        if let Destination::Playlist(occurrence) | Destination::Current(Some(occurrence)) = dest {
-            let fallback = dest.playlist_fallback();
-            let key = RowKey::Key(occurrence.entry);
-            let location = Location::Playlist(occurrence.playlist);
-            if matches!(self.location, Location::Playlist(id) if id == occurrence.playlist)
-                && self
-                    .table
-                    .read(cx)
-                    .delegate()
-                    .contains_playlist_entry(occurrence, track.library_id)
-            {
-                self.reveal_row(key, w, cx);
-                return;
-            }
-            let Some(store) = self.catalog.read(cx).handle() else {
-                if let Some(fallback) = fallback {
-                    self.locate(track, context, fallback, w, cx);
+        let occurrence = match dest {
+            Destination::Current(occurrence) => occurrence,
+            Destination::Playlist(occurrence) => Some(occurrence),
+            _ => None,
+        };
+        let lookup = self.catalog.read(cx).handle().map(|store| {
+            let track = track.clone();
+            store.query(&self.intent, request, move |s| {
+                let id = match track.library_id {
+                    Some(id) => Some(id),
+                    None => s.find(&crate::store::Locator::of(&track))?,
+                };
+                let Some(id) = id else {
+                    return Ok(RecordingSite::default());
+                };
+                let row = s
+                    .rows(Scope::Library(None), &[id])?
+                    .pop()
+                    .filter(|row| row.available);
+                let registration = match &row {
+                    Some(row) => s.registered_disc(&row.track)?,
+                    None => None,
+                };
+                let in_scope = scope
+                    .map(|scope| s.reveal_key(scope, id, occurrence))
+                    .transpose()?
+                    .flatten();
+                let in_playlist = if let Some(entry) = occurrence {
+                    s.reveal_key(Scope::Playlist(entry.playlist), id, Some(entry))?
                 } else {
-                    w.push_notification("The Library is unavailable.", cx);
-                }
-                return;
-            };
-            let target = track.clone();
-            let lookup = store.query(&self.intent, request, move |store| {
-                let rows = store.rows(Scope::Playlist(occurrence.playlist), &[occurrence.entry])?;
-                Ok(rows
-                    .first()
-                    .filter(|row| row.track.same_item(&target))
-                    .map(|row| row.id))
-            });
+                    None
+                };
+                Ok(RecordingSite {
+                    row: row.map(|r| r.track),
+                    registration,
+                    in_scope,
+                    in_playlist,
+                })
+            })
+        });
+        if let Some(lookup) = lookup {
             cx.spawn_in(w, async move |this, cx| {
-                let found = lookup.await;
+                let result = lookup.await;
                 let _ = this.update_in(cx, |b, w, cx| {
                     if !b.navigation_is_current(request) {
                         return;
                     }
-                    match (found, fallback) {
-                        (Ok(Some(id)), _) => {
-                            // A restored track may only have its locator. The
-                            // playlist lookup also resolves its indexed ID.
-                            if !dest.prefers_current_view(&b.location)
-                                || !b.reveal_listed(&track, Some(id), w, cx)
-                            {
-                                b.move_to(Route::new(location, None), Arrival::Row(key), w, cx);
+                    match result {
+                        Ok(site) => b.arrive_recording(track, context, dest, site, w, cx),
+                        Err(err) if !crate::store::is_canceled(&err) => {
+                            if matches!(dest, Destination::Library | Destination::Playlist(_)) {
+                                w.push_notification(err.to_string(), cx);
+                            } else {
+                                b.arrive_recording(
+                                    track,
+                                    context,
+                                    dest,
+                                    RecordingSite::default(),
+                                    w,
+                                    cx,
+                                );
                             }
                         }
-                        (_, Some(fallback)) => b.locate(track, context, fallback, w, cx),
-                        (Ok(None), None) => {
-                            w.push_notification("This entry is no longer in the playlist.", cx)
-                        }
-                        (Err(_), None) => w.push_notification("This playlist is unavailable.", cx),
+                        Err(_) => {}
                     }
                 });
             })
             .detach();
-            return;
+        } else {
+            self.arrive_recording(track, context, dest, RecordingSite::default(), w, cx);
         }
-        if contextual && track.library_id.is_none() {
-            // A physical queue entry may also be in an indexed view whose row
-            // has never been hydrated. Resolve its locator off the UI thread.
-            if self.scope().is_some()
-                && let Some(store) = self.catalog.read(cx).handle()
-            {
-                let locator = crate::store::Locator::of(&track);
-                let lookup = store.query(&self.intent, request, move |s| s.find(&locator));
-                cx.spawn_in(w, async move |this, cx| {
-                    let id = lookup.await.ok().flatten();
-                    let _ = this.update_in(cx, |b, w, cx| {
-                        if b.navigation_is_current(request) && !b.reveal_listed(&track, id, w, cx) {
-                            b.reveal_folder(track, context, w, cx);
-                        }
-                    });
-                })
-                .detach();
-            } else {
-                self.reveal_folder(track, context, w, cx);
-            }
-            return;
-        }
-        if dest == Destination::Locations {
-            let Some((id, store)) = track.library_id.zip(self.catalog.read(cx).handle()) else {
-                self.reveal_folder(track, context, w, cx);
-                return;
-            };
-            let lookup = store.query(&self.intent, request, move |s| {
-                s.rows(Scope::Library(None), &[id])
-            });
-            cx.spawn_in(w, async move |this, cx| {
-                let current = lookup
-                    .await
-                    .ok()
-                    .and_then(|rows| rows.into_iter().find(|row| row.available));
-                let _ = this.update_in(cx, |b, w, cx| {
-                    if b.navigation_is_current(request) {
-                        b.reveal_folder(current.map_or(track, |row| row.track), context, w, cx);
-                    }
-                });
-            })
-            .detach();
-            return;
-        }
-        let lookup = self.catalog.read(cx).handle().map(|store| {
-            let target = track.clone();
-            store.query(&self.intent, request, move |s| s.registered_disc(&target))
-        });
-        cx.spawn_in(w, async move |this, cx| {
-            let result = match lookup {
-                Some(lookup) => lookup.await,
-                None => Ok(None),
-            };
-            let _ = this.update_in(cx, |b, w, cx| {
-                if !b.navigation_is_current(request) {
-                    return;
-                }
-                match result {
-                    Ok(Some(disc)) => {
-                        let location = Location::Album {
-                            root: Some(disc.root),
-                            id: disc.album,
-                            title: disc.title,
-                        };
-                        b.move_to(
-                            Route::new(location, None),
-                            Arrival::Row(RowKey::Key(disc.track)),
-                            w,
-                            cx,
-                        );
-                    }
-                    _ if contextual => b.reveal_folder(track, context, w, cx),
-                    Ok(None) => w.push_notification("This recording is outside the Library.", cx),
-                    Err(_) => {
-                        w.push_notification("This recording is unavailable in the Library.", cx)
-                    }
-                }
-            });
-        })
-        .detach();
     }
 
-    fn reveal_listed(
+    fn arrive_recording(
         &mut self,
-        track: &Track,
-        id: Option<i64>,
+        original: Arc<Track>,
+        context: library::DiscContext,
+        dest: Destination,
+        site: RecordingSite,
         w: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        if self.location.is_directory() {
-            return false;
+    ) {
+        let RecordingSite {
+            row,
+            registration,
+            in_scope,
+            in_playlist,
+        } = site;
+        let track = row.unwrap_or(original);
+        let disc = DiscId::of(&track);
+        let Some(folder) = disc.folder() else { return };
+        let current = self.route();
+        let mode = self.presentation().unwrap_or(ViewMode::Tracks);
+        let library_view = matches!(
+            self.location,
+            Location::Library(_)
+                | Location::Album { .. }
+                | Location::Release { .. }
+                | Location::Artist { .. }
+                | Location::Releases
+        );
+        let physical_key = || RowKey::Track(track.source.clone(), track.disc.clone());
+        if matches!(dest, Destination::Current(_)) || dest == Destination::Library && library_view {
+            if let Some(key) = in_scope {
+                let key = if self.listing_discs() {
+                    registration
+                        .as_ref()
+                        .map_or_else(|| RowKey::Disc(disc.clone()), |reg| reg.shelf_key())
+                } else {
+                    RowKey::Key(key)
+                };
+                self.reveal_row(current, key, mode, w, cx);
+                return;
+            }
+            if self.location.is_folder() && matches!(dest, Destination::Current(_)) {
+                let contains = match &self.page {
+                    Some(Page::Disc(shown)) => shown.same(&disc),
+                    Some(Page::Release(shown)) => self.programs.iter().any(|program| {
+                        program.id.same(&disc)
+                            && program
+                                .release
+                                .as_ref()
+                                .is_some_and(|release| release.key.same(shown))
+                    }),
+                    None => {
+                        crate::places::same_path(folder, &self.path)
+                            || (self.subfolders || mode == ViewMode::Tree)
+                                && library::within(folder, &self.path)
+                    }
+                };
+                if contains {
+                    let key = if mode == ViewMode::Albums {
+                        RowKey::Disc(disc.clone())
+                    } else {
+                        physical_key()
+                    };
+                    self.reveal_row(current, key, mode, w, cx);
+                    return;
+                }
+            }
         }
-        let Some(key) = self.table.read(cx).delegate().recording_key(track, id) else {
-            return false;
+        let playlist = match dest {
+            Destination::Current(playlist) => playlist,
+            Destination::Playlist(playlist) => Some(playlist),
+            _ => None,
         };
-        self.reveal_row(key, w, cx);
-        true
+        if let Some((playlist, key)) = playlist.zip(in_playlist) {
+            self.reveal_row(
+                Route::new(Location::Playlist(playlist.playlist), None),
+                RowKey::Key(key),
+                ViewMode::Tracks,
+                w,
+                cx,
+            );
+            return;
+        }
+        if matches!(dest, Destination::Playlist(_)) {
+            w.push_notification("This entry is no longer in the playlist.", cx);
+            return;
+        }
+        if dest != Destination::Locations {
+            if let Some(reg) = registration {
+                let (location, key) = match mode {
+                    ViewMode::Tree => (Location::Library(Some(reg.root)), RowKey::Key(reg.track)),
+                    ViewMode::Albums => (Location::Library(Some(reg.root)), reg.shelf_key()),
+                    ViewMode::Tracks => (
+                        Location::Album {
+                            root: Some(reg.root),
+                            id: reg.album,
+                            title: reg.title,
+                        },
+                        RowKey::Key(reg.track),
+                    ),
+                };
+                self.reveal_row(Route::new(location, None), key, mode, w, cx);
+                return;
+            }
+            if dest == Destination::Library {
+                w.push_notification("This recording is outside the Library.", cx);
+                return;
+            }
+        }
+        let page =
+            (mode == ViewMode::Tracks && context.allows(&track)).then(|| Page::Disc(disc.clone()));
+        let key = if mode == ViewMode::Albums {
+            RowKey::Disc(disc.clone())
+        } else {
+            physical_key()
+        };
+        self.reveal_row(
+            Route::new(Location::Folder(folder.to_owned()), page),
+            key,
+            mode,
+            w,
+            cx,
+        );
     }
 
-    fn reveal_row(&mut self, key: RowKey, w: &mut Window, cx: &mut Context<Self>) {
-        if self.listing_shelf() {
-            self.move_to(self.route(), Arrival::Row(key), w, cx);
-        } else {
-            let visit = self.saved_visit(cx);
-            self.history.record(visit);
+    fn reveal_row(
+        &mut self,
+        route: Route,
+        key: RowKey,
+        mode: ViewMode,
+        w: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.route().same(&route) {
+            self.history.record(self.saved_visit(cx));
             self.cancel_pending();
             self.pending = Some(Pending {
                 bookmark: Bookmark::default(),
                 target: Some(key),
+                recording: true,
             });
-            self.finish_listing(cx);
-        }
-    }
-
-    fn reveal_folder(
-        &mut self,
-        track: Arc<Track>,
-        context: library::DiscContext,
-        w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let disc = DiscId::of(&track);
-        let Some(parent) = disc.folder() else {
-            return;
-        };
-        let matches_disc =
-            |route: &Route| matches!(&route.page, Some(Page::Disc(id)) if id.same(&disc));
-        let current = self.route();
-        let scope = self.reveal_collection_scope(parent, cx);
-        let recent = self.history.recent.iter().rev().find(|visit| {
-            matches_disc(&visit.route)
-                && matches!(&visit.route.location, Location::Folder(path)
-                    if crate::places::same_path(path, scope.as_deref().unwrap_or(parent))
-                        && (crate::places::same_path(path, parent) || visit.subfolders == Some(true)))
-        });
-        let route = if matches_disc(&current)
-            || (self.location.is_folder()
-                && self.page.is_none()
-                && self
-                    .physical_sequence_disc()
-                    .is_some_and(|id| id.same(&disc)))
-        {
-            current
-        } else if let Some(visit) = recent {
-            visit.route.clone()
+            if !self.busy
+                && !self.shelf_loading
+                && (self.listing_shelf()
+                    || self.listing_tree()
+                    || !self.table.read(cx).delegate().is_loading())
+            {
+                self.finish_listing(cx);
+            }
         } else {
-            let folder = parent.to_owned();
-            let page = context.allows(&track).then_some(Page::Disc(disc));
-            Route::new(Location::Folder(folder), page)
-        };
-        let key = RowKey::Track(track.source.clone(), track.disc.clone());
-        self.move_to(route, Arrival::Row(key), w, cx);
+            self.move_to(route, Arrival::Recording(key, mode), w, cx);
+        }
     }
 
     pub fn continue_cd(&self, request: crate::queue::Entry, cx: &mut Context<Self>) {
@@ -1533,40 +1617,14 @@ pub fn continue_cd(
 #[cfg(test)]
 mod tests {
     use super::{
-        Arrival, Destination, DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf,
-        PlaylistId, Route, RowKey, SavedVisit, ShelfLink,
+        Arrival, DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf, PlaylistId,
+        Route, RowKey, SavedVisit, ShelfLink,
     };
     use crate::collection::ViewMode;
     use crate::library::DiscTrack;
-    use crate::queue::PlaylistOccurrence;
 
     fn playlist(id: PlaylistId) -> SavedVisit {
         SavedVisit::new(Route::new(Location::Playlist(id), None), ViewMode::Tracks)
-    }
-
-    #[test]
-    fn artwork_keeps_a_matching_view_and_can_reveal_without_its_playlist() {
-        let occurrence = PlaylistOccurrence {
-            playlist: 8,
-            entry: 13,
-        };
-        let artwork = Destination::Current(Some(occurrence));
-        let menu = Destination::Playlist(occurrence);
-        let origin = Location::Playlist(8);
-        let other_views = [
-            Location::Library(None),
-            Location::Playlist(9),
-            Location::Folder(PathBuf::from(r"C:\Music")),
-        ];
-        assert!(!artwork.prefers_current_view(&origin));
-        for view in other_views {
-            assert!(artwork.prefers_current_view(&view));
-            assert!(!menu.prefers_current_view(&view));
-        }
-        let fallback = artwork.playlist_fallback().unwrap();
-        assert!(fallback.prefers_current_view(&origin));
-        assert!(fallback.playlist_fallback().is_none());
-        assert!(menu.playlist_fallback().is_none());
     }
 
     #[test]

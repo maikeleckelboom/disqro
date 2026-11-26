@@ -84,6 +84,7 @@ struct Segment {
     title: String,
     album: String,
     artist: String,
+    album_artist: Option<String>,
 }
 /// Deduplicate whole programs. A different source, sequence or authored
 /// program remains a separate edition, even if some chapters are identical.
@@ -142,6 +143,7 @@ impl Sources {
                         title: track.title.clone(),
                         album: track.album.clone(),
                         artist: track.artist.clone(),
+                        album_artist: track.album_artist.clone(),
                     }
                 })
                 .collect();
@@ -437,7 +439,7 @@ pub(crate) fn tree_folder(
                 .ok_or_else(|| anyhow::anyhow!("The folder is unavailable."))
         },
     );
-    anyhow::ensure!(alive(), crate::store::Cancelled);
+    anyhow::ensure!(alive(), crate::store::Canceled);
     anyhow::ensure!(listed, "The folder is unavailable.");
     let programs = crate::collection::Discs::group(rows.iter().flatten(), &covers, folder);
     Ok(FolderBranch {

@@ -198,14 +198,9 @@ fn recovered_occurrences_keep_the_last_committed_checkpoint_and_catalog_data() {
 }
 
 #[test]
-fn concurrent_catalog_and_history_startup_upgrade_once() {
+fn concurrent_catalog_and_history_startup_creates_the_current_schema_once() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library.sqlite3");
-    let mut db = rusqlite::Connection::open(&path).unwrap();
-    super::super::schema::initialize_production(&mut db).unwrap();
-    db.execute("INSERT INTO playlists VALUES (1,'Preserved',0,0)", [])
-        .unwrap();
-    drop(db);
     let start = Arc::new(std::sync::Barrier::new(3));
     std::thread::scope(|scope| {
         for _ in 0..3 {
@@ -216,20 +211,10 @@ fn concurrent_catalog_and_history_startup_upgrade_once() {
                     super::super::schema::version(&store.db).unwrap(),
                     super::super::schema::VERSION
                 );
-                assert_eq!(store.playlists().unwrap()[0].name, "Preserved");
+                assert!(store.playlists().unwrap().is_empty());
             });
         }
     });
-    assert!(dir.path().join("library-schema3-backup.sqlite3").is_file());
-    assert!(
-        !std::fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("library-upgrade-"))
-    );
 }
 
 #[test]

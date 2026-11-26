@@ -111,7 +111,8 @@ def capture_states(process, output, prefix, results):
     rects = {}
     for name in ["Collapse Collections", "Collapse Playlists", "Browse Collections", "Browse Playlists",
                  "Add Music Folder…", "New Playlist…", "Reference Library", "Evening Session",
-                 "All Music", "Favorites", "Collapse Reference Library", "Collapse Live Set"]:
+                 "All Music", "Artists", "Releases", "Favorites", "Recently Played",
+                 "Collapse Reference Library", "Collapse Live Set"]:
         rect = try_rect(hwnd, name)
         if rect:
             rects[name] = rect
@@ -152,6 +153,37 @@ def capture_states(process, output, prefix, results):
     return hwnd
 
 
+def capture_destinations(exe, output, scale, root):
+    settings = layout(root, 236, 1004, mode="tracks", location=dict(Library=root))
+    process = launch(exe, output, settings, scale)
+    try:
+        hwnd, _ = wait_for(process, "Opening Notes")
+        resize(hwnd, 1240, 780)
+        for destination, content in [
+            ("Artists", "Various Artists"), ("Releases", "Album Artist"),
+        ]:
+            hwnd, point = wait_for(process, destination)
+            click_control(hwnd, point)
+            wait_for(process, content)
+            screenshot(hwnd, output / f"{destination.lower()}.png")
+        hwnd, point = wait_for(process, "Artists")
+        click_control(hwnd, point)
+        hwnd, point = wait_for(process, "Various Artists")
+        click_control(hwnd, W.POINT(point.x, point.y))
+        click_control(hwnd, point)
+        wait_for(process, "Tracks")
+        screenshot(hwnd, output / "album-artist-tracks.png")
+        rects = control_rects(hwnd, ["Releases"], min_y=0)
+        # The toolbar's presentation is to the right of the sidebar label.
+        title, _, width, _ = rects[0]
+        hwnd, point = wait_for(process, "Releases", min_x=title + width)
+        click_control(hwnd, point)
+        wait_for(process, "Live Set")
+        screenshot(hwnd, output / "album-artist-releases.png")
+    finally:
+        close(process)
+
+
 def journey(exe, test_exe, output, scale):
     output.mkdir(parents=True, exist_ok=False)
     subprocess.run([test_exe, "--ignored", "--exact", "browser::tree::tests::seed_music_browser_qualification"],
@@ -167,6 +199,7 @@ def journey(exe, test_exe, output, scale):
             capture_states(process, output, prefix, results)
         finally:
             close(process)
+    capture_destinations(exe, output, scale, root)
     (output / "result.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 

@@ -24,6 +24,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub mod artists;
 mod identity;
 mod index;
 pub mod listening;
@@ -35,10 +36,11 @@ pub mod search;
 mod tests;
 mod worker;
 
+pub use artists::{ArtistId, ArtistRow};
 pub use identity::NativeFile;
 pub use index::{Progress, Summary, index_root};
 pub use query::{AlbumRow, AlbumStructure, Order, Query, Scope, Term};
-pub use worker::{Cancelled, Handle, Ticket, is_cancelled};
+pub use worker::{Canceled, Handle, Ticket, is_canceled};
 
 pub type TrackId = i64;
 pub type RootId = i64;
@@ -203,21 +205,7 @@ impl Store {
         let mut db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.pragma_update(None, "foreign_keys", true)?;
-        let _migration = if schema::version(&db)? != schema::VERSION {
-            // The catalog, listening writer and statistics reader may open
-            // together. Serialize backup and migration as one startup step.
-            let lock = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(path.with_extension("migration.lock"))?;
-            lock.lock()?;
-            schema::initialize(&mut db, Some(path))?;
-            Some(lock)
-        } else {
-            None
-        };
+        schema::initialize(&mut db)?;
         configure(&db)?;
         Ok(Self { db })
     }
@@ -225,7 +213,7 @@ impl Store {
     pub fn memory() -> Self {
         let mut db = Connection::open_in_memory().unwrap();
         configure(&db).unwrap();
-        schema::initialize(&mut db, None).unwrap();
+        schema::initialize(&mut db).unwrap();
         Self { db }
     }
 
@@ -296,6 +284,7 @@ impl Store {
     pub fn remove_root(&mut self, id: RootId) -> Result<()> {
         let tx = Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         self.remember_listening_releases(&tx, id)?;
+        tx.execute("DELETE FROM release_discs WHERE album_id IN (SELECT id FROM albums WHERE root_id = ?1)", [id])?;
         tx.execute("UPDATE tracks SET root_id = NULL WHERE root_id = ?1", [id])?;
         tx.execute("UPDATE files SET root_id = NULL WHERE root_id = ?1", [id])?;
         tx.execute("UPDATE albums SET root_id = NULL WHERE root_id = ?1", [id])?;

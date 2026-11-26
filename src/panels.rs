@@ -161,7 +161,7 @@ impl PanelRecord {
 /// take the app rather than a context of their own.
 #[allow(unused_variables)]
 pub trait PaneContent: 'static {
-    /// The content itself, for the workspace to recognise a type it coordinates.
+    /// The content itself, for the workspace to recognize a type it coordinates.
     fn as_any(&self) -> &dyn std::any::Any;
     fn view(&self) -> AnyView;
     fn focus_handle(&self, cx: &App) -> FocusHandle;

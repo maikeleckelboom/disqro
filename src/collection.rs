@@ -5,8 +5,8 @@ use crate::{
     library::{self, Track},
     store::{AlbumId, AlbumRow, Mark, PlaylistId, RootId, Term},
     table::{
-        ColumnInteraction, ContextKind, Field, Layout, SHELF_FIELDS, TableColumns, Viewport,
-        reselect,
+        ARTIST_FIELDS, ColumnInteraction, ContextKind, Field, Layout, SHELF_FIELDS, TableColumns,
+        Viewport, reselect,
     },
     theme::materials,
 };
@@ -36,32 +36,10 @@ pub enum ViewMode {
     Tree,
 }
 
-impl From<bool> for ViewMode {
-    fn from(albums: bool) -> Self {
-        if albums { Self::Albums } else { Self::Tracks }
-    }
-}
-
-pub(crate) fn read_view_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ViewMode, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum SavedMode {
-        Current(ViewMode),
-        Legacy(bool),
-    }
-    Ok(match SavedMode::deserialize(d) {
-        Ok(SavedMode::Current(mode)) => mode,
-        Ok(SavedMode::Legacy(albums)) => albums.into(),
-        Err(_) => ViewMode::default(),
-    })
-}
-
 /// How collections are presented and which physical folders include descendants.
-/// Earlier versions' global recursive switch is ignored.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewPrefs {
-    #[serde(alias = "albums", deserialize_with = "read_view_mode")]
     pub mode: ViewMode,
     pub local_collections: Vec<RootId>,
     pub subfolders: Vec<SubfolderRule>,
@@ -185,6 +163,7 @@ pub struct Disc {
     pub id: DiscId,
     pub root: Option<RootId>,
     pub title: String,
+    album_artist: Option<String>,
     pub folder: PathBuf,
     pub cover: Option<CoverFile>,
     cue_image: Option<PathBuf>,
@@ -226,12 +205,23 @@ pub fn is_single_disc(programs: &[Arc<Disc>]) -> bool {
             .is_some_and(|t| t.has_disc_context())
 }
 
+fn agreed_credit<'a>(credits: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    let mut present = credits.into_iter().flatten();
+    let name = present.next()?;
+    let key = name.to_lowercase();
+    present
+        .all(|credit| credit.to_lowercase() == key)
+        .then(|| name.to_owned())
+}
+
 /// A row in a browser directory.
 #[derive(Clone)]
 pub enum Shelf {
     Disc(Arc<Disc>),
     Release(Arc<Release>),
     Link(ShelfLink, String),
+    /// An artist in the Artists list.
+    Artist(Arc<crate::store::ArtistRow>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -260,6 +250,19 @@ impl Shelf {
             Self::Disc(d) => crate::table::RowKey::Disc(d.id.clone()),
             Self::Release(r) => crate::table::RowKey::Release(r.key.clone()),
             Self::Link(link, _) => crate::table::RowKey::Link(*link),
+            Self::Artist(artist) => crate::table::RowKey::Artist(artist.id),
+        }
+    }
+
+    /// Where activating the row goes, for rows that name another destination.
+    pub fn destination(&self) -> Option<crate::browser::Location> {
+        match self {
+            Self::Link(link, _) => Some(link.location()),
+            Self::Artist(artist) => Some(crate::browser::Location::Artist {
+                id: artist.id,
+                name: artist.name.clone(),
+            }),
+            Self::Disc(_) | Self::Release(_) => None,
         }
     }
 }
@@ -270,6 +273,7 @@ pub struct Release {
     pub title: String,
     pub discs: Vec<Arc<Disc>>,
     folder: PathBuf,
+    album_artist: Option<String>,
     cover: Option<crate::artwork::CoverFile>,
     year: Option<u32>,
     format: String,
@@ -283,12 +287,16 @@ pub struct Discs {
     original: Arc<[Shelf]>,
     pub(crate) shelf_layout: Layout,
     directory_layout: Layout,
+    /// The Artists list: each artist and how many tracks it has.
+    pub(crate) artist_layout: Layout,
     columns: ColumnInteraction,
     pub(crate) sort: Option<(Field, ColumnSort)>,
     pub directory_label: Option<&'static str>,
     pub empty: SharedString,
     /// Where the commands of the rows' menus go.
     pub browser: Option<WeakEntity<crate::browser::Browser>>,
+    /// Opens a row's destination in another browser.
+    pub router: Option<Entity<crate::panels::Router>>,
     pub tracks: Option<WeakEntity<TableState<crate::table::MusicTable>>>,
 }
 impl Discs {
@@ -296,14 +304,17 @@ impl Discs {
         browser: WeakEntity<crate::browser::Browser>,
         tracks: WeakEntity<TableState<crate::table::MusicTable>>,
         shelf_layout: Layout,
+        artist_layout: Layout,
     ) -> Self {
         Self {
             browser: Some(browser),
+            router: None,
             tracks: Some(tracks),
             rows: Vec::new(),
             original: Arc::default(),
             shelf_layout,
             directory_layout: Layout::for_fields(&[Field::Title]),
+            artist_layout,
             columns: ColumnInteraction::default(),
             sort: None,
             directory_label: None,
@@ -369,7 +380,7 @@ impl Discs {
         match row {
             Shelf::Disc(disc) => playing(disc),
             Shelf::Release(release) => release.discs.iter().any(playing),
-            Shelf::Link(..) => false,
+            Shelf::Link(..) | Shelf::Artist(_) => false,
         }
     }
     /// Top-level albums and releases. Each release owns its numbered discs.
@@ -397,6 +408,7 @@ impl Discs {
             rows.push(Shelf::Release(Arc::new(Release {
                 key: m.key.clone(),
                 title: m.title.clone(),
+                album_artist: agreed_credit(found.iter().map(|disc| disc.album_artist.as_deref())),
                 folder: first
                     .folder
                     .ancestors()
@@ -459,6 +471,7 @@ impl Discs {
                     id,
                     root: None,
                     title,
+                    album_artist: None,
                     folder: folder.strip_prefix(root).unwrap_or(folder).into(),
                     cover: covers.get(folder).cloned(),
                     cue_image: None,
@@ -503,6 +516,11 @@ impl Discs {
         items
             .into_iter()
             .map(|mut disc| {
+                disc.album_artist = agreed_credit(
+                    disc.tracks
+                        .iter()
+                        .map(|track| track.album_artist.as_deref()),
+                );
                 if matches!(disc.id, DiscId::Album(..)) {
                     disc.tracks.sort_by_key(|t| t.number.unwrap_or(u32::MAX));
                 } else if let Some(first) = disc.tracks.first()
@@ -564,6 +582,7 @@ impl Disc {
             id: DiscId::Library(a.id),
             root: a.root,
             title: a.title,
+            album_artist: a.album_artist,
             folder: a.folder,
             cover: a.cover.and_then(CoverFile::new),
             cue_image: a.cue_image,
@@ -737,6 +756,7 @@ impl Disc {
             },
             // A release names its year once, above its discs.
             Field::Year if member.is_none() => self.year.map(|v| v.to_string()).unwrap_or_default(),
+            Field::Artist if member.is_none() => self.album_artist.clone().unwrap_or_default(),
             Field::Count => self.count.to_string(),
             Field::Length if self.complete => library::clock(self.duration),
             Field::Format => self.format.clone(),
@@ -754,6 +774,7 @@ impl Release {
     pub(crate) fn label(&self, field: Field) -> String {
         match field {
             Field::Title => self.title.clone(),
+            Field::Artist => self.album_artist.clone().unwrap_or_default(),
             Field::Year => self.year.map(|v| v.to_string()).unwrap_or_default(),
             Field::Count => self.count.to_string(),
             Field::Length if self.complete => library::clock(self.duration),
@@ -769,9 +790,15 @@ impl Shelf {
             Self::Disc(d) => d.label(field),
             Self::Release(r) => r.label(field),
             Self::Link(_, title) => title.clone(),
+            Self::Artist(artist) => match field {
+                Field::Count => artist.tracks.to_string(),
+                _ => artist.name.clone(),
+            },
         }
     }
 }
+/// The directory label of the Artists list.
+pub const ARTIST: &str = "Artist";
 const SHELF_COVER: f32 = 32.;
 
 fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: &mut Vec<Shelf>) {
@@ -794,6 +821,7 @@ fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: 
                     Shelf::Disc(d) => (d.year, d.count, d.duration),
                     Shelf::Release(r) => (r.year, r.count, r.duration),
                     Shelf::Link(..) => (None, 0, 0.),
+                    Shelf::Artist(artist) => (None, artist.tracks, 0.),
                 };
                 let number = match field {
                     Field::Year => u64::from(year.unwrap_or(0)),
@@ -813,17 +841,17 @@ fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: 
 
 impl TableColumns for Discs {
     fn layout(&self) -> &Layout {
-        if self.directory_label.is_some() {
-            &self.directory_layout
-        } else {
-            &self.shelf_layout
+        match self.directory_label {
+            Some(ARTIST) => &self.artist_layout,
+            Some(_) => &self.directory_layout,
+            None => &self.shelf_layout,
         }
     }
     fn layout_mut(&mut self) -> &mut Layout {
-        if self.directory_label.is_some() {
-            &mut self.directory_layout
-        } else {
-            &mut self.shelf_layout
+        match self.directory_label {
+            Some(ARTIST) => &mut self.artist_layout,
+            Some(_) => &mut self.directory_layout,
+            None => &mut self.shelf_layout,
         }
     }
     fn interaction(&self) -> &ColumnInteraction {
@@ -836,8 +864,11 @@ impl TableColumns for Discs {
         self.browser.clone()
     }
     fn sort(&self) -> Option<(Field, ColumnSort)> {
-        self.sort
-            .filter(|(field, _)| self.shelf_layout.has(*field) && self.directory_label.is_none())
+        self.sort.filter(|(field, _)| match self.directory_label {
+            Some(ARTIST) => self.artist_layout.has(*field),
+            Some(_) => false,
+            None => self.shelf_layout.has(*field),
+        })
     }
     fn sort_rows(table: &mut TableState<Self>, field: Field, cx: &mut Context<TableState<Self>>) {
         let next = crate::table::next_sort(table.delegate().sort(), field);
@@ -852,25 +883,30 @@ impl TableColumns for Discs {
         }
     }
     fn default_layout(&self) -> Layout {
-        if self.directory_label.is_some() {
-            Layout::for_fields(&[Field::Title])
-        } else {
-            Layout::new(ContextKind::Shelf)
+        match self.directory_label {
+            Some(ARTIST) => Layout::new(ContextKind::Artists),
+            Some(_) => Layout::for_fields(&[Field::Title]),
+            None => Layout::new(ContextKind::Shelf),
         }
     }
     fn available_fields(&self) -> &'static [Field] {
-        if self.directory_label.is_some() {
-            &[Field::Title]
-        } else {
-            SHELF_FIELDS
+        match self.directory_label {
+            Some(ARTIST) => ARTIST_FIELDS,
+            Some(_) => &[Field::Title],
+            None => SHELF_FIELDS,
         }
     }
-    fn sortable_field(&self, _: Field) -> bool {
-        self.directory_label.is_none()
+    fn sortable_field(&self, field: Field) -> bool {
+        match self.directory_label {
+            Some(ARTIST) => ARTIST_FIELDS.contains(&field),
+            Some(_) => false,
+            None => true,
+        }
     }
     fn column_label(&self, field: Field) -> &'static str {
         match field {
             Field::Title => self.directory_label.unwrap_or("Album / Disc"),
+            Field::Artist => "Album Artist",
             Field::Path => "Folder",
             _ => field.label(),
         }
@@ -983,6 +1019,33 @@ impl TableDelegate for Discs {
                     )
                     .child(div().truncate().child(title.clone()));
             }
+            Shelf::Artist(artist) => {
+                if field != Field::Title {
+                    return cell.child(div().truncate().child(row.label(field)));
+                }
+                let name = artist.name.clone();
+                let releases = artist.releases;
+                return cell
+                    .child(
+                        Icon::new(IconName::MicVocal)
+                            .size(px(16.))
+                            .text_color(m.text_faint),
+                    )
+                    .child(
+                        div()
+                            .id(("artist-name", artist.id.0 as usize))
+                            .truncate()
+                            .child(name)
+                            .tooltip(move |w, cx| {
+                                let label = if releases == 1 {
+                                    "1 associated release".into()
+                                } else {
+                                    format!("{releases} associated releases")
+                                };
+                                gpui_kit::component::tooltip::Tooltip::new(label).build(w, cx)
+                            }),
+                    );
+            }
         };
         if field != Field::Title {
             return cell.child(
@@ -1082,16 +1145,23 @@ impl TableDelegate for Discs {
                 tracks,
                 cx,
             ),
-            Shelf::Link(link, _) => {
-                let location = link.location();
-                menu.item(
+            Shelf::Link(..) | Shelf::Artist(_) => {
+                let Some(location) = row.destination() else {
+                    return menu;
+                };
+                let open = location.clone();
+                let menu = menu.item(
                     gpui_kit::component::menu::PopupMenuItem::new("Open").on_click(
                         move |_, window, cx| {
-                            let _ =
-                                browser.update(cx, |b, cx| b.show(location.clone(), window, cx));
+                            let _ = browser.update(cx, |b, cx| b.show(open.clone(), window, cx));
                         },
                     ),
-                )
+                );
+                match &self.router {
+                    Some(router) => crate::panels::Destination::View(location)
+                        .open_in_new_tab(menu, router.clone()),
+                    None => menu,
+                }
             }
         }
     }
@@ -1136,8 +1206,8 @@ mod tests {
         assert!(!prefs.includes_subfolders(disc));
     }
     #[test]
-    fn earlier_global_subfolder_switch_is_not_carried_over() {
-        let prefs: ViewPrefs = serde_json::from_str(r#"{"recursive":true,"albums":true}"#).unwrap();
+    fn a_presentation_preference_round_trips_independently_of_folder_scope() {
+        let prefs: ViewPrefs = serde_json::from_str(r#"{"mode":"albums"}"#).unwrap();
         assert_eq!(prefs.mode, super::ViewMode::Albums);
         assert!(!prefs.includes_subfolders(Path::new(r"C:\Users\Me\Music")));
         let again: ViewPrefs =
@@ -1175,6 +1245,7 @@ mod release_tests {
             .map(|r| match r {
                 Shelf::Release(r) => format!("release {} {}", r.title, r.discs.len()),
                 Shelf::Link(_, title) => title.clone(),
+                Shelf::Artist(artist) => artist.name.clone(),
                 Shelf::Disc(d) => match d.member_label() {
                     Some((n, _)) => n,
                     None => d.title.clone(),

@@ -95,6 +95,22 @@ impl TreeTable {
         self.index.get(id).copied()
     }
 
+    pub(super) fn reset(&mut self, expansion: Expansion) {
+        self.tree = Tree::default();
+        self.tree.set_expansion(expansion);
+        self.rows.clear();
+        self.starts.clear();
+        self.index.clear();
+        self.boundaries.clear();
+        self.spans.clear();
+        self.len = 0;
+        self.shown = 0..0;
+        self.matching.next();
+        self.descendants = None;
+        self.selected = None;
+        self.restore = None;
+    }
+
     /// The entry shown at row `index`.
     pub(super) fn row(&self, index: usize) -> Option<&TreeRow> {
         let entry = self.starts.partition_point(|start| *start <= index);
@@ -217,6 +233,29 @@ impl TreeTable {
         table.delegate_mut().selected = id.clone();
         table.delegate_mut().restore = Some((id, viewport));
         Self::restore_view(table, cx);
+    }
+
+    pub(super) fn land(
+        table: &mut TableState<Self>,
+        target: TreeId,
+        viewport: Viewport,
+        center: bool,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let row = table.delegate().position(&target);
+        table.delegate_mut().selected = Some(target);
+        table.delegate_mut().restore = None;
+        reselect(table, row, cx);
+        if let Some(row) = row.filter(|_| center) {
+            table
+                .vertical_scroll_handle
+                .scroll_to_item(row, ScrollStrategy::Center);
+        } else {
+            viewport.restore(table, crate::table::ROW_HEIGHT, |key| {
+                table.delegate().row_position(key)
+            });
+        }
+        cx.notify();
     }
 
     pub(super) fn project(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {

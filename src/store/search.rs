@@ -1,14 +1,14 @@
 //! Ranked library lookup. FTS rowids are the catalog's durable ids. Resolve
 //! display metadata in the same read transaction as the match.
-use super::{AlbumId, PlaylistId, RootId, Scope, Store, TrackId};
+use super::{AlbumId, ArtistId, PlaylistId, RootId, Scope, Store, TrackId};
 use anyhow::Result;
 use rusqlite::params;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Track(TrackId),
-    Artist(String),
+    Artist(ArtistId),
     Album(RootId, AlbumId),
     Release(RootId, AlbumId),
     Playlist(PlaylistId),
@@ -107,27 +107,29 @@ impl Store {
                     .join(" · "),
             });
         }
+        let artist_sql = format!(
+            "SELECT p.id, p.name FROM artists_fts(?1) f JOIN artists p ON p.id = f.rowid
+             WHERE {} ORDER BY rank, p.key LIMIT ?2 OFFSET ?3",
+            super::artists::active()
+        );
         let artists = self
             .db
-            .prepare_cached(
-                "SELECT min(t.artist) FROM tracks_fts('artist : (' || ?1 || ')')
-             JOIN tracks t ON t.id=tracks_fts.rowid WHERE t.present=1 AND t.root_id IS NOT NULL
-             GROUP BY t.artist_key ORDER BY t.artist_key LIMIT ?2 OFFSET ?3",
-            )?
-            .query_map(args, |r| r.get::<_, String>(0))?
+            .prepare_cached(&artist_sql)?
+            .query_map(args, |r| Ok((ArtistId(r.get(0)?), r.get::<_, String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         result.more |= artists.len() > limit;
         result
             .hits
-            .extend(artists.into_iter().take(limit).map(|name| Hit {
-                target: Target::Artist(name.clone()),
+            .extend(artists.into_iter().take(limit).map(|(id, name)| Hit {
+                target: Target::Artist(id),
                 title: name,
                 detail: String::new(),
                 context: String::new(),
             }));
-        let album_sql = "SELECT a.root_id, a.id, a.title, a.folder
+        let album_sql = "SELECT a.root_id, a.id, a.title, a.folder, d.first_id, d.title
             FROM albums_fts(?1) JOIN albums a ON a.id = albums_fts.rowid
-            WHERE a.root_id IS NOT NULL AND EXISTS (
+            LEFT JOIN release_discs d ON d.album_id = a.id
+            WHERE a.root_id IS NOT NULL AND a.is_release = 1 AND EXISTS (
                 SELECT 1 FROM tracks t INDEXED BY tracks_album
                 WHERE t.album_id = a.id AND t.present = 1 AND t.root_id = a.root_id
             ) ORDER BY rank, a.id LIMIT ?2 OFFSET ?3";
@@ -140,23 +142,21 @@ impl Store {
                     r.get::<_, AlbumId>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
+                    r.get::<_, Option<AlbumId>>(4)?
+                        .zip(r.get::<_, Option<String>>(5)?),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         result.more |= albums.len() > limit;
-        let mut roots = HashMap::new();
         let mut releases = Vec::new();
         let mut seen = HashSet::new();
-        for (root, id, title, detail) in albums.into_iter().take(limit) {
-            if let std::collections::hash_map::Entry::Vacant(entry) = roots.entry(root) {
-                entry.insert(self.releases(Some(root))?);
-            }
-            if let Some(release) = roots[&root].get(&id)
-                && seen.insert(release.first)
+        for (root, id, title, detail, member) in albums.into_iter().take(limit) {
+            if let Some((first, title)) = member
+                && seen.insert(first)
             {
                 releases.push(Hit {
-                    target: Target::Release(root, release.first),
-                    title: release.title.clone(),
+                    target: Target::Release(root, first),
+                    title,
                     detail: String::new(),
                     context: String::new(),
                 });

@@ -600,8 +600,8 @@ fn folder_listing_pages_keep_their_order_and_bounded_reads() {
         panic!("A small folder groups all of its files");
     };
     assert_eq!((audio.len(), sheets.len()), (23, 0));
-    let cancelled = crate::library::list_page(root, None, 50, true, || false);
-    assert!(cancelled.is_err());
+    let canceled = crate::library::list_page(root, None, 50, true, || false);
+    assert!(canceled.is_err());
 }
 
 #[test]
@@ -727,6 +727,19 @@ fn seed_music_browser_qualification() {
         assert!(chapters.iter().all(|n| n.value(Field::Format) == "FLAC"));
     }
     cue(&release.join("CD 2"), "Live Set (CD2)", 3, true);
+    for number in [1, 2] {
+        let sheet = release.join(format!("CD {number}/Live Set (CD{number}).cue"));
+        let text = fs::read_to_string(&sheet).unwrap();
+        let (title, body) = text.split_once('\n').unwrap();
+        fs::write(
+            sheet,
+            format!(
+                "{title}\nPERFORMER \"Various Artists\"\n{}",
+                body.replace("INDEX 01", "PERFORMER \"The Reference Ensemble\"\nINDEX 01")
+            ),
+        )
+        .unwrap();
+    }
     let archive = library.join("Archive");
     fs::create_dir_all(&archive).unwrap();
     write_wav(&archive.join("Loose Recording.wav"), 1);

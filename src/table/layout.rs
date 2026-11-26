@@ -9,10 +9,13 @@ pub enum ContextKind {
     Playlist,
     Shelf,
     Tree,
+    Artists,
 }
 
+pub(crate) const ARTIST_FIELDS: &[Field] = &[Field::Title, Field::Count];
 pub(crate) const SHELF_FIELDS: &[Field] = &[
     Field::Title,
+    Field::Artist,
     Field::Year,
     Field::Count,
     Field::Length,
@@ -50,12 +53,6 @@ pub struct LayoutColumn {
     pub(super) pin: Pin,
 }
 
-#[derive(Deserialize)]
-pub struct LegacyColumn {
-    field: String,
-    width: f32,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layout {
     pub(super) columns: Vec<LayoutColumn>,
@@ -65,10 +62,6 @@ pub struct Layout {
     /// column the listener resizes fixes every width as shown.
     #[serde(default = "adaptive")]
     pub(super) adaptive: bool,
-    /// Earlier layouts drew artwork inside Title. Loading turns the saved
-    /// choice into the Cover column.
-    #[serde(default, skip_serializing)]
-    artwork: Option<bool>,
     /// The column whose boundary is being dragged. It keeps its width while
     /// the other text columns absorb the change.
     #[serde(skip)]
@@ -87,6 +80,7 @@ impl Layout {
             ContextKind::Favorites => &[Cover, Title, Artist, Album, Length],
             ContextKind::Shelf => SHELF_FIELDS,
             ContextKind::Tree => &[Title, Artist, Count, Length, Format],
+            ContextKind::Artists => ARTIST_FIELDS,
             _ => &[Cover, Title, Artist, Album, Length, Favorite],
         };
         let mut layout = Self::for_fields(fields);
@@ -94,8 +88,14 @@ impl Layout {
             layout.columns[0].width = 300.;
         }
         if context == ContextKind::Shelf {
-            layout.columns[0].width = 290.;
-            layout.columns[5].width = 230.;
+            for column in &mut layout.columns {
+                column.width = match column.field {
+                    Title => 290.,
+                    Artist => 190.,
+                    Path => 230.,
+                    field => field.width(),
+                };
+            }
         }
         layout
     }
@@ -105,7 +105,6 @@ impl Layout {
             columns: fields.iter().copied().map(LayoutColumn::new).collect(),
             adaptive: true,
             hidden: Vec::new(),
-            artwork: None,
             holding: None,
         }
     }
@@ -156,6 +155,7 @@ impl Layout {
         }
     }
 
+    #[cfg(test)]
     fn show_cover(&mut self, shown: bool) {
         if self.has(Field::Cover) != shown {
             self.toggle(Field::Cover);
@@ -364,6 +364,8 @@ pub struct Layouts {
     pub(crate) shelf: Layout,
     #[serde(default = "tree_layout")]
     pub(crate) tree: Layout,
+    #[serde(default = "artists_layout")]
+    pub(crate) artists: Layout,
 }
 
 fn shelf_layout() -> Layout {
@@ -371,6 +373,9 @@ fn shelf_layout() -> Layout {
 }
 fn tree_layout() -> Layout {
     Layout::new(ContextKind::Tree)
+}
+fn artists_layout() -> Layout {
+    Layout::new(ContextKind::Artists)
 }
 
 impl Default for Layouts {
@@ -383,6 +388,7 @@ impl Default for Layouts {
             playlist: Layout::new(ContextKind::Playlist),
             shelf: shelf_layout(),
             tree: tree_layout(),
+            artists: artists_layout(),
         }
     }
 }
@@ -398,6 +404,7 @@ impl Layouts {
             ContextKind::Playlist => &self.playlist,
             ContextKind::Shelf => &self.shelf,
             ContextKind::Tree => &self.tree,
+            ContextKind::Artists => &self.artists,
         }
     }
     pub(super) fn get_mut(&mut self, context: ContextKind) -> &mut Layout {
@@ -411,6 +418,7 @@ impl Layouts {
             ContextKind::Playlist => &mut self.playlist,
             ContextKind::Shelf => &mut self.shelf,
             ContextKind::Tree => &mut self.tree,
+            ContextKind::Artists => &mut self.artists,
         }
     }
 
@@ -433,7 +441,6 @@ impl Layouts {
     }
 
     pub fn validate(mut self) -> Self {
-        let version = self.version;
         for context in [
             ContextKind::Disc,
             ContextKind::Mixed,
@@ -441,6 +448,7 @@ impl Layouts {
             ContextKind::Playlist,
             ContextKind::Shelf,
             ContextKind::Tree,
+            ContextKind::Artists,
         ] {
             if context == ContextKind::Favorites && self.favorites.is_none() {
                 continue;
@@ -451,6 +459,7 @@ impl Layouts {
                 let allowed = match context {
                     ContextKind::Shelf => SHELF_FIELDS,
                     ContextKind::Tree => TREE_FIELDS,
+                    ContextKind::Artists => ARTIST_FIELDS,
                     _ => &Field::ALL,
                 };
                 if !allowed.contains(&c.field)
@@ -460,12 +469,7 @@ impl Layouts {
                     return false;
                 }
                 seen.push(c.field);
-                // Version 3 made Favorite a compact glyph column. Earlier
-                // widths were sized for its text heading.
-                let old_default = version < 3
-                    && c.field == Field::Favorite
-                    && (c.width == 88. || (version < 2 && c.width == 34.));
-                if old_default || !(24. ..=c.field.max_width()).contains(&c.width) {
+                if !(24. ..=c.field.max_width()).contains(&c.width) {
                     c.width = c.field.width();
                 }
                 true
@@ -476,88 +480,16 @@ impl Layouts {
             if !layout.has(Field::Title) {
                 layout.columns.push(LayoutColumn::new(Field::Title));
             }
-            if let Some(artwork) = layout.artwork.take() {
-                layout.show_cover(artwork);
-            }
-            if matches!(
-                context,
-                ContextKind::Mixed | ContextKind::Disc | ContextKind::Playlist
-            ) && version == 0
-                && !seen.contains(&Field::Favorite)
-            {
-                layout.columns.push(LayoutColumn::new(Field::Favorite));
-            }
             layout.normalize();
         }
         self.version = 3;
         self
-    }
-
-    pub fn migrate(old: &[LegacyColumn], version: u32) -> Self {
-        let mut layouts = Self::default();
-        let names: Vec<_> = old.iter().map(|c| c.field.as_str()).collect();
-        let standard = names
-            == [
-                "Number", "Title", "Artist", "Album", "Liked", "Rating", "Length",
-            ]
-            || (version < 2 && names == ["Number", "Title", "Artist", "Album", "Length"]);
-        let mut saved: Vec<LayoutColumn> = Vec::new();
-        for c in old {
-            let Ok(field) = Field::deserialize(serde_json::Value::String(c.field.clone())) else {
-                continue;
-            };
-            if !saved.iter().any(|s| s.field == field) {
-                let width = if !(field == Field::Favorite && c.width == 34.)
-                    && (24. ..=field.max_width()).contains(&c.width)
-                {
-                    c.width
-                } else {
-                    field.width()
-                };
-                saved.push(LayoutColumn {
-                    width,
-                    ..LayoutColumn::new(field)
-                });
-            }
-        }
-        if !saved.iter().any(|c| c.field == Field::Title) {
-            return layouts;
-        }
-        for layout in [&mut layouts.disc, &mut layouts.mixed, &mut layouts.playlist] {
-            if standard {
-                for col in &mut layout.columns {
-                    if let Some(c) = saved.iter().find(|c| c.field == col.field) {
-                        col.width = c.width;
-                    }
-                }
-            } else {
-                // These single-layout profiles predate Cover. Keep this
-                // context's default for it.
-                let cover = layout.has(Field::Cover);
-                layout.columns.clone_from(&saved);
-                layout.show_cover(cover);
-                if !layout.has(Field::Favorite) {
-                    layout.columns.push(LayoutColumn::new(Field::Favorite));
-                }
-                layout.normalize();
-            }
-        }
-        layouts
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn saved(fields: &[(&str, f32)]) -> Vec<LegacyColumn> {
-        fields
-            .iter()
-            .map(|(name, width)| LegacyColumn {
-                field: (*name).into(),
-                width: *width,
-            })
-            .collect()
-    }
     fn fields(layout: &Layout) -> Vec<Field> {
         layout.columns.iter().map(|c| c.field).collect()
     }
@@ -612,118 +544,29 @@ mod tests {
     }
 
     #[test]
-    fn old_layouts_gain_a_shelf_and_save_its_columns_independently() {
+    fn shelf_and_artist_layouts_keep_their_edits_separate_from_tracks() {
         use Field::*;
         let mut layouts = Layouts::default();
         layouts.mixed.toggle(Artist);
-        let mut old = serde_json::to_value(&layouts).unwrap();
-        old.as_object_mut().unwrap().remove("shelf");
-        let mut restored = serde_json::from_value::<Layouts>(old).unwrap().validate();
+        let mut restored =
+            serde_json::from_value::<Layouts>(serde_json::to_value(&layouts).unwrap())
+                .unwrap()
+                .validate();
         assert_eq!(fields(&restored.shelf), SHELF_FIELDS);
         assert!(!restored.mixed.has(Artist));
         restored.shelf.set_pin(Path, Pin::Right);
         restored.shelf.toggle(Format);
+        restored.artists.toggle(Count);
         assert!(restored.shelf.move_column(1, 0));
-        assert_eq!(fields(&restored.shelf)[0], Year);
+        assert_eq!(fields(&restored.shelf)[0], Artist);
         let edited = serde_json::to_vec(&restored).unwrap();
         let again: Layouts = serde_json::from_slice(&edited).unwrap();
         assert!(!again.shelf.has(Format));
+        assert!(again.shelf.has(Count) && !again.artists.has(Count));
         assert_eq!(again.shelf.columns.last().unwrap().pin, Pin::Right);
         assert_eq!(fields(&again.mixed), fields(&layouts.mixed));
     }
 
-    #[test]
-    fn migration_distributes_old_widths_and_preserves_custom_fields() {
-        let legacy = saved(&[
-            ("Number", 40.),
-            ("Title", 319.),
-            ("Artist", 135.),
-            ("Album", 150.),
-            ("Liked", 34.),
-            ("Rating", 100.),
-            ("Length", 60.),
-        ]);
-        let layouts = Layouts::migrate(&legacy, 2);
-        assert!(!layouts.disc.has(Field::Cover));
-        assert!(layouts.mixed.has(Field::Cover) && layouts.playlist.has(Field::Cover));
-        assert_eq!(layouts.disc.columns[1].width, 319.);
-        assert_eq!(layouts.mixed.columns[1].width, 319.);
-        assert_eq!(layouts.disc.columns.len(), 5);
-        let custom = saved(&[
-            ("Year", 74.),
-            ("Title", 248.),
-            ("Path", 470.),
-            ("Liked", 34.),
-        ]);
-        let mut layouts = Layouts::migrate(&custom, 2);
-        assert_eq!(
-            fields(&layouts.disc),
-            [Field::Year, Field::Title, Field::Path, Field::Favorite]
-        );
-        assert_eq!(
-            fields(&layouts.playlist),
-            [
-                Field::Cover,
-                Field::Year,
-                Field::Title,
-                Field::Path,
-                Field::Favorite
-            ]
-        );
-        layouts.disc = Layout::new(ContextKind::Disc);
-        assert_eq!(layouts.playlist.columns[3].width, 470.);
-    }
-    #[test]
-    fn saved_artwork_choice_becomes_a_single_cover_column() {
-        // Saved while artwork lived inside Title, customized everywhere: CD
-        // artwork on, mixed artwork off, and a playlist with a duplicate Cover.
-        let json = r#"{
-            "disc": {"columns": [{"field": "Number", "width": 44},
-                {"field": "Title", "width": 354}, {"field": "Year", "width": 81}],
-                "artwork": true},
-            "mixed": {"columns": [{"field": "Title", "width": 312},
-                {"field": "Path", "width": 410}, {"field": "Artist", "width": 150}],
-                "artwork": false},
-            "playlist": {"columns": [{"field": "Title", "width": 300},
-                {"field": "Cover", "width": 300}, {"field": "Cover", "width": 40},
-                {"field": "Album", "width": 160}], "artwork": true}
-        }"#;
-        let layouts = serde_json::from_str::<Layouts>(json).unwrap().validate();
-        assert_eq!(
-            fields(&layouts.disc),
-            [
-                Field::Number,
-                Field::Cover,
-                Field::Title,
-                Field::Year,
-                Field::Favorite
-            ]
-        );
-        let widths: Vec<f32> = layouts.disc.columns.iter().map(|c| c.width).collect();
-        assert_eq!(widths, [44., 40., 354., 81., 36.]);
-        assert_eq!(
-            fields(&layouts.mixed),
-            [Field::Title, Field::Path, Field::Artist, Field::Favorite]
-        );
-        assert_eq!(layouts.mixed.columns[1].width, 410.);
-        assert_eq!(
-            fields(&layouts.playlist),
-            [Field::Title, Field::Cover, Field::Album, Field::Favorite]
-        );
-        assert_eq!(layouts.playlist.columns[1].width, Field::Cover.width());
-
-        // The flag is not written back. Later loads trust the columns, so a
-        // Cover the listener hid stays hidden.
-        let mut saved = serde_json::to_value(&layouts).unwrap();
-        assert!(saved["disc"].get("artwork").is_none());
-        saved["disc"]["columns"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|c| c["field"] != "Cover");
-        let again = serde_json::from_value::<Layouts>(saved).unwrap().validate();
-        assert!(!again.disc.has(Field::Cover));
-        assert_eq!(fields(&again.playlist), fields(&layouts.playlist));
-    }
     #[test]
     fn reset_restores_each_context_default() {
         assert_eq!(
@@ -847,38 +690,6 @@ mod tests {
             );
         }
     }
-    #[test]
-    fn favorite_migration_preserves_explicit_order_visibility_width_and_pin() {
-        use Field::*;
-        let mut old = Layouts {
-            version: 1,
-            ..Default::default()
-        };
-        old.disc.columns.last_mut().unwrap().width = 34.;
-        old.disc.set_pin(Favorite, Pin::Right);
-        old.mixed.columns.last_mut().unwrap().width = 137.;
-        old.mixed.move_column(5, 2);
-        old.playlist.columns.last_mut().unwrap().width = 119.;
-        old.playlist.set_pin(Favorite, Pin::Left);
-        old.playlist.toggle(Favorite);
-        let json = serde_json::to_string(&old).unwrap();
-        let loaded = serde_json::from_str::<Layouts>(&json).unwrap().validate();
-        let disc = loaded.disc.columns.last().unwrap();
-        assert_eq!(
-            (disc.field, disc.width, disc.pin),
-            (Favorite, 36., Pin::Right)
-        );
-        // Explicit widths survive the glyph-heading migration, even when hidden.
-        assert_eq!(loaded.mixed.columns[2].field, Favorite);
-        assert_eq!(loaded.mixed.columns[2].width, 137.);
-        assert!(!loaded.playlist.has(Favorite));
-        let hidden = &loaded.playlist.hidden[0];
-        assert_eq!(
-            (hidden.field, hidden.width, hidden.pin),
-            (Favorite, 119., Pin::Left)
-        );
-    }
-
     #[test]
     fn divider_ownership_tracks_visible_edges_across_pin_groups() {
         use super::super::resize_owner;

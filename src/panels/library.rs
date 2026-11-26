@@ -78,6 +78,8 @@ impl EventEmitter<LibraryChanged> for LibraryPanel {}
 
 /// Space above a section heading, separating it from the previous section.
 const SECTION_GAP: f32 = 8.;
+/// Space between exploring the library and personal listening destinations.
+const GROUP_GAP: f32 = 8.;
 
 pub struct LibraryPanel {
     catalog: Entity<Catalog>,
@@ -299,7 +301,33 @@ impl LibraryPanel {
         })
     }
 
-    /// Built-in destinations, collections, and playlists, in that order.
+    /// A built-in destination: a row that opens `location`, with the same
+    /// open actions as every other.
+    fn destination_row(
+        &self,
+        (id, label): (&'static str, &'static str),
+        icon: (Icon, IconName),
+        location: Location,
+        selected: bool,
+        gap: f32,
+        m: &crate::theme::Materials,
+    ) -> AnyElement {
+        let router = self.router.clone();
+        let target = location.clone();
+        let (icon, menu_icon) = icon;
+        Self::opens(
+            nav_row(id.into(), icon, label.into(), selected, m).mt(px(gap)),
+            &self.router,
+            location,
+        )
+        .context_menu(move |menu, _, _| {
+            Self::open_items(menu, router.clone(), target.clone(), menu_icon)
+        })
+        .into_any_element()
+    }
+
+    /// Library exploration, personal destinations, collections and
+    /// playlists, in that order.
     fn render_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = *materials(cx);
         let location = self.location(cx);
@@ -335,24 +363,33 @@ impl LibraryPanel {
                 .into_any_element(),
             );
         }
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "liked".into(),
-                    Icon::default().path(crate::assets::HEART_FILL),
-                    "Favorites".into(),
-                    location == Some(Location::Liked),
-                    &m,
-                ),
-                &self.router,
-                Location::Liked,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(menu, router.clone(), Location::Liked, IconName::Heart)
-            })
-            .into_any_element(),
-        );
+        rows.push(self.destination_row(
+            ("artists", "Artists"),
+            (Icon::new(IconName::MicVocal), IconName::MicVocal),
+            Location::Artists,
+            matches!(location, Some(Location::Artists | Location::Artist { .. })),
+            0.,
+            &m,
+        ));
+        rows.push(self.destination_row(
+            ("releases", "Releases"),
+            (Icon::new(IconName::Disc3), IconName::Disc3),
+            Location::Releases,
+            location == Some(Location::Releases),
+            0.,
+            &m,
+        ));
+        rows.push(self.destination_row(
+            ("liked", "Favorites"),
+            (
+                Icon::default().path(crate::assets::HEART_FILL),
+                IconName::Heart,
+            ),
+            Location::Liked,
+            location == Some(Location::Liked),
+            GROUP_GAP,
+            &m,
+        ));
         let router = self.router.clone();
         rows.push(
             Self::opens(

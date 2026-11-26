@@ -19,7 +19,9 @@ use std::{
     sync::Arc,
 };
 
+mod reveal;
 mod table;
+pub(super) use reveal::recording_identity;
 pub(crate) use table::TreeTable;
 
 const EXPANSION_LIMIT: usize = 128;
@@ -120,7 +122,7 @@ impl<'a> Lens<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum TreeId {
     Collection(RootId),
     Folder(Option<RootId>, String),
@@ -430,7 +432,7 @@ struct Slot {
 
 struct Hits {
     query: String,
-    nodes: Vec<Node>,
+    nodes: Vec<(usize, Node)>,
 }
 
 impl Slot {
@@ -452,7 +454,7 @@ impl Slot {
             + self.hits.as_ref().map_or(0, |hits| hits.nodes.len())
     }
 
-    fn hits(&self, query: &str) -> Option<&[Node]> {
+    fn hits(&self, query: &str) -> Option<&[(usize, Node)]> {
         self.hits
             .as_ref()
             .filter(|hits| hits.query == query)
@@ -483,7 +485,8 @@ impl Slot {
             query: lens.query.to_owned(),
             nodes: nodes
                 .into_iter()
-                .filter(|node| lens.keeps(node, open(&node.id)))
+                .enumerate()
+                .filter(|(_, node)| !open(&node.id) && lens.keeps(node, false))
                 .collect(),
         });
     }
@@ -588,13 +591,13 @@ impl Branch {
         self.more.is_none() && self.pages.iter().all(|page| page.nodes.is_some())
     }
 
-    /// The loaded page farthest from `keep`.
-    fn farthest(&self, keep: usize) -> Option<usize> {
+    /// The least recently used page. Break ties by distance from `keep`.
+    fn least_recent(&self, keep: usize) -> Option<usize> {
         self.pages
             .iter()
             .enumerate()
             .filter(|(index, page)| *index != keep && page.nodes.is_some())
-            .max_by_key(|(index, _)| index.abs_diff(keep))
+            .min_by_key(|(index, page)| (page.used, std::cmp::Reverse(index.abs_diff(keep))))
             .map(|(index, _)| index)
     }
 }
@@ -678,6 +681,9 @@ struct Tree {
     saturated: bool,
     /// Advances whenever the viewport moves, to order pages by use.
     clock: u64,
+    /// Exact rows resolved by identity beyond the pages currently held.
+    /// Normal paging merges them in once it reaches their position.
+    direct: HashMap<Option<TreeId>, Node>,
 }
 
 impl Tree {
@@ -697,8 +703,9 @@ impl Tree {
 
     fn expansion(&self) -> Expansion {
         let mut deep: Vec<_> = self.deep.iter().cloned().collect();
-        deep.sort_by_key(|id| id.is_some());
-        let closed: Vec<_> = self.closed.iter().cloned().collect();
+        deep.sort();
+        let mut closed: Vec<_> = self.closed.iter().cloned().collect();
+        closed.sort();
         let links = self
             .expanded
             .iter()
@@ -898,13 +905,11 @@ impl Tree {
                 return;
             }
             reachable.insert(key.clone(), deep);
-            if let Some(branch) = tree.branches.get(&key) {
-                for node in branch.reachable() {
-                    if tree.is_open(&node.id, deep) {
-                        links.push((node.id.clone(), key.clone()));
-                        let inner = tree.opens_by_default(&node.id, deep);
-                        visit(tree, Some(node.id.clone()), inner, reachable, links);
-                    }
+            for node in tree.children(&key) {
+                if node.expandable() && tree.is_open(&node.id, deep) {
+                    links.push((node.id.clone(), key.clone()));
+                    let inner = tree.opens_by_default(&node.id, deep);
+                    visit(tree, Some(node.id.clone()), inner, reachable, links);
                 }
             }
         }
@@ -918,6 +923,7 @@ impl Tree {
             &mut links,
         );
         self.branches.retain(|key, _| reachable.contains_key(key));
+        self.direct.retain(|key, _| reachable.contains_key(key));
         for (key, branch) in &mut self.branches {
             branch.deep = reachable[key];
         }
@@ -946,7 +952,15 @@ impl Tree {
     }
 
     fn loaded(&self) -> usize {
-        self.branches.values().map(Branch::resident).sum()
+        self.branches.values().map(Branch::resident).sum::<usize>() + self.direct.len()
+    }
+
+    fn children(&self, parent: &Option<TreeId>) -> impl Iterator<Item = &Node> {
+        let branch = self.branches.get(parent);
+        let direct = self.direct.get(parent).filter(|direct| {
+            branch.is_none_or(|branch| !branch.reachable().any(|node| node.id == direct.id))
+        });
+        branch.into_iter().flat_map(Branch::reachable).chain(direct)
     }
 
     /// Whether the active sort orders the items of branch `id`. Discs and
@@ -1110,12 +1124,12 @@ impl Tree {
         let sorts = self.sorts(id);
         let deep = self.branch_deep(id);
         let tree = &*self;
-        let open = |key: &TreeId| tree.is_open(key, deep);
+        let open = |node: &Node| tree.retains_anchor(node, deep);
         let anchors = |branch: &Branch| -> HashSet<TreeId> {
             branch
                 .nodes()
+                .filter(|node| open(node))
                 .map(|n| n.id.clone())
-                .filter(|key| open(key))
                 .collect()
         };
         let opened = self.branches.get(id).map(anchors).unwrap_or_default();
@@ -1126,7 +1140,7 @@ impl Tree {
             }
             if !sorts || branch.unsorted {
                 while branch.loaded_pages() > RESIDENT_PAGES
-                    && let Some(index) = branch.farthest(keep)
+                    && let Some(index) = branch.least_recent(keep)
                 {
                     branch.pages[index].release(&open, lens);
                 }
@@ -1157,7 +1171,7 @@ impl Tree {
                 .map(|branch| {
                     branch
                         .nodes()
-                        .filter(|n| self.is_open(&n.id, deep))
+                        .filter(|n| self.retains_anchor(n, deep))
                         .map(|n| n.id.clone())
                         .collect()
                 })
@@ -1175,11 +1189,31 @@ impl Tree {
             match page {
                 Some(page) => page.release(&open, lens),
                 None => {
-                    self.saturated |= lens.is_some();
+                    if lens.is_some() {
+                        self.saturated = true;
+                        let excess = self.loaded().saturating_sub(LOADED_NODE_LIMIT);
+                        if let Some(hits) = self
+                            .branches
+                            .get_mut(id)
+                            .and_then(|branch| branch.pages.get_mut(keep))
+                            .and_then(|page| page.hits.as_mut())
+                        {
+                            hits.nodes.truncate(hits.nodes.len().saturating_sub(excess));
+                        }
+                    }
                     break;
                 }
             }
         }
+    }
+
+    fn retains_anchor(&self, node: &Node, deep: bool) -> bool {
+        let id = &node.id;
+        node.expandable()
+            && self.is_open(id, deep)
+            && (self.reads_first(id)
+                || self.branches.contains_key(&Some(id.clone()))
+                || self.pending.contains_key(&Some(id.clone())))
     }
 
     /// Whether the first page of open item `id` is read without waiting for
@@ -1219,7 +1253,7 @@ impl Tree {
                         return Some((id, source()?, fetch));
                     }
                 }
-                for node in branch.reachable() {
+                for node in tree.children(&id) {
                     if tree.is_open(&node.id, branch.deep)
                         && let Some(next) = find(tree, Some(node.id.clone()), Some(node))
                     {
@@ -1312,6 +1346,10 @@ impl Projection<'_> {
     fn visit(&mut self, parent: Option<TreeId>, depth: usize, inherited: bool) {
         let tree = self.tree;
         let Some(branch) = tree.branches.get(&parent) else {
+            if let Some(direct) = tree.direct.get(&parent) {
+                let matched = inherited || self.lens.is_none_or(|lens| lens.matches(direct));
+                self.node(direct, &parent, depth, tree.branch_deep(&parent), matched);
+            }
             if inherited || self.lens.is_none() {
                 let row = self.len;
                 if let Some(key) = &parent
@@ -1334,11 +1372,20 @@ impl Projection<'_> {
         } else {
             self.browse(branch, &parent, depth, sorted);
         }
+        if let Some(direct) = tree.direct.get(&parent) {
+            let already_listed = !(sorted && self.lens.is_none() && !branch.complete())
+                && branch.reachable().any(|node| node.id == direct.id);
+            if !already_listed {
+                let matched = inherited || self.lens.is_none_or(|lens| lens.matches(direct));
+                self.node(direct, &parent, depth, branch.deep, matched);
+            }
+        }
         let text = if let Some(text) = &branch.notice {
             Some(text.clone())
         } else if sorts && branch.unsorted {
             Some("Too many items to sort · Shown in folder order".into())
-        } else if branch.pages.iter().all(|page| page.len == 0)
+        } else if !tree.direct.contains_key(&parent)
+            && branch.pages.iter().all(|page| page.len == 0)
             && branch.more.is_none()
             && depth > 0
             && (inherited || self.lens.is_none())
@@ -1454,7 +1501,11 @@ impl Projection<'_> {
         for (index, page) in branch.pages.iter().enumerate() {
             match (&page.nodes, page.hits(lens.query)) {
                 (Some(nodes), _) => found.extend(nodes.iter().map(|node| (index, node))),
-                (None, Some(hits)) => found.extend(hits.iter().map(|node| (index, node))),
+                (None, Some(hits)) => {
+                    let mut retained: Vec<_> = page.anchors.iter().chain(hits).collect();
+                    retained.sort_unstable_by_key(|(offset, _)| *offset);
+                    found.extend(retained.into_iter().map(|(_, node)| (index, node)));
+                }
                 (None, None) => {
                     complete = false;
                     if !saturated {
@@ -1563,6 +1614,15 @@ fn physical_branch(
     after: Option<&crate::library::ListingCursor>,
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<Branch> {
+    physical_page(path, after, PAGE, alive)
+}
+
+fn physical_page(
+    path: &Path,
+    after: Option<&crate::library::ListingCursor>,
+    limit: usize,
+    alive: &dyn Fn() -> bool,
+) -> anyhow::Result<Branch> {
     let crate::discovery::FolderBranch {
         dirs,
         programs,
@@ -1570,7 +1630,7 @@ fn physical_branch(
         next,
         paged,
         notice,
-    } = crate::discovery::tree_folder(path, after, PAGE, alive)?;
+    } = crate::discovery::tree_folder(path, after, limit, alive)?;
     let mut nodes = dirs
         .into_iter()
         .map(|dir| Node::folder(None, dir))
@@ -1603,7 +1663,7 @@ fn physical_branch(
                     .map(|t| Node::track(t, None))
                     .collect::<Vec<_>>()
             })),
-            Shelf::Link(..) => {}
+            Shelf::Link(..) | Shelf::Artist(_) => {}
         }
     }
     let mut branch = Branch::page(nodes, next.map(Cursor::Listing));
@@ -1718,7 +1778,7 @@ fn indexed_branch(
 
 impl Browser {
     pub(crate) fn listing_tree(&self) -> bool {
-        self.prefs.mode == ViewMode::Tree && self.has_presentations()
+        self.presentation() == Some(ViewMode::Tree)
     }
 
     pub(crate) fn tree_expansion(&self, cx: &App) -> Expansion {
@@ -1727,12 +1787,7 @@ impl Browser {
 
     pub(crate) fn reset_tree(&mut self, expansion: Expansion, cx: &mut App) {
         self.tree.update(cx, |table, cx| {
-            let delegate = table.delegate_mut();
-            delegate.tree = Tree::default();
-            delegate.tree.set_expansion(expansion);
-            delegate.rows.clear();
-            delegate.selected = None;
-            delegate.restore = None;
+            table.delegate_mut().reset(expansion);
             table.clear_selection(cx);
             crate::table::scroll_to_top(table);
             cx.notify();
@@ -1912,7 +1967,7 @@ impl Browser {
                                 cx.background_spawn(async move {
                                     let _slot = workers.acquire().await;
                                     let current = || work.is_current(generation);
-                                    anyhow::ensure!(current(), crate::store::Cancelled);
+                                    anyhow::ensure!(current(), crate::store::Canceled);
                                     // An unreadable folder still lists its
                                     // indexed recordings.
                                     Ok(indexed_dirs(root, &path, after.as_deref(), &current)
@@ -1946,17 +2001,13 @@ impl Browser {
                         };
                         store
                             .query(&ticket, generation, move |s| {
-                                let scope = Scope::Album(id);
-                                let keys = s.disc_keys(scope)?;
-                                let end = keys.len().min(offset.saturating_add(PAGE));
-                                let rows =
-                                    s.rows(scope, keys.get(offset..end).unwrap_or_default())?;
+                                let (rows, next) = s.disc_page(id, offset, PAGE)?;
                                 Ok(Branch::page(
                                     rows.into_iter()
                                         .filter(|row| row.available)
                                         .map(|row| Node::track(row.track, Some(disc.clone())))
                                         .collect(),
-                                    (end < keys.len()).then_some(Cursor::Offset(end)),
+                                    next.map(Cursor::Offset),
                                 ))
                             })
                             .await
@@ -1969,7 +2020,7 @@ impl Browser {
                         };
                         cx.background_spawn(async move {
                             let _slot = workers.acquire().await;
-                            anyhow::ensure!(work.is_current(generation), crate::store::Cancelled);
+                            anyhow::ensure!(work.is_current(generation), crate::store::Canceled);
                             physical_branch(&path, after.as_ref(), &|| work.is_current(generation))
                         })
                         .await

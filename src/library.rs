@@ -19,6 +19,8 @@ pub struct Track {
     pub title: String,
     #[serde(default)]
     pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     #[serde(default)]
     pub album: String,
     #[serde(default)]
@@ -62,6 +64,7 @@ impl Track {
             title: name(&path),
             source: path,
             artist: String::new(),
+            album_artist: None,
             album: String::new(),
             duration: None,
             number: None,
@@ -111,7 +114,12 @@ impl Track {
             if let Some(title) = tag.title() {
                 self.title = title.into_owned();
             }
-            self.artist = tag.artist().unwrap_or_default().into_owned();
+            self.artist = tag.artist().unwrap_or_default().trim().to_owned();
+            self.album_artist = tag
+                .get_string(lofty::tag::ItemKey::AlbumArtist)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
             self.album = tag.album().unwrap_or_default().into_owned();
             self.number = tag.track();
             self.disc_number = tag.disk();
@@ -415,20 +423,25 @@ impl NameKey {
     pub fn as_str(&self) -> &str {
         &self.name
     }
-}
-
-impl Ord for NameKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn logical_cmp(&self, other: &Self) -> std::cmp::Ordering {
         #[cfg(windows)]
-        let order = {
+        {
             use windows::{Win32::UI::Shell::StrCmpLogicalW, core::PCWSTR};
             // Both keys are NUL-terminated and outlive the call.
             unsafe { StrCmpLogicalW(PCWSTR(self.wide.as_ptr()), PCWSTR(other.wide.as_ptr())) }
                 .cmp(&0)
-        };
+        }
         #[cfg(not(windows))]
-        let order = self.name.to_lowercase().cmp(&other.name.to_lowercase());
-        order.then_with(|| self.name.cmp(&other.name))
+        {
+            self.name.to_lowercase().cmp(&other.name.to_lowercase())
+        }
+    }
+}
+
+impl Ord for NameKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.logical_cmp(other)
+            .then_with(|| self.name.cmp(&other.name))
     }
 }
 
@@ -443,6 +456,7 @@ impl PartialOrd for NameKey {
 /// the directory.
 struct Window {
     after: Option<NameKey>,
+    inclusive: bool,
     limit: usize,
     kept: std::collections::BinaryHeap<(NameKey, PathBuf)>,
     /// Entries after the resume point, including those not kept.
@@ -453,6 +467,7 @@ impl Window {
     fn new(after: Option<&str>, limit: usize) -> Self {
         Self {
             after: after.map(|name| NameKey::new(name.to_owned())),
+            inclusive: false,
             limit,
             kept: Default::default(),
             seen: 0,
@@ -460,7 +475,13 @@ impl Window {
     }
 
     fn offer(&mut self, key: NameKey, path: PathBuf) {
-        if self.after.as_ref().is_some_and(|after| key <= *after) {
+        if self.after.as_ref().is_some_and(|after| {
+            if self.inclusive {
+                key.logical_cmp(after).is_lt()
+            } else {
+                key <= *after
+            }
+        }) {
             return;
         }
         self.seen += 1;
@@ -485,6 +506,8 @@ impl Window {
 pub enum ListingCursor {
     Dirs(String),
     Files(String),
+    /// A recording reveal begins at its exact filename.
+    AtFile(String),
 }
 
 /// The files of one page of a folder listing.
@@ -536,11 +559,17 @@ pub fn list_page(
     let (dirs_after, files_after) = match after {
         None => (None, None),
         Some(ListingCursor::Dirs(name)) => (Some(name.as_str()), None),
-        Some(ListingCursor::Files(name)) => (None, Some(name.as_str())),
+        Some(ListingCursor::Files(name) | ListingCursor::AtFile(name)) => {
+            (None, Some(name.as_str()))
+        }
     };
-    let listing_dirs = !matches!(after, Some(ListingCursor::Files(_)));
+    let listing_dirs = !matches!(
+        after,
+        Some(ListingCursor::Files(_) | ListingCursor::AtFile(_))
+    );
     let mut dirs = Window::new(dirs_after, if listing_dirs { limit } else { 0 });
     let mut files = Window::new(files_after, limit);
+    files.inclusive = matches!(after, Some(ListingCursor::AtFile(_)));
     let mut all_files: Option<Vec<PathBuf>> = Some(Vec::new());
     let mut cover: Option<PathBuf> = None;
     let mut notices = Vec::new();
@@ -549,7 +578,7 @@ pub fn list_page(
     for entry in fs::read_dir(path).with_context(|| format!("Cannot open {}", path.display()))? {
         visited += 1;
         if visited.is_multiple_of(256) {
-            anyhow::ensure!(current(), crate::store::Cancelled);
+            anyhow::ensure!(current(), crate::store::Canceled);
         }
         let entry = match entry {
             Ok(e) => e,
@@ -581,7 +610,11 @@ pub fn list_page(
             continue;
         }
         if is_sheet(&p) || is_audio(&p) {
-            files.offer(NameKey::new(name(&p)), p.clone());
+            // A CUE and its image commonly have identical stems.
+            files.offer(
+                NameKey::new(entry.file_name().to_string_lossy().into_owned()),
+                p.clone(),
+            );
             if let Some(list) = &mut all_files {
                 if list.len() < GROUPED_FILES {
                     list.push(p);
@@ -598,11 +631,11 @@ pub fn list_page(
             cover = Some(p);
         }
     }
-    anyhow::ensure!(current(), crate::store::Cancelled);
+    anyhow::ensure!(current(), crate::store::Canceled);
     let (dirs, more_dirs) = dirs.finish();
     let next_dir = more_dirs.then(|| dirs.last().map(|(key, _)| key.as_str().to_owned()));
     let files = (!more_dirs && files_wanted).then(|| match all_files {
-        Some(all) if files_after.is_none() => {
+        Some(all) if files_after.is_none() || files.inclusive => {
             let (sheets, audio) = all.into_iter().partition(|p| is_sheet(p));
             ListedFiles::All { audio, sheets }
         }
@@ -660,7 +693,7 @@ pub fn claimed_sources(
     {
         visited += 1;
         if visited.is_multiple_of(64) {
-            anyhow::ensure!(current(), crate::store::Cancelled);
+            anyhow::ensure!(current(), crate::store::Canceled);
         }
         let Ok(entry) = entry else { continue };
         let sheet = entry.path();
@@ -688,7 +721,7 @@ pub fn claimed_sources(
             }
         }
     }
-    anyhow::ensure!(current(), crate::store::Cancelled);
+    anyhow::ensure!(current(), crate::store::Canceled);
     Ok(claimed)
 }
 

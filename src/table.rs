@@ -35,8 +35,8 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-pub use layout::{ContextKind, Layouts, LegacyColumn};
-pub(crate) use layout::{Layout, SHELF_FIELDS, TREE_FIELDS};
+pub(crate) use layout::{ARTIST_FIELDS, Layout, SHELF_FIELDS, TREE_FIELDS};
+pub use layout::{ContextKind, Layouts};
 pub(crate) use playback::{ScanningFolder, play_library};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -142,7 +142,6 @@ pub enum Field {
     Plays,
     LastPlayed,
     ListeningTime,
-    #[serde(alias = "Liked")]
     Favorite,
 }
 impl Field {
@@ -331,6 +330,7 @@ pub(crate) enum RowKey {
     /// A release in the Releases list, by its first disc.
     Release(DiscId),
     Link(crate::collection::ShelfLink),
+    Artist(crate::store::ArtistId),
     Track(PathBuf, Option<DiscTrack>),
     Tree(crate::browser::TreeId),
     Key(i64),
@@ -669,13 +669,6 @@ pub(crate) struct Viewport {
     horizontal: f32,
 }
 impl Viewport {
-    pub fn legacy(scroll: f32) -> Self {
-        Self {
-            scroll,
-            ..Self::default()
-        }
-    }
-
     pub fn capture<D: TableDelegate>(
         table: &TableState<D>,
         height: f32,
@@ -1081,7 +1074,7 @@ impl MusicTable {
                 }
                 let (listing, sections) = match result {
                     Ok(listing) => listing,
-                    Err(e) if store::is_cancelled(&e) => return None,
+                    Err(e) if store::is_canceled(&e) => return None,
                     Err(e) => {
                         t.delegate_mut().empty = format!("{e:#}").into();
                         Default::default()
@@ -1439,21 +1432,6 @@ impl MusicTable {
             DiscId::Library(id) => self.catalog.read(cx).playing_album(track) == Some(id),
             _ => disc.id.contains(track) && disc.tracks.iter().any(|t| t.same_item(track)),
         }
-    }
-
-    pub(crate) fn contains_playlist_entry(
-        &self,
-        occurrence: crate::queue::PlaylistOccurrence,
-        track_id: Option<i64>,
-    ) -> bool {
-        let Contents::Library(p) = &self.rows.data else {
-            return false;
-        };
-        p.scope == Scope::Playlist(occurrence.playlist)
-            && p.keys
-                .iter()
-                .position(|&key| key == occurrence.entry)
-                .is_some_and(|index| p.playlist_tracks.get(index).copied() == track_id)
     }
 
     fn is_playing(&self, row: usize, t: &Track, cx: &App) -> bool {
@@ -2258,17 +2236,15 @@ impl TableDelegate for MusicTable {
             PopupMenuItem::new("Reveal in Folder")
                 .icon(IconName::FolderOpen)
                 .on_click(move |_, window, cx| {
-                    let original = track.disc.as_ref().map_or(&track.source, |d| &d.sheet);
-                    if let Some(folder) = original.parent() {
-                        let _ = browser.update(cx, |b, cx| {
-                            b.open_revealing(
-                                folder.to_owned(),
-                                Some(crate::browser::Reveal::Track(track.clone())),
-                                window,
-                                cx,
-                            )
-                        });
-                    }
+                    let _ = browser.update(cx, |b, cx| {
+                        b.locate(
+                            track.clone(),
+                            crate::library::DiscContext::Inferred,
+                            crate::browser::Destination::Locations,
+                            window,
+                            cx,
+                        );
+                    });
                 }),
         )
     }

@@ -38,7 +38,7 @@ def profile(root, width, mode="tracks", query=""):
     return dict(layout=dict(version=3, center=center), workspace=dict(active=1), window=dict(close_to_tray=False))
 
 
-def wait_for(process, label=None, min_y=None, timeout=12):
+def wait_for(process, label=None, min_y=None, timeout=12, *, min_x=None):
     deadline = time.monotonic() + timeout
     last_error = None
     while time.monotonic() < deadline and process.poll() is None:
@@ -47,15 +47,15 @@ def wait_for(process, label=None, min_y=None, timeout=12):
             return hwnd
         if hwnd:
             try:
-                return hwnd, control_centers(hwnd, [label], min_y=min_y)[0]
+                return hwnd, control_centers(hwnd, [label], min_y=min_y, min_x=min_x)[0]
             except subprocess.CalledProcessError as exc:
                 last_error = exc
         time.sleep(0.1)
     raise RuntimeError(f"Native window did not show {label!r}") from last_error
 
 
-def click(process, label):
-    hwnd, point = wait_for(process, label)
+def click(process, label, **bounds):
+    hwnd, point = wait_for(process, label, **bounds)
     click_control(hwnd, point)
     return hwnd
 
@@ -234,7 +234,8 @@ def journey(exe, test_exe, output):
         wait_for(process, "Tracks")
         screenshot(hwnd, output / "library-sidebar.png")
 
-        click(process, "Releases")
+        _, sidebar = wait_for(process, "Browse Collections")
+        click(process, "Releases", min_x=sidebar.x + 180)
         wait_for(process, "Album / Disc")
         time.sleep(0.25)
         screenshot(hwnd, output / "releases.png")
@@ -283,9 +284,43 @@ def journey(exe, test_exe, output):
         wait_for(process, "Pause")
         click(process, "Releases")
         wait_for(process, "Album / Disc")
+        click(process, "Go to Playing Track")
         wait_for(process, "Pause")
+        screenshot(hwnd, output / "reveal-release.png")
     finally:
         close(process)
+
+    previous = browser_states(output / "workspace-v1.json")[1]["current"]
+    assert previous["location"] == "Releases", previous
+    assert "Release" in previous["bookmark"]["selected"], previous
+    saved_queue = json.loads((output / "workspace-v1.json").read_text(encoding="utf-8"))["queue"]
+    queue = saved_queue["queue"]
+    playing = queue["entries"][queue["current"]]["track"]
+    chapter = playing["disc"]
+    with sqlite3.connect(output / "library.sqlite3") as db:
+        target_id, = db.execute(
+            """SELECT t.id FROM tracks t JOIN files a ON a.id = t.anchor
+               JOIN files s ON s.id = t.source WHERE a.path_key = ? AND s.path_key = ?
+               AND t.part = ? AND t.first_tick = ? AND t.last_tick IS ? AND t.present""",
+            (os.path.normpath(chapter["sheet"]).lower(), os.path.normpath(playing["source"]).lower(),
+             chapter["number"], chapter["start"], chapter.get("end")),
+        ).fetchone()
+    tree = profile(root, 1000, "tree", "hide all recordings")
+    tree["queue"] = saved_queue
+    process = launch(exe, output, tree)
+    try:
+        hwnd = click(process, "Go to Playing Track")
+        wait_for(process, playing["title"])
+        screenshot(hwnd, output / "reveal-tree.png")
+    finally:
+        close(process)
+    restored = browser_states(output / "workspace-v1.json")[1]
+    assert restored["current"]["location"] == {"Library": root}, restored
+    assert restored["current"]["mode"] == "tree" and not restored["current"].get("query"), restored
+    assert restored["current"]["bookmark"]["selected"]["Tree"] == {"IndexedTrack": target_id}, restored
+    assert restored["back"][-1]["query"] == "hide all recordings", restored
+    after = json.loads((output / "workspace-v1.json").read_text(encoding="utf-8"))["queue"]["queue"]
+    assert after["entries"] == queue["entries"] and after["current"] == queue["current"]
 
     for name, width, label, query in [
         ("wide", 760, "Releases", ""),
@@ -309,6 +344,7 @@ def journey(exe, test_exe, output):
     favorites_journey(exe, output)
     (output / "result.json").write_text(json.dumps(dict(expanded_nodes=len(expanded),
         route_preserved=True, restart_restored=True, back_forward_restored=True, playback_continued=True,
+        reveal_release=True, reveal_tree_clears_filter_with_history=True,
         independent_splits=True, responsive_cases=5,
         favorites_column_suppressed=True, multi_remove_preserved_ratings=True, live_resize=True), indent=2), encoding="utf-8")
 
@@ -329,4 +365,4 @@ if __name__ == "__main__":
             raise
     else:
         run([sys.executable, "-B", str(Path(__file__).resolve()), str(args.exe), str(args.test_exe),
-             str(args.output), "--worker"], 150)
+             str(args.output), "--worker"], 225)

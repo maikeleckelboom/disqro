@@ -14,15 +14,15 @@ use std::{
 
 /// A superseded query, or a scan stopped before it finished.
 #[derive(Debug)]
-pub struct Cancelled;
-impl std::fmt::Display for Cancelled {
+pub struct Canceled;
+impl std::fmt::Display for Canceled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Cancelled")
+        f.write_str("Canceled")
     }
 }
-impl std::error::Error for Cancelled {}
-pub fn is_cancelled(e: &anyhow::Error) -> bool {
-    e.is::<Cancelled>()
+impl std::error::Error for Canceled {}
+pub fn is_canceled(e: &anyhow::Error) -> bool {
+    e.is::<Canceled>()
         || e.downcast_ref::<rusqlite::Error>().is_some_and(|e| {
             e.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted)
         })
@@ -160,9 +160,9 @@ impl Handle {
             mailbox.ready.notify_one();
         }
         async move {
-            anyhow::ensure!(!stale, Cancelled);
+            anyhow::ensure!(!stale, Canceled);
             anyhow::ensure!(!full, "The library is busy. Try the action again.");
-            rx.recv().await.map_err(|_| Cancelled)?
+            rx.recv().await.map_err(|_| Canceled)?
         }
     }
     /// Runs a read that a newer generation of `ticket` supersedes.
@@ -180,7 +180,7 @@ impl Handle {
         self.submit(Some((ticket.clone(), generation)), move |store| {
             let store = store.map_err(|e| anyhow!("The library is unavailable: {e}"))?;
             if !ticket.is_current(generation) {
-                return Err(Cancelled.into());
+                return Err(Canceled.into());
             }
             let watch = ticket.clone();
             store

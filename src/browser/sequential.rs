@@ -488,12 +488,6 @@ impl Browser {
         )
     }
 
-    pub(super) fn reveal_collection_scope(&self, folder: &Path, cx: &App) -> Option<PathBuf> {
-        self.physical_scope(folder, cx)
-            .filter(|scope| !scope.release_only)
-            .map(|scope| scope.path)
-    }
-
     pub(super) fn refresh_folder_traversal(&mut self, cx: &mut Context<Self>) {
         let scope =
             if !self.listing_tree() && self.location.is_folder() && self.folder_ready && !self.busy
@@ -696,7 +690,9 @@ impl Browser {
             _ => return None,
         };
         let node = sequence.adjacent(&current, kind, next)?;
-        Some((node.route(kind, root, folder)?, node.label(kind, false)))
+        let mut route = node.route(kind, root, folder)?;
+        route.shelf.clone_from(&self.shelf_origin);
+        Some((route, node.label(kind, false)))
     }
 
     pub(crate) fn sequence_label(&self, kind: SequenceKind, next: bool) -> Option<String> {

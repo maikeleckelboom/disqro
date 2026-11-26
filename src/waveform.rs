@@ -77,7 +77,7 @@ impl Reader {
     ) -> Result<()> {
         while self.cursor < end {
             if self.used == self.buffer.len() {
-                ensure!(current(), "Analysis cancelled");
+                ensure!(current(), "Analysis canceled");
                 self.buffer = self.decoder.decode()?;
                 self.used = 0;
                 ensure!(!self.buffer.is_empty(), "Unexpected source end");
@@ -99,7 +99,7 @@ pub fn samples(
     reader: &mut Option<Reader>,
     current: &impl Fn() -> bool,
 ) -> Result<Vec<Frame>> {
-    ensure!(current(), "Analysis cancelled");
+    ensure!(current(), "Analysis canceled");
     ensure!(
         range.start < range.end && range.end <= s.frames && source_unchanged(s),
         "Sample range unavailable"
@@ -226,7 +226,7 @@ pub fn feed(
     reader: &mut Option<Reader>,
     current: &impl Fn() -> bool,
 ) -> Result<()> {
-    ensure!(current(), "Analysis cancelled");
+    ensure!(current(), "Analysis canceled");
     ensure!(
         range.end <= source.frames && source_unchanged(source),
         "Recording changed"
@@ -257,7 +257,7 @@ pub fn load(
     reader: &mut Option<Reader>,
     current: &impl Fn() -> bool,
 ) -> Result<Page> {
-    ensure!(current(), "Analysis cancelled");
+    ensure!(current(), "Analysis canceled");
     if let Some(page) = cached(source, request, cache) {
         return Ok(page);
     }

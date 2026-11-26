@@ -27,7 +27,7 @@ use gpui_kit::{
 };
 pub use navigation::continue_cd;
 use navigation::{Arrival, History, Pending};
-pub(crate) use navigation::{Bookmark, Route, SavedVisit};
+pub(crate) use navigation::{Route, SavedVisit};
 pub(crate) use sequential::SequenceKind;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -67,13 +67,44 @@ pub enum Location {
     Playlist(PlaylistId),
     Collections,
     Playlists,
+    /// Every artist of the library.
+    Artists,
+    /// One artist: the tracks it performs and the releases it appears on.
+    Artist {
+        id: crate::store::ArtistId,
+        name: String,
+    },
+    /// Every release of the library.
+    Releases,
 }
 impl Location {
     pub fn is_folder(&self) -> bool {
         matches!(self, Self::Folder(_))
     }
+    /// A list of other destinations rather than of music.
     pub fn is_directory(&self) -> bool {
-        matches!(self, Self::Collections | Self::Playlists)
+        matches!(self, Self::Collections | Self::Playlists | Self::Artists)
+    }
+    /// How this destination can be shown, its default first. What a
+    /// destination holds and how it is shown are separate: Releases always
+    /// lists releases, while a collection or an artist can be shown as
+    /// tracks or as releases, and only folders and collections as a tree.
+    pub fn presentations(&self) -> &'static [ViewMode] {
+        match self {
+            Self::Folder(_) | Self::Library(_) => {
+                &[ViewMode::Tracks, ViewMode::Albums, ViewMode::Tree]
+            }
+            Self::Artist { .. } => &[ViewMode::Tracks, ViewMode::Albums],
+            Self::Releases => &[ViewMode::Albums],
+            _ => &[],
+        }
+    }
+    fn presentation(&self, mode: ViewMode) -> Option<ViewMode> {
+        let choices = self.presentations();
+        choices
+            .contains(&mode)
+            .then_some(mode)
+            .or_else(|| choices.first().copied())
     }
     fn unavailable(&self, catalog: &Catalog) -> Option<&'static str> {
         if !catalog.loaded {
@@ -100,7 +131,6 @@ impl Location {
 pub enum Reveal {
     Play(PathBuf, u64),
     Select(PathBuf),
-    Track(Arc<Track>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -136,9 +166,8 @@ pub struct Browser {
     /// The browser that receives navigation from Library and Locations.
     pub(crate) active: bool,
     history: History,
+    shelf_origin: Option<navigation::ShelfOrigin>,
     pending: Option<Pending>,
-    /// A deliberate artwork click while discovery or an index query is still running.
-    pending_playing: Option<(u64, Arc<Track>, library::DiscContext, Destination)>,
     folder_child: Option<PathBuf>,
     window: AnyWindowHandle,
     navigation: u64,
@@ -168,6 +197,7 @@ pub struct Browser {
     generation: u64,
     query: String,
     albums: Ticket,
+    shelf_loading: bool,
     /// The path editor Ctrl+L opens in this browser's header.
     pub address: Option<WeakEntity<crate::location::LocationBar>>,
     /// The dock panel showing this browser, whose commands its header offers.
@@ -216,6 +246,7 @@ impl Browser {
         let this = cx.weak_entity();
         let shelf_layout = columns.shelf.clone();
         let tree_layout = columns.tree.clone();
+        let artist_layout = columns.artists.clone();
         let table = cx.new(|cx| {
             let mut table = crate::table::managed_table(
                 MusicTable::new(player.clone(), catalog.clone(), columns, this.clone()),
@@ -227,7 +258,7 @@ impl Browser {
             table
         });
         let discs = cx.new(|cx| {
-            let discs = Discs::new(this.clone(), table.downgrade(), shelf_layout);
+            let discs = Discs::new(this.clone(), table.downgrade(), shelf_layout, artist_layout);
             crate::table::managed_table(discs, window, cx)
         });
         cx.subscribe_in(
@@ -453,8 +484,8 @@ impl Browser {
             folder_traversal: Default::default(),
             indexed_sequence: Default::default(),
             history: History::default(),
+            shelf_origin: None,
             pending: None,
-            pending_playing: None,
             folder_child: None,
             window: window.window_handle(),
             navigation: 0,
@@ -465,6 +496,7 @@ impl Browser {
             subfolders: false,
             folder_count: 0,
             albums: Ticket::default(),
+            shelf_loading: false,
             address: None,
             pane: None,
         }
@@ -548,16 +580,32 @@ impl Browser {
             // A folder without subfolders is one album or a loose set even
             // inside a collection: its tracks are what it has to show.
             Location::Folder(_) => self.subfolders && self.folder_count > 0,
-            Location::Library(_) => true,
+            Location::Library(_) | Location::Artist { .. } | Location::Releases => true,
             _ => false,
         }
     }
+    /// How the destination shown can be presented, when there is a choice.
+    pub fn presentations(&self) -> &'static [ViewMode] {
+        if self.page.is_some() {
+            return &[];
+        }
+        self.location.presentations()
+    }
+    /// Whether the destination offers a choice of presentation.
     pub fn has_presentations(&self) -> bool {
-        self.page.is_none() && matches!(self.location, Location::Folder(_) | Location::Library(_))
+        self.presentations().len() > 1
+    }
+    /// The presentation in effect: the chosen one where the destination
+    /// offers it, otherwise the destination's own.
+    pub fn presentation(&self) -> Option<ViewMode> {
+        self.page
+            .is_none()
+            .then(|| self.location.presentation(self.prefs.mode))
+            .flatten()
     }
 
     pub fn listing_discs(&self) -> bool {
-        self.prefs.mode == ViewMode::Albums && self.has_presentations()
+        self.presentation() == Some(ViewMode::Albums)
     }
 
     pub(crate) fn folder_scope(&self) -> Option<bool> {
@@ -574,8 +622,14 @@ impl Browser {
     /// The library view the table shows, if any.
     fn scope(&self) -> Option<Scope> {
         Some(match &self.location {
-            Location::Folder(_) | Location::Collections | Location::Playlists => return None,
+            Location::Folder(_)
+            | Location::Collections
+            | Location::Playlists
+            | Location::Artists => return None,
             Location::Library(Some(root)) if !self.subfolders => Scope::CollectionFolder(*root),
+            Location::Releases => Scope::Releases,
+            Location::Artist { id, .. } if self.listing_discs() => Scope::ArtistReleases(*id),
+            Location::Artist { id, .. } => Scope::Artist(*id),
             Location::Library(root) => Scope::Library(*root),
             Location::Album { id, .. } => Scope::Album(*id),
             Location::Release { id, .. } => Scope::Release(*id),
@@ -637,7 +691,11 @@ impl Browser {
                 window,
                 cx,
             ),
-            Some(Shelf::Link(link, _)) => self.show(link.location(), window, cx),
+            Some(row @ (Shelf::Link(..) | Shelf::Artist(_))) => {
+                if let Some(location) = row.destination() {
+                    self.show(location, window, cx)
+                }
+            }
             None => {}
         }
     }
@@ -652,7 +710,7 @@ impl Browser {
     pub fn open_disc(&mut self, d: &Disc, w: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = d.id.album() {
             let root = d.root.or_else(|| self.library_root());
-            self.show(
+            self.open_indexed_program(
                 Location::Album {
                     root,
                     id,
@@ -678,7 +736,7 @@ impl Browser {
     ) {
         if let DiscId::Library(id) = key {
             let root = root.or_else(|| self.library_root());
-            self.show(
+            self.open_indexed_program(
                 Location::Release {
                     root,
                     id: *id,
@@ -739,13 +797,17 @@ impl Browser {
         cx.notify();
     }
     pub fn view(&mut self, mode: ViewMode, window: &mut Window, cx: &mut Context<Self>) {
-        if self.prefs.mode == mode {
+        if self.presentation() == Some(mode) && self.prefs.mode == mode {
             return;
         }
         let had_list_focus = self.list_focus(cx).is_focused(window);
         let was_tree = self.listing_tree();
         if let Location::Album { root, .. } | Location::Release { root, .. } = self.location {
-            self.up_to_collection(Location::Library(root), mode, window, cx);
+            let location = self
+                .shelf_origin
+                .as_ref()
+                .map_or(Location::Library(root), navigation::ShelfOrigin::location);
+            self.up_to_collection(location, mode, window, cx);
         } else if self.page.is_some() {
             self.up_to_collection(self.location.clone(), mode, window, cx);
         } else {
@@ -783,6 +845,7 @@ impl Browser {
     }
     fn filter(&mut self, cx: &mut Context<Self>) {
         self.albums.next();
+        self.shelf_loading = false;
         if self.listing_tree() {
             self.refresh_tree(cx);
         } else if self.location.is_directory() {
@@ -913,6 +976,8 @@ impl Browser {
             match (label, self.query.is_empty()) {
                 (Some("Collection"), true) => "No collections",
                 (Some("Collection"), false) => "No matching collections",
+                (Some(crate::collection::ARTIST), true) => "No artists",
+                (Some(crate::collection::ARTIST), false) => "No matching artists",
                 (Some(_), true) => "No playlists",
                 (Some(_), false) => "No matching playlists",
                 (None, true) => "No releases",
@@ -947,7 +1012,54 @@ impl Browser {
             cx.notify();
         });
     }
+    /// Lists the library's artists, read by the library worker and replaced
+    /// by a newer filter or destination before they arrive.
+    fn filter_artists(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = self.catalog.read(cx).handle() else {
+            return;
+        };
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut()
+                .set_rows(Arc::default(), Sections::default(), cx);
+        });
+        let search = self.query.clone();
+        let generation = self.albums.next();
+        let artists = store.query(&self.albums, generation, move |s| {
+            Ok(s.artists(&search)?
+                .into_iter()
+                .map(|artist| Shelf::Artist(Arc::new(artist)))
+                .collect::<Vec<_>>())
+        });
+        self.busy = true;
+        cx.spawn(async move |this, cx| {
+            let result = artists.await;
+            let _ = this.update(cx, |b, cx| {
+                if !b.albums.is_current(generation) || b.location != Location::Artists {
+                    return;
+                }
+                b.busy = false;
+                let rows = match result {
+                    Ok(rows) => rows,
+                    Err(e) if crate::store::is_canceled(&e) => return,
+                    Err(e) => {
+                        b.notice = Some(format!("{e:#}"));
+                        Vec::new()
+                    }
+                };
+                b.count = rows.len();
+                b.set_shelf(rows, Some(crate::collection::ARTIST), cx);
+                b.finish_listing(cx);
+                cx.emit(ViewChanged);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn filter_directory(&mut self, cx: &mut Context<Self>) {
+        if self.location == Location::Artists {
+            self.filter_artists(cx);
+            return;
+        }
         let catalog = self.catalog.read(cx);
         let (label, rows): (_, Vec<_>) = if self.location == Location::Collections {
             (
@@ -1046,14 +1158,16 @@ impl Browser {
         });
     }
     fn load_albums(&mut self, cx: &mut Context<Self>) {
-        let (Location::Library(root), Some(store)) =
-            (self.location.clone(), self.catalog.read(cx).handle())
+        let location = self.location.clone();
+        let (Location::Library(_) | Location::Releases | Location::Artist { .. }, Some(store)) =
+            (&location, self.catalog.read(cx).handle())
         else {
             return;
         };
         let search = self.query.clone();
         let scope = self.scope().expect("library shelf has a scope");
         let generation = self.albums.next();
+        self.shelf_loading = true;
         let albums = store.query(&self.albums, generation, move |s| {
             s.collection_albums(scope, &search)
         });
@@ -1063,36 +1177,39 @@ impl Browser {
                 Ok(albums) => {
                     cx.background_spawn(async move {
                         let mut items = Vec::with_capacity(albums.len());
+                        let mut count = 0;
+                        let mut duration = 0.;
                         for album in albums {
                             if !ticket.is_current(generation) {
-                                return Err(crate::store::Cancelled.into());
+                                return Err(crate::store::Canceled.into());
                             }
+                            count += album.count;
+                            duration += album.duration;
                             items.push(Arc::new(Disc::from_album(album)));
                         }
-                        Ok(items)
+                        Ok((Discs::shelve(items), count, duration))
                     })
                     .await
                 }
                 Err(e) => Err(e),
             };
             let _ = this.update(cx, |b, cx| {
-                if !b.albums.is_current(generation)
-                    || b.location != Location::Library(root)
-                    || !b.listing_discs()
+                if !b.albums.is_current(generation) || b.location != location || !b.listing_discs()
                 {
                     return;
                 }
-                let items = match result {
-                    Ok(items) => items,
-                    Err(e) if crate::store::is_cancelled(&e) => return,
+                b.shelf_loading = false;
+                let (rows, count, duration) = match result {
+                    Ok(shelf) => shelf,
+                    Err(e) if crate::store::is_canceled(&e) => return,
                     Err(e) => {
                         b.notice = Some(format!("{e:#}"));
-                        Vec::new()
+                        (Vec::new(), 0, 0.)
                     }
                 };
-                b.count = items.iter().map(|d| d.count).sum();
-                b.duration = Some(items.iter().map(|d| d.duration()).sum());
-                b.set_discs(items, cx);
+                b.count = count;
+                b.duration = Some(duration);
+                b.set_shelf(rows, None, cx);
                 b.finish_listing(cx);
                 cx.notify();
             });
@@ -1103,9 +1220,6 @@ impl Browser {
     pub fn library_listed(&mut self, count: usize, duration: f64, cx: &mut Context<Self>) {
         if self.listing_tree() {
             return;
-        }
-        if self.listing_discs() {
-            self.resume_playing_reveal(cx);
         }
         if self.scope().is_some() && self.active {
             self.table
@@ -1296,6 +1410,7 @@ impl Browser {
         self.filter(cx);
         cx.notify();
         let Some(events) = events else {
+            self.finish_listing(cx);
             return;
         };
         cx.spawn(async move |this, cx| {
@@ -1434,7 +1549,6 @@ impl Browser {
         let item = (0..table.len())
             .filter_map(|i| table.track(i))
             .find(|t| match request {
-                Reveal::Track(wanted) => wanted.same_item(t),
                 Reveal::Select(path) | Reveal::Play(path, _) => {
                     let path = self.alternate_sheet(path).unwrap_or(path);
                     crate::places::same_path(&t.source, path)
@@ -1500,6 +1614,9 @@ impl Browser {
             Location::Playlist(p) => catalog
                 .playlist(*p)
                 .map_or_else(|| "Playlist".into(), |p| p.name.clone()),
+            Location::Artists => "Artists".into(),
+            Location::Artist { name, .. } => name.clone(),
+            Location::Releases => "Releases".into(),
         }
     }
 }

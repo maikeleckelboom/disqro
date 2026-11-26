@@ -201,7 +201,7 @@ def profile(scenario, source):
                 window=dict(close_to_tray=False), layout=dict(version=3, center=center))
 
 
-def control_centers(hwnd, labels, *, min_y=None):
+def control_centers(hwnd, labels, *, min_y=None, min_x=None):
     # Query once. Every input message below targets this private HWND.
     script = r"""
 Add-Type -AssemblyName UIAutomationClient
@@ -209,12 +209,14 @@ Add-Type -AssemblyName UIAutomationTypes
 $root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]HWND)
 foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
     $match = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $label)
-    if ($env:DISQRO_CONTROL_MIN_Y) {
+    if ($env:DISQRO_CONTROL_MIN_Y -or $env:DISQRO_CONTROL_MIN_X) {
         $element = $null
         $matches = $root.FindAll([Windows.Automation.TreeScope]::Descendants, $match)
         for ($i=0; $i -lt $matches.Count; $i++) {
             $candidate = $matches.Item($i)
-            if ($candidate.Current.BoundingRectangle.Y -ge [int]$env:DISQRO_CONTROL_MIN_Y) {
+            $bounds = $candidate.Current.BoundingRectangle
+            if ((!$env:DISQRO_CONTROL_MIN_Y -or $bounds.Y -ge [int]$env:DISQRO_CONTROL_MIN_Y) -and
+                (!$env:DISQRO_CONTROL_MIN_X -or $bounds.X -ge [int]$env:DISQRO_CONTROL_MIN_X)) {
                 $element = $candidate
                 break
             }
@@ -230,7 +232,8 @@ foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
 """
     output = subprocess.check_output(["powershell", "-NoProfile", "-Command", script.replace("HWND", str(hwnd))],
                                      env=dict(os.environ, DISQRO_CONTROL_LABELS=json.dumps(labels),
-                                              DISQRO_CONTROL_MIN_Y='' if min_y is None else str(min_y)),
+                                              DISQRO_CONTROL_MIN_Y='' if min_y is None else str(min_y),
+                                              DISQRO_CONTROL_MIN_X='' if min_x is None else str(min_x)),
                                      creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
     coords = list(map(int, output.split()))
     return [W.POINT(x, y) for x, y in zip(coords[::2], coords[1::2], strict=True)]

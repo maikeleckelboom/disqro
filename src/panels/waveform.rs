@@ -1,4 +1,4 @@
-//! The detail deck follows a physical source at a fixed centre. Each instance
+//! The detail deck follows a physical source at a fixed center. Each instance
 //! owns its zoom and may hold a separate position for inspection.
 use super::{Home, Instances, Pane, PaneContent, PaneEvent, PanelType, Services};
 use crate::{

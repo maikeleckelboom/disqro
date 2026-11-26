@@ -8,8 +8,8 @@ use super::{Pane, PaneContent, PanelType, Router, Services};
 use crate::{
     assets::FileIcon,
     audio::Command,
-    browser::{Bookmark, Browser, Location, Route, SavedVisit, SequenceKind, music_home},
-    collection::{Page, ViewMode, ViewPrefs},
+    browser::{Browser, Location, Route, SavedVisit, SequenceKind, music_home},
+    collection::{ViewMode, ViewPrefs},
     location::{LocationBar, TrailWidths},
     player::Player,
     table::{Layouts, queue_targets},
@@ -47,11 +47,6 @@ pub static TYPE: PanelType = PanelType {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserState {
-    /// The view shown: a folder, a collection, Favorites or a playlist.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub location: Option<Location>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub page: Option<Page>,
     #[serde(
         skip_serializing_if = "Vec::is_empty",
         deserialize_with = "read_visits"
@@ -80,20 +75,10 @@ pub struct BrowserState {
     /// The Place Locations shows the folder under.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root: Option<PathBuf>,
-    /// Top-level preference from workspaces saved before per-visit state.
-    #[serde(rename = "albums", skip_serializing)]
-    pub(crate) legacy_albums: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layouts: Option<Layouts>,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub search: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub filter_open: bool,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub scroll: f32,
-}
-fn is_zero(v: &f32) -> bool {
-    *v == 0.
 }
 fn read_visits<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SavedVisit>, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
@@ -122,11 +107,7 @@ impl BrowserPane {
             .clone()
             .map(Layouts::validate)
             .unwrap_or(template.layouts);
-        let mut prefs = state.prefs.unwrap_or(template.prefs);
-        prefs.mode = state
-            .legacy_albums
-            .map(ViewMode::from)
-            .unwrap_or(prefs.mode);
+        let prefs = state.prefs.unwrap_or(template.prefs);
         let folders = services.locations.read(cx).folders.clone();
         let (player, catalog) = (services.player.clone(), services.catalog.clone());
         let browser = cx.new(|cx| {
@@ -135,13 +116,9 @@ impl BrowserPane {
             b.path = state.folder.unwrap_or_else(music_home);
             b.tree_root = state.root.clone();
             let current = state.current.unwrap_or_else(|| {
-                let location = state
-                    .location
-                    .unwrap_or_else(|| Location::Folder(b.path.clone()));
-                let mut visit = SavedVisit::new(Route::new(location, state.page), mode);
+                let mut visit =
+                    SavedVisit::new(Route::new(Location::Folder(b.path.clone()), None), mode);
                 visit.root = state.root;
-                visit.query = state.search;
-                visit.bookmark = Bookmark::legacy(state.scroll);
                 visit
             });
             b.restore_history(state.back, state.forward, state.recent);
@@ -154,6 +131,9 @@ impl BrowserPane {
         browser.update(cx, |b, cx| {
             b.address = Some(address.downgrade());
             b.tree.update(cx, |t, _| {
+                t.delegate_mut().router = Some(services.router.clone())
+            });
+            b.discs.update(cx, |t, _| {
                 t.delegate_mut().router = Some(services.router.clone())
             });
         });
@@ -193,7 +173,6 @@ impl BrowserPane {
             prefs: Some(browser.prefs.clone()),
             layouts: Some(browser_layouts(browser, cx)),
             filter_open: browser.filter_open,
-            ..Default::default()
         }
     }
     pub fn new_tab_state(browser: &Browser, cx: &App) -> BrowserState {
@@ -217,6 +196,7 @@ impl BrowserPane {
 fn browser_layouts(browser: &Browser, cx: &App) -> Layouts {
     let mut layouts = browser.table.read(cx).delegate().layouts.clone();
     layouts.shelf = browser.discs.read(cx).delegate().shelf_layout.clone();
+    layouts.artists = browser.discs.read(cx).delegate().artist_layout.clone();
     layouts.tree = browser.tree.read(cx).delegate().layout.clone();
     layouts
 }
@@ -333,11 +313,12 @@ fn browser_menu(
         .cloned();
     let cd_table = b.table.clone();
     let release_table = b.table.clone();
-    let collection = b.can_list_discs();
+    let collection =
+        b.can_list_discs() && !matches!(b.location, Location::Artist { .. } | Location::Releases);
     let play_label = match &page {
         Some(Page::Disc(_)) => "Play CD",
         Some(Page::Release(_)) => "Play Release",
-        None if b.can_list_discs() => "Play Collection",
+        None if collection => "Play Collection",
         None => "Play All",
     };
     let menu = menu.when_some(playing, |menu, mut entry| {
@@ -425,7 +406,10 @@ fn browser_menu(
         | Location::RecentlyPlayed
         | Location::Playlist(_)
         | Location::Collections
-        | Location::Playlists => menu,
+        | Location::Playlists
+        | Location::Artists
+        | Location::Artist { .. }
+        | Location::Releases => menu,
     }
 }
 
@@ -472,6 +456,8 @@ impl PaneContent for BrowserPane {
             Location::Liked => Icon::default().path(crate::assets::HEART_FILL),
             Location::RecentlyPlayed => Icon::new(IconName::Clock),
             Location::Playlist(_) | Location::Playlists => Icon::new(IconName::ListMusic),
+            Location::Artists | Location::Artist { .. } => Icon::new(IconName::MicVocal),
+            Location::Releases => Icon::new(IconName::Disc3),
         }
     }
     fn save(&self, cx: &App) -> serde_json::Value {
@@ -573,6 +559,18 @@ enum HeaderDensity {
 struct BrowserViews {
     mode: Option<ViewMode>,
     subfolders: Option<bool>,
+    /// The presentations the destination offers.
+    choices: &'static [ViewMode],
+}
+
+impl BrowserViews {
+    /// The view tabs the destination offers, in their usual order.
+    fn offered(self) -> impl Iterator<Item = (usize, (ViewMode, &'static str, IconName))> {
+        VIEW_CHOICES
+            .into_iter()
+            .enumerate()
+            .filter(move |(_, (mode, _, _))| self.choices.contains(mode))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -673,7 +671,8 @@ impl ControlWidths {
 }
 
 impl BrowserViews {
-    fn widths(self, labels: Pixels) -> ControlWidths {
+    fn widths(self, labels: [Pixels; VIEW_CHOICES.len()]) -> ControlWidths {
+        let labels: Pixels = self.offered().map(|(i, _)| labels[i]).sum();
         let overhead = px(2. * HEADER_INSET + size::TAB_DROP)
             + if self.subfolders.is_some() {
                 px(ICON_BUTTON + SCOPE_GAP)
@@ -688,7 +687,7 @@ impl BrowserViews {
         let (text, icons, picker) = if self.mode.is_some() {
             (
                 labels,
-                px(VIEW_CHOICES.len() as f32 * VIEW_TAB),
+                px(self.offered().count() as f32 * VIEW_TAB),
                 px(PICKER_WIDTH),
             )
         } else {
@@ -703,7 +702,7 @@ impl BrowserViews {
 
     fn menu(self, mut menu: PopupMenu, browser: &Entity<Browser>) -> PopupMenu {
         if let Some(mode) = self.mode {
-            for (value, name, icon) in VIEW_CHOICES {
+            for (_, (value, name, icon)) in self.offered() {
                 let browser = browser.clone();
                 menu = menu.item(
                     PopupMenuItem::new(name)
@@ -809,16 +808,13 @@ impl Browser {
                 px(0.)
             };
         let sequence = self.sequence_kind();
-        let layout = self
-            .header_views()
-            .widths(label_widths.into_iter().sum())
-            .layout(
-                width,
-                history,
-                TrailWidths::measure(self, window, cx),
-                filter_focused || self.filter_open || filter_applied,
-                sequence.is_some(),
-            );
+        let layout = self.header_views().widths(label_widths).layout(
+            width,
+            history,
+            TrailWidths::measure(self, window, cx),
+            filter_focused || self.filter_open || filter_applied,
+            sequence.is_some(),
+        );
         let density = layout.density;
         let compact = density == HeaderDensity::Menu;
         let sequence = sequence.filter(|_| layout.sequence);
@@ -1017,8 +1013,12 @@ impl Browser {
 
     fn header_views(&self) -> BrowserViews {
         BrowserViews {
-            mode: self.has_presentations().then_some(self.prefs.mode),
+            mode: self
+                .has_presentations()
+                .then(|| self.presentation())
+                .flatten(),
             subfolders: self.folder_scope(),
+            choices: self.presentations(),
         }
     }
 
@@ -1046,12 +1046,13 @@ impl Browser {
                     BrowserViews {
                         mode: Some(mode),
                         subfolders: None,
+                        choices: views.choices,
                     },
                     handle,
                     m,
                 )
             } else {
-                view_tabs(&browser, mode, focus, density, label_widths, m)
+                view_tabs(&browser, views, mode, focus, density, label_widths, m)
             }
         });
         let scope = views.subfolders.map(|include| {
@@ -1060,6 +1061,7 @@ impl Browser {
                 BrowserViews {
                     mode: None,
                     subfolders: Some(include),
+                    choices: &[],
                 },
                 &focus.folders,
                 m,
@@ -1182,6 +1184,7 @@ impl Browser {
 
 fn view_tabs(
     browser: &Entity<Browser>,
+    views: BrowserViews,
     mode: ViewMode,
     focus: &ViewFocus,
     density: HeaderDensity,
@@ -1197,43 +1200,46 @@ fn view_tabs(
         .flex_shrink_0()
         .role(Role::Group)
         .aria_label("View")
-        .children(VIEW_CHOICES.into_iter().zip(label_widths).map(
-            |((value, name, icon), label_width)| {
-                let browser = browser.clone();
-                let selected = mode == value;
-                let labeled = density == HeaderDensity::Labels;
-                Button::new(name)
-                    .ghost()
-                    .xsmall()
-                    .w(if labeled { label_width } else { px(VIEW_TAB) })
-                    .h(px(VIEW_TAB_HEIGHT))
-                    .rounded(px(0.))
-                    .rounded_t(px(size::TAB_RADIUS + 1.))
-                    .px(px(0.))
-                    .selected(selected)
-                    .toggled(selected)
-                    .border_t_1()
-                    .border_l_1()
-                    .border_r_1()
-                    .border_color(if selected {
-                        m.line
-                    } else {
-                        transparent_black()
-                    })
-                    .when(selected, |b| b.bg(m.canvas))
-                    .child(Icon::new(icon).size(px(15.)).text_color(if selected {
-                        m.text
-                    } else {
-                        m.text_faint
-                    }))
-                    .when(labeled, |b| b.text_size(px(VIEW_LABEL_SIZE)).child(name))
-                    .accessibility_label(name)
-                    .tooltip(name)
-                    .track_focus(focus.choice(value))
-                    .tab_stop(true)
-                    .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
-            },
-        ))
+        .children(
+            views
+                .offered()
+                .map(|(i, choice)| (choice, label_widths[i]))
+                .map(|((value, name, icon), label_width)| {
+                    let browser = browser.clone();
+                    let selected = mode == value;
+                    let labeled = density == HeaderDensity::Labels;
+                    Button::new(name)
+                        .ghost()
+                        .xsmall()
+                        .w(if labeled { label_width } else { px(VIEW_TAB) })
+                        .h(px(VIEW_TAB_HEIGHT))
+                        .rounded(px(0.))
+                        .rounded_t(px(size::TAB_RADIUS + 1.))
+                        .px(px(0.))
+                        .selected(selected)
+                        .toggled(selected)
+                        .border_t_1()
+                        .border_l_1()
+                        .border_r_1()
+                        .border_color(if selected {
+                            m.line
+                        } else {
+                            transparent_black()
+                        })
+                        .when(selected, |b| b.bg(m.canvas))
+                        .child(Icon::new(icon).size(px(15.)).text_color(if selected {
+                            m.text
+                        } else {
+                            m.text_faint
+                        }))
+                        .when(labeled, |b| b.text_size(px(VIEW_LABEL_SIZE)).child(name))
+                        .accessibility_label(name)
+                        .tooltip(name)
+                        .track_focus(focus.choice(value))
+                        .tab_stop(true)
+                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
+                }),
+        )
         .into_any_element()
 }
 
@@ -1495,6 +1501,7 @@ mod tests {
         BrowserState, BrowserViews, HeaderDensity, HeaderFilter, TrailWidths, ViewMode, px,
     };
     use crate::browser::Location;
+    use crate::browser::{Route, SavedVisit};
     use std::path::PathBuf;
 
     #[test]
@@ -1502,9 +1509,10 @@ mod tests {
         let views = BrowserViews {
             mode: None,
             subfolders: None,
+            choices: &[],
         };
         let layout = |width| {
-            views.widths(px(0.)).layout(
+            views.widths([px(0.); 3]).layout(
                 px(width),
                 px(53.),
                 TrailWidths {
@@ -1538,11 +1546,15 @@ mod tests {
             for subfolders in [None, Some(false)] {
                 for editing in [false, true] {
                     for sequence in [false, true] {
-                        let views = BrowserViews { mode, subfolders };
+                        let views = BrowserViews {
+                            mode,
+                            subfolders,
+                            choices: &[ViewMode::Tracks, ViewMode::Albums, ViewMode::Tree],
+                        };
                         let mut previous = px(2000.);
                         let mut previous_filter = px(2000.);
                         for width in (120..=1000).rev() {
-                            let layout = views.widths(px(235.)).layout(
+                            let layout = views.widths([px(235. / 3.); 3]).layout(
                                 px(width as f32),
                                 px(53.),
                                 TrailWidths {
@@ -1578,13 +1590,15 @@ mod tests {
     #[test]
     fn a_saved_browser_keeps_its_view_and_a_new_one_starts_fresh() {
         let state = BrowserState {
-            location: Some(Location::Playlist(3)),
+            current: Some(SavedVisit::new(
+                Route::new(Location::Playlist(3), None),
+                ViewMode::Tree,
+            )),
             folder: Some(PathBuf::from("C:\\Music")),
             prefs: Some(crate::collection::ViewPrefs {
                 mode: ViewMode::Tree,
                 ..Default::default()
             }),
-            scroll: 120.,
             ..Default::default()
         };
         let json = serde_json::to_value(&state).unwrap();
@@ -1592,22 +1606,20 @@ mod tests {
         assert!(json.get("layouts").is_none());
         assert!(json.get("back").is_none() && json.get("forward").is_none());
         let back: BrowserState = serde_json::from_value(json).unwrap();
-        assert_eq!(back.location, Some(Location::Playlist(3)));
+        assert_eq!(back.current.unwrap().route.location, Location::Playlist(3));
         assert_eq!(back.prefs.unwrap().mode, ViewMode::Tree);
-        assert_eq!(back.scroll, 120.);
         // A fresh instance has no saved view and takes the template's.
         let fresh: BrowserState =
             serde_json::from_value(serde_json::Value::Null).unwrap_or_default();
-        assert!(fresh.location.is_none() && fresh.prefs.is_none());
+        assert!(fresh.current.is_none() && fresh.prefs.is_none());
     }
 
     #[test]
     fn a_folder_cd_page_and_both_navigation_stacks_round_trip() {
         let state = serde_json::json!({
-            "location":{"Folder":"C:/Music"},
-            "page":{"Disc":{"Cue":"C:/Music/Disc.cue"}},
-            "back":[{"location":"Liked","albums":false,"query":"mix"}],
-            "forward":[{"location":{"Playlist":4},"albums":false,"query":"set"}]
+            "current":{"location":{"Folder":"C:/Music"},"page":{"Disc":{"Cue":"C:/Music/Disc.cue"}}},
+            "back":[{"location":"Liked","mode":"tracks","query":"mix"}],
+            "forward":[{"location":{"Playlist":4},"mode":"tracks","query":"set"}]
         });
         let restored: BrowserState = serde_json::from_value(state).unwrap();
         assert_eq!(restored.back[0].mode, ViewMode::Tracks);
@@ -1643,13 +1655,13 @@ mod tests {
         let pinned = PanelRecord::with_state(serde_json::json!({
             "current":{"location":{"Playlist":2},"query":"Evening","bookmark":{"selected":{"Key":42}}},
             "back":[{"location":"Liked"}],
-            "prefs":{"albums":false,"subfolders":[]}
+            "prefs":{"mode":"tracks","subfolders":[]}
         }));
         let browse = PanelRecord::with_state(serde_json::json!({
-            "current":{"location":{"Folder":"C:/Collection"},"albums":true,"subfolders":true},
-            "forward":[{"location":{"Library":11},"albums":true}],
+            "current":{"location":{"Folder":"C:/Collection"},"mode":"albums","subfolders":true},
+            "forward":[{"location":{"Library":11},"mode":"albums"}],
             "recent":[{"location":{"Playlist":2},"query":"Morning"}],
-            "prefs":{"albums":true,"subfolders":[{"path":"C:/Collection","include":true}]}
+            "prefs":{"mode":"albums","subfolders":[{"path":"C:/Collection","include":true}]}
         }));
         let on_disk = serde_json::to_vec(&[pinned, browse]).unwrap();
         let [pinned, browse]: [PanelRecord; 2] = serde_json::from_slice(&on_disk).unwrap();

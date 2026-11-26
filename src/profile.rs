@@ -2,7 +2,7 @@ use crate::{
     panels::{InstanceId, PanelRecord},
     places::PlacesState,
     queue::Queue,
-    table::{Layouts, LegacyColumn},
+    table::Layouts,
 };
 use gpui_kit::component::dock::DockAreaState;
 use serde::{Deserialize, Serialize};
@@ -50,26 +50,9 @@ pub struct ClosedPanel {
     pub beside: Vec<InstanceId>,
 }
 
-/// Navigation from the fixed workspace, consumed when its geometry is replaced.
-#[derive(Default, Deserialize)]
-#[serde(default)]
-pub struct LegacyNavigation {
-    pub folder: Option<PathBuf>,
-    pub location: Option<crate::browser::Location>,
-    pub sidebar: LegacySidebar,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-pub struct LegacySidebar {
-    pub expanded: Vec<String>,
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
-    #[serde(flatten, skip_serializing)]
-    pub legacy_navigation: LegacyNavigation,
     pub volume: f32,
     pub full_cd: bool,
     pub show_levels: bool,
@@ -77,8 +60,6 @@ pub struct Profile {
     /// another version is replaced by the default layout.
     pub layout: Option<DockAreaState>,
     pub workspace: WorkspaceState,
-    #[serde(skip_serializing)]
-    pub columns: Vec<LegacyColumn>,
     /// The column layouts a new Music Browser starts with.
     pub table_layouts: Option<Layouts>,
     pub places: Option<PlacesState>,
@@ -89,35 +70,35 @@ pub struct Profile {
     pub collection: crate::collection::ViewPrefs,
     /// Folders open in Locations.
     pub expanded: Vec<String>,
-    /// Version of the single-layout preference written before contextual tables.
-    #[serde(skip_serializing)]
-    pub columns_version: u32,
 }
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            legacy_navigation: LegacyNavigation::default(),
             volume: 0.65,
             full_cd: false,
             show_levels: true,
             layout: None,
             workspace: WorkspaceState::default(),
-            columns: vec![],
             table_layouts: None,
             places: None,
             queue: None,
             window: WindowPrefs::default(),
             collection: Default::default(),
             expanded: Vec::new(),
-            // Missing from profiles written before the field existed.
-            columns_version: 0,
         }
     }
 }
 pub fn location() -> Option<PathBuf> {
     std::env::var_os("DISQRO_PROFILE_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Disqro")))
+        .or_else(|| {
+            // Tests can opt into a fixture profile. They must never use the
+            // installed application's state or rebuildable cache by default.
+            if cfg!(test) {
+                return None;
+            }
+            std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Disqro"))
+        })
         .map(|p| p.join("workspace-v1.json"))
 }
 /// Preserve an unreadable snapshot before starting a fresh workspace.
@@ -221,46 +202,6 @@ impl ProfileFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn old_tray_setting_retires_independently_of_close_and_custom_layouts() {
-        let mut p: Profile = serde_json::from_str(r#"{"window":{"minimize_to_tray":true,"close_to_tray":true},"columns":[{"field":"Title","width":310},{"field":"Liked","width":40}]}"#).unwrap();
-        assert!(p.window.close_to_tray);
-        p.table_layouts = Some(Layouts::migrate(&p.columns, p.columns_version));
-        let json = serde_json::to_value(p).unwrap();
-        assert!(json["window"].get("minimize_to_tray").is_none());
-        assert!(json.get("columns").is_none());
-        let playlist = &json["table_layouts"]["playlist"]["columns"];
-        assert_eq!(playlist[0]["field"], "Cover");
-        assert_eq!(playlist[1]["width"], 310.);
-    }
-    #[test]
-    fn an_earlier_profile_keeps_everything_but_its_fixed_panel_layout() {
-        let p: Profile = serde_json::from_str(
-            r#"{"volume":0.3,"folder":"C:/Music","location":{"Playlist":4},
-                "sidebar":{"expanded":["c:/music"],"playlists_closed":true},
-                "layout":{"version":2,"center":{"panel_name":"StackPanel","children":[],
-                    "info":{"stack":{"sizes":[],"axis":0}}}},
-                "collection":{"albums":true,"subfolders":[]}}"#,
-        )
-        .unwrap();
-        assert_eq!(p.volume, 0.3);
-        assert_eq!(p.collection.mode, crate::collection::ViewMode::Albums);
-        assert_eq!(
-            p.legacy_navigation.folder.as_deref(),
-            Some(Path::new("C:/Music"))
-        );
-        assert_eq!(
-            p.legacy_navigation.location,
-            Some(crate::browser::Location::Playlist(4))
-        );
-        assert_eq!(p.legacy_navigation.sidebar.expanded, ["c:/music"]);
-        let canonical = serde_json::to_value(&p).unwrap();
-        for retired in ["folder", "location", "sidebar"] {
-            assert!(canonical.get(retired).is_none());
-        }
-        assert_eq!(p.layout.map(|l| l.version), Some(Some(2)));
-        assert!(p.workspace.closed.is_empty());
-    }
     #[test]
     fn the_workspace_state_round_trips() {
         let closed = ClosedPanel {

@@ -902,7 +902,7 @@ impl Render for Player {
         )
         .absolute()
         .size_full();
-        // Three zones of equal flexibility keep the transport centred in the
+        // Three zones of equal flexibility keep the transport centered in the
         // window: the recording on the left, playback in the middle, and the
         // listening controls on the right. The timeline runs the full width
         // below them and takes whatever height the player is given.

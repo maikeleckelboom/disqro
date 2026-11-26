@@ -96,7 +96,7 @@ impl ListeningList {
                 .await?;
             let mut files = store::DetachedFiles::default();
             for row in rows {
-                anyhow::ensure!(ticket.is_current(generation), store::Cancelled);
+                anyhow::ensure!(ticket.is_current(generation), store::Canceled);
                 if Catalog::available(&row, &offline, &mut files)
                     && (scope != Scope::RecentlyPlayed || row.track.source.is_file())
                 {
@@ -145,7 +145,10 @@ impl ListeningList {
                 .iter()
                 .find(|c| c.root.id == id)
                 .map(|c| c.root.name.clone()),
-            Scope::Album(_) | Scope::Release(_) => None,
+            Scope::Releases => Some("Releases".into()),
+            Scope::Album(_) | Scope::Release(_) | Scope::Artist(_) | Scope::ArtistReleases(_) => {
+                None
+            }
         }
     }
 
@@ -750,7 +753,7 @@ impl Catalog {
                     let mut files = store::DetachedFiles::default();
                     for row in &mut rows {
                         if !ticket.is_current(generation) {
-                            return Err(store::Cancelled.into());
+                            return Err(store::Canceled.into());
                         }
                         row.available = Self::available(row, &offline, &mut files)
                             && (scope != Scope::RecentlyPlayed || row.track.source.is_file());
@@ -1036,7 +1039,7 @@ impl Catalog {
         if let Err(result) = message {
             self.scanning = None;
             // Scan transactions can commit file moves before later phases finish,
-            // including when a scan is cancelled.
+            // including when a scan is canceled.
             self.refresh_listening_locations();
             cx.emit(CatalogEvent::Structure(id));
             match result {
@@ -1044,7 +1047,7 @@ impl Catalog {
                     "{} moved or copied files could not be matched with certainty. Their earlier entries are kept as missing.",
                     summary.ambiguous
                 ))),
-                Err(e) if !store::is_cancelled(&e) => {
+                Err(e) if !store::is_canceled(&e) => {
                     cx.emit(CatalogEvent::Notice(format!("Library scan failed: {e:#}")))
                 }
                 _ => {}
