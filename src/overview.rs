@@ -84,7 +84,7 @@ mod tests {
             );
             assert!((f32::from(target.origin.x - logical.origin.x) * scale).abs() <= 0.5);
             let pixels = surface.viewport.first * view.pixels_per_second / f64::from(surface.rate);
-            assert!((pixels - view.first as f64).abs() <= 0.5);
+            assert!((pixels - view.origin()).abs() < 1e-6);
         }
     }
 }

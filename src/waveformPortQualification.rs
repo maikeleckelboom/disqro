@@ -261,7 +261,7 @@ fn replay(command: &str, cases: &Path, facts: &Path, output: &Path) -> Result<()
                 }
             };
             let frame = Frame {
-                exact_first: view.first as f64 * f64::from(view.rate) / view.pixels_per_second,
+                exact_first: view.origin() * f64::from(view.rate) / view.pixels_per_second,
                 ..frame
             };
             if command == "bench-gpu" {

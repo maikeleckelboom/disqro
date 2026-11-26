@@ -41,6 +41,21 @@ pub static TYPE: PanelType = PanelType {
     build: |services, _, window, cx| Rc::new(cx.new(|cx| Waveform::new(services, window, cx))),
 };
 
+/// The instant a frame's waveform motion shows: the compositor tick that
+/// scheduled the frame, so successive frames sample the renderer clock one
+/// refresh period apart however late the UI thread woke. Falls back to `now`
+/// without a recent tick.
+pub(crate) fn frame_time(now: Instant) -> Instant {
+    #[cfg(windows)]
+    if let Some(tick) = gpui_windows_gpu::frame_tick()
+        && tick.at <= now
+        && now.duration_since(tick.at) < tick.period * 2
+    {
+        return tick.at;
+    }
+    now
+}
+
 /// All decks in the workspace use one native frame request. Motion updates
 /// textures the scene already references. Layout owns bounds and hit testing.
 #[derive(Clone, Default)]
@@ -106,7 +121,8 @@ impl Motion {
                 state.armed = false;
                 std::mem::take(&mut state.panels)
             };
-            let now = Instant::now();
+            let woke = Instant::now();
+            let now = frame_time(woke);
             let start = crate::diagnostics::begin_stage();
             let count = panels.len() as u64;
             for panel in panels {
@@ -116,7 +132,9 @@ impl Motion {
                     }
                 });
             }
-            crate::diagnostics::stage(start, "wave_frame", count, 0);
+            // The detail is the wake latency after the sampled tick, in µs.
+            let lag = woke.saturating_duration_since(now).as_micros() as u64;
+            crate::diagnostics::stage(start, "wave_frame", count, lag);
         });
     }
 }
@@ -299,7 +317,8 @@ impl Waveform {
         if !self.presented || layout.scale != window.scale_factor() {
             return;
         }
-        self.position.update(&track, Instant::now(), false);
+        self.position
+            .update(&track, frame_time(Instant::now()), false);
         self.input_at = crate::diagnostics::get().map(|_| Instant::now());
         let delta = e.delta.pixel_delta(px(40.));
         let (dx, dy) = (f64::from(f32::from(delta.x)), f64::from(f32::from(delta.y)));
@@ -483,6 +502,13 @@ impl Waveform {
                     surface.viewport.frame_at(0.5).to_bits(),
                     surface.viewport.span.to_bits(),
                 );
+                // The continuous device origin this retained draw shows.
+                crate::diagnostics::stage(
+                    crate::diagnostics::begin_stage(),
+                    "wave_motion",
+                    view.origin().to_bits(),
+                    view.width as u64,
+                );
                 if track.scrub_frame.is_some() && (self.position.inspecting.is_none() || grabbed) {
                     crate::diagnostics::stage(
                         crate::diagnostics::begin_stage(),
@@ -567,7 +593,9 @@ impl Render for Waveform {
             );
         };
         let grabbed = self.grabbed();
-        let moving = self.position.update(&track, Instant::now(), grabbed);
+        let moving = self
+            .position
+            .update(&track, frame_time(Instant::now()), grabbed);
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
         self.coverage = Self::coverage(coverage, track.source.available);
