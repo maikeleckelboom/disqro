@@ -1,7 +1,6 @@
 -- External-content indexes store tokens only. The catalog owns every identity and label.
 
 CREATE VIRTUAL TABLE tracks_fts USING fts5(title, artist, album, content='tracks', content_rowid='id');
-INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');
 CREATE TRIGGER tracks_fts_insert AFTER INSERT ON tracks BEGIN
     INSERT INTO tracks_fts(rowid, title, artist, album) VALUES(new.id, new.title, new.artist, new.album);
 END;
@@ -15,7 +14,6 @@ WHEN old.title IS NOT new.title OR old.artist IS NOT new.artist OR old.album IS 
 END;
 
 CREATE VIRTUAL TABLE albums_fts USING fts5(title, folder, content='albums', content_rowid='id');
-INSERT INTO albums_fts(albums_fts) VALUES('rebuild');
 CREATE TRIGGER albums_fts_insert AFTER INSERT ON albums BEGIN
     INSERT INTO albums_fts(rowid, title, folder) VALUES(new.id, new.title, new.folder);
 END;
@@ -29,7 +27,6 @@ WHEN old.title IS NOT new.title OR old.folder IS NOT new.folder BEGIN
 END;
 
 CREATE VIRTUAL TABLE playlists_fts USING fts5(name, content='playlists', content_rowid='id');
-INSERT INTO playlists_fts(playlists_fts) VALUES('rebuild');
 CREATE TRIGGER playlists_fts_insert AFTER INSERT ON playlists BEGIN
     INSERT INTO playlists_fts(rowid, name) VALUES(new.id, new.name);
 END;
@@ -43,9 +40,13 @@ WHEN old.name IS NOT new.name BEGIN
 END;
 
 CREATE VIRTUAL TABLE roots_fts USING fts5(name, content='roots', content_rowid='id');
-INSERT INTO roots_fts(roots_fts) VALUES('rebuild');
 CREATE TRIGGER roots_fts_insert AFTER INSERT ON roots BEGIN
     INSERT INTO roots_fts(rowid, name) VALUES(new.id, new.name);
+END;
+
+CREATE VIRTUAL TABLE artists_fts USING fts5(name, content='artists', content_rowid='id');
+CREATE TRIGGER artists_fts_insert AFTER INSERT ON artists BEGIN
+    INSERT INTO artists_fts(rowid, name) VALUES(new.id, new.name);
 END;
 CREATE TRIGGER roots_fts_delete AFTER DELETE ON roots BEGIN
     INSERT INTO roots_fts(roots_fts, rowid, name) VALUES('delete', old.id, old.name);

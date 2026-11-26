@@ -271,7 +271,7 @@ fn missing_files_keep_their_place_until_they_return() {
 
     // A scan that stops early marks nothing missing.
     let stopped = index_root(&mut s, r, None, &|| false, &mut |_| {});
-    assert!(is_cancelled(&stopped.unwrap_err()));
+    assert!(is_canceled(&stopped.unwrap_err()));
     assert!(all(&s, Scope::Playlist(list)).iter().all(|r| r.available));
 
     let gone = index(&mut s, r);
@@ -592,14 +592,14 @@ fn a_superseded_scan_cannot_publish_after_root_removal_or_a_new_scan() {
         }
     };
     let error = index_root(&mut older, id, None, &|| true, &mut replace).unwrap_err();
-    assert!(is_cancelled(&error));
+    assert!(is_canceled(&error));
     let mut remove = |p| {
         if matches!(p, Progress::Walking) {
             newer.remove_root(id).unwrap();
         }
     };
     let error = index_root(&mut older, id, None, &|| true, &mut remove).unwrap_err();
-    assert!(is_cancelled(&error));
+    assert!(is_canceled(&error));
     drop(older);
     let reopened = Store::open(&path).unwrap();
     assert!(reopened.roots().unwrap().is_empty());
@@ -658,7 +658,7 @@ fn replacing_pending_queries_keeps_the_new_read_after_an_intervening_edit() {
     });
     // A delayed hydration batch from an older view must not evict the winner.
     let stale = worker.query(&ticket, 0, |_| Ok(()));
-    assert!(is_cancelled(&gpui_kit::block_on(stale).unwrap_err()));
+    assert!(is_canceled(&gpui_kit::block_on(stale).unwrap_err()));
     release.send(()).unwrap();
     assert_eq!(observed.recv_timeout(timeout).unwrap()[0].name, "Saved");
 }
@@ -678,6 +678,50 @@ fn tagged_wave(title: &[u8; 8], value: i16) -> Vec<u8> {
     let size = wave.len() as u32 - 8;
     wave[4..8].copy_from_slice(&size.to_le_bytes());
     wave
+}
+
+#[test]
+fn tagged_compilation_rescans_preserve_recording_and_album_identity() {
+    use lofty::{
+        config::WriteOptions,
+        tag::{Accessor, ItemKey, Tag, TagExt, TagType},
+    };
+    let media = tempfile::tempdir().unwrap();
+    let mut s = Store::memory();
+    let root = s.add_root(media.path()).unwrap();
+    let put = |file, title, value, performer: &str, credit: Option<&str>| {
+        let path = media.path().join(file);
+        fs::write(&path, tagged_wave(title, value)).unwrap();
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_artist(performer.to_owned());
+        tag.set_album("One Title".into());
+        if let Some(name) = credit {
+            tag.insert_text(ItemKey::AlbumArtist, name.into());
+        }
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    };
+    put("a.wav", b"Song One", 31, "Alpha", Some(" Various Artists "));
+    put("b.wav", b"Song Two", 53, "Beta", Some("Various Artists"));
+    index(&mut s, root);
+    let tracks = all(&s, Scope::Library(None));
+    let original = tracks.iter().map(|r| r.id).collect::<Vec<_>>();
+    let album = &s.albums(Some(root), "").unwrap()[0];
+    assert_eq!(album.album_artist.as_deref(), Some("Various Artists"));
+    let various = &s.artists("Various").unwrap()[0];
+    assert_eq!((various.tracks, various.releases), (0, 1));
+    s.set_liked(&original, true).unwrap();
+    index(&mut s, root);
+    assert_eq!(s.artists("Various").unwrap()[0].id, various.id);
+
+    put("b.wav", b"Song Two", 53, "Beta", Some("Conflicting Credit"));
+    index(&mut s, root);
+    assert!(s.artists("Various").unwrap().is_empty());
+    let updated = &s.albums(Some(root), "").unwrap()[0];
+    assert!(updated.album_artist.is_none());
+    assert_eq!(updated.id, album.id);
+    let keys = s.disc_keys(Scope::Album(album.id)).unwrap();
+    assert_eq!(keys, original);
+    assert_eq!(all(&s, Scope::Liked).len(), 2);
 }
 
 #[test]
@@ -960,7 +1004,9 @@ fn collection_playback_keeps_release_discs_together_even_when_their_years_differ
         "UPDATE albums SET year = CASE title WHEN 'Vol I (CD1)' THEN 1980 WHEN 'Vol I (CD2)' THEN 2010 ELSE 1995 END",
         [],
     ).unwrap();
-    let keys = s.collection_keys(Some(root), "two".into()).unwrap();
+    let keys = s
+        .collection_keys(Scope::Library(Some(root)), "two".into())
+        .unwrap();
     let titles: Vec<_> = s
         .rows(Scope::Library(Some(root)), &keys)
         .unwrap()
@@ -1003,7 +1049,7 @@ fn catalog_search_follows_cue_identity_and_catalog_edits() {
             .unwrap()
             .hits
             .iter()
-            .any(|h| h.target == Target::Artist("Artist".into()))
+            .any(|h| matches!(h.target, Target::Artist(_)) && h.title == "Artist")
     );
     fs::write(
         dir.path().join("Album A/a.cue"),
@@ -1034,6 +1080,56 @@ fn catalog_search_follows_cue_identity_and_catalog_edits() {
 }
 
 #[test]
+fn reveal_resolves_the_exact_occurrence_and_unfiltered_scope() {
+    use crate::queue::PlaylistOccurrence;
+    let dir = tempfile::tempdir().unwrap();
+    collection(dir.path());
+    let mut s = Store::memory();
+    let root = s.add_root(dir.path()).unwrap();
+    index(&mut s, root);
+    let rows = all(&s, Scope::Library(None));
+    let first = chapter(&rows, "a.cue", 1);
+    let second = chapter(&rows, "a.cue", 2);
+    let playlist = s
+        .create_playlist("Duplicates", &[first.id, second.id, first.id])
+        .unwrap();
+    let occurrences = s.entries(playlist).unwrap();
+    let releases = s.collection_albums(Scope::Releases, "").unwrap();
+    assert_eq!(
+        releases
+            .iter()
+            .map(|disc| disc.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Album A", "Album B"]
+    );
+    let exact = PlaylistOccurrence {
+        playlist,
+        entry: occurrences[2].0,
+    };
+    assert_eq!(
+        s.reveal_key(Scope::Playlist(playlist), first.id, Some(exact))
+            .unwrap(),
+        Some(exact.entry)
+    );
+    assert_eq!(
+        s.reveal_key(Scope::Playlist(playlist), second.id, Some(exact))
+            .unwrap(),
+        None
+    );
+    let disc = s.registered_disc(&first.track).unwrap().unwrap();
+    assert_eq!(
+        s.reveal_key(Scope::Album(disc.album), second.id, None)
+            .unwrap(),
+        Some(second.id)
+    );
+    assert_eq!(
+        s.reveal_key(Scope::CollectionFolder(root), first.id, None)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 #[ignore = "six-figure catalog playback qualification"]
 fn six_figure_listening_snapshot() {
     use crate::catalog::ListeningList;
@@ -1047,9 +1143,30 @@ fn six_figure_listening_snapshot() {
         tx.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<100001)
           INSERT INTO files(id,path,path_key,name,kind,root_id,size,modified)
           SELECT i,printf('music/%06d.wav',i),printf('music/%06d.wav',i),'fixture.wav',0,?1,400,1 FROM n",[root])?;
-        tx.execute("INSERT INTO tracks(anchor,part,source,root_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
-          SELECT id,0,id,root_id,path,'','','WAV',path,'','',path,1 FROM files",[])?;
+        tx.execute("INSERT INTO artists(id,key,name)
+          SELECT id,printf('performer %04d',id),printf('Performer %04d',id) FROM files WHERE id <= 1000",[])?;
+        tx.execute("INSERT INTO albums(id,key,root_id,title,folder,sort_key,is_release)
+          SELECT id,printf('release:%04d',id),?1,printf('Release %04d',id),'music',printf('release%04d',id),1
+          FROM artists",[root])?;
+        tx.execute("INSERT INTO tracks(anchor,part,source,root_id,album_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+          SELECT f.id,0,f.id,f.root_id,a.id,f.path,p.name,a.title,'WAV',f.path,p.key,lower(a.title),f.path,1
+          FROM files f JOIN artists p ON p.id = f.id % 1000 + 1 JOIN albums a ON a.id=p.id",[])?;
         tx.commit()?;
+        let start = std::time::Instant::now();
+        let artists = s.artists("")?;
+        assert_eq!(artists.len(), 1000);
+        eprintln!("1,000 artist summaries from 100,001 recordings in {:?}", start.elapsed());
+        let chosen = artists[700].id;
+        let start = std::time::Instant::now();
+        let tracks = s.keys(&Query {scope:Scope::Artist(chosen),search:String::new(),order:None})?;
+        assert_eq!(tracks.len(), 100);
+        assert_eq!(s.collection_albums(Scope::ArtistReleases(chosen), "")?.len(), 1);
+        assert_eq!(s.reveal_key(Scope::Artist(chosen), tracks[50], None)?, Some(tracks[50]));
+        eprintln!("Scoped tracks, releases and exact reveal in {:?}", start.elapsed());
+        let mut plan = s.db.prepare(&format!("EXPLAIN QUERY PLAN SELECT id FROM tracks t WHERE {}", super::artists::tracks_of(1)))?;
+        let operations = plan.query_map([chosen.0], |r| r.get::<_, String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(operations.iter().any(|operation| operation.contains("tracks_performer")), "{operations:?}");
+        eprintln!("Artist query plan {operations:?}");
         s.keys(&Query {scope:Scope::Library(None),search:String::new(),order:Some((Order::Title,true))})
     })).unwrap();
     assert_eq!(keys.len(), 100001);
@@ -1071,4 +1188,217 @@ fn six_figure_listening_snapshot() {
         "100,001 sorted recordings resolved in {:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn collection_folder_scope_uses_indexed_anchors_and_keeps_playback_in_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let music = temp.path().join("Music");
+    collection(&music);
+    fs::write(music.join("root.wav"), b"loose recording").unwrap();
+    let mut store = Store::open(&temp.path().join("library.sqlite3")).unwrap();
+    let root = store.add_root(&music).unwrap();
+    index(&mut store, root);
+
+    let direct = Scope::CollectionFolder(root);
+    let rows = all(&store, direct);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].track.title, "root");
+    assert_eq!(all(&store, Scope::Library(Some(root))).len(), 9);
+    let shelf = store.collection_albums(direct, "").unwrap();
+    assert_eq!(shelf.len(), 1);
+    assert_eq!(shelf[0].count, 1);
+    assert_eq!(
+        store.collection_keys(direct, String::new()).unwrap(),
+        [rows[0].key]
+    );
+}
+
+#[test]
+fn artists_separate_track_and_album_artists_and_keep_compilations_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("Music");
+    let sheet = |folder: &str, file: &str, text: &str| {
+        let dir = root.join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(file), text).unwrap();
+        fs::write(dir.join("image.wav"), b"compilation image").unwrap();
+    };
+    // A compilation: credited to Various Artists, performed by others,
+    // including a duo whose name is never split.
+    sheet(
+        "Compilation",
+        "c.cue",
+        "TITLE \"Hard Hits\"\nPERFORMER \"Various Artists\"\nFILE \"image.wav\" WAVE\n\
+         TRACK 01 AUDIO\nTITLE \"First\"\nPERFORMER \"Alpha\"\nINDEX 01 00:00:00\n\
+         TRACK 02 AUDIO\nTITLE \"Second\"\nPERFORMER \"Beta\"\nINDEX 01 00:10:00\n\
+         TRACK 03 AUDIO\nTITLE \"Third\"\nPERFORMER \"Alpha & Gamma\"\nINDEX 01 00:20:00\n",
+    );
+    // An album of Alpha's own, and its two discs of a live release.
+    sheet(
+        "Alpha Album",
+        "a.cue",
+        "TITLE \"Own Work\"\nPERFORMER \"Alpha\"\nFILE \"image.wav\" WAVE\n\
+         TRACK 01 AUDIO\nTITLE \"Own One\"\nINDEX 01 00:00:00\n\
+         TRACK 02 AUDIO\nTITLE \"Own Two\"\nINDEX 01 00:10:00\n",
+    );
+    for n in [1, 2] {
+        sheet(
+            &format!("Live/CD {n}"),
+            &format!("Live (CD{n}).cue"),
+            &format!(
+                "TITLE \"Live (CD{n})\"\nPERFORMER \"alpha\"\nFILE \"image.wav\" WAVE\n\
+                 TRACK 01 AUDIO\nTITLE \"Live {n}\"\nINDEX 01 00:00:00\n"
+            ),
+        );
+    }
+    // A recording nobody is credited for.
+    sheet(
+        "Anonymous",
+        "u.cue",
+        "TITLE \"Untitled\"\nFILE \"image.wav\" WAVE\n\
+         TRACK 01 AUDIO\nTITLE \"Nobody\"\nINDEX 01 00:00:00\n",
+    );
+    let mut s = Store::open(&temp.path().join("library.sqlite3")).unwrap();
+    let id = s.add_root(&root).unwrap();
+    index(&mut s, id);
+    let artists = s.artists("").unwrap();
+    let names: Vec<_> = artists.iter().map(|a| a.name.as_str()).collect();
+    assert!(
+        names.contains(&"Beta") && names.contains(&"Alpha & Gamma"),
+        "{names:?}"
+    );
+    assert!(names.contains(&"Various Artists"), "{names:?}");
+    assert_eq!(names.len(), 4, "{names:?}");
+    // One artist however its name is cased.
+    assert_eq!(
+        names
+            .iter()
+            .filter(|n| n.eq_ignore_ascii_case("alpha"))
+            .count(),
+        1
+    );
+    let alpha = artists
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case("alpha"))
+        .unwrap();
+    assert_eq!(s.artists(" ALPHA ").unwrap()[0].id, alpha.id);
+    // Its compilation track, its album and the live release, counted once.
+    assert_eq!(alpha.tracks, 1 + 2 + 2);
+    assert_eq!(alpha.releases, 3);
+    let various = artists
+        .iter()
+        .find(|a| a.name == "Various Artists")
+        .unwrap();
+    assert_eq!((various.tracks, various.releases), (0, 1));
+    // Filtering by name.
+    assert_eq!(
+        s.artists("gamma")
+            .unwrap()
+            .iter()
+            .map(|a| a.name.clone())
+            .collect::<Vec<_>>(),
+        ["Alpha & Gamma"]
+    );
+    // An artist's tracks and releases, through the same views as a
+    // collection's.
+    let tracks = all(&s, Scope::Artist(alpha.id));
+    let mut titles: Vec<_> = tracks.iter().map(|r| r.track.title.clone()).collect();
+    titles.sort();
+    assert_eq!(titles, ["First", "Live 1", "Live 2", "Own One", "Own Two"]);
+    let releases = s
+        .collection_albums(Scope::ArtistReleases(alpha.id), "")
+        .unwrap();
+    assert_eq!(releases.len(), 4);
+    assert_eq!(
+        releases.iter().filter(|r| r.release.is_some()).count(),
+        2,
+        "the live discs keep their release"
+    );
+    assert!(all(&s, Scope::Artist(various.id)).is_empty());
+    let compilation = s
+        .collection_albums(Scope::ArtistReleases(various.id), "")
+        .unwrap();
+    assert_eq!(compilation.len(), 1);
+    assert_eq!(
+        (compilation[0].title.as_str(), compilation[0].count),
+        ("Hard Hits", 3)
+    );
+    assert_eq!(
+        compilation[0].album_artist.as_deref(),
+        Some("Various Artists")
+    );
+    let hits = s.search_library("Various", 20, 0).unwrap().hits;
+    assert!(
+        hits.iter()
+            .any(|h| h.target == search::Target::Artist(various.id))
+    );
+    let missing = all(&s, Scope::Library(None));
+    assert!(
+        missing
+            .iter()
+            .any(|row| row.track.title == "Nobody" && row.track.album_artist.is_none())
+    );
+    index(&mut s, id);
+    assert_eq!(s.artists("Various").unwrap()[0].id, various.id);
+}
+
+#[test]
+#[ignore = "high-cardinality artist and release qualification"]
+fn independent_large_artist_and_release_shelves_page_in_both_directions() {
+    use crate::{
+        collection::{Shelf, ShelfIndex},
+        table::{Field, RowKey},
+    };
+    use gpui_kit::component::table::ColumnSort;
+    const N: usize = 40_960;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("library.sqlite3")).unwrap();
+    let root = store.add_root(dir.path()).unwrap();
+    let tx = store.db.transaction().unwrap();
+    tx.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?2)
+        INSERT INTO files(id,path,path_key,name,kind,root_id,size,modified)
+        SELECT i,printf('music/%06d.wav',i),printf('music/%06d.wav',i),'fixture.wav',0,?1,400,1 FROM n",
+        rusqlite::params![root, N as i64]).unwrap();
+    tx.execute_batch("INSERT INTO artists(id,key,name) SELECT id,printf('artist %06d',id),printf('Artist %06d',id) FROM files;
+        INSERT INTO albums(id,key,root_id,title,folder,sort_key,is_release)
+            SELECT id,path,root_id,printf('Release %06d',id),'music',path,1 FROM files;
+        INSERT INTO tracks(anchor,part,source,root_id,album_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+            SELECT f.id,0,f.id,f.root_id,a.id,f.path,p.name,a.title,'WAV',f.path,p.key,lower(a.title),f.path,1
+            FROM files f JOIN artists p ON p.id=f.id JOIN albums a ON a.id=f.id;").unwrap();
+    tx.commit().unwrap();
+    for artists in [true, false] {
+        let ticket = Ticket::default();
+        let generation = ticket.next();
+        let start = std::time::Instant::now();
+        let reader = store.reader(ticket.clone(), generation).unwrap();
+        let index = ShelfIndex::build(
+            &reader,
+            artists,
+            "",
+            Some((Field::Title, ColumnSort::Descending)),
+            ticket,
+            generation,
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!((index.snapshot.len, index.count), (N, N));
+        let start = std::time::Instant::now();
+        for offset in [0, N - 256, 256, 0] {
+            let page = index.snapshot.rows::<Shelf>(offset, 256).unwrap();
+            assert_eq!(page.len(), 256);
+            let id = (N - offset) as i64;
+            let key = if artists {
+                RowKey::Artist(ArtistId(id))
+            } else {
+                RowKey::Disc(crate::collection::DiscId::Library(id))
+            };
+            assert_eq!(page[0].key(), key);
+            assert_eq!(index.snapshot.position(&key).unwrap(), Some(offset));
+        }
+        eprintln!(
+            "artists={artists} cardinality={N} index={elapsed:?} four_pages_and_ranks={:?}",
+            start.elapsed()
+        );
+    }
 }

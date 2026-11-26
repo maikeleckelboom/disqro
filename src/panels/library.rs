@@ -1,12 +1,12 @@
-//! Library: personal music organisation. The indexed collections, Liked
-//! Tracks and the playlists, each opened in the active Music Browser.
+//! Library: built-in destinations, indexed collections, and user playlists.
+//! Each opens in the active Music Browser.
 //!
 //! A folder dragged here from Locations is added to the library as a
 //! collection: it is indexed where it is, never moved or copied. Tracks
 //! dropped on a playlist are added to it as new entries.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, ROW, nav_row},
+    nav::{DraggedFolder, ICON, ROW, nav_row, section_row},
 };
 use crate::{
     audio::Command,
@@ -53,16 +53,41 @@ pub static TYPE: PanelType = PanelType {
 pub struct LibraryState {
     #[serde(skip_serializing_if = "is_zero")]
     pub scroll: f32,
+    #[serde(skip_serializing_if = "is_false")]
+    pub collections_closed: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub playlists_closed: bool,
 }
 fn is_zero(v: &f32) -> bool {
     *v == 0.
 }
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// A collapsible group of Library rows with an overview of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Section {
+    Collections,
+    Playlists,
+}
+
+/// Something saved with the panel changed.
+struct LibraryChanged;
+impl EventEmitter<LibraryChanged> for LibraryPanel {}
+
+/// Space above a section heading, separating it from the previous section.
+const SECTION_GAP: f32 = 8.;
+/// Space between exploring the library and personal listening destinations.
+const GROUP_GAP: f32 = 8.;
 
 pub struct LibraryPanel {
     catalog: Entity<Catalog>,
     router: Entity<Router>,
     player: Entity<Player>,
     renaming: Option<(PlaylistId, Entity<InputState>)>,
+    collections_closed: bool,
+    playlists_closed: bool,
     scroll: ScrollHandle,
     focus: FocusHandle,
     /// Follows the active browser, whose view the rows mark.
@@ -96,6 +121,8 @@ impl LibraryPanel {
             router: services.router.clone(),
             player: services.player.clone(),
             renaming: None,
+            collections_closed: state.collections_closed,
+            playlists_closed: state.playlists_closed,
             scroll,
             focus: cx.focus_handle(),
             browser: None,
@@ -113,7 +140,28 @@ impl LibraryPanel {
     fn state(&self) -> LibraryState {
         LibraryState {
             scroll: -f32::from(self.scroll.offset().y),
+            collections_closed: self.collections_closed,
+            playlists_closed: self.playlists_closed,
         }
+    }
+    fn closed(&self, section: Section) -> bool {
+        match section {
+            Section::Collections => self.collections_closed,
+            Section::Playlists => self.playlists_closed,
+        }
+    }
+    /// Expands or collapses a section. It never navigates, so the browser's
+    /// destination and playback are unaffected.
+    fn set_closed(&mut self, section: Section, closed: bool, cx: &mut Context<Self>) {
+        if self.closed(section) == closed {
+            return;
+        }
+        match section {
+            Section::Collections => self.collections_closed = closed,
+            Section::Playlists => self.playlists_closed = closed,
+        }
+        cx.emit(LibraryChanged);
+        cx.notify();
     }
     /// The view the active browser shows.
     fn location(&self, cx: &App) -> Option<Location> {
@@ -200,7 +248,7 @@ impl LibraryPanel {
             alert
                 .title(format!("Remove “{name}” from the library?"))
                 .description(
-                    "Its folder and music files are not changed. Liked tracks, ratings and \
+                    "Music files stay in their current folder. Favorites, ratings, and \
                      playlist entries are kept and reconnect if you add the folder again.",
                 )
                 .show_cancel(true)
@@ -253,7 +301,33 @@ impl LibraryPanel {
         })
     }
 
-    /// The collections, Liked Tracks and the playlists.
+    /// A built-in destination: a row that opens `location`, with the same
+    /// open actions as every other.
+    fn destination_row(
+        &self,
+        (id, label): (&'static str, &'static str),
+        icon: (Icon, IconName),
+        location: Location,
+        selected: bool,
+        gap: f32,
+        m: &crate::theme::Materials,
+    ) -> AnyElement {
+        let router = self.router.clone();
+        let target = location.clone();
+        let (icon, menu_icon) = icon;
+        Self::opens(
+            nav_row(id.into(), icon, label.into(), selected, m).mt(px(gap)),
+            &self.router,
+            location,
+        )
+        .context_menu(move |menu, _, _| {
+            Self::open_items(menu, router.clone(), target.clone(), menu_icon)
+        })
+        .into_any_element()
+    }
+
+    /// Library exploration, personal destinations, collections and
+    /// playlists, in that order.
     fn render_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = *materials(cx);
         let location = self.location(cx);
@@ -289,7 +363,72 @@ impl LibraryPanel {
                 .into_any_element(),
             );
         }
-        for c in &catalog.collections {
+        rows.push(self.destination_row(
+            ("artists", "Artists"),
+            (Icon::new(IconName::MicVocal), IconName::MicVocal),
+            Location::Artists,
+            matches!(location, Some(Location::Artists | Location::Artist { .. })),
+            0.,
+            &m,
+        ));
+        rows.push(self.destination_row(
+            ("releases", "Releases"),
+            (Icon::new(IconName::Disc3), IconName::Disc3),
+            Location::Releases,
+            location == Some(Location::Releases),
+            0.,
+            &m,
+        ));
+        rows.push(self.destination_row(
+            ("liked", "Favorites"),
+            (
+                Icon::default().path(crate::assets::HEART_FILL),
+                IconName::Heart,
+            ),
+            Location::Liked,
+            location == Some(Location::Liked),
+            GROUP_GAP,
+            &m,
+        ));
+        let router = self.router.clone();
+        rows.push(
+            Self::opens(
+                nav_row(
+                    "recently-played".into(),
+                    Icon::new(IconName::Clock),
+                    "Recently Played".into(),
+                    location == Some(Location::RecentlyPlayed),
+                    &m,
+                ),
+                &self.router,
+                Location::RecentlyPlayed,
+            )
+            .context_menu(move |menu, _, _| {
+                Self::open_items(
+                    menu,
+                    router.clone(),
+                    Location::RecentlyPlayed,
+                    IconName::Clock,
+                )
+            })
+            .into_any_element(),
+        );
+        rows.push(self.section_header(
+            (Section::Collections, "Collections", Location::Collections),
+            location.as_ref(),
+            (
+                "Add Music Folder…",
+                IconName::Plus,
+                crate::workspace::AddMusicFolder,
+            ),
+            cx,
+        ));
+        let collections: &[_] = if self.collections_closed {
+            &[]
+        } else {
+            &catalog.collections
+        };
+        for c in collections {
             let id = c.root.id;
             let path = c.root.path.clone();
             let status = c.status.clone();
@@ -371,50 +510,86 @@ impl LibraryPanel {
                 });
             rows.push(row.into_any_element());
         }
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "liked".into(),
-                    Icon::default().path(crate::assets::HEART_FILL),
-                    "Liked Tracks".into(),
-                    location == Some(Location::Liked),
-                    &m,
-                ),
-                &self.router,
-                Location::Liked,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
-            })
-            .into_any_element(),
-        );
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "recently-played".into(),
-                    Icon::new(IconName::Clock),
-                    "Recently Played".into(),
-                    location == Some(Location::RecentlyPlayed),
-                    &m,
-                ),
-                &self.router,
-                Location::RecentlyPlayed,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(
-                    menu,
-                    router.clone(),
-                    Location::RecentlyPlayed,
-                    IconName::Clock,
-                )
-            })
-            .into_any_element(),
-        );
         rows.extend(self.render_playlists(location, cx));
         rows
     }
+    /// A section heading: its chevron collapses the section, the heading
+    /// opens the section's overview, and its trailing action adds to it.
+    fn section_header<A: Action + Clone>(
+        &self,
+        (section, title, location): (Section, &'static str, Location),
+        current: Option<&Location>,
+        (add_label, add_icon, action): (&'static str, IconName, A),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = current == Some(&location);
+        let open = !self.closed(section);
+        let m = *materials(cx);
+        let browse = self.router.clone();
+        let menu_action = action.clone();
+        let (toggle, keys) = (cx.weak_entity(), cx.weak_entity());
+        section_row(
+            title.into(),
+            title.into(),
+            open,
+            selected,
+            &m,
+            move |_, cx| {
+                let _ = toggle.update(cx, |s, cx| s.set_closed(section, open, cx));
+            },
+        )
+        .mt(px(SECTION_GAP))
+        .on_click(move |e, w, cx| {
+            Self::open(
+                &browse,
+                location.clone(),
+                e.modifiers().secondary(cx),
+                w,
+                cx,
+            )
+        })
+        // Left collapses and Right expands, as in the Locations tree.
+        .on_key_down(move |e, _, cx| {
+            if e.keystroke.modifiers.modified() {
+                return;
+            }
+            let closed = match e.keystroke.key.as_str() {
+                "left" => true,
+                "right" => false,
+                _ => return,
+            };
+            let _ = keys.update(cx, |s, cx| s.set_closed(section, closed, cx));
+            cx.stop_propagation();
+        })
+        .child(
+            // The trailing action is independent of the heading's overview.
+            div()
+                .flex_shrink_0()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new("add")
+                        .ghost()
+                        .xsmall()
+                        .tab_stop(true)
+                        .icon(Icon::new(add_icon).size(px(14.)).text_color(m.text_faint))
+                        .accessibility_label(add_label)
+                        .tooltip(add_label)
+                        .on_click(move |_, w, cx| {
+                            cx.stop_propagation();
+                            w.dispatch_action(Box::new(action.clone()), cx)
+                        }),
+                ),
+        )
+        .context_menu(move |menu, _, _| {
+            menu.item(
+                PopupMenuItem::new(add_label)
+                    .icon(add_icon)
+                    .action(Box::new(menu_action.clone())),
+            )
+        })
+        .into_any_element()
+    }
+
     fn render_playlists(
         &self,
         location: Option<Location>,
@@ -422,65 +597,19 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
-        let browse = self.router.clone();
-        let header = h_flex()
-            .id("playlists")
-            .h(px(ROW))
-            .mx(px(6.))
-            .pl(px(8.))
-            .pr(px(2.))
-            .gap(px(4.))
-            .flex_shrink_0()
-            .items_center()
-            .mt(px(6.))
-            .text_size(px(12.))
-            .text_color(m.text_muted)
-            .child(
-                div()
-                    .id("browse-playlists")
-                    .role(Role::Button)
-                    .aria_label("Browse playlists")
-                    .tab_index(0)
-                    .cursor_pointer()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if location == Some(Location::Playlists) {
-                        m.accent
-                    } else {
-                        m.text_muted
-                    })
-                    .hover(|d| d.text_color(m.text))
-                    .on_click(move |_, w, cx| {
-                        Self::open(&browse, Location::Playlists, false, w, cx)
-                    })
-                    .child("Playlists"),
-            )
-            .child(
-                Button::new("new-playlist")
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(IconName::Plus)
-                            .size(px(14.))
-                            .text_color(m.text_faint),
-                    )
-                    .accessibility_label("New Playlist")
-                    .tooltip("New Playlist · Ctrl+N")
-                    .on_click(|_, w, cx| {
-                        cx.stop_propagation();
-                        w.dispatch_action(Box::new(crate::workspace::NewPlaylist), cx)
-                    }),
-            )
-            .context_menu(|menu, _, _| {
-                menu.item(
-                    PopupMenuItem::new("New Playlist")
-                        .icon(IconName::Plus)
-                        .action(Box::new(crate::workspace::NewPlaylist)),
-                )
-            })
-            .into_any_element();
-        let mut rows = vec![header];
+        let mut rows = vec![self.section_header(
+            (Section::Playlists, "Playlists", Location::Playlists),
+            location.as_ref(),
+            (
+                "New Playlist",
+                IconName::Plus,
+                crate::workspace::NewPlaylist,
+            ),
+            cx,
+        )];
+        if self.playlists_closed {
+            return rows;
+        }
         for p in playlists {
             let id = p.id;
             let selected = location == Some(Location::Playlist(id));
@@ -504,7 +633,7 @@ impl LibraryPanel {
                         }))
                         .child(
                             Icon::new(IconName::Music2)
-                                .size(px(16.))
+                                .size(px(ICON))
                                 .mr(px(2.))
                                 .text_color(m.accent),
                         )
@@ -722,6 +851,11 @@ impl PaneContent for Entity<LibraryPanel> {
     fn save(&self, cx: &App) -> serde_json::Value {
         serde_json::to_value(self.read(cx).state()).unwrap_or_default()
     }
+    fn watch(&self, cx: &mut Context<super::Pane>) -> Vec<Subscription> {
+        vec![cx.subscribe(self, |_, _, _: &LibraryChanged, cx| {
+            cx.emit(super::PaneEvent::Changed)
+        })]
+    }
     fn accepts_folder(&self) -> bool {
         true
     }
@@ -737,14 +871,23 @@ mod tests {
     use crate::{catalog::Targets, store::Scope};
 
     #[test]
-    fn the_old_playlist_disclosure_is_ignored_and_scroll_is_kept() {
+    fn sections_restore_their_disclosure_independently_with_the_scroll_position() {
+        // Workspaces saved before Collections could collapse keep Playlists'.
         let state: LibraryState = serde_json::from_value(serde_json::json!({
             "playlists_closed": true, "scroll": 114.
         }))
         .unwrap();
+        assert!(state.playlists_closed && !state.collections_closed);
         assert_eq!(
             serde_json::to_value(state).unwrap(),
-            serde_json::json!({"scroll": 114.})
+            serde_json::json!({"scroll": 114., "playlists_closed": true})
+        );
+        let state: LibraryState =
+            serde_json::from_value(serde_json::json!({"collections_closed": true})).unwrap();
+        assert!(state.collections_closed && !state.playlists_closed);
+        assert_eq!(
+            serde_json::to_value(LibraryState::default()).unwrap(),
+            serde_json::json!({})
         );
     }
 

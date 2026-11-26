@@ -145,6 +145,9 @@ impl Places {
             dismissed: self.dismissed.clone(),
         }
     }
+    pub fn position(&self, path: &Path) -> Option<usize> {
+        self.items.iter().position(|p| same_path(&p.path, path))
+    }
     pub fn contains(&self, path: &Path) -> bool {
         self.items.iter().any(|p| same_path(&p.path, path))
     }

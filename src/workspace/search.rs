@@ -336,7 +336,7 @@ impl LibrarySearch {
         });
         browser.update(cx, |b, cx| match target {
             Target::Track(id) => b.show_search_track(id, w, cx),
-            Target::Artist(name) => b.show_search_artist(name, w, cx),
+            Target::Artist(id) => b.show(Location::Artist { id, name: title }, w, cx),
             Target::Album(root, id) => b.show(
                 Location::Album {
                     root: Some(root),

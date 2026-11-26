@@ -1,5 +1,7 @@
 # Native Stroke waveform
 
+The implementation now lives in Waveform Native; file paths in this record refer to the historical Disqro revisions it describes. [Waveform Native in Disqro](waveform-native.md)
+
 Disqro uses the accepted Dekzer Stroke appearance in the detailed Waveform panel and the compact Track and Full CD views. The detail deck holds the playhead at the center and scrolls physical-source geometry underneath it. Each Waveform panel keeps its chosen zoom in seconds when playback moves to another recording. Adjacent CUE chapters in the same image share the source coordinates and resident detail pages. Follow mode zooms around the playhead. Panning holds an inspection position with pointer-anchored zoom. **Follow playback** returns the deck to the playhead.
 
 The detail projection uses the current viewport density on each draw. At three frames per device pixel the same Stroke view starts revealing separate left and right source-sample lines. The lines grow into the full presentation by 0.75 frames per pixel. They connect consecutive decoded samples within the physical source. A seek targets the logical interval drawn with the gesture and is checked again by the playback transport. Musical context outside that interval remains visible for inspection.
@@ -10,19 +12,19 @@ GPUI Kit 0.10.0 selects its published GPUI Fast 0.1.17 backend on Windows. The v
 
 The Windows dependency graph has no active wgpu dependency. The checked-in backend uses about 0.71 MiB of upstream source, with the bridge confined to the Windows platform crate. The local release executable with qualification enabled grew from 40.93 to 46.20 MiB. This comparison includes the change of GPUI backend.
 
-The detail shader selects source-owned extrema from the finest held interval, folds the 44.1 and 48 kHz octave cells into Stroke colour, and evaluates the reference core and fringe coverage. The CPU supplies the reference f64-to-integer partition for the current viewport so large offsets retain the accepted boundary decisions. Compact overviews and other-rate palette pooling keep the reference f64 projection and send one-dimensional geometry or colour parameters to the shaders. The application has one device-owned set of pipelines and a 16 MiB detail evidence arena shared by all panels. Immutable pages and PCM tiles upload on admission. Device replacement invalidates the associated GPU state. Pixel and geometry readbacks live in the qualification build.
+The detail shader selects source-owned extrema from the finest held interval, folds the 44.1 and 48 kHz octave cells into Stroke color, and evaluates the reference core and fringe coverage. The CPU supplies the reference f64-to-integer partition for the current viewport so large offsets retain the accepted boundary decisions. Compact overviews and other-rate palette pooling keep the reference f64 projection and send one-dimensional geometry or color parameters to the shaders. The application has one device-owned set of pipelines and a 16 MiB detail evidence arena shared by all panels. Immutable pages and PCM tiles upload on admission. Device replacement invalidates the associated GPU state. Pixel and geometry readbacks live in the qualification build.
 
 The worker retains complementary evidence on bounded source tiles, including loaded pages during zoom reversals. A missing detail interval can use projected overview bins while evidence arrives. Missing and measured silence have distinct states. The overview starts with signed extrema and stereo RMS from decoded material. They become the geometry for the final spectral overview. The analyzer uses the existing planned real FFT and reuses overlapping resampled windows while retaining the reference power calculation. SQLite stores packed, versioned evidence. The old waveform tables held derived data and are retired independently of library, queue, and listening data. [Final hardening and Windows qualification](waveform-final-hardening.md)
 
 ## Visual qualification
 
-The recovered CPU renderer remains a frozen oracle in the test and qualification builds. The accepted source comparison at `743ec97bda061a3acacea80a7d0ef925d1b9591e` contains 103 Stroke views and 103 historical layered views. The layered outlier remains recorded in the recovery evidence. Three-band rendering, the separate Precision style, their saved style choices, and the standard-rate layered peak and energy analysis have left the application. For rates outside the supported octave grid, the original Stroke colour fallback still uses its band energy measurements. The independent live visualization panels keep their own analysis. [Visual recovery and original tolerances](waveform-visual-recovery.md)
+The accepted Windows GPU baseline records the PNG and geometry JSON for every Stroke case. The qualification executable renders the stored native evidence. [Native rendering qualification](waveform-visual-recovery.md)
 
-All 103 Stroke views met the original limits on a Radeon 780M, including the 44.1 and 48 kHz recordings, CUE segment, and anti-phase control. The same 103 views also passed with fresh evidence from the new analyzer. The replay used 560, 1,200, and 1,920 device-pixel widths and 100%, 150%, and 200% scale. Where the reference exposes detail columns, source boundaries, extrema witnesses, and coverage states matched exactly. Core bounds differed from Rust by at most 0.000016 device pixels. The maximum composed channel difference from Rust was one 8-bit code. The highest active-pixel P99 against Electron was one code. The largest individual composed difference against Electron was 30 codes, inside the Canvas fallback limits.
+All 103 Stroke views met the original limits on a Radeon 780M, including the 44.1 and 48 kHz recordings, CUE segment, and anti-phase control. The same 103 views also passed with fresh evidence from the new analyzer. The replay used 560, 1,200, and 1,920 device-pixel widths and 100%, 150%, and 200% scale. Where the reference exposes detail columns, source boundaries, extrema witnesses, and coverage states matched exactly. Core bounds differed from Rust by at most 0.000016 device pixels. The maximum composed channel difference from Rust was one 8-bit code.
 
-The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agrees pixel-for-pixel with Rust and exceeds the Electron limit along a single scanline. The maximum difference is 63 codes over 728 pixels at 32 kHz and 649 at 96 kHz. At these scales the live deck introduces decoded sample geometry as evidence becomes available. Separate shader checks verify decoded stereo and CUE clipping, along with the spectral fallback at 40,123 Hz in both themes.
+The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agreed pixel-for-pixel with Rust.
 
-Five openly licensed recordings passed 45 additional views using fresh evidence. Each recording has an overview and 8 s and 2 s detail at all three sizes and scales. Both applications independently decoded the same converted float WAV to identical PCM. The native GPU and Rust differed by at most one code. The highest active-pixel P99 against Electron was one code. The conversion preserved the original sample rates and limited the long recordings to their first 180 s. The Project and Baddadan still need authorized recordings.
+Five openly licensed recordings passed 45 additional views using fresh evidence. Each recording has an overview and 8 s and 2 s detail at all three sizes and scales. Both applications independently decoded the same converted float WAV to identical PCM. The native GPU and Rust differed by at most one code.
 
 | Material | Rate | Detail center | Recording and license |
 | --- | ---: | ---: | --- |
@@ -32,12 +34,7 @@ Five openly licensed recordings passed 45 additional views using fresh evidence.
 | Acoustic guitar | 44.1 kHz | 24 s | RyGuy, [Acoustic Guitar Sample](https://commons.wikimedia.org/wiki/File:AcousticGuitarSample.ogg), public domain |
 | Classical | 48 kHz | 129 s | Czech National Symphony Orchestra via Musopen, [Beethoven's Eroica, II. Marcia funebre](https://commons.wikimedia.org/wiki/File:Beethoven_SymphonyNo.3Eroica_LudwigVanBeethoven-SymphonyNo.3InEFlatMajorEroicaOp.55-02-MarciaFunebreAdagioAssai.ogg), [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
 
-To replay accepted matches from the local checkpoint against the shader, build with `qualification` and run the following command. The runner compares the GPU's own source witnesses and column data with Rust, and compares pixels with Rust and Electron. The local manifests identify the registered physical extent and source frames of each view.
-
-```powershell
-cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformParity.py --dekzer C:/dev/dekzer --work .local/waveform-parity/oracle checkpoint-gpu --checkpoint .local/waveform-parity/checkpoint --exe target/release/disqro.exe --output .local/waveform-native-gpu/replay
-```
+Use the current native byte-comparison procedure for the accepted GPU outputs. [Native waveform qualification](waveform-visual-recovery.md)
 
 ## Loading and performance protocol
 
@@ -64,7 +61,7 @@ cargo test --release --locked timeline_waveform_baseline -- --ignored --nocaptur
 The native journey uses a muted playback graph, two detail panels, Full CD and an isolated profile. Its offscreen mode uses a private desktop. The foreground mode requires permission to bring the test player to the front. Native diagnostic draws and input handling are timed independently from offscreen D3D11 timestamp queries and foreground DXGI display statistics. DXGI's flip-model counters track the latest observation and can have gaps during resizing or compositor transitions. They cannot establish hardware input-to-photon latency. [Microsoft's DXGI timing API](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiswapchain-getframestatistics)
 
 ```powershell
-python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-native-gpu/native
+python -B tools/qualify_waveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-native-gpu/native
 ```
 
 The GPU timestamp run used 180 offscreen zoom updates per view with warm source buffers. The CPU columns measure waveform preparation and submission. GPU timestamps bracket the detail compute passes and Stroke draw on the Radeon 780M. This test excludes GPUI composition, presentation, and output sampling.

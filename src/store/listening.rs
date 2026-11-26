@@ -7,7 +7,6 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, HashMap};
 
 #[cfg(test)]
-#[path = "listeningTests.rs"]
 mod tests;
 
 struct RecordingIdentity {

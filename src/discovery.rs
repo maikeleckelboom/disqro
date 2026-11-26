@@ -13,7 +13,6 @@ use std::{
 };
 
 #[cfg(test)]
-#[path = "discoveryTests.rs"]
 mod tests;
 
 /// The opened folder's own subfolders, listed once per scan.
@@ -84,6 +83,7 @@ struct Segment {
     title: String,
     album: String,
     artist: String,
+    album_artist: Option<String>,
 }
 /// Deduplicate whole programs. A different source, sequence or authored
 /// program remains a separate edition, even if some chapters are identical.
@@ -142,6 +142,7 @@ impl Sources {
                         title: track.title.clone(),
                         album: track.album.clone(),
                         artist: track.artist.clone(),
+                        album_artist: track.album_artist.clone(),
                     }
                 })
                 .collect();
@@ -181,7 +182,25 @@ pub(crate) fn walk(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) -> Option<Sources> {
+    walk_bounded(root, recursive, None, alive, publish, &mut |path| {
+        library::browse_while(path, cache, alive)
+    })
+}
+
+/// Keep the interactive scan bounded even when a drive root was explicitly
+/// set to include subfolders. Indexing uses its own full walk.
+const BROWSER_FOLDER_LIMIT: usize = 16_384;
+
+fn walk_bounded(
+    root: &Path,
+    recursive: bool,
+    limit: Option<usize>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+    browse: &mut dyn FnMut(&Path) -> anyhow::Result<library::Folder>,
+) -> Option<Sources> {
     let mut todo = vec![root.to_owned()];
+    let mut visited = 0;
     let mut sources = Sources::default();
     let mut batch = Batch::default();
     let mut first = true;
@@ -190,7 +209,15 @@ pub(crate) fn walk(
         if !alive() {
             return None;
         }
-        match library::browse_while(&path, cache, alive) {
+        if limit.is_some_and(|limit| visited == limit) {
+            batch.notice.get_or_insert_with(|| {
+                "Folder scan reached its limit. Open a subfolder to browse more.".into()
+            });
+            batch.incomplete.push(root.to_owned());
+            break;
+        }
+        visited += 1;
+        match browse(&path) {
             Ok(folder) => {
                 if path == root {
                     batch.root = Some(Root {
@@ -247,7 +274,23 @@ fn scan_into(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) {
-    let Some(sources) = walk(root, recursive, cache, alive, publish) else {
+    scan_with(root, recursive, cache, alive, publish, &mut |path| {
+        library::browse_while(path, cache, alive)
+    });
+}
+
+/// Discovers folders listed by `browse`, then reads the tags of the
+/// recordings they hold. Only recordings `browse` returned are opened.
+fn scan_with(
+    root: &Path,
+    recursive: bool,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+    browse: &mut dyn FnMut(&Path) -> anyhow::Result<library::Folder>,
+) {
+    let limit = recursive.then_some(BROWSER_FOLDER_LIMIT);
+    let Some(sources) = walk_bounded(root, recursive, limit, alive, publish, browse) else {
         return;
     };
     let mut batch = Batch::default();
@@ -304,6 +347,109 @@ fn scan_into(
     if !batch.rows.is_empty() || !batch.unreadable.is_empty() {
         publish(batch);
     }
+}
+
+pub(crate) struct FolderBranch {
+    pub dirs: Vec<PathBuf>,
+    pub programs: Vec<Arc<crate::collection::Disc>>,
+    pub unreadable: HashSet<PathBuf>,
+    /// Where the next page starts when more entries follow.
+    pub next: Option<library::ListingCursor>,
+    /// The recordings are one page of a folder too large to group by album.
+    pub paged: bool,
+    pub notice: Option<String>,
+}
+
+/// One page of a folder for the Tree view: up to `limit` subfolders after
+/// `after`, then its recordings. Only the recordings on this page are read.
+pub(crate) fn tree_folder(
+    folder: &Path,
+    after: Option<&library::ListingCursor>,
+    limit: usize,
+    group_limit: usize,
+    alive: &dyn Fn() -> bool,
+) -> anyhow::Result<FolderBranch> {
+    let listing = library::list_page(folder, after, limit, Some(group_limit), alive)?;
+    let mut next = listing.next_dir.map(library::ListingCursor::Dirs);
+    let Some(files) = listing.files else {
+        return Ok(FolderBranch {
+            dirs: listing.dirs,
+            programs: Vec::new(),
+            unreadable: HashSet::new(),
+            next,
+            paged: false,
+            notice: None,
+        });
+    };
+    let cache =
+        crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
+    let (audio, sheets, claimed, paged) = match files {
+        library::ListedFiles::All { audio, sheets } => (audio, sheets, HashSet::new(), false),
+        library::ListedFiles::Page {
+            audio,
+            sheets,
+            next: resume,
+        } => {
+            next = resume.map(library::ListingCursor::Files);
+            // A sheet on any page owns the recordings it plays.
+            let claimed = library::claimed_sources(folder, &audio, cache.as_ref(), alive)?;
+            (audio, sheets, claimed, true)
+        }
+    };
+    let mut page = Some(library::browse_files(
+        library::Folder {
+            cover: listing.cover,
+            notices: listing.notices,
+            complete: listing.complete,
+            ..Default::default()
+        },
+        audio,
+        &sheets,
+        &sheets,
+        claimed,
+        cache.as_ref(),
+        alive,
+    )?);
+    let mut rows = Vec::new();
+    let mut covers = HashMap::new();
+    let mut unreadable = HashSet::new();
+    let mut listed = false;
+    let mut notice = None;
+    scan_with(
+        folder,
+        false,
+        cache.as_ref(),
+        alive,
+        &mut |batch| {
+            listed |= batch.root.is_some();
+            notice = notice.take().or(batch.notice);
+            covers.extend(batch.covers);
+            unreadable.extend(batch.unreadable);
+            for (index, track) in batch.rows {
+                if index == rows.len() {
+                    rows.push(track);
+                } else {
+                    rows[index] = track;
+                }
+            }
+            alive()
+        },
+        &mut |_| {
+            page.take()
+                .ok_or_else(|| anyhow::anyhow!("The folder is unavailable."))
+        },
+    );
+    anyhow::ensure!(alive(), crate::store::Canceled);
+    anyhow::ensure!(listed, "The folder is unavailable.");
+    let programs = crate::collection::Discs::group(rows.iter().flatten(), &covers, folder);
+    Ok(FolderBranch {
+        dirs: listing.dirs,
+        programs,
+        unreadable,
+        next,
+        paged,
+        notice: notice.filter(|_| paged),
+    })
 }
 
 pub fn folder_tracks(

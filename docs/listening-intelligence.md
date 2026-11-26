@@ -26,7 +26,7 @@ Artist statistics group the full track-artist credit after trimming and case nor
 
 ## Durability and local data ownership
 
-Schema 5 is the authoritative listening schema. Fresh profiles and upgrades from production install the same listening definitions in one transaction. Upgrades back up the production library and check its foreign keys before commit. Profiles already at schema 5 open directly. The obsolete development schema 4 is refused with instructions to keep the existing database and use a fresh profile or explicitly reset a disposable development database. Initialization leaves databases and music files intact when it refuses a version.
+The current library schema includes the listening tables and their projections. They are created in the same transaction as a new library. [Persistent library](persistent-library.md) describes how to prepare a separate copy of a schema 5 profile.
 
 An occurrence stores its recording link, metadata snapshot, activity and qualification timestamps, end state and checkpoint sequence. Sparse UTC minute rows keep calendar attribution independent of the occurrence start. Triggers maintain recording totals and materialized artist and release rankings in the checkpoint transaction. Authored release evidence stays with each track through catalog detachment. Indexes support History pagination, dated bins and qualifications, recency, open-occurrence recovery, track totals and verified relocation.
 
@@ -60,7 +60,7 @@ The Dark theme was inspected at 144 DPI in 1,240 × 780 and 720 × 460 logical-p
 
 | Check | Observed result |
 | --- | --- |
-| Selection and queue admission | Selecting and queueing a 10-second WAV produced zero occurrences. Playback passed the 5-second threshold and appeared in Recently Played. |
+| Selection and queue admission | Selecting and queuing a 10-second WAV produced zero occurrences. Playback passed the 5-second threshold and appeared in Recently Played. |
 | Playback, pause and restore | Paused playback retained its credited duration. Graceful exit saved a shutdown end reason. Relaunch restored the dock and history without crediting the paused queue. |
 | Recently Played and columns | An unmodified click from Statistics reused the already open Music Browser. The three optional listening columns were enabled in the track table and sorted by Plays. |
 | History and clearing | Removed a single listen after relaunch. Cancel and confirm were exercised for full history clearing during playback. Later checkpoints did not recreate the removed occurrence. |
@@ -68,7 +68,6 @@ The Dark theme was inspected at 144 DPI in 1,240 × 780 and 720 × 460 logical-p
 | CUE and hard termination | Two chapters in one WAV image each received exactly 6.000 seconds and one play. In the final forced-termination run, 4.005 seconds survived and recovery marked the occurrence interrupted. Its last durable activity preceded termination by 2.229 seconds. |
 | Indexed multi-disc release and repeat | Two recording IDs shared one release key. Two iterations of Repeat One produced two qualified occurrences for the second recording. The compilation credited each chapter's own performer. |
 | Verified source relocation | Two simultaneously open folder Music Browsers updated the path, Plays, Last Played and Listening Time after a library rescan. The saved recording ID and credit were identical before and after the rename. Playback had already stopped. [Native evidence](evidence/listening-intelligence/relocation-two-browsers.webp) |
-| Populated schema 3 profile | The native upgrade to schema 5 preserved three likes and four entries in one playlist. It backed up the schema 3 library and left history empty. The concurrent startup test verifies that multiple readers can open during the upgrade and share one completed migration. |
 | Concurrent views | Browsed and filtered music with two browser instances while History displayed the synthetic catalog and Statistics switched ranges. A real 180-second WAV progressed through qualification during the workload. |
 | Competing writer processes | A second optimized player continued rendering while the first held the writer lock. Its new activity remained unsaved until the first quit. After ownership recovered the second persisted one buffered occurrence with 8.77 seconds of credit and quit gracefully. |
 | Statistics navigation | Switched the ranking metric and date range while History paginated, then hid and reopened Statistics. Revealing an available ranked CUE track reused the open browser. With the source temporarily moved, the same action showed an unavailable-recording notification and left Statistics open. The chart tooltip showed the date and exact listening duration. |

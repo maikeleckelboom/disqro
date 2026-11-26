@@ -1,7 +1,9 @@
 //! Rows shared by the navigation panels, and what they drag.
-use crate::theme::{Materials, materials};
+use crate::{
+    disclosure::Disclosure,
+    theme::{Materials, materials},
+};
 use gpui_kit::{
-    assets::IconName,
     component::{Icon, h_flex},
     prelude::*,
     *,
@@ -19,7 +21,7 @@ pub struct DraggedFolder {
     pub path: PathBuf,
     pub label: SharedString,
     /// The Place it is, so Locations can reorder Places by dragging.
-    pub place: Option<usize>,
+    pub place: bool,
 }
 impl Render for DraggedFolder {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -42,27 +44,42 @@ pub fn chip(label: SharedString, cx: &App) -> Div {
         .child(label)
 }
 
-/// The disclosure slot used by the Locations tree.
-pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -> Stateful<Div> {
-    div()
+/// The leading icon column every navigation row shares.
+pub const ICON: f32 = 16.;
+/// Space between the leading icon column and the label.
+const ICON_GAP: f32 = 2.;
+
+/// The surface every navigation row shares: height, insets, hover,
+/// selection and keyboard focus. Rows add their own leading column and label.
+pub fn nav_surface(
+    id: ElementId,
+    label: SharedString,
+    selected: bool,
+    m: &Materials,
+) -> Stateful<Div> {
+    h_flex()
         .id(id)
-        .size(px(20.))
+        .role(Role::Button)
+        .aria_label(label)
+        .aria_selected(selected)
+        .key_context("NavigationRow")
+        .focusable()
+        .tab_stop(true)
+        .h(px(ROW))
+        .mx(px(6.))
+        .px(px(8.))
+        .gap(px(4.))
+        .rounded(px(5.))
         .flex_shrink_0()
-        .flex()
         .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .when_some(open, |d, open| {
-            d.hover(|d| d.bg(m.hover)).child(
-                Icon::new(if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(12.))
-                .text_color(m.text_faint),
-            )
-        })
+        .text_size(px(crate::theme::size::TEXT))
+        .text_color(if selected { m.text } else { m.text_muted })
+        .when(selected, |d| d.bg(m.selected))
+        .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
+        // Keyboard focus outlines the row inside a border it always reserves.
+        .border_1()
+        .border_color(transparent_black())
+        .focus_visible(|d| d.text_color(m.text).border_color(m.focus_line()))
 }
 
 /// Every Library destination shares the same leading icon and label columns.
@@ -73,32 +90,48 @@ pub fn nav_row(
     selected: bool,
     m: &Materials,
 ) -> Stateful<Div> {
-    h_flex()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(label.clone())
-        .tab_stop(true)
-        .h(px(ROW))
-        .mx(px(6.))
-        .px(px(8.))
-        .gap(px(4.))
-        .rounded(px(5.))
-        .flex_shrink_0()
-        .items_center()
-        .text_size(px(13.))
-        .cursor_pointer()
-        .text_color(if selected { m.text } else { m.text_muted })
-        .when(selected, |d| d.bg(m.selected))
-        .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
-        // Keyboard focus outlines the row inside a border it always reserves.
-        .border_1()
-        .border_color(transparent_black())
-        .focus_visible(|d| d.text_color(m.text).border_color(m.focus_line()))
+    nav_surface(id, label.clone(), selected, m)
         .child(
-            icon.size(px(16.))
+            icon.size(px(ICON))
                 .flex_shrink_0()
-                .mr(px(2.))
+                .mr(px(ICON_GAP))
                 .text_color(if selected { m.accent } else { m.text_faint }),
         )
         .child(div().flex_1().min_w_0().truncate().child(label))
 }
+
+/// A section heading in a navigation list: its label, then its disclosure
+/// chevron, which only expands or collapses the section, then the rest of
+/// the row, which opens the section's overview. The label starts where the
+/// icons of the rows below it do, so the heading leads them without being
+/// indented itself. Callers add trailing actions after it.
+pub fn section_row(
+    id: ElementId,
+    title: SharedString,
+    open: bool,
+    selected: bool,
+    m: &Materials,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    nav_surface(id, format!("Browse {title}").into(), selected, m)
+        .aria_expanded(open)
+        .font_weight(FontWeight::MEDIUM)
+        .child(
+            div()
+                .flex_shrink(1.)
+                .min_w_0()
+                .truncate()
+                .child(title.clone()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .ml(px(HEADING_DISCLOSURE_GAP))
+                .child(Disclosure::new("disclosure", open, title).on_toggle(on_toggle)),
+        )
+        .child(div().flex_1())
+}
+
+/// The chevron's interactive area pads its glyph, so it overlaps the label
+/// slightly to keep the glyph visibly attached to it.
+const HEADING_DISCLOSURE_GAP: f32 = -5.;

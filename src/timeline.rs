@@ -147,6 +147,14 @@ impl Segment {
                 self.source.rate,
             ) - frame_time(self.frames.start, self.source.rate))
     }
+    /// Program time at a fractional source `frame`, for positions between
+    /// frames such as an interpolated playhead. Agrees with [`Self::at`] at
+    /// whole frames to within a nanosecond.
+    pub fn at_fractional(&self, frame: f64) -> f64 {
+        let (start, end) = (self.frames.start as f64, self.frames.end as f64);
+        self.time.start as f64
+            + (frame.clamp(start, end) - start) * SECOND as f64 / f64::from(self.source.rate)
+    }
     pub fn elapsed_frame(&self, elapsed: f64) -> usize {
         self.frames.start
             + ((elapsed.max(0.) * f64::from(self.source.rate)).round() as usize)
@@ -172,6 +180,17 @@ pub struct Program {
     watch: Vec<(PathBuf, Option<Stamp>)>,
 }
 impl Program {
+    pub fn inspection_chapter(&self, source: &Arc<Source>, frame: usize) -> Option<(u8, f64, f64)> {
+        let segment = self
+            .segments
+            .iter()
+            .find(|s| Arc::ptr_eq(&s.source, source) && s.frames.contains(&frame))?;
+        let chapter = segment.track.disc.as_ref()?.number;
+        let elapsed = (frame - segment.frames.start) as f64 / f64::from(source.rate);
+        let time = segment.time.start as f64 / SECOND as f64 + elapsed;
+        Some((chapter, elapsed, time))
+    }
+
     pub fn index(&self, t: &Track) -> Option<usize> {
         self.segments
             .iter()
@@ -325,7 +344,7 @@ fn describe(
         // Keep a verified length tied to the authored sheet revision for offline files.
         if let (Some(c), Some((p, s))) = (cache, sheet) {
             let _ = c.0.execute(
-                "INSERT OR REPLACE INTO disc_sources_v1 VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO disc_sources VALUES(?,?,?,?,?,?,?,?)",
                 params![
                     p.as_os_str().as_encoded_bytes(),
                     s.stamp.bytes,
@@ -348,7 +367,7 @@ fn describe(
         }
     } else {
         let known=cache.zip(sheet).and_then(|(c,(p,s))|c.0.query_row(
-            "SELECT bytes,modified,rate,frames FROM disc_sources_v1 WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
+            "SELECT bytes,modified,rate,frames FROM disc_sources WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
             params![p.as_os_str().as_encoded_bytes(),s.stamp.bytes,s.stamp.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},object:None,rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
         known.with_context(|| {
             format!(
@@ -368,5 +387,4 @@ fn describe(
 }
 
 #[cfg(test)]
-#[path = "timeline_tests.rs"]
 mod tests;

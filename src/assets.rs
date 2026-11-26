@@ -19,6 +19,7 @@ gpui_kit::assets::icon_assets!(
         Repeat,
         Repeat1,
         ListMusic,
+        ListTree,
         ListStart,
         ListEnd,
         AudioLines,
@@ -49,10 +50,11 @@ gpui_kit::assets::icon_assets!(
         ListFilter,
         Music,
         Folder,
-        Folders
+        Folders,
+        MicVocal
     ]
 );
-/// A filled variant of Lucide's heart (ISC licence), for liked tracks.
+/// A filled variant of Lucide's heart (ISC license), for liked tracks.
 pub const HEART_FILL: &str = "icons/heart-fill.svg";
 pub struct Assets;
 impl AssetSource for Assets {

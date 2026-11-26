@@ -1,12 +1,14 @@
-//! Queue and History: two panels over the one playback queue.
+//! Queue and History: two panels over the one playback sequence.
 //!
-//! **Queue** shows the current entry, marked by its state rather than a
-//! heading, and what plays after it. **History** shows what played before,
-//! most recent first. Each panel keeps its own selection and scroll
-//! position; switching, splitting or closing them never changes the queue.
+//! The active occurrence is Now Playing, owned by the transport and shown
+//! by the player. **Queue** lists only what plays after it, and **History**
+//! what played before it, most recent first. Neither lists the active
+//! occurrence, so no queue edit can remove it. Each panel keeps its own
+//! selection and scroll position; switching, splitting or closing them
+//! never changes the sequence.
 use super::{Pane, PaneContent, PanelType, Services};
 use crate::{
-    audio::{Command, TransportState},
+    audio::Command,
     library::clock,
     player::{Player, PlayerEvent, reveal_items},
     queue::{Entry, Queue, Repeat},
@@ -86,10 +88,9 @@ pub enum Mode {
 
 impl Mode {
     fn indices(self, q: &Queue) -> std::ops::Range<usize> {
-        let current = q.history().len();
         match self {
-            Self::Queue => current..q.entries.len(),
-            Self::History => 0..current,
+            Self::Queue => q.upcoming_range(),
+            Self::History => 0..q.history().len(),
         }
     }
 }
@@ -237,7 +238,6 @@ impl Entries {
         player: &Entity<Player>,
         entry: Entry,
         mode: Mode,
-        is_current: bool,
         menu: PopupMenu,
     ) -> PopupMenu {
         let id = entry.id;
@@ -254,18 +254,16 @@ impl Entries {
         let next = act(Command::ScheduleNext(id));
         let remove = act(Command::Remove(vec![id]));
         let menu = menu
-            .when(!is_current, |m| {
-                m.item(
-                    PopupMenuItem::new("Play")
-                        .icon(IconName::Play)
-                        .on_click(play),
-                )
-                .item(
-                    PopupMenuItem::new("Play Next")
-                        .icon(IconName::ListStart)
-                        .on_click(next),
-                )
-            })
+            .item(
+                PopupMenuItem::new("Play")
+                    .icon(IconName::Play)
+                    .on_click(play),
+            )
+            .item(
+                PopupMenuItem::new("Play Next")
+                    .icon(IconName::ListStart)
+                    .on_click(next),
+            )
             .item(
                 PopupMenuItem::new(match mode {
                     Mode::Queue => "Remove from Queue",
@@ -287,20 +285,11 @@ impl Entries {
         let m = *materials(cx);
         let entry = q.entries[ix].clone();
         let id = entry.id;
-        let is_current = q.current == Some(ix);
         let selected = self.selected == Some(id);
         let t = &entry.track;
         let title: SharedString = t.title.clone().into();
         let artist = Some(SharedString::from(t.artist.clone())).filter(|a| !a.is_empty());
         let duration = t.duration.map(clock).unwrap_or_default();
-        let status = &self.player.read(cx).status;
-        // The current entry is marked, never drawn as a control: the marker
-        // rests while playback is paused or stopped.
-        let marker = if status.playback_state() == TransportState::Playing {
-            m.accent
-        } else {
-            m.text_faint
-        };
         let this = cx.weak_entity();
         let mode = self.mode;
         let menu_entry = entry.clone();
@@ -309,20 +298,7 @@ impl Entries {
             .id(("entry", id))
             .role(Role::ListBoxOption)
             .aria_selected(selected)
-            .aria_label(if is_current {
-                format!(
-                    "{title} · {}",
-                    match status.playback_state() {
-                        TransportState::Playing => "Now playing",
-                        TransportState::Paused => "Paused",
-                        TransportState::Scrubbing => "Scrubbing",
-                        TransportState::Finished => "Finished",
-                        TransportState::Stopped => "Stopped",
-                    }
-                )
-            } else {
-                title.to_string()
-            })
+            .aria_label(title.clone())
             .w_full()
             .h(px(ROW))
             .px(px(10.))
@@ -332,24 +308,6 @@ impl Entries {
             .text_size(px(size::TEXT))
             .when(selected, |d| d.bg(m.selected))
             .when(!selected, |d| d.hover(|d| d.bg(m.hover)))
-            // Only the queue has a current entry to mark. History rows start
-            // at the edge rather than beside an empty column.
-            .when(mode == Mode::Queue, |d| {
-                d.child(
-                    div()
-                        .w(px(16.))
-                        .flex_shrink_0()
-                        .flex()
-                        .justify_center()
-                        .when(is_current, |d| {
-                            d.child(
-                                Icon::new(IconName::AudioLines)
-                                    .size(px(14.))
-                                    .text_color(marker),
-                            )
-                        }),
-                )
-            })
             .child({
                 // A narrow panel shows whole titles rather than a sliver of
                 // each artist.
@@ -366,7 +324,7 @@ impl Entries {
                             })
                             .when(artist.is_none(), |d| d.flex_1().min_w_0())
                             .truncate()
-                            .text_color(if is_current { m.accent } else { m.text })
+                            .text_color(m.text)
                             .child(title.clone()),
                     )
                     .when_some(artist, |d, artist| {
@@ -396,7 +354,7 @@ impl Entries {
                 }
                 cx.notify();
             }))
-            .when(mode == Mode::Queue && !is_current, |row| {
+            .when(mode == Mode::Queue, |row| {
                 row.on_drag(
                     DraggedEntry {
                         id,
@@ -410,14 +368,7 @@ impl Entries {
                 }))
             })
             .context_menu(move |menu, _, _| {
-                Self::entry_menu(
-                    this.clone(),
-                    &player,
-                    menu_entry.clone(),
-                    mode,
-                    is_current,
-                    menu,
-                )
+                Self::entry_menu(this.clone(), &player, menu_entry.clone(), mode, menu)
             });
         div().w_full().px(px(6.)).child(row).into_any_element()
     }
@@ -585,10 +536,23 @@ mod tests {
     }
 
     #[test]
-    fn queue_lists_the_current_entry_then_what_follows() {
+    fn queue_lists_only_what_follows_the_active_occurrence() {
         let q = queue(5, Some(2));
-        assert_eq!(rows(Mode::Queue, &q), [2, 3, 4]);
+        assert_eq!(rows(Mode::Queue, &q), [3, 4]);
         assert_eq!(rows(Mode::History, &q), [1, 0]);
+        // A single playing entry leaves an empty, valid queue.
+        let single = queue(1, Some(0));
+        assert!(rows(Mode::Queue, &single).is_empty());
+        assert!(rows(Mode::History, &single).is_empty());
+    }
+
+    #[test]
+    fn upcoming_duplicates_of_the_active_recording_stay_listed() {
+        let track = Track::file(std::path::PathBuf::from(r"C:\Music\same.flac"));
+        let mut q = Queue::default();
+        q.replace([track.clone(), track].into_iter().collect(), 0);
+        assert_eq!(rows(Mode::Queue, &q), [1]);
+        assert_ne!(q.entries[0].id, q.entries[1].id);
     }
 
     #[test]

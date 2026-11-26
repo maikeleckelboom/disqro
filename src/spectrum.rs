@@ -291,7 +291,7 @@ impl Projection {
             let band = self.settings.style == Style::Bands;
             let value = if band || (self.smoothed && c.hi - c.lo >= 1.) {
                 let mut sum = 0.;
-                // A bin owns the interval halfway to either neighbour.
+                // A bin owns the interval halfway to either neighbor.
                 for k in
                     (c.lo - 0.5).ceil().max(0.) as usize..=((c.hi + 0.5).floor() as usize).min(last)
                 {
@@ -367,5 +367,4 @@ impl Ballistics {
 }
 
 #[cfg(test)]
-#[path = "spectrumTests.rs"]
 mod tests;

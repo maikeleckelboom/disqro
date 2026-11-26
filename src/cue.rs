@@ -95,6 +95,7 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
                 t.disc_number = folder_disc;
                 t.album = album.clone();
                 t.artist = artist.clone();
+                t.album_artist = (!artist.is_empty()).then(|| artist.clone());
                 t.disc = Some(DiscTrack {
                     sheet: sheet.into(),
                     number: n,
@@ -105,9 +106,11 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
                 in_track = true;
             }
             "TITLE" if in_track => tracks.last_mut().unwrap().title = title(args)?,
-            "PERFORMER" if in_track => tracks.last_mut().unwrap().artist = title(args)?,
+            "PERFORMER" if in_track => {
+                tracks.last_mut().unwrap().artist = title(args)?.trim().to_owned()
+            }
             "TITLE" => album = title(args)?,
-            "PERFORMER" => artist = title(args)?,
+            "PERFORMER" => artist = title(args)?.trim().to_owned(),
             "INDEX" => {
                 let (ix, val) = value(args)?;
                 let stamp = time(val.trim())?;
@@ -146,6 +149,7 @@ fn parse(sheet: &Path, text: &str) -> Result<Vec<Track>> {
         if previous.as_ref() != Some(&t.source) && d.start > 0 {
             let mut pre = t.clone();
             pre.title = "Disc lead-in".into();
+            pre.artist.clear();
             pre.disc = Some(DiscTrack {
                 number: 0,
                 start: 0,

@@ -6,6 +6,7 @@ use crate::{
     theme::materials,
 };
 use breadcrumb::Breadcrumbs;
+pub(crate) use breadcrumb::TrailWidths;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{
@@ -141,6 +142,11 @@ impl LocationBar {
             _view: view,
         }
     }
+    pub(crate) fn set_width(&self, width: Pixels, cx: &mut App) {
+        self.trail
+            .update(cx, |trail, cx| trail.set_field_width(width, cx));
+    }
+
     fn follow(
         browser: &Entity<Browser>,
         window: &mut Window,

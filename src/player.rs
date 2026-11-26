@@ -28,9 +28,10 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-#[path = "player_wave.rs"]
+mod cursor;
 mod wave;
 use crate::level_meter::LevelMeter;
+pub(crate) use wave::WaveStrip;
 pub(crate) use wave::WaveTrack;
 
 /// The perspective tabs above the timeline lane.
@@ -149,10 +150,19 @@ pub struct Player {
     segment: Option<usize>,
     shapes: Vec<Shape>,
     unavailable: Option<String>,
-    run: std::ops::Range<usize>,
     waveform_scrub: Option<Arc<crate::audio::scrub::Gesture>>,
     visible: bool,
     drawn_position: f64,
+    /// Whether the compact waveform moves its playhead by itself.
+    cursor_retained: Rc<Cell<bool>>,
+    /// The reachable frames of the shown chapter, by what they depend on.
+    #[allow(clippy::type_complexity)]
+    navigable: std::cell::RefCell<
+        Option<(
+            (usize, usize, bool, u64, Option<usize>),
+            std::ops::Range<usize>,
+        )>,
+    >,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
     /// The workspace keeps it current for the player's Queue button.
     pub queue_shown: bool,
@@ -163,12 +173,15 @@ impl Player {
         full_cd: bool,
         show_levels: bool,
         listening: Option<crate::listening::Writer>,
+        motion: crate::panels::waveform::Motion,
         cx: &mut Context<Self>,
     ) -> Self {
         let transport = Transport::new(volume, listening);
         let meter = cx.new(|_| LevelMeter::new(transport.signal.clone(), Axis::Horizontal));
         let player = cx.entity();
-        let wave_strip = cx.new(|cx| wave::WaveStrip::new(player, cx));
+        let cursor_retained = Rc::new(Cell::new(false));
+        let retained = cursor_retained.clone();
+        let wave_strip = cx.new(|cx| wave::WaveStrip::new(player, motion, retained, cx));
         let events = transport.changed.clone();
         cx.spawn(async move |this, cx| {
             while events.recv().await.is_ok() {
@@ -218,10 +231,11 @@ impl Player {
             segment: None,
             shapes: vec![],
             unavailable: None,
-            run: 0..0,
             waveform_scrub: None,
             visible: true,
             drawn_position: 0.,
+            cursor_retained,
+            navigable: Default::default(),
             queue_shown: true,
         }
     }
@@ -417,24 +431,21 @@ impl Player {
         if identity_changed || track_changed || self.status.scrub.is_some() {
             self.scrub = None;
         }
-        if queue_changed || track_changed {
-            self.update_run();
-        }
         if state_changed {
             cx.emit(PlayerEvent::StateChanged);
         }
         if wave_changed {
             cx.emit(PlayerEvent::WaveChanged);
         }
-        // Redraw for position alone only when the playhead moves on screen or
-        // the clock turns over; a long track then redraws a few times a second
-        // instead of on every transport tick.
+        // Redraw for position alone only when the clock turns over. The
+        // compact waveform moves its own playhead at the display's rate; only
+        // where it cannot does position redraw whenever the playhead moves on
+        // screen.
         let (shown_position, shown_duration) = self.wave_time();
-        let redraw = !position_only || {
+        let redraw = !position_only || shown_position.floor() != self.drawn_position.floor() || {
             let width = f64::from(f32::from(self.seek_bounds.get().size.width)).max(1.);
             let moved = (shown_position - self.drawn_position).abs();
-            let pixels = moved * width / shown_duration.max(1.);
-            pixels >= 0.75 || shown_position.floor() != self.drawn_position.floor()
+            !self.cursor_retained.get() && moved * width / shown_duration.max(1.) >= 0.75
         };
         if redraw && (self.visible || !position_only) {
             self.drawn_position = shown_position;
@@ -520,6 +531,7 @@ impl Player {
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timer = crate::diagnostics::Timer::measure(|d| &d.ui_us);
+        crate::diagnostics::stage(crate::diagnostics::begin_stage(), "player_render", 0, 0);
         let m = *materials(cx);
         let s = &self.status;
         let active = s.track.is_some();
@@ -670,11 +682,17 @@ impl Render for Player {
             .bg(m.control)
             .text_color(m.text)
             .when(active || self.can_start, |d| {
-                d.cursor_pointer()
+                d.focusable()
+                    .tab_stop(true)
+                    .key_context("TransportControl")
+                    .focus_visible(|d| d.border_1().border_color(m.focus_line()))
                     .hover(|d| d.bg(m.control_hover))
                     .on_click(cx.listener(|p, _, _, cx| p.command(Command::Toggle, cx)))
             })
-            .when(!active && !self.can_start, |d| d.opacity(0.4))
+            .when(!active && !self.can_start, |d| {
+                d.opacity(0.4)
+                    .a11y_synthetic_children(|tree| tree.parent_node().set_disabled())
+            })
             .tooltip(|w, cx| Tooltip::new("Play or pause · Space").build(w, cx))
             .child(
                 Icon::new(if play_will_pause {
@@ -888,7 +906,7 @@ impl Render for Player {
         )
         .absolute()
         .size_full();
-        // Three zones of equal flexibility keep the transport centred in the
+        // Three zones of equal flexibility keep the transport centered in the
         // window: the recording on the left, playback in the middle, and the
         // listening controls on the right. The timeline runs the full width
         // below them and takes whatever height the player is given.

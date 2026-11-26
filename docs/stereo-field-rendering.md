@@ -85,9 +85,9 @@ Build the live binary in a separate target directory. Use new output directories
 
 ```powershell
 cargo build --release --locked --features qualification --target-dir .local/live-target
-python tools/qualifySpectrum.py field .local/live-target/release/disqro.exe C:/fixtures/disc.cue .local/live-field --exercise-resize
-python tools/buildFieldReference.py . .local/reference-src .local/reference-target
-python tools/captureFieldReference.py .local/reference-src/reference.exe C:/fixtures/excerpt.flac .local/native-captures
+python tools/qualify_spectrum.py field .local/live-target/release/disqro.exe C:/fixtures/disc.cue .local/live-field --exercise-resize
+python tools/build_field_reference.py . .local/reference-src .local/reference-target
+python tools/capture_field_reference.py .local/reference-src/reference.exe C:/fixtures/excerpt.flac .local/native-captures
 ```
 
 To capture an earlier implementation, give the current reference tool a checkout of that revision as its first argument and use a fresh scratch directory. The source instrumentation holds the observed samples for the photograph and records the GPUI geometry. Production and live CPU builds use the normal streaming path.

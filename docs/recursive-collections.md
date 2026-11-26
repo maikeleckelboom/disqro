@@ -1,6 +1,6 @@
 # Browsing a music collection
 
-Open the collection root from Locations, the address bar or the folder picker, then choose **Include Subfolders**. A folder that holds only subfolders offers it in the list; the **Subfolders** button in the Music Browser toolbar always offers it. Disqro remembers the choice for that folder and every folder inside it, and starts showing discs and tracks as it finds them. Its parent and neighbouring folders keep showing only their own recordings. Choosing it again inside a collection turns it off for that branch alone.
+Open the collection root from Locations, the address bar or the folder picker, then choose **Include Subfolders**. A folder that holds only subfolders offers it in the list; the **Subfolders** button in the Music Browser toolbar always offers it. Disqro remembers the choice for that folder and every folder inside it, and starts showing discs and tracks as it finds them. Its parent and neighboring folders keep showing only their own recordings. Choosing it again inside a collection turns it off for that branch alone.
 
 - **Albums / CDs** shows the artwork, title, year, track count, duration, format and relative folder for each disc. Double-click a disc or press Enter to see its tracks. The button above the table returns to the discs.
 - **All Tracks** groups the customizable table by CD. Double-click a CD header to open its page. Click a column heading to sort across the collection. Ctrl+F searches titles, artists, albums and paths. Combine terms such as `artist:gizmo format:flac` or `album:thunderdome`.
@@ -25,7 +25,7 @@ The walker checks each referenced source on every visit. A missing file in a mul
 
 ## Windows qualification, 19 November 2026
 
-The optimized x64 application ran on Windows 11 Pro build 26300, Ryzen 7 8845HS, at 150% scaling. The local Thunderdome archive contained 211 subdirectories, 108 FLAC images totalling 60.86 GiB and 214 CUE sheets. An independent count found 108 available programs and 106 sheets referencing absent rips. The available programs specified **2,086 numbered tracks and 37 recorded lead-ins**. Disqro displayed all **2,123** in **108 discs**.
+The optimized x64 application ran on Windows 11 Pro build 26300, Ryzen 7 8845HS, at 150% scaling. The local Thunderdome archive contained 211 subdirectories, 108 FLAC images totaling 60.86 GiB and 214 CUE sheets. An independent count found 108 available programs and 106 sheets referencing absent rips. The available programs specified **2,086 numbered tracks and 37 recorded lead-ins**. Disqro displayed all **2,123** in **108 discs**.
 
 | Observation | Result |
 | --- | ---: |
@@ -76,7 +76,7 @@ Interaction checks, driven through window messages:
 - **Typed paths:** a path inside a dot-folder opened its three recordings, and the tree showed the way to it.
 - **Scope:** the archive offered **Include Subfolders** in its empty list and then showed 108 discs and 2,123 entries in natural folder order. `# 1-22` inherited the choice with 44 discs, and Music kept its own 10 recordings. In a fixture, an album with `CD1` and `CD2` showed two discs; its artist folder still offered the choice, and `CD1` listed its tracks.
 - **Content:** a fixture with text files, a playlist file, `.git`, `.cache` and a folder with the hidden attribute listed only recordings and visible folders. A zero-byte WAV and a text file named `.mp3` were dimmed with a warning; an untagged WAV was not.
-- **During discovery:** a search narrowed the list as it grew and restored all 4,302 entries when cleared. With Title sorted and the list scrolled, the top row stayed in place while about 3,000 more entries were sorted in around it. Albums / CDs and All Tracks switched while discovery continued. Choosing the `C:` Place cancelled the scan. Refresh, and Include Subfolders on Music, left the tree unchanged in 20 and 43 sampled frames.
+- **During discovery:** a search narrowed the list as it grew and restored all 4,302 entries when cleared. With Title sorted and the list scrolled, the top row stayed in place while about 3,000 more entries were sorted in around it. Albums / CDs and All Tracks switched while discovery continued. Choosing the `C:` Place canceled the scan. Refresh, and Include Subfolders on Music, left the tree unchanged in 20 and 43 sampled frames.
 - **Library:** the archive added to the library showed 108 discs and 2,123 entries in its collection. A like and a three-star rating on two CUE chapters, a new playlist and playback from the album all worked. Reveal in Folder opened the chapter's `CD1` folder with the chapter selected and both marks shown, while playback continued.
 
 [Folder without recordings](evidence/folder-without-recordings.png) · [Folder as a collection](evidence/folder-as-collection.png) · [Reveal in Folder](evidence/reveal-in-folder.png) · [Unreadable recordings](evidence/unreadable-recordings.png)

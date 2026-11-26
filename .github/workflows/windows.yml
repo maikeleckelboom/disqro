@@ -13,18 +13,103 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  source:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install pinned Rust tools
-        run: rustup component add rustfmt clippy
+        run: rustup component add rustfmt
       - name: Formatting
         run: cargo fmt --all -- --check
+      - name: Source naming
+        run: python tools/check_names.py
+      - name: American English
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'typos.zip'
+          $bin = Join-Path $env:RUNNER_TEMP 'typos'
+          Invoke-WebRequest 'https://github.com/crate-ci/typos/releases/download/v1.52.2/typos-v1.52.2-x86_64-pc-windows-msvc.zip' -OutFile $archive
+          if ((Get-FileHash $archive).Hash -ne 'AB79036832CEA0F2A21AA947731D39512250CC0F7A6A2F6ADD26262738A8CC11') { throw 'Unexpected typos archive' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $bin
+          & "$bin/typos.exe" .
+      - name: Native output comparator
+        run: python -B -m unittest discover -s tools -p test_waveform_parity.py
+
+  verify:
+    needs: source
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TRUSTED_REVISION: >-
+        ${{ github.repository == 'maikeleckelboom/disqro' &&
+            github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+            ((github.event_name == 'pull_request' &&
+              github.event.pull_request.head.repo.full_name == github.repository &&
+              github.event.pull_request.user.login == github.repository_owner &&
+              github.base_ref == 'main' && startsWith(github.head_ref, 'integrate/')) ||
+             ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+              github.ref == 'refs/heads/main')) }}
+    steps:
+      - name: Require an owner-controlled revision
+        if: env.TRUSTED_REVISION != 'true'
+        run: throw 'Private dependency checks require owner review and promotion to an integration branch.'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Prepare a clean Windows build
+        run: |
+          $cargoHome = Join-Path $env:RUNNER_TEMP 'disqro-cargo'
+          if (Test-Path -LiteralPath $cargoHome) { throw 'Expected an empty Cargo home' }
+          "CARGO_HOME=$cargoHome" >> $env:GITHUB_ENV
+          'CARGO_NET_OFFLINE=true' >> $env:GITHUB_ENV
+          rustup component add clippy
+      - name: Fetch locked dependencies with the read-only engine key
+        shell: bash
+        env:
+          WAVEFORM_NATIVE_DEPLOY_KEY: ${{ secrets.WAVEFORM_NATIVE_DEPLOY_KEY }}
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          CARGO_NET_OFFLINE: 'false'
+        run: |
+          set -euo pipefail
+          export PATH="/usr/bin:$PATH"
+          hosts="$(mktemp)"
+          eval "$(ssh-agent -s)" >/dev/null
+          trap 'ssh-agent -k >/dev/null; rm -f "$hosts"' EXIT
+          # GitHub's published Ed25519 host key. Reject unknown or rotated keys.
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$hosts"
+          printf '%s\n' "$WAVEFORM_NATIVE_DEPLOY_KEY" | tr -d '\r' | ssh-add - >/dev/null 2>&1
+          unset WAVEFORM_NATIVE_DEPLOY_KEY
+          export GIT_SSH_COMMAND="ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes -o HostKeyAlgorithms=ssh-ed25519 -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile='$hosts'"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0='url.ssh://git@github.com/maikeleckelboom/waveform-native.insteadOf'
+          export GIT_CONFIG_VALUE_0='https://github.com/maikeleckelboom/waveform-native'
+          git ls-remote --exit-code "$GIT_CONFIG_VALUE_0" HEAD >/dev/null
+          cargo fetch --locked --target x86_64-pc-windows-msvc >/dev/null 2>&1
+      # Compiler and test diagnostics can contain private dependency source.
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings *> $null
       - name: Tests
-        run: cargo test --locked
+        shell: bash
+        run: |
+          set -eu
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          if ! cargo test --locked --color never >"$log" 2>&1; then
+            # Report failing test identities, locations, and diagnostic codes only.
+            sed -nE 's/^test ([a-zA-Z0-9_:]+) \.\.\. FAILED\r?$/Failed test: \1/p' "$log"
+            grep -Eo 'panicked at src[/\\][a-zA-Z0-9_/\\.]+\.rs:[0-9]+:[0-9]+|LNK[0-9]{4}|error\[E[0-9]{4}\]|os error [0-9]+|STATUS_[A-Z_]+' "$log" | sort -u
+            exit 1
+          fi
+          sed -nE 's/^test result: ok\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;.*/Tests passed: \1, failed: \2, ignored: \3/p' "$log"
       - name: Build Windows player
-        run: .\build.ps1
+        run: .\build.ps1 *> $null
+      - name: Build production Windows player and record provenance
+        run: |
+          .\build.ps1 -Release *> $null
+          $sha = (Get-FileHash -Algorithm SHA256 target/release/disqro.exe).Hash
+          "Commit $(git rev-parse HEAD), tree $(git rev-parse 'HEAD^{tree}')"
+          "Cargo.lock blob $(git rev-parse 'HEAD:Cargo.lock'), $(rustc --version)"
+          "disqro.exe SHA-256 $sha"

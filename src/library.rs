@@ -19,6 +19,8 @@ pub struct Track {
     pub title: String,
     #[serde(default)]
     pub artist: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_artist: Option<String>,
     #[serde(default)]
     pub album: String,
     #[serde(default)]
@@ -62,6 +64,7 @@ impl Track {
             title: name(&path),
             source: path,
             artist: String::new(),
+            album_artist: None,
             album: String::new(),
             duration: None,
             number: None,
@@ -111,7 +114,12 @@ impl Track {
             if let Some(title) = tag.title() {
                 self.title = title.into_owned();
             }
-            self.artist = tag.artist().unwrap_or_default().into_owned();
+            self.artist = tag.artist().unwrap_or_default().trim().to_owned();
+            self.album_artist = tag
+                .get_string(lofty::tag::ItemKey::AlbumArtist)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
             self.album = tag.album().unwrap_or_default().into_owned();
             self.number = tag.track();
             self.disc_number = tag.disk();
@@ -179,7 +187,7 @@ pub fn browse_while(
 ) -> Result<Folder> {
     let mut folder = Folder::default();
     let mut files = Vec::new();
-    let mut discs = Vec::new();
+    let mut discs: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(path).with_context(|| format!("Cannot open {}", path.display()))? {
         anyhow::ensure!(current(), "Folder changed");
         let entry = match entry {
@@ -224,11 +232,36 @@ pub fn browse_while(
     }
     sort_by_name(&mut folder.dirs, folder_name);
     discs.sort();
-    let mut covered = HashSet::new();
+    browse_files(
+        folder,
+        files,
+        &discs,
+        &discs,
+        HashSet::new(),
+        cache,
+        current,
+    )
+}
+
+/// Builds the recordings of a folder from some of its files. Only `sheets`
+/// contribute CUE programs, while every sheet in `claims` and every file in
+/// `claimed` (canonical paths) is removed from the loose recordings.
+pub fn browse_files(
+    mut folder: Folder,
+    mut files: Vec<PathBuf>,
+    sheets: &[PathBuf],
+    claims: &[PathBuf],
+    claimed: HashSet<PathBuf>,
+    cache: Option<&crate::cache::Cache>,
+    current: impl Fn() -> bool,
+) -> Result<Folder> {
+    let mut covered = claimed;
     let mut tracks: Vec<Track> = Vec::new();
     let mut absent = Vec::new();
-    for sheet in discs {
+    for sheet in claims {
         anyhow::ensure!(current(), "Folder changed");
+        let shown = sheets.contains(sheet);
+        let sheet = sheet.clone();
         match cache.map_or_else(|| crate::cue::read(&sheet), |c| c.program(&sheet)) {
             Ok(program) => {
                 let sources = program
@@ -240,13 +273,17 @@ pub fn browse_while(
                     .filter_map(|&path| match path.canonicalize() {
                         Ok(canonical) => Some((path.to_owned(), canonical)),
                         Err(e) => {
-                            if e.kind() != std::io::ErrorKind::NotFound {
+                            if shown && e.kind() != std::io::ErrorKind::NotFound {
                                 folder.failed_sheets.push(sheet.clone());
                             }
                             None
                         }
                     })
                     .collect::<std::collections::HashMap<_, _>>();
+                covered.extend(present.values().cloned());
+                if !shown {
+                    continue;
+                }
                 if present.is_empty() {
                     absent.push((sheet, program));
                     continue;
@@ -257,19 +294,19 @@ pub fn browse_while(
                         folder_name(&sheet)
                     ));
                 }
-                covered.extend(present.values().cloned());
                 tracks.extend(
                     program
                         .into_iter()
                         .filter(|t| present.contains_key(&t.source)),
                 );
             }
-            Err(error) => {
+            Err(error) if shown => {
                 folder
                     .notices
                     .push(format!("{} · {error}", folder_name(&sheet)));
                 folder.failed_sheets.push(sheet);
             }
+            Err(_) => {}
         }
     }
     for (sheet, program) in absent {
@@ -362,6 +399,336 @@ pub(crate) fn try_subfolders(path: &Path) -> std::io::Result<Vec<PathBuf>> {
         .collect();
     sort_by_name(&mut dirs, folder_name);
     Ok(dirs)
+}
+
+/// A folder entry's name in the order Explorer shows it, so `CD 2`
+/// precedes `CD 10`. Names that compare equal fall back to their exact
+/// spelling, so every listing has one total order to resume from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameKey {
+    name: String,
+    #[cfg(windows)]
+    wide: Vec<u16>,
+}
+
+impl NameKey {
+    pub fn new(name: String) -> Self {
+        Self {
+            #[cfg(windows)]
+            wide: name.encode_utf16().chain([0]).collect(),
+            name,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+    fn logical_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        #[cfg(windows)]
+        {
+            use windows::{Win32::UI::Shell::StrCmpLogicalW, core::PCWSTR};
+            // Both keys are NUL-terminated and outlive the call.
+            unsafe { StrCmpLogicalW(PCWSTR(self.wide.as_ptr()), PCWSTR(other.wide.as_ptr())) }
+                .cmp(&0)
+        }
+        #[cfg(not(windows))]
+        {
+            self.name.to_lowercase().cmp(&other.name.to_lowercase())
+        }
+    }
+}
+
+impl Ord for NameKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.logical_cmp(other)
+            .then_with(|| self.name.cmp(&other.name))
+    }
+}
+
+impl PartialOrd for NameKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// The first `limit` entries after a resume point, kept while a directory
+/// streams past. Memory stays proportional to `limit`, whatever the size of
+/// the directory.
+struct Window {
+    after: Option<NameKey>,
+    inclusive: bool,
+    limit: usize,
+    kept: std::collections::BinaryHeap<(NameKey, PathBuf)>,
+    /// Entries after the resume point, including those not kept.
+    seen: usize,
+}
+
+impl Window {
+    fn new(after: Option<&str>, limit: usize) -> Self {
+        Self {
+            after: after.map(|name| NameKey::new(name.to_owned())),
+            inclusive: false,
+            limit,
+            kept: Default::default(),
+            seen: 0,
+        }
+    }
+
+    fn offer(&mut self, key: NameKey, path: PathBuf) {
+        if self.after.as_ref().is_some_and(|after| {
+            if self.inclusive {
+                key.logical_cmp(after).is_lt()
+            } else {
+                key <= *after
+            }
+        }) {
+            return;
+        }
+        self.seen += 1;
+        if self.kept.len() < self.limit {
+            self.kept.push((key, path));
+        } else if self.kept.peek().is_some_and(|(largest, _)| key < *largest) {
+            self.kept.pop();
+            self.kept.push((key, path));
+        }
+    }
+
+    /// The kept entries in order, and whether more follow them.
+    fn finish(self) -> (Vec<(NameKey, PathBuf)>, bool) {
+        let more = self.seen > self.kept.len();
+        (self.kept.into_sorted_vec(), more)
+    }
+}
+
+/// Where a paged folder listing resumes: after a subfolder, or after a
+/// recording file once every subfolder has been listed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListingCursor {
+    Dirs(String),
+    Files(String),
+    /// A recording reveal begins at its exact filename.
+    AtFile(String),
+}
+
+/// The files of one page of a folder listing.
+pub enum ListedFiles {
+    /// Every recording and sheet of the folder. Small folders keep their
+    /// albums and programs together.
+    All {
+        audio: Vec<PathBuf>,
+        sheets: Vec<PathBuf>,
+    },
+    /// The next files by name in a folder with too many to group at once.
+    /// Sheets on other pages can still play these recordings, which
+    /// `claimed_sources` resolves.
+    Page {
+        audio: Vec<PathBuf>,
+        sheets: Vec<PathBuf>,
+        /// A resume point when more files follow.
+        next: Option<String>,
+    },
+}
+
+/// One bounded page of a folder: its next subfolders and, once they are
+/// exhausted, its recordings.
+pub struct FolderListing {
+    pub dirs: Vec<PathBuf>,
+    /// A resume point when more subfolders follow.
+    pub next_dir: Option<String>,
+    /// Present once every subfolder is listed.
+    pub files: Option<ListedFiles>,
+    pub cover: Option<PathBuf>,
+    pub notices: Vec<String>,
+    pub complete: bool,
+}
+
+/// Recordings and sheets a folder groups into albums and programs at once.
+pub const GROUPED_FILES: usize = 4096;
+
+/// Lists one page of `path` in a single pass over its entries. Only names
+/// are held, at most `limit` of each kind beyond the resume point, so a
+/// directory of any size takes bounded memory. Links, junctions, hidden and
+/// system entries are skipped as in `browse_while`, so no listing can cycle.
+pub fn list_page(
+    path: &Path,
+    after: Option<&ListingCursor>,
+    limit: usize,
+    group_limit: Option<usize>,
+    current: impl Fn() -> bool,
+) -> Result<FolderListing> {
+    let (dirs_after, files_after) = match after {
+        None => (None, None),
+        Some(ListingCursor::Dirs(name)) => (Some(name.as_str()), None),
+        Some(ListingCursor::Files(name) | ListingCursor::AtFile(name)) => {
+            (None, Some(name.as_str()))
+        }
+    };
+    let listing_dirs = !matches!(
+        after,
+        Some(ListingCursor::Files(_) | ListingCursor::AtFile(_))
+    );
+    let mut dirs = Window::new(dirs_after, if listing_dirs { limit } else { 0 });
+    let mut files = Window::new(files_after, limit);
+    files.inclusive = matches!(after, Some(ListingCursor::AtFile(_)));
+    let mut all_files: Option<Vec<PathBuf>> = Some(Vec::new());
+    let mut cover: Option<PathBuf> = None;
+    let mut notices = Vec::new();
+    let mut complete = true;
+    let mut visited = 0usize;
+    for entry in fs::read_dir(path).with_context(|| format!("Cannot open {}", path.display()))? {
+        visited += 1;
+        if visited.is_multiple_of(256) {
+            anyhow::ensure!(current(), crate::store::Canceled);
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                notices.push(e.to_string());
+                complete = false;
+                continue;
+            }
+        };
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) => {
+                notices.push(e.to_string());
+                complete = false;
+                continue;
+            }
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        let p = entry.path();
+        if kind.is_dir() {
+            if listing_dirs && !hidden(&entry) {
+                dirs.offer(NameKey::new(folder_name(&p)), p);
+            }
+            continue;
+        }
+        if !kind.is_file() || group_limit.is_none() {
+            continue;
+        }
+        if is_sheet(&p) || is_audio(&p) {
+            // A CUE and its image commonly have identical stems.
+            files.offer(
+                NameKey::new(entry.file_name().to_string_lossy().into_owned()),
+                p.clone(),
+            );
+            if let Some(list) = &mut all_files {
+                if list.len() < group_limit.unwrap_or_default() {
+                    list.push(p);
+                } else {
+                    all_files = None;
+                }
+            }
+        } else if let Some(rank) = cover_rank(&p)
+            && cover
+                .as_ref()
+                .and_then(|c| cover_rank(c))
+                .is_none_or(|r| rank < r)
+        {
+            cover = Some(p);
+        }
+    }
+    anyhow::ensure!(current(), crate::store::Canceled);
+    let (dirs, more_dirs) = dirs.finish();
+    let next_dir = more_dirs.then(|| dirs.last().map(|(key, _)| key.as_str().to_owned()));
+    let files = (!more_dirs && group_limit.is_some()).then(|| match all_files {
+        Some(all) if files_after.is_none() || files.inclusive => {
+            let (sheets, audio) = all.into_iter().partition(|p| is_sheet(p));
+            ListedFiles::All { audio, sheets }
+        }
+        _ => {
+            let (page, more) = files.finish();
+            let next = more
+                .then(|| page.last().map(|(key, _)| key.as_str().to_owned()))
+                .flatten();
+            let (sheets, audio) = page
+                .into_iter()
+                .map(|(_, p)| p)
+                .partition(|p: &PathBuf| is_sheet(p));
+            ListedFiles::Page {
+                audio,
+                sheets,
+                next,
+            }
+        }
+    });
+    Ok(FolderListing {
+        dirs: dirs.into_iter().map(|(_, p)| p).collect(),
+        next_dir: next_dir.flatten(),
+        files,
+        cover,
+        notices,
+        complete,
+    })
+}
+
+fn is_sheet(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|s| s.eq_ignore_ascii_case("cue"))
+}
+
+/// The recordings among `audio` that a CUE sheet anywhere in `folder` plays,
+/// as canonical paths. Every sheet is read in turn and only matches with
+/// `audio` are kept, so a page of a folder with any number of sheets takes
+/// memory bounded by the page, and no recording a program plays is listed
+/// again on its own.
+pub fn claimed_sources(
+    folder: &Path,
+    audio: &[PathBuf],
+    cache: Option<&crate::cache::Cache>,
+    current: impl Fn() -> bool,
+) -> Result<HashSet<PathBuf>> {
+    let mut claimed = HashSet::new();
+    if audio.is_empty() {
+        return Ok(claimed);
+    }
+    let names: HashSet<String> = audio.iter().map(|p| name_key(p)).collect();
+    let mut page: Option<HashSet<PathBuf>> = None;
+    let mut visited = 0usize;
+    for entry in
+        fs::read_dir(folder).with_context(|| format!("Cannot open {}", folder.display()))?
+    {
+        visited += 1;
+        if visited.is_multiple_of(64) {
+            anyhow::ensure!(current(), crate::store::Canceled);
+        }
+        let Ok(entry) = entry else { continue };
+        let sheet = entry.path();
+        if !is_sheet(&sheet) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(program) = cache.map_or_else(|| crate::cue::read(&sheet), |c| c.program(&sheet))
+        else {
+            continue;
+        };
+        let mut sources: Vec<&Path> = program.iter().map(|t| t.source.as_path()).collect();
+        sources.dedup();
+        for source in sources {
+            if !names.contains(&name_key(source)) {
+                continue;
+            }
+            let Ok(key) = source.canonicalize() else {
+                continue;
+            };
+            let page = page.get_or_insert_with(|| {
+                audio.iter().filter_map(|p| p.canonicalize().ok()).collect()
+            });
+            if page.contains(&key) {
+                claimed.insert(key);
+            }
+        }
+    }
+    anyhow::ensure!(current(), crate::store::Canceled);
+    Ok(claimed)
+}
+
+fn name_key(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Orders paths by name as Explorer does, so `CD 2` precedes `CD 10`.

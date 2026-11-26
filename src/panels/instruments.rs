@@ -20,7 +20,6 @@ use gpui_kit::{
     *,
 };
 use std::rc::Rc;
-#[path = "instrumentPlot.rs"]
 mod plot;
 use plot::Plot;
 

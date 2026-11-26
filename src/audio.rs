@@ -24,13 +24,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[path = "audioClock.rs"]
 mod clock;
 
 pub use crate::recording::Recording;
 pub(crate) use clock::Position as RendererPosition;
 
-#[path = "audioScrub.rs"]
 pub(crate) mod scrub;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
@@ -113,6 +111,24 @@ pub(crate) struct WaveSeekAnchor {
     pub sheet: Option<(std::path::PathBuf, crate::cache::Revision)>,
 }
 
+/// An explicit seek within the active recording's authored program. The
+/// program, not the queue, defines where a listener may go; the transport
+/// reconciles the queue only when the destination is committed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProgramSeek {
+    /// The queue entry that was active when the seek was requested.
+    pub origin: u64,
+    /// Every chapter of the program in authored order.
+    pub program: crate::library::TrackList,
+    /// The destination's index in `program`.
+    pub chapter: usize,
+    pub source_revision: crate::cache::Stamp,
+    pub sheet_revision: Option<crate::cache::Stamp>,
+    /// Destination position from the chapter's start, and its length.
+    pub seconds: f64,
+    pub duration: f64,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TransportState {
     Playing,
@@ -149,7 +165,7 @@ impl Status {
     }
 }
 
-/// Every control path — the window, the tray, media keys — sends these to
+/// Every control path â€” the window, the tray, media keys â€” sends these to
 /// the one transport, so they can never disagree about what is playing.
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
@@ -166,19 +182,8 @@ pub enum Command {
     Seek(f64),
     /// Seek to a time in seconds within the current track.
     SeekTo(f64),
-    SeekWave {
-        anchor: WaveSeekAnchor,
-        frame: usize,
-    },
     BeginWaveScrub(Arc<scrub::Gesture>),
-    SeekOnDisc {
-        target: u64,
-        source_revision: crate::cache::Stamp,
-        sheet_revision: Option<crate::cache::Stamp>,
-        revision: u64,
-        seconds: f64,
-        duration: f64,
-    },
+    SeekProgram(Box<ProgramSeek>),
     Step(i8),
     Volume(f32),
     Jump(u64),
@@ -240,17 +245,14 @@ impl Pending {
                     Command::Seek(_) | Command::SeekTo(_)
                 )
         ) || matches!((&self.command, &old.command), (
-            Command::SeekWave { anchor, .. }, Command::SeekWave { anchor: previous, .. }
-        ) if anchor == previous);
+            Command::SeekProgram(seek), Command::SeekProgram(previous)
+        ) if seek.origin == previous.origin && seek.program == previous.program);
         replace && self.entry == old.entry
     }
     fn applies_to(&self, entry: Option<u64>) -> bool {
         !matches!(
             self.command,
-            Command::Seek(_)
-                | Command::SeekTo(_)
-                | Command::SeekOnDisc { .. }
-                | Command::SeekWave { .. }
+            Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_)
         ) || self.entry == entry
     }
 }
@@ -556,6 +558,8 @@ struct OutputState {
     // The actual contiguous decoded extent, including the voice's seek origin.
     decoded: AtomicUsize,
     decode_failed: AtomicBool,
+    #[cfg(test)]
+    decoder_finished: (Mutex<bool>, std::sync::Condvar),
     error: Mutex<Option<io::Error>>,
 }
 
@@ -581,6 +585,8 @@ struct OutputVoice {
     state: Arc<OutputState>,
     rate: f64,
     clock: Arc<clock::Clock>,
+    #[cfg(all(windows, feature = "qualification"))]
+    trace: Option<rtrb::Consumer<crate::diagnostics::AudioStage>>,
 }
 
 impl OutputVoice {
@@ -675,11 +681,17 @@ struct ObservedSound {
     timing: clock::Writer,
     rendered: f64,
     progress: Option<rtrb::Producer<RenderProgress>>,
+    #[cfg(all(windows, feature = "qualification"))]
+    trace: Option<crate::diagnostics::AudioTrace>,
 }
 
 impl kira::sound::Sound for ObservedSound {
     fn on_start_processing(&mut self) {
         self.timing.begin(&self.clock, Instant::now());
+        #[cfg(all(windows, feature = "qualification"))]
+        if let Some(trace) = &mut self.trace {
+            trace.callback(self.rendered);
+        }
         match self.state.command.swap(0, Ordering::AcqRel) {
             PAUSE => self.handle.pause(Tween::default()),
             RESUME => self.handle.resume(Tween::default()),
@@ -750,8 +762,19 @@ impl kira::sound::Sound for ObservedSound {
             to,
             out.len() as f64 * dt,
             self.rate,
+            if state == PlaybackState::Playing {
+                // Leave interpolation lookahead to Kira. The presentation
+                // cannot predict into output for which the PCM is unavailable.
+                frames.saturating_sub(4) as f64
+            } else {
+                to
+            },
         );
         self.rendered = to;
+        #[cfg(all(windows, feature = "qualification"))]
+        if let Some(trace) = &mut self.trace {
+            trace.commit(frame);
+        }
         self.state.state.store(state as u8, Ordering::Release);
         self.state.gate.fetch_and(!RENDERING, Ordering::Release);
     }
@@ -793,6 +816,8 @@ impl kira::sound::SoundData for ObservedData {
         .fade_in_tween(self.fade_in)
         .start_position(kira::sound::PlaybackPosition::Samples(self.start));
         let (inner, handle) = data.into_sound()?;
+        #[cfg(all(windows, feature = "qualification"))]
+        let (trace, trace_rx) = crate::diagnostics::AudioTrace::channel().unzip();
         Ok((
             Box::new(ObservedSound {
                 inner,
@@ -806,8 +831,16 @@ impl kira::sound::SoundData for ObservedData {
                 timing: clock::Writer::default(),
                 rendered: self.start as f64,
                 progress: self.progress,
+                #[cfg(all(windows, feature = "qualification"))]
+                trace,
             }),
-            OutputVoice { state, rate, clock },
+            OutputVoice {
+                state,
+                rate,
+                clock,
+                #[cfg(all(windows, feature = "qualification"))]
+                trace: trace_rx,
+            },
         ))
     }
 }
@@ -828,6 +861,34 @@ struct VoiceCredit {
 fn position_us(seconds: f64) -> i64 {
     (seconds * 1_000_000.).round() as i64
 }
+#[cfg(all(windows, feature = "qualification"))]
+fn qualification_output_settings() -> Result<kira::backend::cpal::CpalBackendSettings> {
+    use kira::backend::cpal::{
+        CpalBackendSettings,
+        cpal::{
+            self, BufferSize,
+            traits::{DeviceTrait, HostTrait},
+        },
+    };
+    if !silent_qualification() {
+        return Ok(CpalBackendSettings::default());
+    }
+    let Ok(value) = std::env::var("DISQRO_QUALIFY_BUFFER_FRAMES") else {
+        return Ok(CpalBackendSettings::default());
+    };
+    let frames: std::num::NonZeroU32 =
+        value.parse().context("Invalid qualification buffer size")?;
+    let device = cpal::default_host()
+        .default_output_device()
+        .context("No qualification endpoint")?;
+    let mut config = device.default_output_config()?.config();
+    config.buffer_size = BufferSize::Fixed(frames.get());
+    Ok(CpalBackendSettings {
+        device: Some(device),
+        config: Some(config),
+    })
+}
+
 static SILENT_QUALIFICATION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 pub fn silent_qualification() -> bool {
@@ -891,6 +952,37 @@ pub(crate) fn scrub_run(
     Some((first..last + 1, allowed))
 }
 
+/// The authored chapters around the one spanning `playable` that continue
+/// each other in `source`, independent of the queue: their indices in
+/// `program` and the source frames they cover.
+pub(crate) fn program_run(
+    program: &[Arc<Track>],
+    source: &crate::timeline::Source,
+    playable: &Range<usize>,
+) -> Option<(Range<usize>, Range<usize>)> {
+    let ranges: Vec<_> = program.iter().map(|track| source.playable(track)).collect();
+    let at = ranges
+        .iter()
+        .position(|range| range.as_ref() == Some(playable))?;
+    let joined = |a: usize, b: usize| {
+        ranges[a]
+            .as_ref()
+            .zip(ranges[b].as_ref())
+            .is_some_and(|(a, b)| a.end == b.start)
+    };
+    let mut first = at;
+    while first > 0 && joined(first - 1, first) {
+        first -= 1;
+    }
+    let mut last = at;
+    while last + 1 < ranges.len() && joined(last, last + 1) {
+        last += 1;
+    }
+    let start = ranges[first].as_ref()?.start;
+    let end = ranges[last].as_ref()?.end;
+    Some((first..last + 1, start..end))
+}
+
 fn disc_start(t: &Track) -> u64 {
     t.disc.as_ref().map_or(0, |d| d.start)
 }
@@ -925,6 +1017,8 @@ impl Engine {
         self.credit = None;
         self.pause_checkpoint = false;
         self.position_probe = None;
+        #[cfg(all(windows, feature = "qualification"))]
+        self.trace_audio();
         self.voice = None;
         self.status.presentation = None;
         self.status.source_revision = None;
@@ -1325,7 +1419,7 @@ impl Engine {
         self.status.skipped = self
             .status
             .entry
-            .map(|id| (id, format!("Skipped recording · {error:#}")));
+            .map(|id| (id, format!("Skipped recording Â· {error:#}")));
         self.retry_next = true;
         self.status.playing = true;
         Ok(())
@@ -1412,10 +1506,7 @@ impl Engine {
                     self.status.playing = on;
                     return Ok(());
                 }
-                Command::Seek(_)
-                | Command::SeekTo(_)
-                | Command::SeekOnDisc { .. }
-                | Command::SeekWave { .. } => return Ok(()),
+                Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_) => return Ok(()),
                 _ => {}
             }
         }
@@ -1424,10 +1515,7 @@ impl Engine {
             && self.voice.is_some()
             && !matches!(
                 &c,
-                Command::Seek(_)
-                    | Command::SeekTo(_)
-                    | Command::SeekOnDisc { .. }
-                    | Command::SeekWave { .. }
+                Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_)
             )
         {
             let position = self.credit_output();
@@ -1533,69 +1621,7 @@ impl Engine {
                 self.seek_to(position)?;
             }
             Command::SeekTo(position) => self.seek_to(position)?,
-            Command::SeekWave { anchor, frame } => {
-                if self.accepts_wave_seek(&anchor, frame) {
-                    // The backend may already have reached the next chapter
-                    // while the transport or the file checks were pending.
-                    let at_end = if self.voice.is_some() {
-                        let position = self.credit_output();
-                        self.update_position(position.min(self.limit));
-                        self.status.playing && position >= self.limit
-                    } else {
-                        false
-                    };
-                    if !at_end
-                        && self.status.playback_identity() == Some(anchor.identity)
-                        && self.queue.revision == anchor.identity.queue
-                    {
-                        let rate = f64::from(anchor.source.rate);
-                        if !self.status.playing {
-                            self.status.duration = anchor.playable.len() as f64 / rate;
-                        }
-                        self.seek_position((frame - anchor.playable.start) as f64 / rate)?;
-                    }
-                }
-            }
-            Command::SeekOnDisc {
-                target,
-                source_revision,
-                sheet_revision,
-                revision,
-                seconds,
-                duration,
-            } => {
-                if self.queue.revision == revision
-                    && let Some(i) = self.queue.index_of(target)
-                    && crate::cache::Stamp::read(&self.queue.entries[i].track.source)
-                        == Some(source_revision)
-                    && sheet_revision.is_none_or(|s| {
-                        self.queue.entries[i]
-                            .track
-                            .disc
-                            .as_ref()
-                            .is_some_and(|d| crate::cache::Stamp::read(&d.sheet) == Some(s))
-                    })
-                {
-                    if self.status.playing {
-                        if self.queue.current == Some(i) {
-                            self.seek_to(seconds)?;
-                        } else {
-                            self.play(i, seconds)?;
-                        }
-                    } else {
-                        if self.queue.current == Some(i) {
-                            self.detach_voice();
-                            self.flush_occurrence();
-                        } else {
-                            self.end_voice(End::Replaced);
-                        }
-                        self.select(Some(i), 0.);
-                        self.status.seek_revision += 1;
-                        self.status.duration = duration;
-                        self.status.position = seconds;
-                    }
-                }
-            }
+            Command::SeekProgram(seek) => self.seek_program(&seek)?,
             Command::PlayNext(tracks) => {
                 self.queue.play_next(&tracks);
                 self.revalidate();
@@ -1613,15 +1639,9 @@ impl Engine {
                 self.revalidate();
             }
             Command::Remove(ids) => {
+                // The queue keeps the active occurrence, so its voice,
+                // position and listening occurrence continue unchanged.
                 if self.queue.remove(&ids) {
-                    let resume = self.status.playing;
-                    self.retry_next = false;
-                    self.stop_voice();
-                    match self.queue.current {
-                        Some(i) if resume => self.play_eligible(i)?,
-                        current => self.select(current, 0.),
-                    }
-                } else {
                     self.revalidate();
                 }
             }
@@ -1669,6 +1689,51 @@ impl Engine {
         }
         Ok(())
     }
+    /// Validates the destination, then reconciles the queue and commits the
+    /// seek as one transport operation. A stale or changed destination is
+    /// rejected before the queue changes.
+    fn seek_program(&mut self, seek: &ProgramSeek) -> Result<()> {
+        let Some(target) = seek.program.get(seek.chapter) else {
+            return Ok(());
+        };
+        let sheet_unchanged = match (&target.disc, &seek.sheet_revision) {
+            (Some(disc), Some(stamp)) => {
+                crate::cache::Stamp::read(&disc.sheet).as_ref() == Some(stamp)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if self.queue.current_entry().map(|e| e.id) != Some(seek.origin)
+            || crate::cache::Stamp::read(&target.source).as_ref() != Some(&seek.source_revision)
+            || !sheet_unchanged
+            || !(0. ..seek.duration).contains(&seek.seconds)
+        {
+            return Ok(());
+        }
+        let Some(i) = self.queue.program_destination(&seek.program, seek.chapter) else {
+            return Ok(());
+        };
+        if self.status.playing {
+            if self.queue.current == Some(i) {
+                self.seek_to(seek.seconds)?;
+            } else {
+                self.play(i, seek.seconds)?;
+            }
+        } else {
+            if self.queue.current == Some(i) {
+                self.detach_voice();
+                self.flush_occurrence();
+            } else {
+                self.end_voice(End::Replaced);
+            }
+            self.select(Some(i), 0.);
+            self.status.seek_revision += 1;
+            self.status.duration = seek.duration;
+            self.status.position = seek.seconds;
+        }
+        Ok(())
+    }
+
     fn accepts_wave_seek(&self, anchor: &WaveSeekAnchor, frame: usize) -> bool {
         let Some(entry) = self.queue.current_entry() else {
             return false;
@@ -1706,6 +1771,8 @@ impl Engine {
                         self.signal.clone(),
                         cfg!(test) || silent_qualification(),
                     ),
+                    #[cfg(all(windows, feature = "qualification"))]
+                    backend_settings: qualification_output_settings()?,
                     ..Default::default()
                 })
                 .context("Windows audio output is unavailable")?,
@@ -1721,8 +1788,7 @@ impl Engine {
             || self.status.playing != gesture.was_playing
             || gesture.ending() == Some(scrub::End::Cancel)
             || !self.accepts_wave_seek(&gesture.anchor, gesture.origin.floor() as usize)
-            || !scrub_run(&self.queue, &gesture.anchor.source)
-                .is_some_and(|(_, bounds)| bounds == gesture.bounds)
+            || self.scrub_bounds(&gesture).as_ref() != Some(&gesture.bounds)
         {
             gesture.close();
             return Ok(());
@@ -1737,14 +1803,12 @@ impl Engine {
                 return Ok(());
             }
         }
-        if gesture.ending().is_none() {
+        if gesture.ending().is_none() && self.scrub_output.is_none() {
             let ready = self.ensure_output().and_then(|()| {
-                if self.scrub_output.is_none() {
-                    self.scrub_output = Some(scrub::Output::install(
-                        self.device.as_mut().unwrap(),
-                        self.scrub_control.clone(),
-                    )?);
-                }
+                self.scrub_output = Some(scrub::Output::install(
+                    self.device.as_mut().unwrap(),
+                    self.scrub_control.clone(),
+                )?);
                 Ok(())
             });
             if let Err(error) = ready {
@@ -1761,6 +1825,14 @@ impl Engine {
             return Ok(());
         }
         self.pause();
+        let held = (gesture.anchor.playable.start as f64
+            + (self.status.position * f64::from(gesture.anchor.source.rate)).round())
+        .clamp(gesture.bounds.start as f64, (gesture.bounds.end - 1) as f64);
+        gesture.hold_at(if self.voice.is_some() {
+            held
+        } else {
+            gesture.origin
+        });
         if let Some(output) = &mut self.scrub_output {
             output.start(&gesture, self.volume);
         }
@@ -1772,7 +1844,7 @@ impl Engine {
         crate::diagnostics::stage(
             crate::diagnostics::begin_stage(),
             "wave_scrub_begin",
-            gesture.origin.to_bits(),
+            gesture.held().unwrap_or(gesture.origin).to_bits(),
             gesture.id,
         );
         self.scrubbing = Some(ActiveScrub {
@@ -1780,6 +1852,17 @@ impl Engine {
             updated: Instant::now(),
         });
         self.update_scrub()
+    }
+
+    /// The frames a gesture may reach: the program's chapters in its source
+    /// for Full CD, the contiguous queue sequence for Track.
+    fn scrub_bounds(&self, gesture: &scrub::Gesture) -> Option<Range<usize>> {
+        let source = &gesture.anchor.source;
+        match &gesture.program {
+            Some(program) => program_run(program, source, &gesture.anchor.playable),
+            None => scrub_run(&self.queue, source),
+        }
+        .map(|(_, bounds)| bounds)
     }
 
     fn close_scrub(&mut self) -> Option<Arc<scrub::Gesture>> {
@@ -1819,7 +1902,22 @@ impl Engine {
                 }
                 return Ok(());
             }
-            if ending == Some(scrub::End::Release) && !failed {
+            // A hold the pointer never moved, or one that was canceled,
+            // continues the voice it paused: no seek and no new voice.
+            let moved = gesture.moved() && ending == Some(scrub::End::Release) && !failed;
+            if !moved && gesture.was_playing && self.voice.is_some() {
+                self.resume()?;
+                let held = gesture.held().unwrap_or(gesture.origin);
+                crate::diagnostics::stage(
+                    crate::diagnostics::begin_stage(),
+                    "wave_scrub_resume",
+                    held.to_bits(),
+                    gesture.id,
+                );
+                Self::trace_scrub_end(&gesture, held.round() as usize);
+                return Ok(());
+            }
+            if moved {
                 return self.finish_wave_scrub(&gesture, frame);
             }
             if gesture.was_playing {
@@ -1851,17 +1949,31 @@ impl Engine {
             self.end_voice(End::SourceFailed);
             return Ok(());
         }
-        let Some((mut indices, bounds)) = scrub_run(&self.queue, source) else {
-            return Ok(());
-        };
-        if bounds != gesture.bounds {
+        if self.scrub_bounds(gesture).as_ref() != Some(&gesture.bounds) {
             return Ok(());
         }
         let frame = frame.round() as usize;
-        let Some((index, segment)) = indices.find_map(|index| {
-            let segment = source.playable(&self.queue.entries[index].track)?;
-            segment.contains(&frame).then_some((index, segment))
-        }) else {
+        let destination = if let Some(program) = &gesture.program {
+            // Full CD: the authored chapter, reconciled into the queue now.
+            let (mut chapters, _) =
+                program_run(program, source, &gesture.anchor.playable).unwrap_or((0..0, 0..0));
+            chapters
+                .find_map(|chapter| {
+                    let segment = source.playable(&program[chapter])?;
+                    segment.contains(&frame).then_some((chapter, segment))
+                })
+                .and_then(|(chapter, segment)| {
+                    Some((self.queue.program_destination(program, chapter)?, segment))
+                })
+        } else {
+            scrub_run(&self.queue, source).and_then(|(mut indices, _)| {
+                indices.find_map(|index| {
+                    let segment = source.playable(&self.queue.entries[index].track)?;
+                    segment.contains(&frame).then_some((index, segment))
+                })
+            })
+        };
+        let Some((index, segment)) = destination else {
             return Ok(());
         };
         self.detach_voice();
@@ -1965,7 +2077,16 @@ impl Engine {
         self.discarded_errors = 0;
         Err(error).context("Windows audio output failed")
     }
+    #[cfg(all(windows, feature = "qualification"))]
+    fn trace_audio(&mut self) {
+        if let Some(trace) = self.voice.as_mut().and_then(|voice| voice.trace.as_mut()) {
+            crate::diagnostics::AudioTrace::drain(trace);
+        }
+    }
+
     fn tick(&mut self) -> Result<()> {
+        #[cfg(all(windows, feature = "qualification"))]
+        self.trace_audio();
         while let Some(error) = self
             .device
             .as_mut()
@@ -2092,5 +2213,4 @@ impl Engine {
 }
 
 #[cfg(test)]
-#[path = "audioTests.rs"]
 pub(crate) mod tests;

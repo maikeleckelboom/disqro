@@ -105,7 +105,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             "space",
             PlayPause,
-            Some("Disqro && !Input && !LibrarySection"),
+            Some("Disqro && !Input && !NavigationRow && !TransportControl"),
         ),
         KeyBinding::new("enter", PlaySelected, Some("DataTable")),
         KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
@@ -271,12 +271,14 @@ impl Workspace {
             catalog.update(cx, |c, cx| c.watch_listening(updates, cx));
             writer
         });
+        let wave_motion = crate::panels::waveform::Motion::default();
         let player = cx.new(|cx| {
             Player::new(
                 volume,
                 saved.full_cd,
                 saved.show_levels,
                 listening.clone(),
+                wave_motion.clone(),
                 cx,
             )
         });
@@ -284,22 +286,19 @@ impl Workspace {
             .table_layouts
             .take()
             .map(Layouts::validate)
-            .unwrap_or_else(|| Layouts::migrate(&saved.columns, saved.columns_version));
+            .unwrap_or_default();
         let router = cx.new(|_| {
             Router::new(Template {
                 layouts,
                 prefs: saved.collection.clone(),
             })
         });
-        if saved.expanded.is_empty() {
-            saved.expanded = std::mem::take(&mut saved.legacy_navigation.sidebar.expanded);
-        }
         let locations = cx
             .new(|cx| Locations::new(saved.places.take(), std::mem::take(&mut saved.expanded), cx));
         let services = Services {
             field_readouts: cx.new(|_| Default::default()),
             player: player.clone(),
-            wave_motion: Default::default(),
+            wave_motion,
             catalog: catalog.clone(),
             locations: locations.clone(),
             router: router.clone(),
@@ -485,16 +484,7 @@ impl Workspace {
                     .update(cx, |r, cx| r.set_active(Some(&browser), cx));
             }
         } else {
-            let legacy = saved.legacy_navigation;
-            app.reset(
-                Some(BrowserState {
-                    folder: legacy.folder,
-                    location: legacy.location,
-                    ..Default::default()
-                }),
-                window,
-                cx,
-            );
+            app.reset(None, window, cx);
         }
         app.set_customizing(false, window, cx);
         app.sync_active_browser(cx);
@@ -1158,7 +1148,6 @@ impl Workspace {
                 closed: self.closed.clone(),
                 player_height: Some(self.player_height),
             },
-            columns: vec![],
             table_layouts: Some(router.template.layouts.clone()),
             places: Some(locations.places.state()),
             queue: (!queue.entries.is_empty()).then(|| SavedQueue {
@@ -1168,8 +1157,6 @@ impl Workspace {
             window: self.prefs,
             collection: router.template.prefs.clone(),
             expanded: locations.expanded(cx),
-            columns_version: 0,
-            legacy_navigation: Default::default(),
         }
     }
     /// What a library action applies to: the table's selection, or the
@@ -1570,7 +1557,7 @@ impl Workspace {
                 )
             })
             .child(div().occlude().child(self.workspace_menu(cx)));
-        // Equal flexible sides keep the search field centred in the window.
+        // Equal flexible sides keep the search field centered in the window.
         h_flex()
             .flex_1()
             .min_w_0()
@@ -1773,6 +1760,12 @@ impl Render for Workspace {
         };
         v_flex()
             .key_context("Disqro")
+            .on_modifiers_changed(cx.listener(|workspace, _, window, cx| {
+                workspace
+                    .services
+                    .wave_motion
+                    .inspection_modifiers(window, cx);
+            }))
             .track_focus(&self.focus)
             .size_full()
             .bg(m.canvas)

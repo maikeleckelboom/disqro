@@ -56,7 +56,7 @@ impl Targets {
 pub enum ListeningList {
     Displayed(Scope, Arc<[i64]>),
     Disc(Scope),
-    Collection(Option<RootId>, String),
+    Collection(Scope, String),
     Playlist(PlaylistId),
     Search(String),
 }
@@ -96,7 +96,7 @@ impl ListeningList {
                 .await?;
             let mut files = store::DetachedFiles::default();
             for row in rows {
-                anyhow::ensure!(ticket.is_current(generation), store::Cancelled);
+                anyhow::ensure!(ticket.is_current(generation), store::Canceled);
                 if Catalog::available(&row, &offline, &mut files)
                     && (scope != Scope::RecentlyPlayed || row.track.source.is_file())
                 {
@@ -127,12 +127,12 @@ impl ListeningList {
     fn source(&self, catalog: &Catalog) -> Option<String> {
         let scope = match self {
             Self::Displayed(scope, _) | Self::Disc(scope) => *scope,
-            Self::Collection(root, _) => Scope::Library(*root),
+            Self::Collection(scope, _) => *scope,
             Self::Playlist(id) => Scope::Playlist(*id),
             Self::Search(query) => return Some(format!("search for “{query}”")),
         };
         match scope {
-            Scope::Liked => Some("Liked Tracks".into()),
+            Scope::Liked => Some("Favorites".into()),
             Scope::RecentlyPlayed => Some("Recently Played".into()),
             Scope::Playlist(id) => catalog
                 .playlists
@@ -140,12 +140,15 @@ impl ListeningList {
                 .find(|p| p.id == id)
                 .map(|p| p.name.clone()),
             Scope::Library(None) => Some("All Music".into()),
-            Scope::Library(Some(id)) => catalog
+            Scope::Library(Some(id)) | Scope::CollectionFolder(id) => catalog
                 .collections
                 .iter()
                 .find(|c| c.root.id == id)
                 .map(|c| c.root.name.clone()),
-            Scope::Album(_) | Scope::Release(_) => None,
+            Scope::Releases => Some("Releases".into()),
+            Scope::Album(_) | Scope::Release(_) | Scope::Artist(_) | Scope::ArtistReleases(_) => {
+                None
+            }
         }
     }
 
@@ -153,10 +156,9 @@ impl ListeningList {
         Ok(match self {
             Self::Displayed(scope, keys) => (scope, keys),
             Self::Disc(scope) => (scope, store.disc_keys(scope)?.into()),
-            Self::Collection(root, search) => (
-                Scope::Library(root),
-                store.collection_keys(root, search)?.into(),
-            ),
+            Self::Collection(scope, search) => {
+                (scope, store.collection_keys(scope, search)?.into())
+            }
             Self::Playlist(id) => (
                 Scope::Playlist(id),
                 store
@@ -751,7 +753,7 @@ impl Catalog {
                     let mut files = store::DetachedFiles::default();
                     for row in &mut rows {
                         if !ticket.is_current(generation) {
-                            return Err(store::Cancelled.into());
+                            return Err(store::Canceled.into());
                         }
                         row.available = Self::available(row, &offline, &mut files)
                             && (scope != Scope::RecentlyPlayed || row.track.source.is_file());
@@ -1037,7 +1039,7 @@ impl Catalog {
         if let Err(result) = message {
             self.scanning = None;
             // Scan transactions can commit file moves before later phases finish,
-            // including when a scan is cancelled.
+            // including when a scan is canceled.
             self.refresh_listening_locations();
             cx.emit(CatalogEvent::Structure(id));
             match result {
@@ -1045,7 +1047,7 @@ impl Catalog {
                     "{} moved or copied files could not be matched with certainty. Their earlier entries are kept as missing.",
                     summary.ambiguous
                 ))),
-                Err(e) if !store::is_cancelled(&e) => {
+                Err(e) if !store::is_canceled(&e) => {
                     cx.emit(CatalogEvent::Notice(format!("Library scan failed: {e:#}")))
                 }
                 _ => {}

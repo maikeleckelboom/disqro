@@ -210,8 +210,14 @@ impl Queue {
     fn upcoming_start(&self) -> usize {
         self.current.map_or(self.idle_history, |c| c + 1)
     }
+    /// Indices of the occurrences that play after the active one, or after
+    /// the history while nothing is active. The active occurrence is Now
+    /// Playing, not part of the queue.
+    pub fn upcoming_range(&self) -> std::ops::Range<usize> {
+        self.upcoming_start().min(self.entries.len())..self.entries.len()
+    }
     pub fn upcoming(&self) -> &[Entry] {
-        &self.entries[self.upcoming_start().min(self.entries.len())..]
+        &self.entries[self.upcoming_range()]
     }
     pub fn history(&self) -> &[Entry] {
         &self.entries[..self.current.unwrap_or(self.idle_history)]
@@ -322,27 +328,77 @@ impl Queue {
         self.touch();
         true
     }
-    /// Removes entries. Returns true when the current entry was among them;
-    /// the entry that followed it then becomes current.
-    pub fn remove(&mut self, ids: &[u64]) -> bool {
-        let removed_current = self.current_entry().is_some_and(|e| ids.contains(&e.id));
-        let history = self.history();
-        let remaining_history =
-            history.len() - history.iter().filter(|e| ids.contains(&e.id)).count();
-        Arc::make_mut(&mut self.entries).retain(|e| !ids.contains(&e.id));
-        // When the current entry went, the one that followed slid into its slot.
-        self.current = self
-            .current
-            .and(Some(remaining_history))
-            .filter(|&c| c < self.entries.len());
-        self.idle_history = if self.current.is_none() {
-            remaining_history
-        } else {
-            0
+    /// The occurrence an explicit seek to `program[chapter]` activates, where
+    /// `program` is the authored chapter order of the active recording.
+    ///
+    /// The queue decides what plays next; it never limits where a listener
+    /// may seek. A destination inside the contiguous program sequence around
+    /// the active entry, in either direction and including History, reuses
+    /// that exact occurrence. Any other destination gets one new occurrence
+    /// inserted right after the active entry. Every other entry keeps its
+    /// identity, playlist occurrence and position. `None` when nothing is
+    /// active or the active entry is not a chapter of `program`; nothing
+    /// changes then.
+    pub fn program_destination(&mut self, program: &[Arc<Track>], chapter: usize) -> Option<usize> {
+        let current = self.current?;
+        let target = program.get(chapter)?;
+        let same = |a: &Track, b: &Track| a.source == b.source && a.disc == b.disc;
+        let at = program
+            .iter()
+            .position(|t| same(t, &self.entries[current].track))?;
+        let mut first = at;
+        while first > 0
+            && current > at - first
+            && same(
+                &self.entries[current - (at - first) - 1].track,
+                &program[first - 1],
+            )
+        {
+            first -= 1;
+        }
+        let mut last = at;
+        while last + 1 < program.len()
+            && self
+                .entries
+                .get(current + (last + 1 - at))
+                .is_some_and(|e| same(&e.track, &program[last + 1]))
+        {
+            last += 1;
+        }
+        if (first..=last).contains(&chapter) {
+            // `first <= chapter` and `at - first <= current`, so this cannot underflow.
+            return Some(current + chapter - at);
+        }
+        let context = self.entries[current].disc_context;
+        let entry = Entry {
+            disc_context: context,
+            ..self.entry(target.clone())
         };
-        Arc::make_mut(&mut self.unshuffled).retain(|id| !ids.contains(id));
+        Arc::make_mut(&mut self.entries).insert(current + 1, entry);
         self.touch();
-        removed_current
+        Some(current + 1)
+    }
+
+    /// Removes queued and history occurrences. The active occurrence is
+    /// never removed: a queue edit cannot stop or replace the recording that
+    /// is playing, and a stale request that names it is ignored. Returns
+    /// whether anything was removed.
+    pub fn remove(&mut self, ids: &[u64]) -> bool {
+        let active = self.current_entry().map(|e| e.id);
+        let removed = |id: u64| Some(id) != active && ids.contains(&id);
+        let history = self.history().iter().filter(|e| removed(e.id)).count();
+        let before = self.entries.len();
+        Arc::make_mut(&mut self.entries).retain(|e| !removed(e.id));
+        if self.entries.len() == before {
+            return false;
+        }
+        match &mut self.current {
+            Some(current) => *current -= history,
+            None => self.idle_history -= history,
+        }
+        Arc::make_mut(&mut self.unshuffled).retain(|&id| !removed(id));
+        self.touch();
+        true
     }
     /// Reorders upcoming entries without crossing the current recording.
     pub fn move_upcoming(&mut self, id: u64, before: Option<u64>) {
@@ -513,6 +569,93 @@ mod tests {
         q.entries.iter().map(|e| e.track.title.clone()).collect()
     }
 
+    fn disc(n: u8) -> Vec<Arc<Track>> {
+        (1..=n).map(|k| Arc::new(chapter("cd", k))).collect()
+    }
+
+    #[test]
+    fn program_seeks_reuse_the_contiguous_sequence_in_both_directions() {
+        let program = disc(5);
+        let mut q = Queue::default();
+        let selection: Selection = program[1..4].iter().cloned().collect();
+        q.replace(selection, 1);
+        let ids: Vec<u64> = q.entries.iter().map(|e| e.id).collect();
+        let revision = q.revision;
+        // Chapters 2–4 are queued around the active chapter 3.
+        assert_eq!(q.program_destination(&program, 3), Some(2));
+        assert_eq!(q.program_destination(&program, 1), Some(0));
+        assert_eq!(q.program_destination(&program, 2), Some(1));
+        assert_eq!(q.revision, revision, "reuse changes nothing");
+        assert_eq!(q.entries.iter().map(|e| e.id).collect::<Vec<_>>(), ids);
+    }
+
+    #[test]
+    fn program_seeks_outside_the_queue_insert_one_occurrence_after_the_active_entry() {
+        let program = disc(5);
+        let mut q = Queue::default();
+        // Play Only This Track, then unrelated entries were queued after it.
+        let only: Selection = [program[2].clone()].into_iter().collect();
+        q.replace(only, 0);
+        q.add(&[file("a"), file("b")].into_iter().collect());
+        q.set_shuffle(true);
+        q.set_repeat(Repeat::All);
+        let before: Vec<u64> = q.entries.iter().map(|e| e.id).collect();
+        let upcoming: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
+        let destination = q.program_destination(&program, 4).unwrap();
+        assert_eq!(destination, 1);
+        assert_eq!(q.entries[1].track.title, "cd 5");
+        assert!(!before.contains(&q.entries[1].id));
+        assert_eq!(q.entries[0].id, before[0]);
+        let after: Vec<u64> = q.entries[2..].iter().map(|e| e.id).collect();
+        assert_eq!(after, upcoming, "unrelated entries keep identity and order");
+        assert!(q.shuffle && q.repeat == Repeat::All);
+        // Backward, from the newly active chapter: chapter 3 is now history and
+        // not contiguous with chapter 5, so chapter 1 is a new occurrence.
+        q.set_current(Some(1));
+        assert_eq!(q.program_destination(&program, 0), Some(2));
+        assert_eq!(titles(&q)[..3], ["cd 3", "cd 5", "cd 1"]);
+        q.validate().unwrap();
+    }
+
+    #[test]
+    fn program_seeks_never_borrow_a_duplicate_occurrence_elsewhere() {
+        let program = disc(4);
+        let mut q = Queue::default();
+        // A playlist plays chapter 2, then something else, then chapter 4.
+        let playlist = Selection::from_indexed(
+            [
+                program[1].clone(),
+                Arc::new(file("other")),
+                program[3].clone(),
+            ]
+            .into(),
+            Some((9, vec![70, 71, 72])),
+        );
+        q.replace(playlist, 0);
+        let later = q.entries[2].clone();
+        let destination = q.program_destination(&program, 3).unwrap();
+        assert_eq!(destination, 1);
+        assert_ne!(q.entries[1].id, later.id);
+        assert_eq!(q.entries[1].playlist_occurrence, None);
+        assert_eq!(q.entries[3], later, "the playlist occurrence is untouched");
+        assert_eq!(q.entries[0].playlist_occurrence.map(|o| o.entry), Some(70));
+    }
+
+    #[test]
+    fn program_seeks_without_an_active_chapter_change_nothing() {
+        let program = disc(3);
+        let mut q = Queue::default();
+        assert_eq!(q.program_destination(&program, 1), None);
+        q.replace([file("unrelated")].into_iter().collect(), 0);
+        let revision = q.revision;
+        assert_eq!(q.program_destination(&program, 1), None);
+        let single: Selection = [program[0].clone()].into_iter().collect();
+        q.replace(single, 0);
+        assert_eq!(q.program_destination(&program, 7), None);
+        assert_ne!(q.revision, revision);
+        assert_eq!(q.entries.len(), 1);
+    }
+
     #[test]
     fn mixed_cue_chapters_and_files_keep_their_identity() {
         let mut q = Queue::default();
@@ -565,20 +708,70 @@ mod tests {
         q.move_upcoming(id1, None);
         assert_eq!(titles(&q), ["1", "2", "4", "3"]);
         assert_eq!(q.current_entry().unwrap().track.title, "2");
-        assert!(!q.remove(&[id3]));
+        assert!(q.remove(&[id3]));
         assert_eq!(titles(&q), ["1", "2", "4"]);
-        assert!(q.remove(&[current]));
-        assert_eq!(q.current_entry().unwrap().track.title, "4");
+        // The active occurrence is Now Playing, not a queue entry.
+        let revision = q.revision;
+        assert!(!q.remove(&[current]));
+        assert_eq!(q.revision, revision);
+        assert_eq!(q.current_entry().unwrap().track.title, "2");
         q.clear_upcoming();
-        assert_eq!(titles(&q), ["1", "4"]);
+        assert_eq!(titles(&q), ["1", "2"]);
+        assert_eq!(q.current_entry().unwrap().id, current);
     }
 
     #[test]
-    fn removing_the_last_current_entry_keeps_history_out_of_upcoming() {
+    fn every_queue_edit_keeps_the_active_occurrence() {
         let mut q = Queue::default();
-        q.replace([file("played"), file("current")].into_iter().collect(), 1);
-        let current = q.current_entry().unwrap().id;
-        assert!(q.remove(&[current]));
+        let same = file("same");
+        q.replace(
+            [
+                file("played"),
+                same.clone(),
+                file("next"),
+                same,
+                file("last"),
+            ]
+            .into_iter()
+            .collect(),
+            1,
+        );
+        let ids: Vec<u64> = q.entries.iter().map(|e| e.id).collect();
+        let active = ids[1];
+        let still_active = |q: &Queue| {
+            assert_eq!(q.current_entry().map(|e| e.id), Some(active));
+        };
+        // A delayed request naming the active entry removes only the others.
+        assert!(q.remove(&[active, ids[2]]));
+        still_active(&q);
+        assert_eq!(titles(&q), ["played", "same", "same", "last"]);
+        // The duplicate recording is a separate occurrence.
+        assert!(q.remove(&[ids[3]]));
+        assert_eq!(titles(&q), ["played", "same", "last"]);
+        assert!(q.remove(&[ids[0]]));
+        assert_eq!(q.current, Some(0));
+        still_active(&q);
+        q.set_shuffle(true);
+        q.set_repeat(Repeat::One);
+        q.move_upcoming(active, None);
+        q.schedule_next(active);
+        still_active(&q);
+        q.clear_history();
+        q.clear_upcoming();
+        still_active(&q);
+        assert!(q.upcoming().is_empty());
+        assert_eq!(q.next_index(true), Some(0), "Repeat One replays it");
+        q.set_repeat(Repeat::Off);
+        assert_eq!(q.next_index(true), None, "an empty queue ends playback");
+    }
+
+    #[test]
+    fn an_idle_sequence_keeps_history_out_of_upcoming() {
+        let mut q = Queue::default();
+        q.replace([file("played"), file("stopped")].into_iter().collect(), 1);
+        let stopped = q.current_entry().unwrap().id;
+        q.set_current(None);
+        assert!(q.remove(&[stopped]));
         let mut q: Queue = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
         q.validate().unwrap();
         assert_eq!(q.history()[0].track.title, "played");

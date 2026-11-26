@@ -2,7 +2,7 @@
 
 ## Evidence and transport
 
-The detail deck requests the full physical-source interval needed by the Stroke projection. Its planner uses the available source extent, sample rate, physical pixel width and viewport span. As the viewport grows, the planner increases the width of the measured extrema cells and bounds the power data for rates outside the fitted 44.1 and 48 kHz Stroke colour model. Coarse cells still store the actual decoded minima, maxima and their source positions. Wide views skip close-up leaf tiers. The renderer continues to resolve each interval using the finest held evidence. It can show the available chapter overview or useful prior tiers while a new tile is pending. An unreadable tile remains distinguishable from that approximation and from measured silence.
+The detail deck requests the full physical-source interval needed by the Stroke projection. Its planner uses the available source extent, sample rate, physical pixel width and viewport span. As the viewport grows, the planner increases the width of the measured extrema cells and bounds the power data for rates outside the fitted 44.1 and 48 kHz Stroke color model. Coarse cells still store the actual decoded minima, maxima and their source positions. Wide views skip close-up leaf tiers. The renderer continues to resolve each interval using the finest held evidence. It can show the available chapter overview or useful prior tiers while a new tile is pending. An unreadable tile remains distinguishable from that approximation and from measured silence.
 
 The analysis worker services visible panels round-robin. Each active view pins its complete plan, and identical keys share one allocation. Active CPU bytes are the union of the held plans. Each geometry tile scans at most 1,048,576 input frames, retains at most 8,192 regular leaves plus a possible unaligned leaf, and uses wider leaves as viewport density falls. Retired entries share an additional 8 MiB and 64-entry CPU budget. The GPU retains a 16 MiB shared evidence arena and can evict other panels' uploads while preparing the current draw. Each visible surface adds a BGRA8 texture sized to its snapped physical bounds. The shared pipeline owns the scratch buffers and a single overview preview buffer. Waveform cache v3 replaces the derived v2 data. Library, queue and listening data use their existing stores.
 
@@ -20,7 +20,7 @@ One GPUI callback services all visible decks in the window. The callback updates
 
 ## Foreground presentation
 
-Two muted runs used the 75-minute CUE fixture, two Waveform decks, a 2560 × 1600 240 Hz display at 150% scale, and the Radeon 780M. The second run reused the cached analysis. The 240 Hz zoom and pan scripts send input to the qualification window only. The same release binary ran both passes and all parity checks. The Dekzer `present-probe` built from `8107c46fd9c7cbb697927a59def9a52f9079dc4f` read a six-colour marker embedded in the composed frame. Its own host cadence measurements informed the same-device approach. Disqro retains its D3D11 host and GPUI scene. [Dekzer reference measurements](https://github.com/maikeleckelboom/dekzer/blob/8107c46fd9c7cbb697927a59def9a52f9079dc4f/docs/native-desktop-foundation.md)
+Two muted runs used the 75-minute CUE fixture, two Waveform decks, a 2560 × 1600 240 Hz display at 150% scale, and the Radeon 780M. The second run reused the cached analysis. The 240 Hz zoom and pan scripts send input to the qualification window only. The same release binary ran both passes and all parity checks. The Dekzer `present-probe` built from `8107c46fd9c7cbb697927a59def9a52f9079dc4f` read a six-color marker embedded in the composed frame. Its own host cadence measurements informed the same-device approach. Disqro retains its D3D11 host and GPUI scene. [Dekzer reference measurements](https://github.com/maikeleckelboom/dekzer/blob/8107c46fd9c7cbb697927a59def9a52f9079dc4f/docs/native-desktop-foundation.md)
 
 PresentMon 2.6.0 received access denied from ETW. Desktop Duplication recorded independent composed updates with zero foreground-loss samples in both passes. DXGI swap-chain samples and app `Present` calls were captured alongside them. Those sources measure different boundaries. The counts below use all elapsed workload time. The four intervals are p50, p95, p99 and worst. Repeated markers count desktop updates that kept the same test frame. The gap count uses two measured 240 Hz refresh intervals. [Stage timings, display counts and sampled DXGI evidence](evidence/waveform/final-hardening.json)
 
@@ -65,7 +65,7 @@ The separate two-deck private run exercised live device recreation, an injected 
 
 ```powershell
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
+python -B tools/qualify_waveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
 ```
 
 ## Replay after natural completion
@@ -84,7 +84,7 @@ Full CD continues to show the authored program. A seek can select any chapter in
 
 ```powershell
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformTransport.py target/release/disqro.exe .local/waveform-transport
+python -B tools/qualify_waveform_transport.py target/release/disqro.exe .local/waveform-transport
 ```
 
 The native runs use a private desktop and muted output. The release build also passed all 103 frozen Stroke views and 45 music views. In the two-deck lifecycle recheck, the paused surface repainted in 519 ms after the injected allocation failure. There was zero waveform work after minimize or closure, and audio callbacks continued after both decks closed.
@@ -115,7 +115,7 @@ cargo build --release --locked --features qualification
 $env:DISQRO_WAVE_BASELINE_SOURCE=(Resolve-Path .local/waveform-mission/fixtures/disc.cue).Path
 $env:DISQRO_WAVE_BASELINE_DETAIL='1'
 cargo test --release --locked --features qualification timeline_waveform_baseline -- --ignored --nocapture
-python -B tools/qualifyWaveform.py target/release/disqro.exe $env:DISQRO_WAVE_BASELINE_SOURCE .local/recovery --exercise-host-recovery
+python -B tools/qualify_waveform.py target/release/disqro.exe $env:DISQRO_WAVE_BASELINE_SOURCE .local/recovery --exercise-host-recovery
 ```
 
 For composed-frame qualification, provide Dekzer's `present-probe.exe` with `--foreground --display-probe PATH`. Supply a new output directory each time. Use `--warm-cache` with the first run's `Cache` directory for the second pass. To replay the frozen visual fixtures, use the checkpoint command in the native Stroke record. [Parity fixture workflow](waveform-native-gpu.md#visual-qualification)
