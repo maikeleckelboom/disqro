@@ -43,6 +43,13 @@ Public CI cannot fetch a private dependency. This integration must not be
 merged until the engine is reachable by public builds (see the engine's
 `docs/distribution.md`).
 
+## Continuous motion
+
+The pinned revision draws the detailed Waveform at a continuous device
+origin, paces frames on the Windows 11 compositor clock, and no longer draws
+44.1 kHz display cells without source frames as silence.
+[Continuous waveform motion](waveform-continuous-motion.md)
+
 ## Derived data
 
 Encoded evidence moved from `wave_evidence_v3` to `wave_evidence_v4`. The
