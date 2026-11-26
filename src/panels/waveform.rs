@@ -96,6 +96,23 @@ impl Motion {
         }
     }
 
+    /// Modifier keys follow keyboard focus, which can be in another panel
+    /// while the pointer inspects a sample. Redraw only a registered hit.
+    pub(crate) fn inspection_modifiers(&self, window: &Window, cx: &mut App) {
+        for panel in &self.0.borrow().presented {
+            if let Some(entity) = panel.upgrade() {
+                let deck = entity.read(cx);
+                if deck.layout.get().is_some_and(|layout| {
+                    deck.texture
+                        .sample_hit(layout.physical(window.mouse_position()))
+                        .is_some()
+                }) {
+                    cx.notify(panel.entity_id());
+                }
+            }
+        }
+    }
+
     fn follow_scrub(&self, owner: EntityId, window: &mut Window, cx: &App) {
         let presented = self.0.borrow().presented.clone();
         for panel in presented {
@@ -269,16 +286,20 @@ impl DeckPosition {
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     show_sample_points: bool,
+    show_sample_ruler: bool,
 }
 
 impl Settings {
-    fn points(self, playing: bool, scrubbing: bool) -> waveform::inspection::SamplePoints {
-        use waveform::inspection::SamplePoints;
-        if self.show_sample_points && !playing && !scrubbing {
-            SamplePoints::Visible
+    fn stationary(self, playing: bool, scrubbing: bool) -> Self {
+        if playing || scrubbing {
+            Self::default()
         } else {
-            SamplePoints::Hidden
+            self
         }
+    }
+
+    fn enabled(self) -> bool {
+        self.show_sample_points || self.show_sample_ruler
     }
 }
 
@@ -429,10 +450,10 @@ impl Waveform {
         self.motion.request(cx.weak_entity(), window);
     }
 
-    fn points(&self, track: &WaveTrack, cx: &App) -> waveform::inspection::SamplePoints {
-        self.settings.points(
+    fn overlays(&self, track: &WaveTrack, cx: &App) -> Settings {
+        self.settings.stationary(
             track.playing
-                || (self.settings.show_sample_points
+                || (self.settings.enabled()
                     && track.position(Instant::now()).is_some_and(|p| p.advancing)),
             self.player.read(cx).waveform_grabbed(),
         )
@@ -557,7 +578,7 @@ impl Waveform {
         let grabbed = self.grabbed();
         let moving = self.position.update(&track, now, grabbed);
         // An inspected texture and its measurement must enter the same scene.
-        if self.points(&track, cx) != SamplePoints::Hidden {
+        if self.overlays(&track, cx).enabled() {
             cx.notify();
             return false;
         }
@@ -718,11 +739,13 @@ impl Render for Waveform {
         let displayed = self.displayed.clone();
         let panel = cx.weak_entity();
         let texture = self.texture.clone();
-        let points = self.points(&track, cx);
-        let inspector = (points != SamplePoints::Hidden).then(|| Rc::new(RefCell::new(None)));
-        let tip = inspector.clone();
+        let overlays = self.overlays(&track, cx);
+        let inspector = overlays
+            .show_sample_points
+            .then(|| Rc::new(RefCell::new(None::<inspection::Reading>)));
+        let measurement = inspector.clone();
         let inspection_player = self.player.clone();
-        let shown = self.settings.show_sample_points;
+        let settings = self.settings;
         let menu_panel = cx.weak_entity();
         let input = self.input_at.take();
         let inspecting = self.position.inspecting.is_some() && !grabbed;
@@ -764,6 +787,23 @@ impl Render for Waveform {
                                     cx.notify();
                                 })),
                         )
+                    })
+                    .when_some(inspector, |header, reading| {
+                        // Layout belongs to the header. Paint after the surface has
+                        // confirmed this scene's PCM hit and render succeeded.
+                        header.child(deferred(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, cx| {
+                                    if let Some(reading) = reading.borrow_mut().take() {
+                                        reading.paint(bounds, window, cx);
+                                    }
+                                },
+                            )
+                            .flex_1()
+                            .min_w_0()
+                            .h_full(),
+                        ))
                     }),
             )
             .child(
@@ -778,7 +818,8 @@ impl Render for Waveform {
                     .child(
                         canvas(
                             move |b, w, _| {
-                                (points != SamplePoints::Hidden)
+                                overlays
+                                    .show_sample_points
                                     .then(|| w.insert_hitbox(b, HitboxBehavior::Normal))
                             },
                             move |b, hitbox, window, cx| {
@@ -801,11 +842,13 @@ impl Render for Waveform {
                                     bounds: target,
                                     scale,
                                 };
-                                let points = if points != SamplePoints::Hidden
+                                let eligible = overlays.enabled()
+                                    && SamplePoints::Visible.for_view(&view)
+                                        == SamplePoints::Visible
                                     && !evidence.samples.is_empty()
-                                    && inspection_player.read(cx).inspection_current(&track)
-                                {
-                                    points.for_view(&view)
+                                    && inspection_player.read(cx).inspection_current(&track);
+                                let points = if eligible && overlays.show_sample_points {
+                                    SamplePoints::Visible
                                 } else {
                                     SamplePoints::Hidden
                                 };
@@ -840,7 +883,7 @@ impl Render for Waveform {
                                 );
                                 #[cfg(not(windows))]
                                 let ready = {
-                                    let _ = (&texture, cx, view, evidence);
+                                    let _ = &texture;
                                     false
                                 };
                                 crate::diagnostics::stage(
@@ -849,6 +892,17 @@ impl Render for Waveform {
                                     u64::from(ready),
                                     (scale * 96.).round() as u64,
                                 );
+                                if ready && eligible && overlays.show_sample_ruler {
+                                    inspection::paint_ruler(
+                                        layout,
+                                        &view,
+                                        surface.viewport.first,
+                                        &evidence,
+                                        hit,
+                                        window,
+                                        cx,
+                                    );
+                                }
                                 if ready && let Some(hitbox) = hitbox {
                                     inspection::listen(
                                         &panel,
@@ -858,14 +912,14 @@ impl Render for Waveform {
                                         hit,
                                         window,
                                     );
-                                    if let (Some(hit), Some(tip)) = (hit, &tip) {
+                                    if let (Some(hit), Some(measurement)) = (hit, &measurement) {
                                         let chapter = inspection_player
                                             .read(cx)
                                             .inspection_chapter(&track, hit.frame as usize);
-                                        *tip.borrow_mut() = Some(inspection::Reading {
+                                        *measurement.borrow_mut() = Some(inspection::Reading {
                                             hit,
                                             chapter,
-                                            pointer: window.mouse_position(),
+                                            source_frames: track.source.frames,
                                         });
                                     }
                                 }
@@ -919,31 +973,30 @@ impl Render for Waveform {
                                 material.wave.cursor
                             }),
                     )
-                    .when_some(inspector, |viewport, reading| {
-                        viewport.child(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, window, cx| {
-                                    if let Some(reading) = reading.borrow_mut().take() {
-                                        reading.paint(bounds, window, cx);
-                                    }
-                                },
-                            )
-                            .absolute()
-                            .size_full(),
-                        )
-                    })
                     .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
                     .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down))
                     .context_menu(move |menu, _, _| {
                         let panel = menu_panel.clone();
+                        let ruler_panel = menu_panel.clone();
                         menu.item(
                             PopupMenuItem::new("Show Sample Points")
-                                .checked(shown)
+                                .checked(settings.show_sample_points)
                                 .on_click(move |_, _, cx| {
                                     let _ = panel.update(cx, |panel, cx| {
                                         panel.settings.show_sample_points =
                                             !panel.settings.show_sample_points;
+                                        cx.emit(SettingsChanged);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Show Sample Ruler")
+                                .checked(settings.show_sample_ruler)
+                                .on_click(move |_, _, cx| {
+                                    let _ = ruler_panel.update(cx, |panel, cx| {
+                                        panel.settings.show_sample_ruler =
+                                            !panel.settings.show_sample_ruler;
                                         cx.emit(SettingsChanged);
                                         cx.notify();
                                     });
@@ -957,7 +1010,6 @@ impl Render for Waveform {
 #[cfg(test)]
 mod point_tests {
     use super::Settings;
-    use waveform::inspection::SamplePoints::{Hidden, Visible};
 
     #[test]
     fn settings_restore_per_panel_and_gate_transport_transitions() {
@@ -965,14 +1017,25 @@ mod point_tests {
         let restored: Settings =
             serde_json::from_value(serde_json::json!({"showSamplePoints": true})).unwrap();
         for (playing, scrubbing, points) in [
-            (false, false, Visible),
-            (true, false, Hidden),
-            (false, true, Hidden),
-            (true, true, Hidden),
-            (false, false, Visible),
+            (false, false, true),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
         ] {
-            assert_eq!(restored.points(playing, scrubbing), points);
-            assert_eq!(other.points(playing, scrubbing), Hidden);
+            let ruler: Settings =
+                serde_json::from_value(serde_json::json!({"showSampleRuler": true})).unwrap();
+            let visible = restored.stationary(playing, scrubbing);
+            assert_eq!(visible.show_sample_points, points);
+            assert!(!visible.show_sample_ruler);
+            let ruler_only = ruler.stationary(playing, scrubbing);
+            assert_eq!(ruler_only.show_sample_ruler, points);
+            assert!(!ruler_only.show_sample_points);
+            assert!(!other.stationary(playing, scrubbing).enabled());
+            assert_eq!(
+                serde_json::to_value(ruler).unwrap()["showSampleRuler"],
+                true
+            );
         }
         assert_eq!(
             serde_json::to_value(restored).unwrap()["showSamplePoints"],

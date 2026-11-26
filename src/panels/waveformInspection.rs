@@ -1,4 +1,4 @@
-//! Transient measurements painted above the successfully drawn native surface.
+//! Transient header measurements and a sample ruler for the displayed native surface.
 use super::*;
 use waveform::inspection::SampleHit;
 
@@ -28,10 +28,162 @@ pub(super) fn listen(
     });
 }
 
+fn line(window: &Window, text: String, pt: f32, color: Hsla, weight: FontWeight) -> ShapedLine {
+    let mut font = window.text_style().font();
+    font.weight = weight;
+    let run = TextRun {
+        len: text.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(text.into(), px(pt), &[run], None)
+}
+
+const RULER_HEIGHT: f32 = 21.;
+
+pub(super) fn paint_ruler(
+    layout: Layout,
+    view: &waveform::View,
+    first: f64,
+    evidence: &overview::Evidence,
+    hit: Option<SampleHit>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let m = *materials(cx);
+    let b = layout.bounds;
+    let top = b.bottom() - px(RULER_HEIGHT);
+    let device_pixel = px(1. / layout.scale);
+    let visible = (view.width as f64 / view.pixels_per_frame()).ceil() as usize;
+    let widest_label = line(
+        window,
+        "8".repeat(visible.to_string().len()),
+        10.,
+        m.text_muted,
+        FontWeight::NORMAL,
+    );
+    let label_spacing = f64::from(f32::from(widest_label.width + px(9.))) * f64::from(layout.scale);
+    let mut ticks = waveform::inspection::ruler_ticks(view, first, label_spacing)
+        .filter(|t| {
+            evidence
+                .samples
+                .iter()
+                .any(|block| block.sample(t.frame).is_some())
+        })
+        .peekable();
+    if ticks.peek().is_none() {
+        return;
+    }
+    window.paint_quad(fill(
+        Bounds::new(point(b.left(), top), size(b.size.width, px(RULER_HEIGHT))),
+        m.chrome.opacity(0.87),
+    ));
+    let mut label_end = b.left();
+    while let Some(tick) = ticks.next() {
+        let x = b.left() + px(tick.x as f32 / layout.scale);
+        let inspected = hit.is_some_and(|h| h.frame == tick.frame);
+        let ink = if inspected {
+            m.accent
+        } else if tick.major {
+            m.text_muted
+        } else {
+            m.text_faint.opacity(0.72)
+        };
+        let h = if tick.major || inspected { 6. } else { 3. };
+        // GPUI snaps quad edges. Split one physical pixel of coverage across
+        // device columns so a fractional vertex and its tick share a center.
+        for (column, coverage) in tick_coverage(tick.x) {
+            if column < 0 || column >= view.width as i64 || coverage <= 0. {
+                continue;
+            }
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(b.left() + device_pixel * column as f32, top),
+                    size(device_pixel, px(h)),
+                ),
+                ink.opacity(coverage),
+            ));
+        }
+        if inspected {
+            let dot = size(px(4.), px(4.));
+            window.paint_quad(quad(
+                Bounds::new(point(x - px(2.), top + px(4.)), dot),
+                px(2.),
+                m.accent,
+                px(0.),
+                m.accent,
+                BorderStyle::Solid,
+            ));
+        }
+        if tick.numbered || tick.number() == 1 || ticks.peek().is_none() {
+            let label = line(
+                window,
+                tick.number().to_string(),
+                10.,
+                if inspected { m.accent } else { m.text_muted },
+                FontWeight::NORMAL,
+            );
+            let Some(left) = centered_label(x, label.width, label_end, b.right()) else {
+                continue;
+            };
+            label_end = left + label.width + px(4.);
+            let _ = label.paint(
+                point(left, top + px(6.)),
+                px(13.),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+    }
+}
+
+fn tick_coverage(center: f64) -> [(i64, f32); 2] {
+    let left = center - 0.5;
+    let column = left.floor();
+    let phase = (left - column) as f32;
+    [(column as i64, 1. - phase), (column as i64 + 1, phase)]
+}
+
+fn centered_label(x: Pixels, width: Pixels, start: Pixels, end: Pixels) -> Option<Pixels> {
+    let left = x - width * 0.5;
+    (left >= start && left + width <= end).then_some(left)
+}
+
 pub(super) struct Reading {
     pub hit: SampleHit,
     pub chapter: Option<(u8, f64, f64)>,
-    pub pointer: Point<Pixels>,
+    pub source_frames: usize,
+}
+
+/// Fixed field widths keep adjacent labels still as values change. Use the
+/// second line of the existing header only when the primary group needs it.
+/// Omit whole lower-priority fields at widths that cannot fit them.
+fn field_positions(width: f32, fields: &[f32], primary: usize) -> Vec<(f32, usize)> {
+    let gap = 10.;
+    let required = fields[..primary].iter().sum::<f32>() + gap * primary.saturating_sub(1) as f32;
+    let wrap = required > width;
+    let mut x = 0.;
+    let mut row = 0;
+    let mut positions = Vec::new();
+    for &field in fields {
+        if x + field > width {
+            if !wrap || row == 1 || field > width {
+                break;
+            }
+            x = 0.;
+            row = 1;
+        }
+        positions.push((x, row));
+        x += field + gap;
+    }
+    positions
 }
 
 impl Reading {
@@ -47,53 +199,84 @@ impl Reading {
             frame,
             (u64::from(left.to_bits()) << 32) | u64::from(right.to_bits()),
         );
-        let seconds = source_seconds(frame, rate);
-        let mut labels = vec![
-            format!("Frame {frame}  ·  {rate} Hz"),
-            format!("Source  {seconds} s"),
-            format!("Left  {}", amplitude(left)),
-            format!("Right  {}", amplitude(right)),
-        ];
-        if let Some((number, track, program)) = self.chapter {
-            labels.push(format!("Track {number}  {track:.12} s"));
-            labels.push(format!("Program  {program:.12} s"));
-        }
         let m = *materials(cx);
-        let font = window.text_style().font();
-        let lines: Vec<_> = labels
-            .into_iter()
-            .map(|s| {
-                let run = TextRun {
-                    len: s.len(),
-                    font: font.clone(),
-                    color: m.text,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                window
-                    .text_system()
-                    .shape_line(s.into(), px(12.), &[run], None)
-            })
-            .collect();
-        let width = lines.iter().map(|l| l.width).max().unwrap_or_default() + px(16.);
-        let height = px(16. * lines.len() as f32 + 10.);
-        let place = |pointer: Pixels, start: Pixels, end: Pixels, length: Pixels| {
-            let after = pointer + px(12.);
-            if after + length <= end {
-                after
-            } else {
-                (pointer - length - px(12.)).max(start)
+        let digits = self.source_frames.to_string().len();
+        let time_digits = (self.source_frames as u64 / u64::from(rate))
+            .to_string()
+            .len()
+            + 15;
+        let cue = self.chapter.filter(|_| window.modifiers().shift);
+        let mut fields = Vec::new();
+        let primary = if let Some((number, track, program)) = cue {
+            fields.push((
+                format!("Track {number}"),
+                format!("{track:.12} s"),
+                time_digits,
+            ));
+            fields.push((
+                "Program".into(),
+                format!("{program:.12} s"),
+                time_digits.max(20),
+            ));
+            fields.push(("Frame".into(), frame.to_string(), digits));
+            2
+        } else {
+            fields.push(("Frame".into(), frame.to_string(), digits));
+            fields.push(("L".into(), amplitude(left), 15));
+            fields.push(("R".into(), amplitude(right), 15));
+            fields.push((
+                "Source".into(),
+                format!("{} s", source_seconds(frame, rate)),
+                time_digits,
+            ));
+            fields.push((
+                "Rate".into(),
+                format!("{rate} Hz"),
+                rate.to_string().len() + 3,
+            ));
+            if self.chapter.is_some() {
+                fields.push(("Shift for CUE times".into(), String::new(), 0));
             }
+            3
         };
-        let origin = point(
-            place(self.pointer.x, bounds.left(), bounds.right(), width),
-            place(self.pointer.y, bounds.top(), bounds.bottom(), height),
-        );
-        window.paint_quad(fill(Bounds::new(origin, size(width, height)), m.overlay));
-        for (i, line) in lines.iter().enumerate() {
-            let at = origin + point(px(8.), px(5. + i as f32 * 16.));
-            let _ = line.paint(at, px(16.), TextAlign::Left, None, window, cx);
+        let numeric = |text: String| {
+            let run = TextRun {
+                len: text.len(),
+                font: font("Consolas"),
+                color: m.text,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_line(text.into(), px(12.), &[run], None)
+        };
+        let digit = numeric("0".into()).width;
+        let mut widths = Vec::new();
+        let mut lines = Vec::new();
+        for (key, text, reserve) in fields {
+            let label = line(window, key, 11., m.text_muted, FontWeight::NORMAL);
+            let value = numeric(text);
+            let width = label.width + px(4.) + value.width.max(digit * reserve as f32);
+            widths.push(f32::from(width));
+            lines.push((label, value));
+        }
+        let positions = field_positions(bounds.size.width.into(), &widths, primary);
+        let wrapped = positions.last().is_some_and(|(_, row)| *row == 1);
+        let line_height = px(14.);
+        let top = bounds.center().y - line_height * if wrapped { 1. } else { 0.5 };
+        for ((x, row), (label, value)) in positions.into_iter().zip(lines) {
+            let at = point(bounds.left() + px(x), top + line_height * row as f32);
+            let _ = label.paint(at, line_height, TextAlign::Left, None, window, cx);
+            let _ = value.paint(
+                at + point(label.width + px(4.), px(0.)),
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
         }
     }
 }
@@ -117,7 +300,43 @@ fn amplitude(value: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{amplitude, source_seconds};
+    use super::{amplitude, centered_label, field_positions, px, source_seconds, tick_coverage};
+
+    #[test]
+    fn fractional_ticks_conserve_coverage_and_edge_labels_keep_their_centers() {
+        for x in [0., 0.125, 1.5, 12.75, 900.625] {
+            let pair = tick_coverage(x);
+            assert_eq!(pair[0].1 + pair[1].1, 1.);
+            assert_eq!(
+                pair.iter()
+                    .map(|(i, a)| (*i as f64 + 0.5) * f64::from(*a))
+                    .sum::<f64>(),
+                x
+            );
+        }
+        assert_eq!(
+            centered_label(px(20.5), px(11.), px(0.), px(100.)),
+            Some(px(15.))
+        );
+        for x in [1., 98.] {
+            assert!(centered_label(px(x), px(12.), px(0.), px(100.)).is_none());
+        }
+    }
+
+    #[test]
+    fn inline_fields_wrap_primary_measurements_and_drop_optional_whole_fields() {
+        let fields = [60., 90., 90., 140., 85.];
+        assert_eq!(field_positions(505., &fields, 3).len(), 5);
+        assert_eq!(
+            field_positions(280., &fields, 3),
+            [(0., 0), (70., 0), (170., 0)]
+        );
+        assert_eq!(
+            field_positions(180., &fields, 3),
+            [(0., 0), (70., 0), (0., 1)]
+        );
+        assert_eq!(field_positions(40., &fields, 3), []);
+    }
 
     #[test]
     fn measurements_keep_source_time_and_round_trip_decoded_channels() {
