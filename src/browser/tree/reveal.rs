@@ -181,14 +181,119 @@ pub(in crate::browser) fn recording_identity(key: &RowKey) -> Option<TreeId> {
     }
 }
 
+/// The normal page containing one lineage member and cursors for the preceding
+/// interval. No row can be displayed until its sibling position is known.
+struct Located {
+    id: TreeId,
+    branch: Branch,
+}
+
+impl reader::Reader {
+    async fn locate(
+        &self,
+        source: Source,
+        target: TreeId,
+        sort: Option<(Field, ColumnSort)>,
+        cx: &AsyncApp,
+    ) -> anyhow::Result<Located> {
+        let mut page = self.read(source.clone(), None, sort, cx).await?;
+        let mut prefix = Vec::new();
+        let mut cursor = None;
+        if let Some(index) = page.snapshot.clone() {
+            let id = target.clone();
+            let (rank, found) = cx
+                .background_spawn(async move {
+                    let rank = index
+                        .position(&id)?
+                        .ok_or_else(|| anyhow::anyhow!("Recording moved"))?;
+                    anyhow::Ok((rank, index.page(rank / PAGE * PAGE)?))
+                })
+                .await?;
+            for start in (0..rank / PAGE * PAGE).step_by(PAGE) {
+                prefix.push(Slot::unloaded(
+                    (start > 0).then_some(Cursor::Offset(start)),
+                    PAGE,
+                ));
+            }
+            let start = rank / PAGE * PAGE;
+            cursor = (start > 0).then_some(Cursor::Offset(start));
+            page = found;
+        } else {
+            loop {
+                let id = target.clone();
+                let (next, found) = cx
+                    .background_spawn(async move {
+                        let found = page.nodes().any(|n| n.id == id);
+                        (page, found)
+                    })
+                    .await;
+                page = next;
+                if found {
+                    break;
+                }
+                let next = page
+                    .more
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Recording moved"))?;
+                prefix.push(Slot::unloaded(cursor, page.pages[0].len));
+                cursor = Some(next.clone());
+                page = self.raw(source.clone(), Some(next), cx).await?;
+            }
+        }
+        page.pages[0].start = cursor;
+        prefix.append(&mut page.pages);
+        page.pages = prefix;
+        Ok(Located {
+            id: target,
+            branch: page,
+        })
+    }
+}
+
+impl Slot {
+    fn unloaded(start: Option<Cursor>, len: usize) -> Self {
+        Self {
+            start,
+            len,
+            nodes: None,
+            rows: len,
+            matched_rows: None,
+            used: 0,
+        }
+    }
+}
+
 impl Tree {
-    fn open_lineage(&mut self, nodes: Vec<Node>) {
-        self.direct.clear();
-        let mut deep = self.deep.contains(&None);
+    fn open_lineage(&mut self, path: Vec<Located>) {
         let mut parent = None;
-        for node in nodes {
-            let id = node.id.clone();
-            if node.expandable() {
+        let mut deep = self.deep.contains(&None);
+        for Located { id, mut branch } in path {
+            self.pending.remove(&parent);
+            let target_page = branch.pages.len() - 1;
+            if let Some(mut resident) = self.branches.remove(&parent) {
+                // Preserve already loaded siblings and subtrees of the same generation.
+                for (old, incoming) in resident
+                    .pages
+                    .iter_mut()
+                    .zip(&mut branch.pages[..target_page])
+                {
+                    if old.start == incoming.start && old.len == incoming.len {
+                        std::mem::swap(old, incoming);
+                    }
+                }
+                if resident
+                    .pages
+                    .get(target_page + 1)
+                    .is_some_and(|next| next.start == branch.more)
+                {
+                    branch.pages.extend(resident.pages.drain(target_page + 1..));
+                    branch.more = resident.more;
+                }
+            }
+            branch.pages[target_page].used = self.clock + 1;
+            branch.deep = deep;
+            self.branches.insert(parent.clone(), branch);
+            if !matches!(id, TreeId::IndexedTrack(_) | TreeId::File { .. }) {
                 self.links.insert(id.clone(), parent.clone());
                 self.closed.remove(&id);
                 if !self.is_open(&id, deep) {
@@ -199,10 +304,25 @@ impl Tree {
                 }
                 deep = self.opens_by_default(&id, deep);
             }
-            self.direct.insert(parent, node);
             parent = Some(id);
         }
         self.reconcile();
+        // Make the loaded page of each ancestor recent before applying the
+        // normal eviction budget, just as if the viewport had reached it.
+        let touched: Vec<_> = self
+            .branches
+            .iter()
+            .filter_map(|(id, branch)| {
+                branch
+                    .pages
+                    .iter()
+                    .position(|p| p.used > self.clock)
+                    .map(|i| (id.clone(), i))
+            })
+            .collect();
+        for (id, i) in touched {
+            self.settle(&id, i, false, None);
+        }
     }
 }
 
@@ -221,24 +341,44 @@ impl Browser {
             });
             return;
         }
-        let ticket = self.intent.clone();
-        let revision = ticket.next();
+        let revision = self.intent.next();
+        let ticket = Ticket::default();
+        let generation = ticket.next();
         let location = self.location.clone();
         let store = self.catalog.read(cx).handle();
         let workers = self.tree.read(cx).delegate().workers.clone();
+        let tree = &self.tree.read(cx).delegate().tree;
+        let Some(root) = tree.root.clone() else {
+            return;
+        };
+        let order = tree.sort;
+        let indexes: HashMap<_, _> = tree
+            .branches
+            .iter()
+            .filter_map(|(id, b)| Some((id.clone(), b.snapshot.clone()?)))
+            .collect();
+        self.tree.update(cx, |table, _| {
+            table.delegate_mut().tree.reveal = Some(Request(ticket.clone()))
+        });
         let window = self.window;
         cx.spawn(async move |browser, cx| {
+            let reader = reader::Reader {
+                handle: store.clone(),
+                workers: workers.clone(),
+                ticket: ticket.clone(),
+                generation,
+            };
             let result = match (location, target.clone(), store) {
                 (Location::Library(root), TreeId::IndexedTrack(id), Some(store)) => {
                     store
-                        .query(&ticket, revision, move |s| indexed_path(s, root, id))
+                        .query(&ticket, generation, move |s| indexed_path(s, root, id))
                         .await
                 }
                 (Location::Folder(base), id @ TreeId::File { .. }, _) => {
                     let ticket = ticket.clone();
                     cx.background_spawn(async move {
                         let _worker = workers.acquire().await;
-                        let alive = || ticket.is_current(revision);
+                        let alive = || ticket.is_current(generation);
                         if !alive() {
                             return Err(crate::store::Canceled.into());
                         }
@@ -252,13 +392,44 @@ impl Browser {
                 }
                 _ => Ok(Vec::new()),
             };
-            if !ticket.is_current(revision) {
+            let result = async {
+                let nodes = result?;
+                let mut path = Vec::new();
+                let mut source = Some(root);
+                let mut sort = order;
+                let mut parent = None;
+                for node in nodes {
+                    let current = source
+                        .take()
+                        .ok_or_else(|| anyhow::anyhow!("Invalid recording hierarchy"))?;
+                    source = node.source();
+                    let next_sort = if matches!(node.item, Item::Disc { .. } | Item::Release { .. })
+                    {
+                        None
+                    } else {
+                        order
+                    };
+                    let (current, current_sort) = match indexes.get(&parent) {
+                        Some(index) => (Source::Snapshot(index.clone()), None),
+                        None => (current, sort),
+                    };
+                    parent = Some(node.id.clone());
+                    path.push(reader.locate(current, node.id, current_sort, cx).await?);
+                    sort = next_sort;
+                }
+                anyhow::Ok(path)
+            }
+            .await;
+            if !ticket.is_current(generation) {
                 return;
             }
             let _ = cx.update(|cx| {
                 window.update(cx, |_, w, cx| {
                     let _ = browser.update(cx, |b, cx| {
-                        if !b.navigation_is_current(revision) || !b.listing_tree() {
+                        if !b.navigation_is_current(revision)
+                            || !b.listing_tree()
+                            || b.tree.read(cx).delegate().tree.sort != order
+                        {
                             return;
                         }
                         if let Ok(nodes) = result
@@ -315,24 +486,8 @@ mod tests {
         let path = physical_path(dir.path(), &id, track.disc.as_ref(), &|| true).unwrap();
         assert_eq!(path.len(), 3);
         assert_eq!(path.last().unwrap().id, id);
-        let mut tree = Tree {
-            root: Some(Source::Folder {
-                root: None,
-                path: dir.path().into(),
-            }),
-            ..Default::default()
-        };
-        tree.open_lineage(path);
-        assert_eq!(
-            tree.project(None)
-                .rows
-                .iter()
-                .filter_map(TreeRow::node)
-                .filter(|node| node.id == id)
-                .count(),
-            1
-        );
-        assert!(tree.next_request().is_some());
+        assert!(path[0].expandable());
+        assert!(matches!(path[1].item, Item::Disc { .. }));
     }
 
     #[::core::prelude::v1::test]
@@ -359,5 +514,66 @@ mod tests {
         assert!(matches!(path[1].item, Item::Release { .. }));
         assert!(matches!(path[2].item, Item::Disc { .. }));
         assert_eq!(path[3].id, TreeId::IndexedTrack(target.id));
+    }
+    #[::core::prelude::v1::test]
+    fn revealed_recording_keeps_its_rank_and_siblings_during_prefetch_and_backward_paging() {
+        let source = |offset: usize| {
+            (offset..offset + PAGE)
+                .map(|i| {
+                    Node::track(
+                        Arc::new(Track::file(format!("fixture/{i:06}.wav").into())),
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let offset = 6 * PAGE;
+        let nodes = source(offset);
+        let target = nodes[PAGE - 2].id.clone();
+        let mut branch = Branch::page(nodes, Some(Cursor::Offset(offset + PAGE)));
+        branch.pages[0].start = Some(Cursor::Offset(offset));
+        let mut pages = (0..offset)
+            .step_by(PAGE)
+            .map(|at| Slot::unloaded((at > 0).then_some(Cursor::Offset(at)), PAGE))
+            .collect::<Vec<_>>();
+        pages.append(&mut branch.pages);
+        branch.pages = pages;
+        let mut tree = Tree::default();
+        tree.open_lineage(vec![Located {
+            id: target.clone(),
+            branch,
+        }]);
+        let verify = |tree: &Tree| {
+            let projection = tree.project(None);
+            let mut rank = 0;
+            for row in projection.rows {
+                if row.node().is_some_and(|n| n.id == target) {
+                    assert_eq!(rank, offset + PAGE - 2);
+                    return;
+                }
+                rank += row.span();
+            }
+            panic!("target vanished");
+        };
+        verify(&tree);
+        tree.receive(
+            &None,
+            &Fetch::Next(Cursor::Offset(offset + PAGE)),
+            Branch::page(source(offset + PAGE), None),
+            None,
+        );
+        verify(&tree);
+        tree.receive(
+            &None,
+            &Fetch::Page(0, None),
+            Branch::page(source(0), Some(Cursor::Offset(PAGE))),
+            None,
+        );
+        verify(&tree);
+        let sibling = &tree.branches[&None].pages[6].nodes.as_ref().unwrap()[PAGE - 1];
+        assert_eq!(
+            sibling.value(Field::Title),
+            format!("{:06}", offset + PAGE - 1)
+        );
     }
 }

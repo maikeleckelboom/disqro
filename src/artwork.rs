@@ -48,7 +48,7 @@ fn file_bytes(path: &Path) -> Option<Vec<u8>> {
 
 /// A rescan sees a new asset when the cover changes. GPUI requests thumbnails
 /// for visible cells; the full-resolution original never enters a table texture.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CoverFile {
     path: PathBuf,
     embedded: bool,

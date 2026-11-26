@@ -19,7 +19,9 @@ use std::{
     sync::Arc,
 };
 
+mod reader;
 mod reveal;
+mod snapshot;
 mod table;
 pub(super) use reveal::recording_identity;
 pub(crate) use table::TreeTable;
@@ -35,14 +37,8 @@ const RESIDENT_PAGES: usize = 4;
 /// Rows beyond the viewport at which the next batch is requested.
 pub(super) const LOOKAHEAD: usize = 512;
 const PARALLEL_BRANCHES: usize = 4;
-/// Items held across every branch: loaded pages, the filter matches of
-/// released pages and the open items that keep their place. Pages the
-/// viewport is not near are released first, so the total bounds memory,
-/// never what can be reached.
+/// Resident node payload across the tree. Released pages retain only cursors and spans.
 const LOADED_NODE_LIMIT: usize = 32_768;
-/// Items a branch may hold to be sorted as a whole. A larger branch keeps
-/// the order it is read in, and says so.
-const SORTED_BRANCH_LIMIT: usize = 24_576;
 /// Catalog folders with matching recordings that filtering resolves.
 const MATCHED_FOLDERS: usize = 4096;
 
@@ -143,7 +139,7 @@ impl TreeId {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 enum Item {
     Collection {
         id: RootId,
@@ -169,7 +165,7 @@ enum Item {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Node {
     id: TreeId,
     item: Item,
@@ -346,8 +342,9 @@ impl TreeRow {
 enum Source {
     Folder { root: Option<RootId>, path: PathBuf },
     Album(i64, Arc<Disc>),
-    Loaded(Vec<Node>),
+    Loaded(Arc<[Node]>),
     Offline,
+    Snapshot(Arc<snapshot::Snapshot>),
 }
 impl Node {
     fn source(&self) -> Option<Source> {
@@ -481,8 +478,7 @@ struct Branch {
     /// The batch the branch waits for, and whether a filter searches it
     /// rather than the viewport showing it.
     wanted: Option<(Want, bool)>,
-    /// Too large to sort as a whole, so shown in the order it is read.
-    unsorted: bool,
+    snapshot: Option<Arc<snapshot::Snapshot>>,
     /// Its items are open unless collapsed, inside an expanded subtree.
     deep: bool,
 }
@@ -517,20 +513,11 @@ impl Branch {
         self.pages.iter().map(Slot::resident).sum()
     }
 
-    /// Items known so far, loaded or released.
-    fn len(&self) -> usize {
-        self.pages.iter().map(|page| page.len).sum()
-    }
-
     fn loaded_pages(&self) -> usize {
         self.pages
             .iter()
             .filter(|page| page.nodes.is_some())
             .count()
-    }
-
-    fn complete(&self) -> bool {
-        self.more.is_none() && self.pages.iter().all(|page| page.nodes.is_some())
     }
 
     /// The least recently used page. Break ties by distance from `keep`.
@@ -615,15 +602,13 @@ struct Tree {
     first: HashSet<TreeId>,
     branches: HashMap<Option<TreeId>, Branch>,
     pending: HashMap<Option<TreeId>, Request>,
+    reveal: Option<Request>,
     root: Option<Source>,
     sort: Option<(Field, ColumnSort)>,
     /// The filter whose matches released pages keep.
     query: String,
     /// Advances whenever the viewport moves, to order pages by use.
     clock: u64,
-    /// Exact rows resolved by identity beyond the pages currently held.
-    /// Normal paging merges them in once it reaches their position.
-    direct: HashMap<Option<TreeId>, Node>,
 }
 
 impl Tree {
@@ -778,6 +763,10 @@ impl Tree {
             self.expanded.clear();
             self.deep.clear();
             self.closed.clear();
+            for page in self.branches.values_mut().flat_map(|b| &mut b.pages) {
+                page.rows = page.len;
+                page.matched_rows = None;
+            }
             self.first.clear();
             self.reconcile();
             return;
@@ -885,7 +874,6 @@ impl Tree {
             &mut links,
         );
         self.branches.retain(|key, _| reachable.contains_key(key));
-        self.direct.retain(|key, _| reachable.contains_key(key));
         for (key, branch) in &mut self.branches {
             branch.deep = reachable[key];
         }
@@ -915,15 +903,14 @@ impl Tree {
     }
 
     fn loaded(&self) -> usize {
-        self.branches.values().map(Branch::resident).sum::<usize>() + self.direct.len()
+        self.branches.values().map(Branch::resident).sum::<usize>()
     }
 
     fn children(&self, parent: &Option<TreeId>) -> impl Iterator<Item = &Node> {
-        let branch = self.branches.get(parent);
-        let direct = self.direct.get(parent).filter(|direct| {
-            branch.is_none_or(|branch| !branch.nodes().any(|node| node.id == direct.id))
-        });
-        branch.into_iter().flat_map(Branch::nodes).chain(direct)
+        self.branches
+            .get(parent)
+            .into_iter()
+            .flat_map(Branch::nodes)
     }
 
     /// Whether the active sort orders the items of branch `id`. Discs and
@@ -937,6 +924,7 @@ impl Tree {
         if self.query == query {
             return;
         }
+        self.reveal = None;
         query.clone_into(&mut self.query);
         for page in self.branches.values_mut().flat_map(|b| &mut b.pages) {
             page.matched_rows = None;
@@ -945,10 +933,11 @@ impl Tree {
 
     fn set_sort(&mut self, sort: Option<(Field, ColumnSort)>) {
         if self.sort != sort {
+            self.reveal = None;
             self.sort = sort;
-            for branch in self.branches.values_mut() {
-                branch.unsorted = false;
-            }
+            self.pending.clear();
+            self.branches.clear();
+            self.first.clear();
         }
     }
 
@@ -1100,13 +1089,9 @@ impl Tree {
     }
 
     fn settle(&mut self, id: &Option<TreeId>, keep: usize, _: bool, lens: Option<&Lens>) {
-        let sorts = self.sorts(id);
-        if let Some(branch) = self.branches.get_mut(id) {
-            branch.unsorted |= sorts && branch.len() > SORTED_BRANCH_LIMIT;
-        }
-        while let Some(index) = self.branches.get(id).and_then(|branch| {
-            ((!sorts || branch.unsorted) && branch.loaded_pages() > RESIDENT_PAGES)
-                .then(|| branch.least_recent(keep))
+        while let Some(index) = self.branches.get(id).and_then(|b| {
+            (b.loaded_pages() > RESIDENT_PAGES)
+                .then(|| b.least_recent(keep))
                 .flatten()
         }) {
             self.release_page(id, index, lens);
@@ -1166,7 +1151,15 @@ impl Tree {
                             .map(|page| Fetch::Page(index, page.start.clone())),
                     };
                     if let Some(fetch) = fetch {
-                        return Some((id, source()?, fetch));
+                        return Some((
+                            id,
+                            branch
+                                .snapshot
+                                .clone()
+                                .map(Source::Snapshot)
+                                .or_else(source)?,
+                            fetch,
+                        ));
                     }
                 }
                 for node in tree.children(&id) {
@@ -1259,10 +1252,6 @@ impl<'a> Projection<'a> {
     fn visit(&mut self, parent: Option<TreeId>, depth: usize, inherited: bool) {
         let tree = self.tree;
         let Some(branch) = tree.branches.get(&parent) else {
-            if let Some(direct) = tree.direct.get(&parent) {
-                let matched = inherited || self.lens.is_none_or(|lens| lens.matches(direct));
-                self.node(direct, &parent, depth, tree.branch_deep(&parent), matched);
-            }
             if inherited || self.lens.is_none() {
                 let row = self.len;
                 if let Some(key) = &parent
@@ -1278,27 +1267,14 @@ impl<'a> Projection<'a> {
             }
             return;
         };
-        let sorts = tree.sorts(&parent);
-        let sorted = sorts && !branch.unsorted;
         if self.lens.is_some() && !inherited {
-            self.search(branch, &parent, depth, sorted);
+            self.search(branch, &parent, depth);
         } else {
-            self.browse(branch, &parent, depth, sorted);
-        }
-        if let Some(direct) = tree.direct.get(&parent) {
-            let already_listed = !(sorted && self.lens.is_none() && !branch.complete())
-                && branch.nodes().any(|node| node.id == direct.id);
-            if !already_listed {
-                let matched = inherited || self.lens.is_none_or(|lens| lens.matches(direct));
-                self.node(direct, &parent, depth, branch.deep, matched);
-            }
+            self.browse(branch, &parent, depth);
         }
         let text = if let Some(text) = &branch.notice {
             Some(text.clone())
-        } else if sorts && branch.unsorted {
-            Some("Too many items to sort · Shown in folder order".into())
-        } else if !tree.direct.contains_key(&parent)
-            && branch.pages.iter().all(|page| page.len == 0)
+        } else if branch.pages.iter().all(|page| page.len == 0)
             && branch.more.is_none()
             && depth > 0
             && (inherited || self.lens.is_none())
@@ -1318,49 +1294,7 @@ impl<'a> Projection<'a> {
 
     /// Every item of a branch, in place, with released pages as runs of
     /// rows the viewport loads again.
-    fn browse(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize, sorted: bool) {
-        if sorted {
-            let start = self.len;
-            if branch.complete() {
-                let mut nodes: Vec<&Node> = branch.nodes().collect();
-                sort_nodes(&mut nodes, self.tree.sort);
-                for node in nodes {
-                    self.node(node, parent, depth, branch.deep, true);
-                }
-            } else {
-                // A sorted branch is shown once all of it is read, never in
-                // part.
-                let count = branch.len();
-                if count > 0 {
-                    self.push(TreeRow::Released {
-                        parent: parent.clone(),
-                        count,
-                    });
-                }
-                self.push(TreeRow::Message {
-                    parent: parent.clone(),
-                    depth,
-                    text: "Sorting…".into(),
-                });
-                let missing = branch
-                    .pages
-                    .iter()
-                    .position(|page| page.nodes.is_none())
-                    .map(Want::Page)
-                    .or(branch.more.is_some().then_some(Want::Next));
-                if let Some(want) = missing {
-                    self.boundary(start..self.len, parent, want, false);
-                }
-            }
-            for page in 0..branch.pages.len() {
-                self.spans.push(Span {
-                    branch: parent.clone(),
-                    page,
-                    rows: start..self.len,
-                });
-            }
-            return;
-        }
+    fn browse(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize) {
         for (index, page) in branch.pages.iter().enumerate() {
             let start = self.len;
             match &page.nodes {
@@ -1393,59 +1327,33 @@ impl<'a> Projection<'a> {
 
     /// The items of a branch a filter keeps. The filter reads every page
     /// of the branch wherever the viewport is, keeping only what it needs.
-    fn search(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize, sorted: bool) {
+    fn search(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize) {
         let Some(lens) = self.lens else {
             return;
         };
-        if sorted {
+        for (index, page) in branch.pages.iter().enumerate() {
             let start = self.len;
-            let mut nodes: Vec<_> = branch.nodes().collect();
-            sort_nodes(&mut nodes, self.tree.sort);
-            for node in nodes {
-                self.node(node, parent, depth, branch.deep, lens.matches(node));
-            }
-            for (i, page) in branch.pages.iter().enumerate() {
-                if page.nodes.is_none() {
-                    self.boundary(0..usize::MAX, parent, Want::Page(i), false);
+            if let Some(nodes) = &page.nodes {
+                for node in nodes {
+                    self.node(node, parent, depth, branch.deep, lens.matches(node));
                 }
+            } else if let Some(count) = page.matched_rows {
+                if count > 0 {
+                    self.push(TreeRow::Released {
+                        parent: parent.clone(),
+                        count,
+                    });
+                    self.boundary(start..self.len, parent, Want::Page(index), false);
+                }
+            } else {
+                self.boundary(0..usize::MAX, parent, Want::Page(index), true);
+            }
+            if self.len > start {
                 self.spans.push(Span {
                     branch: parent.clone(),
-                    page: i,
+                    page: index,
                     rows: start..self.len,
                 });
-            }
-            if !branch.complete() {
-                self.push(TreeRow::Message {
-                    parent: parent.clone(),
-                    depth,
-                    text: "Searching…".into(),
-                });
-            }
-        } else {
-            for (index, page) in branch.pages.iter().enumerate() {
-                let start = self.len;
-                if let Some(nodes) = &page.nodes {
-                    for node in nodes {
-                        self.node(node, parent, depth, branch.deep, lens.matches(node));
-                    }
-                } else if let Some(count) = page.matched_rows {
-                    if count > 0 {
-                        self.push(TreeRow::Released {
-                            parent: parent.clone(),
-                            count,
-                        });
-                        self.boundary(start..self.len, parent, Want::Page(index), false);
-                    }
-                } else {
-                    self.boundary(0..usize::MAX, parent, Want::Page(index), true);
-                }
-                if self.len > start {
-                    self.spans.push(Span {
-                        branch: parent.clone(),
-                        page: index,
-                        rows: start..self.len,
-                    });
-                }
             }
         }
         if branch.more.is_some() {
@@ -1483,28 +1391,27 @@ impl<'a> Projection<'a> {
 }
 
 /// Orders sibling items by `sort`, numbers by value and text without case.
-fn sort_nodes(nodes: &mut [&Node], sort: Option<(Field, ColumnSort)>) {
-    let Some((field, direction)) = sort else {
-        return;
+fn order_value(node: &Node, field: Field) -> (u64, String) {
+    let value = node.value(field);
+    let numeric = match &node.item {
+        Item::Track { track, .. } if field == Field::Length => track.duration,
+        Item::Disc { disc, .. } if field == Field::Length => Some(disc.duration()),
+        _ if matches!(field, Field::Number | Field::Count | Field::Year) => value.parse().ok(),
+        _ => None,
     };
-    nodes.sort_by_cached_key(|node| {
-        let value = node.value(field);
-        let numeric = match &node.item {
-            Item::Track { track, .. } if field == Field::Length => track.duration,
-            Item::Disc { disc, .. } if field == Field::Length => Some(disc.duration()),
-            _ if matches!(field, Field::Number | Field::Count | Field::Year) => value.parse().ok(),
-            _ => None,
-        };
-        let key = (
-            numeric.map_or(0, |value| value.max(0.).to_bits()),
-            value.to_lowercase(),
-        );
-        if direction == ColumnSort::Descending {
-            (None, Some(std::cmp::Reverse(key)))
-        } else {
-            (Some(key), None)
-        }
-    });
+    (
+        numeric.map_or(0, |n| n.max(0.).to_bits()),
+        value.to_lowercase(),
+    )
+}
+
+fn sort_key(node: &Node, (field, direction): (Field, ColumnSort)) -> impl Ord + use<> {
+    let key = order_value(node, field);
+    if direction == ColumnSort::Descending {
+        (None, Some(std::cmp::Reverse(key)))
+    } else {
+        (Some(key), None)
+    }
 }
 
 /// One page of a folder read from disk.
@@ -1694,13 +1601,17 @@ impl Browser {
     }
 
     pub(crate) fn stop_tree_jobs(&mut self, cx: &mut App) {
-        self.tree
-            .update(cx, |table, _| table.delegate_mut().tree.pending.clear());
+        self.tree.update(cx, |table, _| {
+            let tree = &mut table.delegate_mut().tree;
+            tree.pending.clear();
+            tree.reveal = None;
+        });
     }
 
     pub(crate) fn invalidate_tree(&mut self, cx: &mut Context<Self>) {
         self.tree.update(cx, |table, _| {
             let state = &mut table.delegate_mut().tree;
+            state.reveal = None;
             state.root = None;
             state.branches.clear();
             state.pending.clear();
@@ -1829,103 +1740,19 @@ impl Browser {
             });
             let handle = self.catalog.read(cx).handle();
             let workers = self.tree.read(cx).delegate().workers.clone();
+            let tree = &self.tree.read(cx).delegate().tree;
+            let sort = tree
+                .sort
+                .filter(|_| !matches!(source, Source::Snapshot(_)) && tree.sorts(&id));
             let cursor = fetch.cursor().cloned();
             cx.spawn(async move |browser, cx| {
-                let result = match (source, handle) {
-                    (Source::Loaded(nodes), _) => Ok(Branch::slice(
-                        &nodes,
-                        match cursor {
-                            Some(Cursor::Offset(offset)) => offset,
-                            _ => 0,
-                        },
-                    )),
-                    (Source::Offline, _) => Err(anyhow::anyhow!("This collection is unavailable.")),
-                    (
-                        Source::Folder {
-                            root: Some(root),
-                            path,
-                        },
-                        Some(store),
-                    ) => {
-                        let contents_at = match &cursor {
-                            Some(Cursor::Indexed(IndexedCursor::Contents(at))) => Some(*at),
-                            _ => None,
-                        };
-                        // Subfolders are read from disk on a worker, never on
-                        // the catalog thread.
-                        let dirs = match (contents_at, &cursor) {
-                            (Some(_), _) => Ok((Vec::new(), None)),
-                            (None, cursor) => {
-                                let after = match cursor {
-                                    Some(Cursor::Indexed(IndexedCursor::Dirs(name))) => {
-                                        Some(name.clone())
-                                    }
-                                    _ => None,
-                                };
-                                let (work, path) = (ticket.clone(), path.clone());
-                                cx.background_spawn(async move {
-                                    let _slot = workers.acquire().await;
-                                    let current = || work.is_current(generation);
-                                    anyhow::ensure!(current(), crate::store::Canceled);
-                                    // An unreadable folder still lists its
-                                    // indexed recordings.
-                                    Ok(indexed_dirs(root, &path, after.as_deref(), &current)
-                                        .unwrap_or_default())
-                                })
-                                .await
-                            }
-                        };
-                        match dirs {
-                            Ok((dirs, Some(more))) => Ok(indexed_page(dirs, None, Some(more))),
-                            Ok((dirs, None)) => {
-                                store
-                                    .query(&ticket, generation, move |s| {
-                                        let (contents, taken, more) = indexed_contents(
-                                            s,
-                                            root,
-                                            &path,
-                                            contents_at.unwrap_or_default(),
-                                        )?;
-                                        Ok(indexed_page(dirs, Some((contents, taken)), more))
-                                    })
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        }
-                    }
-                    (Source::Album(id, disc), Some(store)) => {
-                        let offset = match cursor {
-                            Some(Cursor::Offset(offset)) => offset,
-                            _ => 0,
-                        };
-                        store
-                            .query(&ticket, generation, move |s| {
-                                let (rows, next) = s.disc_page(id, offset, PAGE)?;
-                                Ok(Branch::page(
-                                    rows.into_iter()
-                                        .filter(|row| row.available)
-                                        .map(|row| Node::track(row.track, Some(disc.clone())))
-                                        .collect(),
-                                    next.map(Cursor::Offset),
-                                ))
-                            })
-                            .await
-                    }
-                    (Source::Folder { root: None, path }, _) => {
-                        let work = ticket.clone();
-                        let after = match cursor {
-                            Some(Cursor::Listing(after)) => Some(after),
-                            _ => None,
-                        };
-                        cx.background_spawn(async move {
-                            let _slot = workers.acquire().await;
-                            anyhow::ensure!(work.is_current(generation), crate::store::Canceled);
-                            physical_branch(&path, after.as_ref(), &|| work.is_current(generation))
-                        })
-                        .await
-                    }
-                    _ => Err(anyhow::anyhow!("The library is unavailable.")),
+                let reader = reader::Reader {
+                    handle,
+                    workers,
+                    ticket: ticket.clone(),
+                    generation,
                 };
+                let result = reader.read(source, cursor, sort, cx).await;
                 let _ = browser.update(cx, |b, cx| {
                     if !ticket.is_current(generation) || !b.listing_tree() {
                         return;
@@ -1984,6 +1811,9 @@ impl Browser {
                 .filter(|(_, want, _)| *want == Want::First)
                 .filter_map(|(branch, _, _)| branch.clone())
                 .collect();
+            any |= tree.root.is_some()
+                && !tree.branches.contains_key(&None)
+                && !tree.pending.contains_key(&None);
             any |= tree.want_first(first);
             for (branch, want, search) in wants {
                 any |= tree.want(&branch, want, search);
@@ -2186,6 +2016,7 @@ impl Browser {
         self.tree.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             let tree = &mut delegate.tree;
+            tree.reveal = None;
             match (action, id.clone()) {
                 (ExpandAction::Toggle, Some(item)) => tree.toggle(item, &parent),
                 (ExpandAction::Toggle, None) => return,

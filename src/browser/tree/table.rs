@@ -261,6 +261,14 @@ impl TreeTable {
     pub(super) fn project(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
         let height = crate::table::ROW_HEIGHT;
         let d = table.delegate();
+        // GPUI consumes a scroll-to-item request during layout. An arriving
+        // page may project the table before that layout has happened.
+        let deferred = table
+            .vertical_scroll_handle
+            .0
+            .borrow()
+            .deferred_scroll_to_item
+            .and_then(|scroll| Some((d.row_key(scroll.item_index)?, scroll)));
         let view = Viewport::capture(table, height, |index| d.row_key(index));
         let catalog = d.catalog.clone();
         let d = table.delegate_mut();
@@ -295,6 +303,16 @@ impl TreeTable {
         let position = d.selected.as_ref().and_then(|id| d.position(id));
         reselect(table, position, cx);
         view.restore(table, height, |key| table.delegate().row_position(key));
+        if let Some((key, mut scroll)) = deferred
+            && let Some(index) = table.delegate().row_position(&key)
+        {
+            scroll.item_index = index;
+            table
+                .vertical_scroll_handle
+                .0
+                .borrow_mut()
+                .deferred_scroll_to_item = Some(scroll);
+        }
         Self::restore_view(table, cx);
         table.delegate().request_near(cx);
         cx.notify();
@@ -308,7 +326,12 @@ impl TreeTable {
             .filter(|boundary| boundary.near(&self.shown))
             .map(|boundary| (boundary.branch.clone(), boundary.want, boundary.search))
             .collect();
-        if wants.is_empty() && self.tree.first.is_empty() {
+        if wants.is_empty()
+            && self.tree.first.is_empty()
+            && (self.tree.root.is_none()
+                || self.tree.branches.contains_key(&None)
+                || self.tree.pending.contains_key(&None))
+        {
             return;
         }
         let browser = self.browser.clone();

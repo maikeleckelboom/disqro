@@ -141,7 +141,7 @@ impl DiscId {
 }
 
 /// A disc's place in a release of several discs.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Membership {
     /// The release's first disc, which identifies it.
     pub key: DiscId,
@@ -158,6 +158,7 @@ pub enum Page {
     /// Identified by its first disc.
     Release(DiscId),
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Disc {
     pub tracks: Vec<Arc<Track>>,
     pub id: DiscId,
@@ -268,6 +269,7 @@ impl Shelf {
 }
 
 /// The discs of one release as the Releases list shows them.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Release {
     pub key: DiscId,
     pub title: String,

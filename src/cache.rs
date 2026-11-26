@@ -6,7 +6,7 @@ use std::{fs, path::Path, time::UNIX_EPOCH};
 
 pub struct Cache(pub(crate) Connection);
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Stamp {
     pub(crate) bytes: i64,
     pub(crate) modified: i64,

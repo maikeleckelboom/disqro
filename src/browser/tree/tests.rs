@@ -1,7 +1,7 @@
 use super::{
     Boundary, Branch, Cursor, Descendants, EXPANSION_LIMIT, Fetch, Item, LOADED_NODE_LIMIT, Lens,
-    Node, PAGE, RESIDENT_PAGES, Request, SORTED_BRANCH_LIMIT, Source, Tree, TreeId, TreeRow, Want,
-    indexed_branch, physical_branch,
+    Node, PAGE, RESIDENT_PAGES, Request, Source, Tree, TreeId, TreeRow, Want, indexed_branch,
+    physical_branch,
 };
 use crate::library::Track;
 use crate::{
@@ -81,10 +81,8 @@ fn physical_tree_loads_only_expanded_branches_and_keeps_all_authored_chapters() 
     tree.branches.insert(Some(folder.clone()), branch);
     tree.toggle(disc.id.clone(), &Some(folder.clone()));
     tree.branches
-        .insert(Some(disc.id.clone()), Branch::page(children, None));
-    let descending = tree.visible(Some((Field::Title, ColumnSort::Descending)), "", &|_| {
-        Mark::default()
-    });
+        .insert(Some(disc.id.clone()), Branch::page(children.to_vec(), None));
+    let descending = tree.visible(None, "", &|_| Mark::default());
     let chapters = descending
         .iter()
         .filter_map(TreeRow::node)
@@ -211,7 +209,7 @@ impl Harness {
         children.insert(None, root.clone());
         Self {
             tree: Tree {
-                root: Some(Source::Loaded(root)),
+                root: Some(Source::Loaded(root.into())),
                 ..Default::default()
             },
             children,
@@ -410,51 +408,40 @@ fn a_filter_finds_matches_beyond_the_loaded_total_and_stops_reading() {
 }
 
 #[test]
-fn a_sort_orders_a_whole_paged_branch_and_says_when_it_cannot() {
-    let all = folders(RESIDENT_PAGES * PAGE + PAGE + 7);
-    let mut view = Harness::new(all.clone());
-    view.settle();
-    // Released and unread pages are read before any sorted row is shown.
-    view.sort = Some((Field::Title, ColumnSort::Descending));
-    view.settle();
-    assert_eq!(view.len, all.len());
-    let logical = view.logical();
-    assert_eq!(logical[0].as_deref(), Some("Folder 20486"));
-    assert_eq!(logical[all.len() - 1].as_deref(), Some("Folder 00000"));
-    assert!(logical.iter().all(Option::is_some));
-    let names: Vec<_> = logical.iter().flatten().collect();
-    assert!(names.windows(2).all(|pair| pair[0] > pair[1]));
-    // Too large to sort as a whole: shown in folder order, with a notice.
-    let huge = folders(SORTED_BRANCH_LIMIT + PAGE);
-    let mut view = Harness::new(huge);
-    view.sort = Some((Field::Title, ColumnSort::Descending));
-    view.settle();
-    let logical = view.logical();
-    assert_eq!(logical[0].as_deref(), Some("Folder 00000"));
-    assert!(
-        logical
-            .iter()
-            .flatten()
-            .any(|text| text.contains("Too many items to sort"))
-    );
-    // A filtered sort orders its matches across every page.
-    let mut view = Harness::new(all);
-    view.sort = Some((Field::Title, ColumnSort::Ascending));
-    view.filter = "folder 2048".into();
-    view.settle();
+fn large_branch_order_and_identity_seek_share_the_same_disk_index() {
+    // The background index owns ordering, including ties across source pages.
+    let mut writer = super::snapshot::Writer::new().unwrap();
+    let sort = (Field::Title, ColumnSort::Descending);
+    let all = folders(45_067);
+    for page in all.chunks(PAGE) {
+        writer
+            .append(Branch::page(page.to_vec(), None), sort)
+            .unwrap();
+    }
+    let ticket = Ticket::default();
+    let generation = ticket.next();
+    let index = writer.finish(sort.1, ticket, generation).unwrap();
+    let mut previous = String::new();
+    for offset in (0..all.len()).step_by(PAGE) {
+        let page = index.page(offset).unwrap();
+        assert!(page.nodes().count() <= PAGE);
+        for node in page.nodes() {
+            let title = node.value(Field::Title);
+            assert!(previous.is_empty() || previous > title);
+            previous = title;
+        }
+    }
+    let rank = index.position(&all[PAGE].id).unwrap().unwrap();
+    assert_eq!(rank, all.len() - PAGE - 1);
     assert_eq!(
-        titles(&view.rows),
-        [
-            "Folder 02048",
-            "Folder 12048",
-            "Folder 20480",
-            "Folder 20481",
-            "Folder 20482",
-            "Folder 20483",
-            "Folder 20484",
-            "Folder 20485",
-            "Folder 20486"
-        ]
+        index
+            .page(rank / PAGE * PAGE)
+            .unwrap()
+            .nodes()
+            .nth(rank % PAGE)
+            .unwrap()
+            .id,
+        all[PAGE].id
     );
 }
 
@@ -1043,7 +1030,8 @@ fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
             } else {
                 Vec::new()
             };
-            tree.branches.insert(Some(id), Branch::page(children, None));
+            tree.branches
+                .insert(Some(id), Branch::page(children.to_vec(), None));
         }
         tree.reconcile();
         peak = peak.max(tree.loaded());
