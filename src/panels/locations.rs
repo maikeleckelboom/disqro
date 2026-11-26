@@ -428,11 +428,12 @@ impl LocationsPanel {
             self.catalog.clone(),
         );
         let model_handle = self.model.clone();
-        tree(&state, move |ix, entry, selected, _, cx| {
+        tree(&state, move |_, entry, selected, _, cx| {
             let depth = entry.depth();
             let id = entry.item().id.clone();
+            let row_id = ElementId::Name(id.clone());
             let Some((root, path)) = folders.read(cx).entry(&id) else {
-                return ListItem::new(("location", ix)).h(px(ROW));
+                return ListItem::new(row_id).h(px(ROW));
             };
             let place = (depth == 0)
                 .then(|| places.iter().position(|p| same_path(&p.path, &root)))
@@ -452,19 +453,15 @@ impl LocationsPanel {
             let expander = if entry.is_folder() {
                 let toggle = folders.clone();
                 let toggle_id = id.clone();
-                Disclosure::new(
-                    ("location-disclosure", ix),
-                    entry.is_expanded(),
-                    label.clone(),
-                )
-                .disabled(!available)
-                .on_toggle(move |_, cx| toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx)))
-                .into_any_element()
+                Disclosure::new("location-disclosure", entry.is_expanded(), label.clone())
+                    .disabled(!available)
+                    .on_toggle(move |_, cx| toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx)))
+                    .into_any_element()
             } else {
                 Disclosure::slot().into_any_element()
             };
             let content = h_flex()
-                .id(("location-row", ix))
+                .id("location-row")
                 .size_full()
                 .gap(px(4.))
                 .min_w_0()
@@ -581,7 +578,7 @@ impl LocationsPanel {
                         })
                     })
             };
-            ListItem::new(("location", ix))
+            ListItem::new(row_id)
                 .h(px(ROW))
                 .p_0()
                 .rounded(px(5.))

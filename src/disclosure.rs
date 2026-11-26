@@ -77,7 +77,9 @@ impl RenderOnce for Disclosure {
             .role(Role::Button)
             .aria_label(format!("{action} {}", self.subject))
             .aria_expanded(self.open)
-            .when(self.disabled, |d| d.aria_description("Unavailable"))
+            .when(!interactive, |d| {
+                d.a11y_synthetic_children(|tree| tree.parent_node().set_disabled())
+            })
             .size(px(SIZE))
             .flex_shrink_0()
             .flex()
@@ -92,7 +94,6 @@ impl RenderOnce for Disclosure {
                 d.key_context("Disclosure")
                     .focusable()
                     .tab_stop(true)
-                    .cursor_pointer()
                     .hover(|d| d.bg(m.control))
                     .active(|d| d.bg(m.control_hover))
                     .focus_visible(|d| d.border_color(m.focus_line()))

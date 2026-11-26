@@ -183,11 +183,12 @@ def capture_destinations(exe, output, scale, root):
     try:
         hwnd, _ = wait_for(process, "Opening Notes")
         resize(hwnd, 1240, 780)
-        for destination, content in [
-            ("Artists", "Various Artists"), ("Releases", "Album Artist"),
+        for destination, content, key in [
+            ("Artists", "Various Artists", 0x0D), ("Releases", "Album Artist", 0x20),
         ]:
-            hwnd, point = wait_for(process, destination)
-            click_control(hwnd, point)
+            control_rects(hwnd, [destination], focus=True)
+            user32.PostMessageW(hwnd, 0x0100, key, 0)
+            user32.PostMessageW(hwnd, 0x0101, key, 0xC0000000)
             wait_for(process, content)
             screenshot(hwnd, output / f"{destination.lower()}.png")
         hwnd, point = wait_for(process, "Artists")

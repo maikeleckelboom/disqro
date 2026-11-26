@@ -61,6 +61,9 @@ pub fn nav_surface(
         .id(id)
         .role(Role::Button)
         .aria_label(label)
+        .aria_selected(selected)
+        .key_context("NavigationRow")
+        .focusable()
         .tab_stop(true)
         .h(px(ROW))
         .mx(px(6.))
@@ -70,7 +73,6 @@ pub fn nav_surface(
         .flex_shrink_0()
         .items_center()
         .text_size(px(crate::theme::size::TEXT))
-        .cursor_pointer()
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(m.selected))
         .when(!selected, |d| d.hover(|d| d.bg(m.hover).text_color(m.text)))
@@ -112,7 +114,6 @@ pub fn section_row(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     nav_surface(id, format!("Browse {title}").into(), selected, m)
-        .key_context("LibrarySection")
         .aria_expanded(open)
         .font_weight(FontWeight::MEDIUM)
         .child(

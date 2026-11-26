@@ -105,7 +105,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(
             "space",
             PlayPause,
-            Some("Disqro && !Input && !LibrarySection"),
+            Some("Disqro && !Input && !NavigationRow"),
         ),
         KeyBinding::new("enter", PlaySelected, Some("DataTable")),
         KeyBinding::new("enter", ActivateTrackLike, Some("TrackLike")),
