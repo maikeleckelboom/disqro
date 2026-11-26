@@ -5,7 +5,12 @@ use std::{
 };
 
 const HISTORY: usize = 8;
-const JITTER_NS: u64 = 2_000_000;
+// A visual estimate can bridge a late publication for at most four milliseconds.
+const MAX_PREDICTION_NS: u64 = 4_000_000;
+const DISCONTINUITY_NS: u64 = 25_000_000;
+const PHASE_FILTER_NS: f64 = 120_000_000.;
+const PHASE_RECOVERY_NS: f64 = 250_000_000.;
+const MAX_RATE_CORRECTION: f64 = 0.005;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Block {
@@ -15,12 +20,14 @@ struct Block {
     end: u64,
     from: f64,
     to: f64,
+    predict_ns: u64,
+    phase_ns: i64,
 }
 
 #[derive(Debug, Default)]
 struct Slot {
     sequence: AtomicU64,
-    words: [AtomicU64; 6],
+    words: [AtomicU64; 8],
 }
 
 impl Slot {
@@ -36,6 +43,8 @@ impl Slot {
             block.end,
             block.from.to_bits(),
             block.to.to_bits(),
+            block.predict_ns,
+            block.phase_ns as u64,
         ]) {
             word.store(value, SeqCst);
         }
@@ -47,7 +56,7 @@ impl Slot {
         if !begin.is_multiple_of(2) {
             return None;
         }
-        let [found, observed, start, end, from, to] =
+        let [found, observed, start, end, from, to, predict_ns, phase_ns] =
             self.words.each_ref().map(|word| word.load(SeqCst));
         (found == id && begin == self.sequence.load(SeqCst)).then(|| Block {
             id,
@@ -56,6 +65,8 @@ impl Slot {
             end,
             from: f64::from_bits(from),
             to: f64::from_bits(to),
+            predict_ns,
+            phase_ns: phase_ns as i64,
         })
     }
 }
@@ -73,6 +84,20 @@ pub(crate) struct Position {
     pub frame: f64,
     pub advancing: bool,
     pub observation_age_ns: u64,
+    pub phase_ns: i64,
+    pub prediction_ns: u64,
+}
+
+impl Position {
+    pub(crate) fn held(frame: f64) -> Self {
+        Self {
+            frame,
+            advancing: false,
+            observation_age_ns: 0,
+            phase_ns: 0,
+            prediction_ns: 0,
+        }
+    }
 }
 
 impl Clock {
@@ -100,11 +125,7 @@ impl Clock {
     fn position_at(&self, now: u64) -> Option<Position> {
         let latest = self.latest.load(SeqCst);
         if latest == 0 {
-            return Some(Position {
-                frame: self.initial,
-                advancing: false,
-                observation_age_ns: 0,
-            });
+            return Some(Position::held(self.initial));
         }
         let mut before = None;
         for id in (latest.saturating_sub(HISTORY as u64 - 1).max(1)..=latest).rev() {
@@ -113,18 +134,28 @@ impl Clock {
             };
             if now >= block.start {
                 let duration = block.end.saturating_sub(block.start).max(1);
-                let progress =
-                    now.saturating_sub(block.start).min(duration) as f64 / duration as f64;
+                let prediction_ns = if id == latest {
+                    now.saturating_sub(block.end).min(block.predict_ns)
+                } else {
+                    0
+                };
+                let progress = (now.saturating_sub(block.start).min(duration) + prediction_ns)
+                    as f64
+                    / duration as f64;
                 return Some(Position {
                     frame: block.from + (block.to - block.from) * progress,
-                    advancing: now < block.end,
+                    advancing: now < block.end + if id == latest { block.predict_ns } else { 0 },
                     observation_age_ns: now.saturating_sub(block.observed),
+                    phase_ns: block.phase_ns,
+                    prediction_ns,
                 });
             }
             before = Some(Position {
                 frame: block.from,
                 advancing: true,
                 observation_age_ns: now.saturating_sub(block.observed),
+                phase_ns: block.phase_ns,
+                prediction_ns: 0,
             });
         }
         before
@@ -137,7 +168,11 @@ pub(super) struct Writer {
     schedule: u64,
     elapsed: u64,
     block: Block,
-    continuing: bool,
+    in_block: bool,
+    uninterrupted: bool,
+    filtered_phase: f64,
+    rate_correction: f64,
+    phase_ns: i64,
 }
 
 impl Writer {
@@ -148,39 +183,78 @@ impl Writer {
     fn begin_at(&mut self, observed: u64) {
         let next = self.schedule + self.elapsed;
         self.observed = observed;
-        // Small callback jitter need not move the sample grid. Re-anchor to
-        // the measured time after a missed period or device scheduling change.
-        self.schedule = if self.elapsed > 0 && observed.abs_diff(next) <= JITTER_NS {
-            next
+        self.phase_ns = observed as i64 - next as i64;
+        if self.uninterrupted && self.phase_ns.unsigned_abs() < DISCONTINUITY_NS {
+            // Keep adjacent blocks continuous. Change the slope only by a
+            // small amount, based on sustained phase error rather than the
+            // arrival time of any one callback.
+            let weight = (self.elapsed as f64 / PHASE_FILTER_NS).min(1.);
+            self.filtered_phase += (self.phase_ns as f64 - self.filtered_phase) * weight;
+            self.rate_correction = (self.filtered_phase / PHASE_RECOVERY_NS)
+                .clamp(-MAX_RATE_CORRECTION, MAX_RATE_CORRECTION);
+            self.schedule = next;
         } else {
-            observed.max(self.block.start)
-        };
+            self.schedule = observed.max(self.block.end);
+            self.filtered_phase = 0.;
+            self.rate_correction = 0.;
+            self.phase_ns = 0;
+        }
         self.elapsed = 0;
-        self.continuing = false;
+        self.in_block = false;
     }
 
-    pub(super) fn rendered(&mut self, clock: &Clock, from: f64, to: f64, seconds: f64, rate: f64) {
+    pub(super) fn rendered(
+        &mut self,
+        clock: &Clock,
+        from: f64,
+        to: f64,
+        seconds: f64,
+        rate: f64,
+        predict_until: f64,
+    ) {
+        let wall_scale = (1. + self.rate_correction) * 1e9;
         let start = self.schedule + self.elapsed;
-        self.elapsed += (seconds * 1e9).round() as u64;
+        self.elapsed += (seconds * wall_scale).round() as u64;
         if to <= from {
-            self.continuing = false;
+            self.uninterrupted = false;
+            self.in_block = false;
+            if self.block.predict_ns > 0 {
+                self.block.predict_ns = 0;
+                clock.slot(self.block.id).write(self.block);
+            }
             return;
         }
-        if !self.continuing {
+        if !self.in_block {
             self.block = Block {
                 id: self.block.id + 1,
                 observed: self.observed,
                 start,
                 from,
+                phase_ns: self.phase_ns,
                 ..Block::default()
             };
-            self.continuing = true;
+            self.in_block = true;
         }
         self.block.to = to;
-        // Use only the source portion actually rendered if this chunk
-        // drained or stalled before its end. No extrapolation past `to`.
-        let source_ns = ((to - from) / rate * 1e9).round() as u64;
+        let source_ns = ((to - from) / rate * wall_scale).round() as u64;
         self.block.end = (start + source_ns).min(self.schedule + self.elapsed);
+        // Allow one source frame of resampler rounding when classifying a
+        // short render. A partial or empty block seals its predecessor.
+        let full = to - from + 1. >= seconds * rate;
+        self.uninterrupted = full;
+        self.block.predict_ns = if full {
+            let block_duration = self.block.end.saturating_sub(self.block.start).max(1);
+            // Use the actual slope of the published block so the prediction
+            // cannot cross the decoded, playable source bound.
+            let available =
+                (predict_until - to).max(0.) * block_duration as f64 / (to - self.block.from);
+            (available as u64).min(MAX_PREDICTION_NS)
+        } else {
+            0
+        };
+        if !full {
+            self.in_block = false;
+        }
         clock.slot(self.block.id).write(self.block);
         clock.latest.store(self.block.id, SeqCst);
     }
@@ -191,13 +265,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn polling_at_arbitrary_times_uses_only_rendered_samples() {
+    fn polling_interpolates_history_and_holds_without_prediction() {
         let clock = Clock::new(10);
         let mut writer = Writer::default();
         writer.begin_at(10_000_000);
-        writer.rendered(&clock, 10., 490., 0.01, 48_000.);
-        writer.begin_at(19_500_000);
-        writer.rendered(&clock, 490., 970., 0.01, 48_000.);
+        writer.rendered(&clock, 10., 490., 0.01, 48_000., 970.);
+        writer.begin_at(20_000_000);
+        writer.rendered(&clock, 490., 970., 0.01, 48_000., 970.);
         assert_eq!(clock.position_at(15_000_000).unwrap().frame, 250.);
         assert_eq!(clock.position_at(19_750_000).unwrap().frame, 478.);
         assert_eq!(clock.position_at(25_000_000).unwrap().frame, 730.);
@@ -205,8 +279,8 @@ mod tests {
         assert_eq!(stalled.frame, 970.);
         assert!(!stalled.advancing);
         writer.begin_at(117_000_000);
-        writer.rendered(&clock, 970., 970., 0.004, 48_000.);
-        writer.rendered(&clock, 970., 1162., 0.004, 48_000.);
+        writer.rendered(&clock, 970., 970., 0.004, 48_000., 1162.);
+        writer.rendered(&clock, 970., 1162., 0.004, 48_000., 1162.);
         assert_eq!(clock.position_at(120_000_000).unwrap().frame, 970.);
         assert_eq!(clock.position_at(123_000_000).unwrap().frame, 1066.);
     }
@@ -216,7 +290,7 @@ mod tests {
         let clock = Clock::new(0);
         let mut writer = Writer::default();
         writer.begin_at(20_000_000);
-        writer.rendered(&clock, 0., 480., 0.01, 48_000.);
+        writer.rendered(&clock, 0., 480., 0.01, 48_000., 970.);
         assert_eq!(clock.position_at(25_000_000).unwrap().frame, 240.);
         let slot = clock.slot(1);
         slot.sequence.fetch_add(1, SeqCst);
@@ -226,37 +300,75 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_callback_jitter_keeps_240hz_projection_monotonic_at_both_zoom_extremes() {
-        let clock = Clock::new(44_100 * 180);
-        let mut writer = Writer::default();
-        let rate = 44_100.;
-        let mut base = 44_100. * 180.;
-        let mut time = 10_000_000;
-        let mut callback = 0;
-        let mut previous = base;
-        for display in 0..480 {
-            let now = 11_000_000 + display * 1_000_000_000 / 240;
-            while time <= now {
-                let jitter = [0, 220_000, -180_000, 90_000][callback % 4];
-                writer.begin_at((time as i64 + jitter) as u64);
-                for _ in 0..7 {
-                    writer.rendered(&clock, base, base + 63., 63. / rate, rate);
-                    base += 63.;
+    fn delayed_callbacks_are_published_only_when_they_arrive() {
+        for refresh in [60, 120, 144, 240] {
+            for callback_ms in [3, 5, 10, 20] {
+                let rate = 48_000.;
+                let initial = 48_000 * 1_800;
+                let clock = Clock::new(initial);
+                let mut writer = Writer::default();
+                let mut committed = initial as f64;
+                let period = callback_ms * 1_000_000;
+                let jitter = [0, 220_000, -180_000, 90_000, 2_400_000, -140_000];
+                let mut callback = 0;
+                let mut previous = None;
+                let mut max_error: f64 = 0.;
+                for display in 0..(refresh * 3) {
+                    let now = 41_000_000 + display * 1_000_000_000 / refresh;
+                    loop {
+                        let arrival = (10_000_000 + callback as u64 * period)
+                            .checked_add_signed(jitter[callback % jitter.len()])
+                            .unwrap();
+                        if arrival > now {
+                            break;
+                        }
+                        writer.begin_at(arrival);
+                        let seconds = period as f64 / 1e9;
+                        let to = committed + seconds * rate;
+                        writer.rendered(&clock, committed, to, seconds, rate, f64::INFINITY);
+                        committed = to;
+                        callback += 1;
+                    }
+                    let position = clock.position_at(now).unwrap();
+                    assert!(
+                        position.frame <= committed + rate * MAX_PREDICTION_NS as f64 / 1e9 + 1e-6
+                    );
+                    let ideal = initial as f64 + (now - 10_000_000) as f64 * rate / 1e9;
+                    max_error = max_error.max((position.frame - ideal).abs());
+                    if let Some(last) = previous {
+                        let step: f64 = position.frame - last;
+                        let nominal = rate / refresh as f64;
+                        assert!(
+                            (step / nominal - 1.).abs() < 0.006,
+                            "{refresh} Hz / {callback_ms} ms at frame {display}: step {step}"
+                        );
+                    }
+                    previous = Some(position.frame);
                 }
-                time += 10_000_000;
-                callback += 1;
+                assert!(
+                    max_error < rate * 0.002,
+                    "{refresh} Hz / {callback_ms} ms: {max_error} samples"
+                );
             }
-            let position = clock.position_at(now).unwrap();
-            assert!(position.frame >= previous && position.frame <= base);
-            if display > 0 {
-                let frames = position.frame - previous;
-                assert!((frames - rate / 240.).abs() <= 1e-3, "{display}: {frames}");
-                for span in [32., 8. * rate, 120. * rate] {
-                    let pixels = frames * 1920. / span;
-                    assert!((pixels - rate * 1920. / 240. / span).abs() < 0.061);
-                }
-            }
-            previous = position.frame;
         }
+    }
+
+    #[test]
+    fn prediction_is_limited_by_decoded_source_and_ends_on_starvation() {
+        let clock = Clock::new(0);
+        let mut writer = Writer::default();
+        writer.begin_at(10_000_000);
+        writer.rendered(&clock, 0., 480., 0.01, 48_000., 576.);
+        let limit = clock.position_at(24_000_000).unwrap();
+        assert_eq!(limit.frame, 576.);
+        assert!(!limit.advancing);
+        writer.begin_at(21_000_000);
+        writer.rendered(&clock, 480., 480., 0.01, 48_000., 576.);
+        assert_eq!(clock.position_at(24_000_000).unwrap().frame, 480.);
+        assert!(!clock.position_at(24_000_000).unwrap().advancing);
+        writer.begin_at(70_000_000);
+        writer.rendered(&clock, 480., 600., 0.01, 48_000., 600.);
+        assert_eq!(clock.position_at(90_000_000).unwrap().frame, 600.);
+        assert!(!clock.position_at(90_000_000).unwrap().advancing);
     }
 }

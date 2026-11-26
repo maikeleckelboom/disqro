@@ -219,6 +219,8 @@ fn scrub_keeps_queue_occurrences_and_listening_separate_until_release() {
         }),
         rate: 48_000.,
         clock: Arc::new(clock::Clock::new(0)),
+        #[cfg(all(windows, feature = "qualification"))]
+        trace: None,
     });
     engine.command(Command::Volume(0.5)).unwrap();
     engine.tick().unwrap();
@@ -635,6 +637,8 @@ fn delayed_transport_fixture(
             rate: 1_000_000.,
             state: state.clone(),
             clock: Arc::new(clock::Clock::new(0)),
+            #[cfg(all(windows, feature = "qualification"))]
+            trace: None,
         }),
         credit: Some(VoiceCredit {
             progress,
@@ -921,6 +925,8 @@ fn cue_queue_edit_uses_the_same_completed_block_for_the_playhead_and_credit() {
             state: state.clone(),
             rate: 8000.,
             clock: Arc::new(clock::Clock::new(0)),
+            #[cfg(all(windows, feature = "qualification"))]
+            trace: None,
         }),
         credit: Some(VoiceCredit {
             progress,
@@ -1499,6 +1505,8 @@ fn queue_edits_never_restart_replace_or_eject_the_active_recording() {
             state: state.clone(),
             rate: 48_000.,
             clock: Arc::new(clock::Clock::new(0)),
+            #[cfg(all(windows, feature = "qualification"))]
+            trace: None,
         });
         engine.group = vec![Chapter {
             id: active,
@@ -1804,6 +1812,8 @@ fn guarded_seek_checks_the_rendered_cue_boundary_before_the_next_transport_tick(
         }),
         rate: 48_000.,
         clock: Arc::new(clock::Clock::new(0)),
+        #[cfg(all(windows, feature = "qualification"))]
+        trace: None,
     });
     let anchor = WaveSeekAnchor {
         identity: engine.status.playback_identity().unwrap(),

@@ -54,19 +54,20 @@ pub static TYPE: PanelType = PanelType {
     },
 };
 
-/// The instant a frame's waveform motion shows: the compositor tick that
-/// scheduled the frame, so successive frames sample the renderer clock one
-/// refresh period apart however late the UI thread woke. Falls back to `now`
-/// without a recent tick.
+/// Use the timing of this window's current native request. The scheduled
+/// refresh slot removes immediate-mode wake jitter from the audio sample.
 pub(crate) fn frame_time(now: Instant) -> Instant {
     #[cfg(windows)]
-    if let Some(tick) = gpui_windows_gpu::frame_tick()
-        && tick.at <= now
-        && now.duration_since(tick.at) < tick.period * 2
-    {
-        return tick.at;
+    if let Some(tick) = gpui_windows_gpu::frame_tick() {
+        return tick.sample_at;
     }
     now
+}
+
+#[cfg(windows)]
+fn signed_ns(a: Instant, b: Instant) -> i64 {
+    a.saturating_duration_since(b).as_nanos() as i64
+        - b.saturating_duration_since(a).as_nanos() as i64
 }
 
 /// All decks in the workspace use one native frame request. Motion updates
@@ -78,6 +79,7 @@ pub(crate) struct Motion(Rc<RefCell<MotionState>>);
 struct MotionState {
     panels: Vec<WeakEntity<Waveform>>,
     presented: Vec<WeakEntity<Waveform>>,
+    spare: Vec<WeakEntity<Waveform>>,
     armed: bool,
 }
 
@@ -140,29 +142,48 @@ impl Motion {
         }
         state.armed = true;
         drop(state);
-        let start = crate::diagnostics::begin_stage();
+        let requested = crate::diagnostics::begin_stage();
         #[cfg(windows)]
         gpui_windows_gpu::present_retained_next_frame(window);
         let motion = self.clone();
-        crate::diagnostics::stage(start, "wave_request", 0, 0);
+        crate::diagnostics::stage(requested, "wave_request", 0, 0);
         window.on_next_frame(move |window, cx| {
             let panels = {
                 let mut state = motion.0.borrow_mut();
                 state.armed = false;
-                std::mem::take(&mut state.panels)
+                let spare = std::mem::take(&mut state.spare);
+                std::mem::replace(&mut state.panels, spare)
             };
+            let mut panels = panels;
             let woke = Instant::now();
             let now = frame_time(woke);
             let start = crate::diagnostics::begin_stage();
             let count = panels.len() as u64;
-            for panel in panels {
+            crate::diagnostics::stage(requested, "wave_request_to_dispatch", count, 0);
+            #[cfg(windows)]
+            if let Some(tick) = gpui_windows_gpu::frame_tick() {
+                crate::diagnostics::stage(
+                    start,
+                    "wave_frame_target",
+                    signed_ns(tick.intended_at, woke) as u64,
+                    tick.period.as_nanos() as u64,
+                );
+                crate::diagnostics::stage(
+                    start,
+                    "wave_frame_signal",
+                    woke.saturating_duration_since(tick.at).as_nanos() as u64,
+                    signed_ns(tick.sample_at, tick.at) as u64,
+                );
+            }
+            for panel in panels.drain(..) {
                 let _ = panel.update(cx, |deck, cx| {
-                    if deck.animate(now, window, cx) {
+                    let panel = cx.entity_id().as_u64();
+                    if crate::diagnostics::with_panel(panel, || deck.animate(now, window, cx)) {
                         motion.request(cx.weak_entity(), window);
                     }
                 });
             }
-            // The detail is the wake latency after the sampled tick, in µs.
+            motion.0.borrow_mut().spare = panels;
             let lag = woke.saturating_duration_since(now).as_micros() as u64;
             crate::diagnostics::stage(start, "wave_frame", count, lag);
         });
@@ -244,13 +265,30 @@ impl DeckPosition {
             let previous_frame = previous.map(|(_, frame)| frame);
             let mut frame =
                 sample.map_or_else(|| previous_frame.unwrap_or(track.frame as f64), |p| p.frame);
-            if let Some(previous) = previous_frame {
+            if let Some(previous) = previous_frame
+                && (track.playing || sample.is_some_and(|position| position.advancing))
+            {
                 frame = frame.max(previous);
             }
             frame = frame.clamp(0., track.source.frames.saturating_sub(1) as f64);
             if let (Some(d), Some(sample)) = (crate::diagnostics::get(), sample) {
                 d.wave_clock_age_us
                     .fetch_max(sample.observation_age_ns / 1000, Relaxed);
+            }
+            if let Some(sample) = sample {
+                let start = crate::diagnostics::begin_stage();
+                crate::diagnostics::stage(
+                    start,
+                    "wave_clock",
+                    sample.phase_ns as u64,
+                    sample.prediction_ns,
+                );
+                crate::diagnostics::stage(
+                    start,
+                    "wave_clock_position",
+                    frame.to_bits(),
+                    sample.observation_age_ns,
+                );
             }
             self.last = Some((track.identity, frame));
             (
@@ -485,29 +523,25 @@ impl Waveform {
     fn prepare(
         &self,
         track: &WaveTrack,
-        layout: Option<Layout>,
-        active: bool,
-    ) -> (Surface, overview::Evidence, Coverage) {
-        let surface = self.surface(track);
+        surface: &Surface,
+        view: Option<&waveform::View>,
+    ) -> (overview::Evidence, Coverage) {
         let viewport = surface.viewport;
         let mut evidence = overview::Evidence {
             overview: Some(track.overview.clone()),
             overview_start: track.range.start,
             ..Default::default()
         };
-        let Some((_, view)) = layout
-            .filter(|_| active)
-            .and_then(|layout| surface.target(layout.bounds, layout.scale))
-        else {
+        let Some(view) = view else {
             self.detail.clear();
-            return (surface, evidence, Coverage::default());
+            return (evidence, Coverage::default());
         };
         let (true, Ok(rate)) = (
             track.source.available,
             waveform::SampleRate::new(track.source.rate),
         ) else {
             self.detail.clear();
-            return (surface, evidence, Coverage::default());
+            return (evidence, Coverage::default());
         };
         let preview = (!track.overview.facts().is_empty()).then(|| waveform::FrameRange {
             start: track.range.start as u64,
@@ -531,7 +565,7 @@ impl Waveform {
             });
         evidence.pages = loaded.pages;
         evidence.samples = loaded.samples;
-        (surface, evidence, loaded.coverage)
+        (evidence, loaded.coverage)
     }
 
     fn coverage(coverage: Coverage, available: bool) -> Option<&'static str> {
@@ -591,18 +625,19 @@ impl Waveform {
         let moving = self.position.update(&track, now, grabbed);
         // Sample markers and any measurement must use the same viewport as
         // the texture in this scene. Keep the retained path at wider zooms.
+        let start = crate::diagnostics::begin_stage();
+        let surface = self.surface(&track);
+        let Some((bounds, view)) = surface.target(layout.bounds, layout.scale) else {
+            return false;
+        };
+        crate::diagnostics::stage(start, "wave_projection", 0, 0);
         let overlays = self.overlays(&track, cx);
-        if overlays.sample_points
-            && self
-                .surface(&track)
-                .target(layout.bounds, layout.scale)
-                .is_some_and(|(_, view)| sample_spacing(&view, layout.scale))
-        {
+        if overlays.sample_points && sample_spacing(&view, layout.scale) {
             cx.notify();
             return false;
         }
         let start = crate::diagnostics::begin_stage();
-        let (surface, evidence, coverage) = self.prepare(&track, Some(layout), true);
+        let (evidence, coverage) = self.prepare(&track, &surface, Some(&view));
         let status = Self::coverage(coverage, track.source.available);
         crate::diagnostics::stage(
             start,
@@ -610,15 +645,14 @@ impl Waveform {
             coverage.exact as u64,
             coverage.pending as u64,
         );
-        let Some((bounds, view)) = surface.target(layout.bounds, layout.scale) else {
-            return false;
-        };
         #[cfg(windows)]
         {
+            let start = crate::diagnostics::begin_stage();
             self.texture.set_sample_points(SamplePoints::Hidden);
             let ready = self
                 .texture
                 .repaint(window, cx, view, &evidence, surface.viewport.first);
+            crate::diagnostics::stage(start, "wave_retained_submit", u64::from(ready), 0);
             if !ready {
                 *self.displayed.borrow_mut() = None;
             } else {
@@ -738,13 +772,25 @@ impl Render for Waveform {
             .position
             .update(&track, frame_time(Instant::now()), grabbed);
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
-        let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
-        crate::diagnostics::stage(
-            crate::diagnostics::begin_stage(),
-            "wave_scene",
-            self.position.viewport.span.to_bits(),
-            coverage.approximate as u64,
-        );
+        let surface = self.surface(&track);
+        let target = self
+            .layout
+            .get()
+            .filter(|_| active)
+            .and_then(|layout| surface.target(layout.bounds, layout.scale));
+        let panel_id = cx.entity_id().as_u64();
+        let (evidence, coverage) = crate::diagnostics::with_panel(panel_id, || {
+            let start = crate::diagnostics::begin_stage();
+            let (evidence, coverage) =
+                self.prepare(&track, &surface, target.as_ref().map(|(_, view)| view));
+            crate::diagnostics::stage(
+                start,
+                "wave_scene",
+                self.position.viewport.span.to_bits(),
+                coverage.approximate as u64,
+            );
+            (evidence, coverage)
+        });
         self.coverage = Self::coverage(coverage, track.source.available);
         let failed = self.texture.unavailable();
         let limited = self.texture.limited();
@@ -903,26 +949,56 @@ impl Render for Waveform {
                                     hit.map_or(points, |h| SamplePoints::Highlight(h.frame));
                                 requested_points.set(requested);
                                 texture.set_sample_points(requested);
-                                #[cfg(windows)]
-                                let ready = texture.paint(
-                                    window,
-                                    cx,
-                                    target,
-                                    view,
-                                    &evidence,
-                                    surface.viewport.first,
-                                );
-                                #[cfg(not(windows))]
-                                let ready = {
-                                    let _ = &texture;
-                                    false
-                                };
-                                crate::diagnostics::stage(
-                                    start,
-                                    "wave_deck_paint",
-                                    u64::from(ready),
-                                    (scale * 96.).round() as u64,
-                                );
+                                let ready = crate::diagnostics::with_panel(panel_id, || {
+                                    #[cfg(windows)]
+                                    let ready = texture.paint(
+                                        window,
+                                        cx,
+                                        target,
+                                        view,
+                                        &evidence,
+                                        surface.viewport.first,
+                                    );
+                                    #[cfg(not(windows))]
+                                    let ready = {
+                                        let _ = &texture;
+                                        false
+                                    };
+                                    crate::diagnostics::stage(
+                                        start,
+                                        "wave_deck_paint",
+                                        u64::from(ready),
+                                        (scale * 96.).round() as u64,
+                                    );
+                                    if ready {
+                                        crate::diagnostics::stage(
+                                            start,
+                                            "wave_scene_motion",
+                                            view.origin().to_bits(),
+                                            view.width as u64,
+                                        );
+                                        crate::diagnostics::stage(
+                                            start,
+                                            "wave_scene_playhead",
+                                            surface.viewport.frame_at(0.5).to_bits(),
+                                            surface.viewport.span.to_bits(),
+                                        );
+                                        if start.is_some() {
+                                            // Client coordinates of the zoom control for private qualification.
+                                            let x = ((f32::from(b.origin.x) + 30.) * scale).round()
+                                                as u32;
+                                            let y = ((f32::from(b.origin.y) - 16.) * scale).round()
+                                                as u32;
+                                            crate::diagnostics::stage(
+                                                start,
+                                                "wave_deck_layout",
+                                                (u64::from(x) << 32) | u64::from(y),
+                                                0,
+                                            );
+                                        }
+                                    }
+                                    ready
+                                });
                                 if ready && let Some(hitbox) = hitbox {
                                     inspection::listen(
                                         &panel,

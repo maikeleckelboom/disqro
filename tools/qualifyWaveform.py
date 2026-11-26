@@ -126,7 +126,7 @@ def presentation_stages(path, phases):
     with path.open(newline="") as file:
         rows = sorted((dict(row, qpc=int(row["qpc"]), ticks=int(row["ticks"]),
                             value=int(row["value"]), detail=int(row["detail"]))
-                       for row in csv.DictReader(file)), key=lambda row: row["qpc"])
+                       for row in csv.DictReader(line for line in file if line.endswith("\n"))), key=lambda row: row["qpc"])
     frequency = counter_frequency()
     stats = {"dropped_stage_records": sum(row["value"] for row in rows if row["stage"] == "dropped"),
              "device_recreations": sum(row["stage"] == "device_recreated" for row in rows),
@@ -154,7 +154,10 @@ def presentation_stages(path, phases):
         result["gpui_entities_invalidated"] = sum(row["value"] for row in groups.get("gpui_draw", []))
         result["retained_requests"] = sum(row["detail"] for row in groups.get("window_frame", []))
         result["device_upload_bytes"] = sum(row["value"] for row in groups.get("shared_device_update", []))
-        result["native_vsync_signals"] = sum(row["value"] for row in groups.get("vsync_wait", []))
+        result["native_vsync_signals"] = (
+            sum(row["value"] for row in groups.get("vsync_wait", []))
+            + sum(row["value"] in (0, 1) for row in groups.get("compositor_wait", []))
+        )
         playhead = {}
         for row in groups.get("wave_playhead", []):
             frame, span = struct.unpack("<dd", struct.pack("<QQ", row["value"], row["detail"]))
@@ -171,7 +174,7 @@ def display_statistics(path, phases):
     if not path.is_file():
         return None
     with path.open(newline="") as file:
-        rows = [dict((key, int(value)) for key, value in row.items()) for row in csv.DictReader(file)]
+        rows = [dict((key, int(value)) for key, value in row.items()) for row in csv.DictReader(line for line in file if line.endswith("\n"))]
     frequency = counter_frequency()
     valid = [row for row in rows if row["foreground"] and not row["statistics_status"]
              and row["displayed"] and row["present_refresh"] and row["sync_qpc"]]

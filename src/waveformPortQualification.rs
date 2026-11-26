@@ -352,7 +352,7 @@ pub fn start_presentation_trace() {
     });
     let _ = std::thread::Builder::new().name("disqro-dxgi-trace".into()).spawn(move || -> std::io::Result<()> {
         let mut out = BufWriter::new(file);
-        writeln!(out, "qpc,foreground,queued,present_status,statistics_status,displayed,present_refresh,sync_refresh,sync_qpc")?;
+        writeln!(out, "qpc,foreground,queued,present_status,statistics_status,displayed,present_refresh,sync_refresh,sync_qpc,frame,window,chain")?;
         loop {
             let frame = match receive.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(frame) => frame,
@@ -360,8 +360,9 @@ pub fn start_presentation_trace() {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let d = frame.display;
-            writeln!(out, "{},{},{},{},{},{},{},{},{}", frame.qpc, u8::from(frame.foreground), frame.queued,
-                frame.present_status, frame.statistics_status, d.PresentCount, d.PresentRefreshCount, d.SyncRefreshCount, d.SyncQPCTime)?;
+            writeln!(out, "{},{},{},{},{},{},{},{},{},{},{},{}", frame.qpc, u8::from(frame.foreground), frame.queued,
+                frame.present_status, frame.statistics_status, d.PresentCount, d.PresentRefreshCount, d.SyncRefreshCount, d.SyncQPCTime,
+                frame.frame, frame.window, frame.chain)?;
             if frame.queued.is_multiple_of(32) { out.flush()?; }
         }
         out.flush()
@@ -406,7 +407,7 @@ fn start_stage_trace() {
             }
             let ticks = |time: Duration| (time.as_secs_f64() * frequency as f64).round() as i64;
             let mut out = BufWriter::new(file);
-            writeln!(out, "qpc,ticks,stage,value,detail")?;
+            writeln!(out, "qpc,ticks,stage,value,detail,frame,window,panel")?;
             loop {
                 let limit = Instant::now() + Duration::from_millis(100);
                 while let Ok(phase) =
@@ -414,8 +415,15 @@ fn start_stage_trace() {
                 {
                     writeln!(
                         out,
-                        "{},{},{},{},{}",
-                        phase.qpc, phase.ticks, phase.stage, phase.value, phase.detail
+                        "{},{},{},{},{},{},{},{}",
+                        phase.qpc,
+                        phase.ticks,
+                        phase.stage,
+                        phase.value,
+                        phase.detail,
+                        phase.frame,
+                        phase.window,
+                        phase.panel
                     )?;
                     if Instant::now() >= limit {
                         break;
@@ -430,7 +438,7 @@ fn start_stage_trace() {
                     let end = counter - ticks(now.saturating_duration_since(frame.draw_end));
                     writeln!(
                         out,
-                        "{end},{},gpui_draw,{},0",
+                        "{end},{},gpui_draw,{},0,0,0,0",
                         ticks(frame.draw_duration()),
                         frame.invalidations
                     )?;
@@ -439,12 +447,12 @@ fn start_stage_trace() {
                         ("gpui_prepaint", frame.phases.prepaint),
                         ("gpui_scene_paint", frame.phases.paint),
                     ] {
-                        writeln!(out, "{end},{},{stage},0,0", ticks(duration))?;
+                        writeln!(out, "{end},{},{stage},0,0,0,0,0", ticks(duration))?;
                     }
                 }
                 let dropped = DROPPED.swap(0, Relaxed);
                 if dropped > 0 {
-                    writeln!(out, "{counter},0,dropped,{dropped},0")?;
+                    writeln!(out, "{counter},0,dropped,{dropped},0,0,0,0")?;
                 }
                 out.flush()?;
             }

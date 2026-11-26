@@ -167,7 +167,7 @@ impl Status {
     }
 }
 
-/// Every control path — the window, the tray, media keys — sends these to
+/// Every control path â€” the window, the tray, media keys â€” sends these to
 /// the one transport, so they can never disagree about what is playing.
 pub enum Command {
     /// Replace the queue with these tracks and play from the index.
@@ -597,6 +597,8 @@ struct OutputVoice {
     state: Arc<OutputState>,
     rate: f64,
     clock: Arc<clock::Clock>,
+    #[cfg(all(windows, feature = "qualification"))]
+    trace: Option<rtrb::Consumer<crate::diagnostics::AudioStage>>,
 }
 
 impl OutputVoice {
@@ -691,11 +693,17 @@ struct ObservedSound {
     timing: clock::Writer,
     rendered: f64,
     progress: Option<rtrb::Producer<RenderProgress>>,
+    #[cfg(all(windows, feature = "qualification"))]
+    trace: Option<crate::diagnostics::AudioTrace>,
 }
 
 impl kira::sound::Sound for ObservedSound {
     fn on_start_processing(&mut self) {
         self.timing.begin(&self.clock, Instant::now());
+        #[cfg(all(windows, feature = "qualification"))]
+        if let Some(trace) = &mut self.trace {
+            trace.callback(self.rendered);
+        }
         match self.state.command.swap(0, Ordering::AcqRel) {
             PAUSE => self.handle.pause(Tween::default()),
             RESUME => self.handle.resume(Tween::default()),
@@ -766,8 +774,19 @@ impl kira::sound::Sound for ObservedSound {
             to,
             out.len() as f64 * dt,
             self.rate,
+            if state == PlaybackState::Playing {
+                // Leave interpolation lookahead to Kira. The presentation
+                // cannot predict into output for which the PCM is unavailable.
+                frames.saturating_sub(4) as f64
+            } else {
+                to
+            },
         );
         self.rendered = to;
+        #[cfg(all(windows, feature = "qualification"))]
+        if let Some(trace) = &mut self.trace {
+            trace.commit(frame);
+        }
         self.state.state.store(state as u8, Ordering::Release);
         self.state.gate.fetch_and(!RENDERING, Ordering::Release);
     }
@@ -809,6 +828,8 @@ impl kira::sound::SoundData for ObservedData {
         .fade_in_tween(self.fade_in)
         .start_position(kira::sound::PlaybackPosition::Samples(self.start));
         let (inner, handle) = data.into_sound()?;
+        #[cfg(all(windows, feature = "qualification"))]
+        let (trace, trace_rx) = crate::diagnostics::AudioTrace::channel().unzip();
         Ok((
             Box::new(ObservedSound {
                 inner,
@@ -822,8 +843,16 @@ impl kira::sound::SoundData for ObservedData {
                 timing: clock::Writer::default(),
                 rendered: self.start as f64,
                 progress: self.progress,
+                #[cfg(all(windows, feature = "qualification"))]
+                trace,
             }),
-            OutputVoice { state, rate, clock },
+            OutputVoice {
+                state,
+                rate,
+                clock,
+                #[cfg(all(windows, feature = "qualification"))]
+                trace: trace_rx,
+            },
         ))
     }
 }
@@ -844,6 +873,34 @@ struct VoiceCredit {
 fn position_us(seconds: f64) -> i64 {
     (seconds * 1_000_000.).round() as i64
 }
+#[cfg(all(windows, feature = "qualification"))]
+fn qualification_output_settings() -> Result<kira::backend::cpal::CpalBackendSettings> {
+    use kira::backend::cpal::{
+        CpalBackendSettings,
+        cpal::{
+            self, BufferSize,
+            traits::{DeviceTrait, HostTrait},
+        },
+    };
+    if !silent_qualification() {
+        return Ok(CpalBackendSettings::default());
+    }
+    let Ok(value) = std::env::var("DISQRO_QUALIFY_BUFFER_FRAMES") else {
+        return Ok(CpalBackendSettings::default());
+    };
+    let frames: std::num::NonZeroU32 =
+        value.parse().context("Invalid qualification buffer size")?;
+    let device = cpal::default_host()
+        .default_output_device()
+        .context("No qualification endpoint")?;
+    let mut config = device.default_output_config()?.config();
+    config.buffer_size = BufferSize::Fixed(frames.get());
+    Ok(CpalBackendSettings {
+        device: Some(device),
+        config: Some(config),
+    })
+}
+
 static SILENT_QUALIFICATION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 pub fn silent_qualification() -> bool {
@@ -972,6 +1029,8 @@ impl Engine {
         self.credit = None;
         self.pause_checkpoint = false;
         self.position_probe = None;
+        #[cfg(all(windows, feature = "qualification"))]
+        self.trace_audio();
         self.voice = None;
         self.status.presentation = None;
         self.status.source_revision = None;
@@ -1372,7 +1431,7 @@ impl Engine {
         self.status.skipped = self
             .status
             .entry
-            .map(|id| (id, format!("Skipped recording · {error:#}")));
+            .map(|id| (id, format!("Skipped recording Â· {error:#}")));
         self.retry_next = true;
         self.status.playing = true;
         Ok(())
@@ -1753,6 +1812,8 @@ impl Engine {
                         self.signal.clone(),
                         cfg!(test) || silent_qualification(),
                     ),
+                    #[cfg(all(windows, feature = "qualification"))]
+                    backend_settings: qualification_output_settings()?,
                     ..Default::default()
                 })
                 .context("Windows audio output is unavailable")?,
@@ -2036,7 +2097,16 @@ impl Engine {
         self.discarded_errors = 0;
         Err(error).context("Windows audio output failed")
     }
+    #[cfg(all(windows, feature = "qualification"))]
+    fn trace_audio(&mut self) {
+        if let Some(trace) = self.voice.as_mut().and_then(|voice| voice.trace.as_mut()) {
+            crate::diagnostics::AudioTrace::drain(trace);
+        }
+    }
+
     fn tick(&mut self) -> Result<()> {
+        #[cfg(all(windows, feature = "qualification"))]
+        self.trace_audio();
         while let Some(error) = self
             .device
             .as_mut()

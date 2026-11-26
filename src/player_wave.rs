@@ -55,11 +55,7 @@ pub(crate) struct WaveTrack {
 impl WaveTrack {
     pub fn position(&self, at: Instant) -> Option<crate::audio::RendererPosition> {
         self.presentation.as_ref().map_or(
-            Some(crate::audio::RendererPosition {
-                frame: self.frame as f64,
-                advancing: false,
-                observation_age_ns: 0,
-            }),
+            Some(crate::audio::RendererPosition::held(self.frame as f64)),
             |clock| clock.position(at),
         )
     }
@@ -514,7 +510,7 @@ impl Player {
             let selected = self.disc_view() == full;
             let tip = match &overview {
                 Some(o) if full && !enabled => o.unavailable_tip(reason, self.program.is_none()),
-                Some(_) => format!("{label} waveform · Alt+W"),
+                Some(_) => format!("{label} waveform Â· Alt+W"),
                 None => "The waveform of this recording".into(),
             };
             row = row.child(
@@ -652,10 +648,10 @@ impl Player {
                 if full {
                     let mut label = s.track.title.clone();
                     if let Some(n) = s.track.display_number() {
-                        label = format!("{n:02} · {label}");
+                        label = format!("{n:02} Â· {label}");
                     }
                     if !s.source.available {
-                        label.push_str(" · Recording unavailable");
+                        label.push_str(" Â· Recording unavailable");
                     }
                     part = part.tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx));
                     if i > 0 {
