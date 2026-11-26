@@ -127,6 +127,29 @@ impl Player {
         Some(p.segments.iter().map(|s| s.track.clone()).collect())
     }
 
+    /// The presentation and evidence must still belong to the displayed source.
+    pub(crate) fn inspection_current(&self, track: &WaveTrack) -> bool {
+        self.generation == track.generation
+            && !self.status.playing
+            && !self.waveform_grabbed()
+            && self.status.playback_identity() == Some(track.identity)
+            && self
+                .program
+                .as_ref()
+                .and_then(|p| p.segments.get(self.segment?))
+                .is_some_and(|s| Arc::ptr_eq(&s.source, &track.source))
+    }
+
+    pub(crate) fn inspection_chapter(
+        &self,
+        track: &WaveTrack,
+        frame: usize,
+    ) -> Option<(u8, f64, f64)> {
+        self.program
+            .as_ref()?
+            .inspection_chapter(&track.source, frame)
+    }
+
     pub(crate) fn waveform_grabbed(&self) -> bool {
         self.waveform_scrub
             .as_ref()

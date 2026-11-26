@@ -104,6 +104,10 @@ impl Analysis {
                             let p = Arc::new(program);
                             let start = p.index(&job.track).unwrap_or(0);
                             active.store(start, Relaxed);
+                            tiles
+                                .lock()
+                                .unwrap()
+                                .set_sources(job.id, p.segments.iter().map(|s| &s.source));
                             if send(Update::Program(p.clone())) {
                                 analyse(
                                     &p,

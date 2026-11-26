@@ -30,6 +30,13 @@ use std::{
     time::Instant,
 };
 
+#[path = "waveformInspection.rs"]
+mod inspection;
+#[cfg(all(windows, feature = "qualification"))]
+#[path = "waveformInspectionJourney.rs"]
+mod inspection_journey;
+use waveform::inspection::SamplePoints;
+
 #[path = "waveformScrub.rs"]
 mod scrub;
 #[path = "waveformZoom.rs"]
@@ -152,6 +159,11 @@ struct Layout {
 }
 
 impl Layout {
+    fn physical(self, point: Point<Pixels>) -> [f64; 2] {
+        let delta = point - self.bounds.origin;
+        [delta.x, delta.y].map(|p| f64::from(f32::from(p)) * f64::from(self.scale))
+    }
+
     fn fraction(self, x: Pixels) -> f64 {
         let width = f64::from(f32::from(self.bounds.size.width)).max(1.);
         (f64::from(f32::from(x - self.bounds.origin.x)) / width).clamp(0., 1.)
@@ -300,9 +312,14 @@ impl Waveform {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        #[cfg(all(windows, feature = "qualification"))]
+        inspection_journey::start(window, cx);
         cx.observe_window_activation(window, |panel, window, cx| {
             if !window.is_window_active() {
                 panel.cancel_press(window, cx);
+                if panel.zoom_editor.take().is_some() {
+                    cx.notify();
+                }
             }
         })
         .detach();
@@ -539,6 +556,11 @@ impl Waveform {
         }
         let grabbed = self.grabbed();
         let moving = self.position.update(&track, now, grabbed);
+        // An inspected texture and its measurement must enter the same scene.
+        if self.points(&track, cx) != SamplePoints::Hidden {
+            cx.notify();
+            return false;
+        }
         let start = crate::diagnostics::begin_stage();
         let (surface, evidence, coverage) = self.prepare(&track, Some(layout), true);
         let status = Self::coverage(coverage, track.source.available);
@@ -553,7 +575,7 @@ impl Waveform {
         };
         #[cfg(windows)]
         {
-            self.texture.set_sample_points(self.points(&track, cx));
+            self.texture.set_sample_points(SamplePoints::Hidden);
             let ready = self
                 .texture
                 .repaint(window, cx, view, &evidence, surface.viewport.first);
@@ -697,6 +719,9 @@ impl Render for Waveform {
         let panel = cx.weak_entity();
         let texture = self.texture.clone();
         let points = self.points(&track, cx);
+        let inspector = (points != SamplePoints::Hidden).then(|| Rc::new(RefCell::new(None)));
+        let tip = inspector.clone();
+        let inspection_player = self.player.clone();
         let shown = self.settings.show_sample_points;
         let menu_panel = cx.weak_entity();
         let input = self.input_at.take();
@@ -752,8 +777,11 @@ impl Render for Waveform {
                     .when(!grabbed, |viewport| viewport.cursor_grab())
                     .child(
                         canvas(
-                            |_, _, _| (),
-                            move |b, _, window, cx| {
+                            move |b, w, _| {
+                                (points != SamplePoints::Hidden)
+                                    .then(|| w.insert_hitbox(b, HitboxBehavior::Normal))
+                            },
+                            move |b, hitbox, window, cx| {
                                 if !active {
                                     return;
                                 }
@@ -769,7 +797,38 @@ impl Render for Waveform {
                                     return;
                                 };
                                 let start = crate::diagnostics::begin_stage();
-                                texture.set_sample_points(points);
+                                let layout = Layout {
+                                    bounds: target,
+                                    scale,
+                                };
+                                let points = if points != SamplePoints::Hidden
+                                    && !evidence.samples.is_empty()
+                                    && inspection_player.read(cx).inspection_current(&track)
+                                {
+                                    points.for_view(&view)
+                                } else {
+                                    SamplePoints::Hidden
+                                };
+                                let hitbox = hitbox.filter(|_| points != SamplePoints::Hidden);
+                                let hit = hitbox
+                                    .as_ref()
+                                    .filter(|h| h.is_hovered(window))
+                                    .and_then(|_| {
+                                        waveform::inspection::hit_sample(
+                                            &view,
+                                            surface.viewport.first,
+                                            layout.physical(window.mouse_position()),
+                                            |i| {
+                                                evidence
+                                                    .samples
+                                                    .iter()
+                                                    .find_map(|block| block.sample(i))
+                                            },
+                                        )
+                                    });
+                                texture.set_sample_points(
+                                    hit.map_or(points, |h| SamplePoints::Highlight(h.frame)),
+                                );
                                 #[cfg(windows)]
                                 let ready = texture.paint(
                                     window,
@@ -790,6 +849,26 @@ impl Render for Waveform {
                                     u64::from(ready),
                                     (scale * 96.).round() as u64,
                                 );
+                                if ready && let Some(hitbox) = hitbox {
+                                    inspection::listen(
+                                        &panel,
+                                        texture.clone(),
+                                        layout,
+                                        hitbox,
+                                        hit,
+                                        window,
+                                    );
+                                    if let (Some(hit), Some(tip)) = (hit, &tip) {
+                                        let chapter = inspection_player
+                                            .read(cx)
+                                            .inspection_chapter(&track, hit.frame as usize);
+                                        *tip.borrow_mut() = Some(inspection::Reading {
+                                            hit,
+                                            chapter,
+                                            pointer: window.mouse_position(),
+                                        });
+                                    }
+                                }
                                 *displayed.borrow_mut() = if ready {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
@@ -840,6 +919,20 @@ impl Render for Waveform {
                                 material.wave.cursor
                             }),
                     )
+                    .when_some(inspector, |viewport, reading| {
+                        viewport.child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, cx| {
+                                    if let Some(reading) = reading.borrow_mut().take() {
+                                        reading.paint(bounds, window, cx);
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                    })
                     .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
                     .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down))
                     .context_menu(move |menu, _, _| {

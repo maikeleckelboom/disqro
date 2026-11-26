@@ -66,6 +66,15 @@ fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
     assert_eq!(p.segments.len(), 12);
     let mut count = 0;
     for (i, s) in p.segments.iter().enumerate() {
+        assert_eq!(
+            p.inspection_chapter(&s.source, s.frames.start),
+            Some((
+                s.track.disc.as_ref().unwrap().number,
+                0.,
+                s.time.start as f64 / SECOND as f64
+            ))
+        );
+        assert!(p.inspection_chapter(&s.source, s.source.frames).is_none());
         for f in s.frames.clone() {
             assert_eq!(p.locate(s.at(f)), Some((i, f)));
             assert_eq!(p.locate(s.at(f + 1) - 1), Some((i, f)));

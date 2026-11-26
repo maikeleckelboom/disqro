@@ -75,7 +75,7 @@ impl Waveform {
         let input =
             cx.new(|cx| InputState::new(window, cx).default_value(format!("{span} samples")));
         cx.subscribe_in(&input, window, move |panel, input, event, window, cx| {
-            if panel.zoom_editor.as_ref() != Some(&input) {
+            if panel.zoom_editor.as_ref() != Some(input) {
                 return;
             }
             match event {

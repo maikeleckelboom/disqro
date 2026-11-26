@@ -134,6 +134,7 @@ pub struct Store {
     evidence: EvidenceStore,
     sources: HashMap<PathBuf, (SourceKey, Arc<Source>)>,
     next_source: u64,
+    validated: HashMap<PathBuf, Arc<Source>>,
 }
 
 impl Default for Store {
@@ -143,6 +144,7 @@ impl Default for Store {
             evidence: EvidenceStore::new(Budget::default()),
             sources: HashMap::new(),
             next_source: 0,
+            validated: HashMap::new(),
         }
     }
 }
@@ -152,6 +154,22 @@ impl Store {
     /// stays resident; in-flight work of the old generation is abandoned.
     pub fn reset(&mut self, revision: u64) {
         self.revision = revision;
+        self.validated.clear();
+    }
+
+    /// Publish identities resolved by the background program reader. View
+    /// submissions only compare in-memory identities, including after eviction.
+    pub fn set_sources<'a>(
+        &mut self,
+        revision: u64,
+        sources: impl IntoIterator<Item = &'a Arc<Source>>,
+    ) {
+        if self.revision == revision {
+            self.validated = sources
+                .into_iter()
+                .map(|s| (s.path.clone(), s.clone()))
+                .collect();
+        }
     }
 
     pub fn next(&mut self, revision: u64) -> Option<Work> {
@@ -194,15 +212,15 @@ impl Store {
     }
 
     fn register(&mut self, source: &Arc<Source>) -> Option<SourceKey> {
+        let current = self.validated.get(&source.path)?;
+        if !Arc::ptr_eq(current, source) && current != source {
+            return None;
+        }
         let previous = self.sources.get(&source.path);
         if let Some((key, held)) = previous
             && (Arc::ptr_eq(held, source) || held == source)
         {
             return Some(*key);
-        }
-        // An older view must not re-register a replaced native file or stamp.
-        if !source.unchanged() {
-            return None;
         }
         let key = if let Some((previous, _)) = previous {
             let next = previous
@@ -360,6 +378,7 @@ mod tests {
         let (wake, _) = mpsc::sync_channel(1);
         let left = View::new(0, store.clone(), wake.clone());
         let right = View::new(1, store.clone(), wake);
+        store.lock().unwrap().set_sources(0, [&original, &other]);
         let first = Key::samples(&original, 0..8192);
         let second = Key::samples(&other, 0..8192);
         left.tiles(0, first.clone(), None);
@@ -384,6 +403,7 @@ mod tests {
         let weak = Arc::downgrade(&original);
         std::fs::remove_file(&path).unwrap();
         let replacement = source(path.clone(), b"replacement stamp and native object");
+        store.lock().unwrap().set_sources(0, [&replacement, &other]);
         let wanted = Key::samples(&replacement, 0..8192);
         assert_eq!(left.tiles(0, wanted.clone(), None).coverage.pending, 1);
         {
@@ -423,6 +443,7 @@ mod tests {
         let mut previous = None;
         for index in 0..24 {
             let source = source(dir.path().join(format!("{index}.wav")), b"sample");
+            store.lock().unwrap().set_sources(0, [&source]);
             weak_sources.push(Arc::downgrade(&source));
             view.tiles(0, Key::samples(&source, 0..8192), None);
             {
@@ -444,6 +465,7 @@ mod tests {
             2
         );
         let replacement = source(dir.path().join("0.wav"), b"rebuilt source");
+        store.lock().unwrap().set_sources(0, [&replacement]);
         view.tiles(0, Key::samples(&replacement, 0..8192), None);
         let mut store = store.lock().unwrap();
         let old_generation = store.next(0).unwrap();
