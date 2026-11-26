@@ -22,7 +22,7 @@ from qualifyWaveformMotion import Record, exact_zoom, real, zoom_controls
 
 SPANS = ("6.000", "2.000", "1.799", "1.000", "0.500")
 LAYOUTS = ("split", "wide", "maximized")
-MODES = ("baseline", "paint", "posted", "posted-uncached", "early", "sync-one",
+MODES = ("baseline", "default", "paint", "posted", "posted-uncached", "early", "sync-one",
          "waitable-one", "waitable-two", "waitable-double")
 SCREEN = ("paint", "posted-uncached", "early", "sync-one",
           "waitable-one", "waitable-two", "waitable-double")
@@ -91,7 +91,7 @@ def launch_player(exe, directory, source, mode, warm_cache, layout="split"):
         DISQRO_PRESENTATION_STAGES=str(directory / "stages.csv"),
         DISQRO_DXGI_TRACE=str(directory / "dxgi.csv"),
     )
-    if mode != "baseline":
+    if mode not in ("baseline", "default"):
         env["GPUI_WINDOWS_PRESENTATION"] = mode
     with (directory / "player.log").open("wb") as log:
         return subprocess.Popen([str(exe), "--qualify-silent", str(source)], cwd=exe.parent,
