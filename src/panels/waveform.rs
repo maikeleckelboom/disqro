@@ -30,6 +30,8 @@ use std::{
 
 #[path = "waveformScrub.rs"]
 mod scrub;
+#[path = "waveformZoom.rs"]
+mod zoom;
 use scrub::Press;
 
 pub static TYPE: PanelType = PanelType {
@@ -172,7 +174,7 @@ impl Displayed {
 struct DeckPosition {
     source: Option<Arc<Source>>,
     last: Option<(PlaybackIdentity, f64)>,
-    seconds: f64,
+    zoom: zoom::Zoom,
     inspecting: Option<f64>,
     viewport: Viewport,
     velocity: waveform::planning::ViewVelocity,
@@ -183,7 +185,7 @@ impl Default for DeckPosition {
         Self {
             source: None,
             last: None,
-            seconds: 8.,
+            zoom: zoom::Zoom::Seconds(8.),
             inspecting: None,
             viewport: Viewport::fit(0),
             velocity: Default::default(),
@@ -230,7 +232,9 @@ impl DeckPosition {
             } else {
                 self.inspecting.unwrap_or(frame)
             },
-            (self.seconds * rate).clamp(32., DETAIL_SECONDS * rate),
+            self.zoom
+                .frames(track.source.rate)
+                .clamp(32., DETAIL_SECONDS * rate),
         );
         self.velocity.observe(at, self.viewport.frame_at(0.5));
         if let Some(at) = crate::diagnostics::begin_stage() {
@@ -258,6 +262,8 @@ struct Waveform {
     texture: Texture,
     input_at: Option<Instant>,
     zoom_label: Option<Task<()>>,
+    zoom_focus: FocusHandle,
+    zoom_editor: Option<Entity<zoom::InputState>>,
     press: Option<Press>,
     capture_watch: Option<Task<()>>,
 }
@@ -304,6 +310,8 @@ impl Waveform {
             texture: Default::default(),
             input_at: None,
             zoom_label: None,
+            zoom_focus: cx.focus_handle().tab_stop(true),
+            zoom_editor: None,
             press: None,
             capture_watch: None,
         }
@@ -347,7 +355,7 @@ impl Waveform {
                 (rate * DETAIL_SECONDS) as usize,
                 track.source.frames,
             );
-            state.seconds = zoomed.span / rate;
+            state.zoom = zoom::Zoom::frames_at(zoomed.span, track.source.rate);
             if state.inspecting.is_some() {
                 state.inspecting = Some(zoomed.frame_at(0.5));
             }
@@ -466,6 +474,7 @@ impl Waveform {
         self.layout.set(None);
         self.displayed.borrow_mut().take();
         self.zoom_label = None;
+        self.zoom_editor = None;
         self.input_at = None;
         self.press = None;
         self.capture_watch = None;
@@ -597,7 +606,9 @@ impl Render for Waveform {
             .bg(material.canvas)
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && panel.cancel_press(window, cx) {
+                if event.keystroke.key == "escape"
+                    && (panel.cancel_zoom(window, cx) || panel.cancel_press(window, cx))
+                {
                     window.prevent_default();
                     cx.stop_propagation();
                 }
@@ -646,7 +657,7 @@ impl Render for Waveform {
                     .gap_2()
                     .border_b_1()
                     .border_color(material.line)
-                    .child(div().text_xs().text_color(material.text_muted).child(title))
+                    .child(self.zoom_control(title, cx))
                     .when_some(
                         if failed {
                             Some("Waveform display unavailable")
