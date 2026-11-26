@@ -11,8 +11,8 @@ use gpui_kit::component::Selectable;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-const OUTSIDE_QUEUE: &str = "This recording is outside the current queue sequence.";
 const UNAVAILABLE_POSITION: &str = "This waveform position is unavailable.";
+const UNAVAILABLE_RECORDING: &str = "This recording is unavailable.";
 
 #[derive(Clone, Copy)]
 pub(super) struct StripSeek {
@@ -43,6 +43,9 @@ pub(crate) struct WaveTrack {
     pub overview: Arc<Page>,
     pub identity: PlaybackIdentity,
     pub seek: Option<WaveSeekAnchor>,
+    /// Source frames the deck may seek to: the playing chapter for Track,
+    /// every authored chapter continuing it in this source for Full CD.
+    pub navigable: std::ops::Range<usize>,
     pub frame: usize,
     presentation: Option<Presentation>,
     pub playing: bool,
@@ -86,6 +89,7 @@ impl Player {
             overview: self.shapes.get(index)?.track.clone(),
             identity,
             seek,
+            navigable: self.navigable(program, index),
             frame: segment.elapsed_frame(self.status.position),
             presentation: self.status.presentation.clone(),
             playing: self.status.playing,
@@ -95,6 +99,32 @@ impl Player {
                 .filter(|gesture| !gesture.closed() && gesture.anchor.identity == identity)
                 .and_then(|gesture| gesture.frame()),
         })
+    }
+
+    /// The frames of the chapters that continue `index` in its physical
+    /// source. Full CD reaches all of them whatever the queue holds.
+    fn navigable(&self, p: &Program, index: usize) -> std::ops::Range<usize> {
+        let segment = &p.segments[index];
+        if !self.disc_view() {
+            return segment.frames.clone();
+        }
+        let joined = |a: &crate::timeline::Segment, b: &crate::timeline::Segment| {
+            Arc::ptr_eq(&a.source, &b.source) && a.frames.end == b.frames.start
+        };
+        let mut first = index;
+        while first > 0 && joined(&p.segments[first - 1], &p.segments[first]) {
+            first -= 1;
+        }
+        let mut last = index;
+        while last + 1 < p.segments.len() && joined(&p.segments[last], &p.segments[last + 1]) {
+            last += 1;
+        }
+        p.segments[first].frames.start..p.segments[last].frames.end
+    }
+
+    fn program_tracks(&self) -> Option<crate::library::TrackList> {
+        let p = self.program.as_ref().filter(|_| self.disc_view())?;
+        Some(p.segments.iter().map(|s| s.track.clone()).collect())
     }
 
     pub(crate) fn waveform_grabbed(&self) -> bool {
@@ -116,14 +146,26 @@ impl Player {
         {
             return None;
         }
-        let (_, bounds) = crate::audio::scrub_run(&self.queue, &anchor.source)?;
-        let gesture = Arc::new(Gesture::new(
+        // Full CD navigates the authored program; Track keeps the contiguous
+        // queue sequence.
+        let program = self.program_tracks();
+        let bounds = match &program {
+            Some(program) => {
+                crate::audio::program_run(program, &anchor.source, &anchor.playable)?.1
+            }
+            None => crate::audio::scrub_run(&self.queue, &anchor.source)?.1,
+        };
+        let gesture = Gesture::new(
             self.transport.sender().scrub_control,
             anchor,
             origin,
             was_playing,
             bounds,
-        ));
+        );
+        let gesture = Arc::new(match program {
+            Some(program) => gesture.within_program(program),
+            None => gesture,
+        });
         match self
             .transport
             .send(Command::BeginWaveScrub(gesture.clone()), self.status.entry)
@@ -143,12 +185,34 @@ impl Player {
         frame: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.wave_track().and_then(|track| track.seek).as_ref() != Some(&anchor)
-            || !anchor.playable.contains(&frame)
-        {
+        let Some(track) = self
+            .wave_track()
+            .filter(|track| track.seek.as_ref() == Some(&anchor))
+        else {
             return false;
+        };
+        if anchor.playable.contains(&frame) {
+            self.command(Command::SeekWave { anchor, frame }, cx);
+            return true;
         }
-        self.command(Command::SeekWave { anchor, frame }, cx);
+        // Another chapter of the Full CD program in this source.
+        let Some((p, chapter)) = self
+            .program
+            .as_ref()
+            .filter(|_| track.navigable.contains(&frame))
+            .and_then(|p| {
+                let chapter = p.segments.iter().position(|s| {
+                    Arc::ptr_eq(&s.source, &anchor.source) && s.frames.contains(&frame)
+                })?;
+                Some((p.clone(), chapter))
+            })
+        else {
+            return false;
+        };
+        match self.target_frame(&p, chapter, frame) {
+            Ok(command) => self.command(command, cx),
+            Err(reason) => cx.emit(PlayerEvent::Notice(reason.into())),
+        }
         true
     }
     pub(super) fn request_wave(&mut self) {
@@ -207,7 +271,6 @@ impl Player {
                 }
                 self.shapes = vec![Shape::default(); p.segments.len()];
                 self.program = Some(p);
-                self.update_run();
             }
             Update::Wave(i, shape) => {
                 if let Some(slot) = self.shapes.get_mut(i) {
@@ -242,30 +305,6 @@ impl Player {
             });
             cx.notify()
         }
-    }
-    pub(super) fn update_run(&mut self) {
-        self.run = 0..0;
-        let (Some(p), Some(i), Some(q)) = (&self.program, self.segment, self.queue.current) else {
-            return;
-        };
-        let matches = |n: usize, k: usize| {
-            self.queue.entries.get(k).is_some_and(|e| {
-                e.track.source == p.segments[n].track.source
-                    && e.track.disc == p.segments[n].track.disc
-            })
-        };
-        if !matches(i, q) {
-            return;
-        }
-        let mut left = i;
-        while left > 0 && q > i - left && matches(left - 1, q - (i - left) - 1) {
-            left -= 1;
-        }
-        let mut right = i + 1;
-        while right < p.segments.len() && matches(right, q + (right - i)) {
-            right += 1;
-        }
-        self.run = left..right;
     }
     pub(super) fn overview(&self) -> Option<Overview> {
         self.status
@@ -356,37 +395,26 @@ impl Player {
         // boundary pixel belongs to the chapter which starts there.
         let time = range.start + ((fraction * length as f64).round() as u64).min(length - 1);
         let (i, frame) = p.locate(time).ok_or(UNAVAILABLE_POSITION)?;
-        self.target_frame(p, active, i, frame)
+        self.target_frame(p, i, frame)
     }
 
-    fn target_frame(
-        &self,
-        p: &Program,
-        active: usize,
-        i: usize,
-        frame: usize,
-    ) -> Result<Command, &'static str> {
-        if !self.run.contains(&i) {
-            return Err(OUTSIDE_QUEUE);
-        }
+    /// A seek to `frame` of chapter `i`, anywhere in the authored program.
+    /// The transport decides which queue occurrence it activates.
+    fn target_frame(&self, p: &Program, i: usize, frame: usize) -> Result<Command, &'static str> {
         let seg = &p.segments[i];
         if !seg.source.available {
-            return Err("This recording is unavailable.");
+            return Err(UNAVAILABLE_RECORDING);
         }
-        let target = self
-            .queue
-            .current
-            .and_then(|current| current.checked_add(i)?.checked_sub(active))
-            .and_then(|index| self.queue.entries.get(index))
-            .ok_or(OUTSIDE_QUEUE)?;
-        Ok(Command::SeekOnDisc {
-            target: target.id,
+        let origin = self.status.entry.ok_or(UNAVAILABLE_POSITION)?;
+        Ok(Command::SeekProgram(Box::new(crate::audio::ProgramSeek {
+            origin,
+            program: p.segments.iter().map(|s| s.track.clone()).collect(),
+            chapter: i,
             source_revision: seg.source.stamp.clone(),
             sheet_revision: p.sheet.as_ref().map(|(_, s)| s.stamp.clone()),
-            revision: self.status.queue_revision,
             seconds: (frame - seg.frames.start) as f64 / f64::from(seg.source.rate),
             duration: seg.frames.len() as f64 / f64::from(seg.source.rate),
-        })
+        })))
     }
     fn move_scrub(&mut self, x: Pixels, cx: &mut Context<Self>) {
         let Some(mut seek) = self.scrub.take() else {
@@ -414,7 +442,7 @@ impl Player {
                     crate::diagnostics::stage(
                         crate::diagnostics::begin_stage(),
                         "wave_compact_blocked",
-                        u64::from(reason == OUTSIDE_QUEUE),
+                        u64::from(reason == UNAVAILABLE_RECORDING),
                         0,
                     );
                     cx.emit(PlayerEvent::Notice(reason.into()));
@@ -553,7 +581,7 @@ impl Player {
                     (0., 1.)
                 };
                 let page = &self.shapes[i].track;
-                let can_seek = s.source.available && self.run.contains(&i);
+                let can_seek = s.source.available;
                 let mut part = div()
                     .id(("wave-segment", i))
                     .absolute()
@@ -596,8 +624,6 @@ impl Player {
                     }
                     if !s.source.available {
                         label.push_str(" · Recording unavailable");
-                    } else if !can_seek {
-                        label.push_str(" · Outside the current queue sequence");
                     }
                     part = part.tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx));
                     if i > 0 {

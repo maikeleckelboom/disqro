@@ -149,7 +149,6 @@ pub struct Player {
     segment: Option<usize>,
     shapes: Vec<Shape>,
     unavailable: Option<String>,
-    run: std::ops::Range<usize>,
     waveform_scrub: Option<Arc<crate::audio::scrub::Gesture>>,
     visible: bool,
     drawn_position: f64,
@@ -218,7 +217,6 @@ impl Player {
             segment: None,
             shapes: vec![],
             unavailable: None,
-            run: 0..0,
             waveform_scrub: None,
             visible: true,
             drawn_position: 0.,
@@ -416,9 +414,6 @@ impl Player {
         }
         if identity_changed || track_changed || self.status.scrub.is_some() {
             self.scrub = None;
-        }
-        if queue_changed || track_changed {
-            self.update_run();
         }
         if state_changed {
             cx.emit(PlayerEvent::StateChanged);

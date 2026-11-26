@@ -154,6 +154,7 @@ impl Layout {
 
 struct Displayed {
     anchor: WaveSeekAnchor,
+    navigable: std::ops::Range<usize>,
     viewport: Viewport,
     layout: Layout,
 }
@@ -161,7 +162,7 @@ struct Displayed {
 impl Displayed {
     fn seek(&self, x: Pixels) -> Option<(WaveSeekAnchor, usize)> {
         let frame = self.viewport.frame_at(self.layout.fraction(x)).round();
-        if frame < 0. || !self.anchor.playable.contains(&(frame as usize)) {
+        if frame < 0. || !self.navigable.contains(&(frame as usize)) {
             return None;
         }
         Some((self.anchor.clone(), frame as usize))
@@ -519,6 +520,7 @@ impl Waveform {
                 }
                 *self.displayed.borrow_mut() = track.seek.map(|anchor| Displayed {
                     anchor,
+                    navigable: track.navigable.clone(),
                     viewport: surface.viewport,
                     layout: Layout { bounds, ..layout },
                 });
@@ -710,6 +712,7 @@ impl Render for Waveform {
                                 *displayed.borrow_mut() = if ready {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
+                                        navigable: track.navigable.clone(),
                                         viewport: surface.viewport,
                                         layout: Layout {
                                             bounds: target,

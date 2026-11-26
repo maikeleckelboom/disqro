@@ -329,6 +329,120 @@ fn scrub_keeps_queue_occurrences_and_listening_separate_until_release() {
 }
 
 #[test]
+fn full_cd_scrub_reaches_unqueued_chapters_and_reconciles_only_on_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    let sheet = dir.path().join("disc.cue");
+    fixture(&path, 48_000, 144_000);
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+    )
+    .unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let program =
+        crate::timeline::Program::resolve(&tracks[0], DiscContext::Selected, None).unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let (writer, _) = listening::Writer::spawn(database.clone());
+    let mut engine = Engine {
+        listening: Some(writer.clone()),
+        ..Engine::default()
+    };
+    // Play Only This Track, then something unrelated was queued after it.
+    let unrelated = Arc::new(Track::file(dir.path().join("another.wav")));
+    engine
+        .queue
+        .replace([tracks[0].clone(), unrelated].into_iter().collect(), 0);
+    let ids: Vec<u64> = engine.queue.entries.iter().map(|e| e.id).collect();
+    engine.select(Some(0), 0.5);
+    engine.refresh_flags();
+    let segment = &program.segments[0];
+    assert_eq!(
+        scrub_run(&engine.queue, &segment.source).unwrap().1,
+        0..48_000
+    );
+    let (chapters, bounds) = program_run(&tracks, &segment.source, &segment.frames).unwrap();
+    assert_eq!((chapters, bounds.clone()), (0..2, 0..144_000));
+    let control = engine.scrub_control.clone();
+    let identity = engine.status.playback_identity().unwrap();
+    let gesture = |origin: f64| {
+        Arc::new(
+            scrub::Gesture::new(
+                control.clone(),
+                WaveSeekAnchor {
+                    identity,
+                    source: segment.source.clone(),
+                    playable: segment.frames.clone(),
+                    sheet: program.sheet.clone(),
+                },
+                origin,
+                false,
+                bounds.clone(),
+            )
+            .within_program(tracks.clone()),
+        )
+    };
+
+    // Escape after crossing into the unqueued chapter changes nothing.
+    let canceled = gesture(24_000.);
+    canceled.move_to(120_000., 24_000., 96_000. * 50., Instant::now());
+    let revision = engine.queue.revision;
+    engine
+        .command(Command::BeginWaveScrub(canceled.clone()))
+        .unwrap();
+    assert!(!canceled.closed());
+    canceled.finish(scrub::End::Cancel);
+    engine.update_scrub().unwrap();
+    assert!(canceled.closed());
+    assert_eq!(engine.queue.revision, revision);
+    assert_eq!(
+        (engine.queue.current, engine.status.position),
+        (Some(0), 0.5)
+    );
+
+    // Crossing both ways while held keeps the original occurrence.
+    let released = gesture(24_000.);
+    engine
+        .command(Command::BeginWaveScrub(released.clone()))
+        .unwrap();
+    for (from, to) in [
+        (24_000., 130_000.),
+        (130_000., 10_000.),
+        (10_000., 120_000.),
+    ] {
+        released.move_to(to, from, (to - from) * 50., Instant::now());
+        engine.update_scrub().unwrap();
+        assert_eq!(engine.queue.current, Some(0));
+        assert_eq!(engine.queue.entries.len(), 2);
+        assert!(engine.occurrence.is_none());
+    }
+    released.finish(scrub::End::Release);
+    engine.update_scrub().unwrap();
+    assert!(released.closed());
+    // One new occurrence after the active entry; the unrelated entry keeps
+    // its identity and place after it.
+    assert_eq!(engine.queue.entries.len(), 3);
+    assert_eq!(engine.queue.current, Some(1));
+    assert_eq!(engine.queue.entries[0].id, ids[0]);
+    assert!(!ids.contains(&engine.queue.entries[1].id));
+    assert!(engine.queue.entries[1].track.same_item(&tracks[1]));
+    assert_eq!(engine.queue.entries[2].id, ids[1]);
+    assert_eq!(engine.status.position, 1.5);
+    assert!(!engine.status.playing && engine.voice.is_none());
+
+    writer.barrier().unwrap();
+    let history = crate::store::Store::open(&database)
+        .unwrap()
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert!(history.is_empty(), "the audition earned listening credit");
+}
+
+#[test]
 fn renderer_preserves_stereo_samples_across_a_disc_chapter() {
     check_chapter_render(false);
 }
@@ -1325,6 +1439,98 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
 }
 
 #[test]
+fn queue_edits_never_restart_replace_or_eject_the_active_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let (writer, _) = listening::Writer::spawn(database.clone());
+    let track = |name: &str| Arc::new(Track::file(dir.path().join(name)));
+    let same = track("same.wav");
+    let tracks: crate::library::TrackList =
+        [track("played.wav"), same.clone(), track("next.wav"), same].into();
+    for playing in [true, false] {
+        let mut engine = Engine {
+            listening: Some(writer.clone()),
+            rate: 48_000,
+            length: 3.,
+            limit: 3.,
+            ..Engine::default()
+        };
+        engine.queue.replace(tracks.clone().into(), 1);
+        engine.select(Some(1), 0.25);
+        let active = engine.queue.current_entry().unwrap().id;
+        let duplicate = engine.queue.entries[3].id;
+        let state = Arc::new(OutputState {
+            cursor: AtomicUsize::new(12_000),
+            state: AtomicU8::new(if playing {
+                PlaybackState::Playing
+            } else {
+                PlaybackState::Paused
+            } as u8),
+            ..Default::default()
+        });
+        engine.voice = Some(OutputVoice {
+            state: state.clone(),
+            rate: 48_000.,
+            clock: Arc::new(clock::Clock::new(0)),
+        });
+        engine.group = vec![Chapter {
+            id: active,
+            offset: 0.,
+        }];
+        engine.status.playing = playing;
+        let revisions = (
+            engine.status.occurrence_revision,
+            engine.status.seek_revision,
+        );
+        let edits = [
+            // A delayed removal that names the entry which became active.
+            Command::Remove(vec![active]),
+            Command::Remove(vec![active, duplicate]),
+            Command::MoveUpcoming(active, None),
+            Command::ScheduleNext(active),
+            Command::Shuffle(true),
+            Command::Repeat(Repeat::All),
+            Command::Shuffle(false),
+            Command::Repeat(Repeat::One),
+            Command::ClearHistory,
+            Command::ClearUpcoming,
+            Command::Remove(vec![active]),
+        ];
+        for edit in edits {
+            engine.command(edit).unwrap();
+            assert!(Arc::ptr_eq(&engine.voice.as_ref().unwrap().state, &state));
+            assert_eq!(engine.queue.current_entry().map(|e| e.id), Some(active));
+            assert_eq!(
+                (engine.status.entry, engine.status.playing),
+                (Some(active), playing)
+            );
+            assert_eq!(engine.status.position, 0.25);
+            assert_eq!(
+                (
+                    engine.status.occurrence_revision,
+                    engine.status.seek_revision
+                ),
+                revisions
+            );
+        }
+        // Clearing leaves the active recording alone, with an empty queue.
+        assert!(engine.queue.upcoming().is_empty());
+        assert!(engine.queue.history().is_empty());
+        assert_eq!(engine.queue.entries.len(), 1);
+        assert_eq!(engine.queue.repeat, Repeat::One);
+    }
+    writer.barrier().unwrap();
+    let history = crate::store::Store::open(&database)
+        .unwrap()
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert!(
+        history.is_empty(),
+        "queue edits ended a listening occurrence"
+    );
+}
+
+#[test]
 fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
     let chapter = |disc: &str, n: u8, start: u64, end: Option<u64>| {
         let mut t = Track::file(format!("{disc}.flac").into());
@@ -1364,7 +1570,7 @@ fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
 }
 
 #[test]
-fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
+fn program_seek_is_atomic_and_rejects_changed_entries_or_recordings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.wav");
     fixture(&path, 32000, 32000);
@@ -1378,38 +1584,72 @@ fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
     let mut e = Engine::default();
     e.queue.replace(tracks.clone().into(), 0);
     e.select(Some(0), 0.);
-    let origin = e.status.entry;
+    let origin = e.status.entry.unwrap();
     let target = e.queue.entries[1].id;
-    let before = e.queue.revision;
     let stamp = crate::cache::Stamp::read(&path).unwrap();
-    let seek = |revision| Command::SeekOnDisc {
-        target,
-        revision,
-        seconds: 0.125,
-        duration: (32000 - 427) as f64 / 32000.,
-        source_revision: stamp.clone(),
-        sheet_revision: crate::cache::Stamp::read(&sheet),
+    let seek = |origin, seconds| {
+        Command::SeekProgram(Box::new(ProgramSeek {
+            origin,
+            program: tracks.clone(),
+            chapter: 1,
+            source_revision: stamp.clone(),
+            sheet_revision: crate::cache::Stamp::read(&sheet),
+            seconds,
+            duration: (32000 - 427) as f64 / 32000.,
+        }))
     };
     assert!(
         !Pending {
-            entry: origin,
-            command: seek(before)
+            entry: Some(origin),
+            command: seek(origin, 0.125)
         }
         .applies_to(Some(target))
     );
-    e.command(seek(before + 1)).unwrap();
-    assert_eq!(e.status.entry, origin);
-    e.command(seek(before)).unwrap();
+    let revision = e.queue.revision;
+    // A seek aimed from another entry, or beyond the chapter, changes nothing.
+    e.command(seek(target, 0.125)).unwrap();
+    e.command(seek(origin, 2.)).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    e.command(seek(origin, 0.125)).unwrap();
     assert_eq!(
         (e.status.entry, e.status.position, e.status.playing),
         (Some(target), 0.125, false)
     );
-    assert_eq!(e.queue.entries.len(), 2);
+    assert_eq!(e.queue.entries.len(), 2, "the queued chapter is reused");
     assert!(e.device.is_none() && e.voice.is_none());
+
+    // Play Only This Track: the next chapter is not queued, yet reachable.
+    e.queue.replace(tracks[..1].iter().cloned().collect(), 0);
     e.select(Some(0), 0.);
+    let only = e.status.entry.unwrap();
+    e.command(seek(only, 0.25)).unwrap();
+    assert_eq!(e.queue.entries.len(), 2);
+    assert_eq!(e.queue.current, Some(1));
+    assert_eq!(e.queue.entries[0].id, only);
+    assert!(e.status.entry.is_some_and(|id| id != only));
+    assert_eq!(e.status.position, 0.25);
+
+    // A changed recording or sheet rejects the seek before the queue changes.
+    e.queue.replace(tracks[..1].iter().cloned().collect(), 0);
+    e.select(Some(0), 0.);
+    let origin = e.status.entry.unwrap();
+    let revision = e.queue.revision;
     fixture(&path, 32000, 32001);
-    e.command(seek(e.queue.revision)).unwrap();
-    assert_eq!(e.status.entry, origin);
+    e.command(seek(origin, 0.125)).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    let stamp = crate::cache::Stamp::read(&path).unwrap();
+    let mut fresh = seek(origin, 0.125);
+    if let Command::SeekProgram(seek) = &mut fresh {
+        seek.source_revision = stamp;
+    }
+    std::fs::write(
+        &sheet,
+        std::fs::read_to_string(&sheet).unwrap() + "\nREM revised\n",
+    )
+    .unwrap();
+    e.command(fresh).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    assert_eq!(e.queue.entries.len(), 1);
 }
 
 #[test]
