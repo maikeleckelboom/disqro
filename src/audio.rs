@@ -1613,15 +1613,9 @@ impl Engine {
                 self.revalidate();
             }
             Command::Remove(ids) => {
+                // The queue keeps the active occurrence, so its voice,
+                // position and listening occurrence continue unchanged.
                 if self.queue.remove(&ids) {
-                    let resume = self.status.playing;
-                    self.retry_next = false;
-                    self.stop_voice();
-                    match self.queue.current {
-                        Some(i) if resume => self.play_eligible(i)?,
-                        current => self.select(current, 0.),
-                    }
-                } else {
                     self.revalidate();
                 }
             }

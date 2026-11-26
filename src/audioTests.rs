@@ -1325,6 +1325,98 @@ fn continuing_cd_reuses_active_decoder_range_and_entry_after_queue_edits() {
 }
 
 #[test]
+fn queue_edits_never_restart_replace_or_eject_the_active_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("library.sqlite3");
+    let (writer, _) = listening::Writer::spawn(database.clone());
+    let track = |name: &str| Arc::new(Track::file(dir.path().join(name)));
+    let same = track("same.wav");
+    let tracks: crate::library::TrackList =
+        [track("played.wav"), same.clone(), track("next.wav"), same].into();
+    for playing in [true, false] {
+        let mut engine = Engine {
+            listening: Some(writer.clone()),
+            rate: 48_000,
+            length: 3.,
+            limit: 3.,
+            ..Engine::default()
+        };
+        engine.queue.replace(tracks.clone().into(), 1);
+        engine.select(Some(1), 0.25);
+        let active = engine.queue.current_entry().unwrap().id;
+        let duplicate = engine.queue.entries[3].id;
+        let state = Arc::new(OutputState {
+            cursor: AtomicUsize::new(12_000),
+            state: AtomicU8::new(if playing {
+                PlaybackState::Playing
+            } else {
+                PlaybackState::Paused
+            } as u8),
+            ..Default::default()
+        });
+        engine.voice = Some(OutputVoice {
+            state: state.clone(),
+            rate: 48_000.,
+            clock: Arc::new(clock::Clock::new(0)),
+        });
+        engine.group = vec![Chapter {
+            id: active,
+            offset: 0.,
+        }];
+        engine.status.playing = playing;
+        let revisions = (
+            engine.status.occurrence_revision,
+            engine.status.seek_revision,
+        );
+        let edits = [
+            // A delayed removal that names the entry which became active.
+            Command::Remove(vec![active]),
+            Command::Remove(vec![active, duplicate]),
+            Command::MoveUpcoming(active, None),
+            Command::ScheduleNext(active),
+            Command::Shuffle(true),
+            Command::Repeat(Repeat::All),
+            Command::Shuffle(false),
+            Command::Repeat(Repeat::One),
+            Command::ClearHistory,
+            Command::ClearUpcoming,
+            Command::Remove(vec![active]),
+        ];
+        for edit in edits {
+            engine.command(edit).unwrap();
+            assert!(Arc::ptr_eq(&engine.voice.as_ref().unwrap().state, &state));
+            assert_eq!(engine.queue.current_entry().map(|e| e.id), Some(active));
+            assert_eq!(
+                (engine.status.entry, engine.status.playing),
+                (Some(active), playing)
+            );
+            assert_eq!(engine.status.position, 0.25);
+            assert_eq!(
+                (
+                    engine.status.occurrence_revision,
+                    engine.status.seek_revision
+                ),
+                revisions
+            );
+        }
+        // Clearing leaves the active recording alone, with an empty queue.
+        assert!(engine.queue.upcoming().is_empty());
+        assert!(engine.queue.history().is_empty());
+        assert_eq!(engine.queue.entries.len(), 1);
+        assert_eq!(engine.queue.repeat, Repeat::One);
+    }
+    writer.barrier().unwrap();
+    let history = crate::store::Store::open(&database)
+        .unwrap()
+        .history_page((i64::MIN, i64::MAX), "", true, None)
+        .unwrap();
+    assert!(
+        history.is_empty(),
+        "queue edits ended a listening occurrence"
+    );
+}
+
+#[test]
 fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
     let chapter = |disc: &str, n: u8, start: u64, end: Option<u64>| {
         let mut t = Track::file(format!("{disc}.flac").into());
