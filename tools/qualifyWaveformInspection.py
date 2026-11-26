@@ -98,6 +98,14 @@ def measure(exe, folder, band, control_wav):
                         time.sleep(0.2)
                         handle = find_window(player.pid)
                         screenshot(handle, path)
+                        if name == "playback":
+                            with Image.open(path) as playing:
+                                # Below the traces and above the transport, within the
+                                # fixture's waveform ruler. Exclude the center playhead.
+                                w, h = playing.size
+                                ruler = playing.convert("L").crop((round(w * 0.7), round(h * 0.83),
+                                                                  round(w * 0.97), round(h * 0.85)))
+                                assert sum(ruler.histogram()[52:]) > 100, "Sample ruler lost its ticks during playback"
                         if name in ("sample-inspector", "cue-times"):
                             baseline = "sample-points" if name == "sample-inspector" else "sample-inspector"
                             with Image.open(folder / (baseline + ".png")) as before, Image.open(path) as after:

@@ -290,16 +290,11 @@ struct Settings {
 }
 
 impl Settings {
-    fn stationary(self, playing: bool, scrubbing: bool) -> Self {
-        if playing || scrubbing {
-            Self::default()
-        } else {
-            self
+    fn visible(self, playing: bool, scrubbing: bool) -> Self {
+        Self {
+            show_sample_points: self.show_sample_points && !playing && !scrubbing,
+            show_sample_ruler: self.show_sample_ruler && !scrubbing,
         }
-    }
-
-    fn enabled(self) -> bool {
-        self.show_sample_points || self.show_sample_ruler
     }
 }
 
@@ -453,12 +448,21 @@ impl Waveform {
     }
 
     fn overlays(&self, track: &WaveTrack, cx: &App) -> Settings {
-        self.settings.stationary(
+        self.settings.visible(
             track.playing
-                || (self.settings.enabled()
+                || (self.settings.show_sample_points
                     && track.position(Instant::now()).is_some_and(|p| p.advancing)),
             self.player.read(cx).waveform_grabbed(),
         )
+    }
+
+    fn surface(&self, track: &WaveTrack) -> Surface {
+        Surface {
+            role: Role::Detail,
+            rate: track.source.rate,
+            playable: 0..track.source.frames,
+            viewport: self.position.viewport,
+        }
     }
 
     fn prepare(
@@ -467,13 +471,8 @@ impl Waveform {
         layout: Option<Layout>,
         active: bool,
     ) -> (Surface, overview::Evidence, Coverage) {
-        let viewport = self.position.viewport;
-        let surface = Surface {
-            role: Role::Detail,
-            rate: track.source.rate,
-            playable: 0..track.source.frames,
-            viewport,
-        };
+        let surface = self.surface(track);
+        let viewport = surface.viewport;
         let mut evidence = overview::Evidence {
             overview: Some(track.overview.clone()),
             overview_start: track.range.start,
@@ -579,8 +578,15 @@ impl Waveform {
         }
         let grabbed = self.grabbed();
         let moving = self.position.update(&track, now, grabbed);
-        // An inspected texture and its measurement must enter the same scene.
-        if self.overlays(&track, cx).enabled() {
+        // The ruler and any sample measurement must use the same viewport
+        // as the texture in this scene. Keep the retained path at wider zooms.
+        let overlays = self.overlays(&track, cx);
+        if (overlays.show_sample_points || overlays.show_sample_ruler)
+            && self
+                .surface(&track)
+                .target(layout.bounds, layout.scale)
+                .is_some_and(|(_, view)| sample_spacing(&view))
+        {
             cx.notify();
             return false;
         }
@@ -845,12 +851,12 @@ impl Render for Waveform {
                                     bounds: target,
                                     scale,
                                 };
-                                let eligible = overlays.enabled()
-                                    && SamplePoints::Visible.for_view(&view)
-                                        == SamplePoints::Visible
+                                let sample_zoom = sample_spacing(&view);
+                                let points = if overlays.show_sample_points
+                                    && sample_zoom
                                     && !evidence.samples.is_empty()
-                                    && inspection_player.read(cx).inspection_current(&track);
-                                let points = if eligible && overlays.show_sample_points {
+                                    && inspection_player.read(cx).inspection_current(&track)
+                                {
                                     SamplePoints::Visible
                                 } else {
                                     SamplePoints::Hidden
@@ -895,7 +901,7 @@ impl Render for Waveform {
                                     u64::from(ready),
                                     (scale * 96.).round() as u64,
                                 );
-                                if ready && eligible && overlays.show_sample_ruler {
+                                if ready && sample_zoom && overlays.show_sample_ruler {
                                     inspection::paint_ruler(
                                         layout,
                                         &view,
@@ -1020,6 +1026,10 @@ impl Render for Waveform {
     }
 }
 
+fn sample_spacing(view: &waveform::View) -> bool {
+    SamplePoints::Visible.for_view(view) == SamplePoints::Visible
+}
+
 #[cfg(test)]
 mod point_tests {
     use super::Settings;
@@ -1038,13 +1048,14 @@ mod point_tests {
         ] {
             let ruler: Settings =
                 serde_json::from_value(serde_json::json!({"showSampleRuler": true})).unwrap();
-            let visible = restored.stationary(playing, scrubbing);
+            let visible = restored.visible(playing, scrubbing);
             assert_eq!(visible.show_sample_points, points);
             assert!(!visible.show_sample_ruler);
-            let ruler_only = ruler.stationary(playing, scrubbing);
-            assert_eq!(ruler_only.show_sample_ruler, points);
+            let ruler_only = ruler.visible(playing, scrubbing);
+            assert_eq!(ruler_only.show_sample_ruler, !scrubbing);
             assert!(!ruler_only.show_sample_points);
-            assert!(!other.stationary(playing, scrubbing).enabled());
+            let disabled = other.visible(playing, scrubbing);
+            assert!(!disabled.show_sample_points && !disabled.show_sample_ruler);
             assert_eq!(
                 serde_json::to_value(ruler).unwrap()["showSampleRuler"],
                 true

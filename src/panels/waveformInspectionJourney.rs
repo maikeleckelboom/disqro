@@ -11,24 +11,26 @@ fn key(name: &'static str) -> PlatformInput {
     })
 }
 
-fn vertex(panel: &Waveform) -> Option<Point<Pixels>> {
+fn hover_point(panel: &Waveform) -> Option<Point<Pixels>> {
     let displayed = panel.displayed.borrow();
     let shown = displayed.as_ref()?;
     let layout = shown.layout;
-    let width = f64::from(f32::from(layout.bounds.size.width) * layout.scale);
-    let height = f64::from(f32::from(layout.bounds.size.height) * layout.scale);
+    // The fixture's signal is near mid-height. Hover well above the trace.
     let frame = shown.viewport.frame_at(0.35).round();
-    let x = (frame - shown.viewport.first) * width / shown.viewport.span;
-    for row in 0..height as u32 {
-        if let Some(hit) = panel.texture.sample_hit([x, f64::from(row)]) {
-            let y = height * (0.5 - 0.46 * f64::from(hit.stereo[0]).clamp(-1., 1.));
-            return Some(
-                layout.bounds.origin
-                    + point(px(x as f32 / layout.scale), px(y as f32 / layout.scale)),
-            );
-        }
-    }
-    None
+    let column = ((frame + 0.2 - shown.viewport.first) / shown.viewport.span) as f32;
+    let point = layout.bounds.origin
+        + point(
+            layout.bounds.size.width * column,
+            layout.bounds.size.height * 0.12,
+        );
+    let hit = panel.texture.sample_hit(layout.physical(point))?;
+    assert_eq!(hit.frame, frame as u64);
+    let below = Point {
+        y: layout.bounds.bottom() - layout.bounds.size.height * 0.12,
+        ..point
+    };
+    assert_eq!(panel.texture.sample_hit(layout.physical(below)), Some(hit));
+    Some(point)
 }
 
 struct Journey {
@@ -165,14 +167,14 @@ impl Journey {
                 if shown.span != 32. || !same_center(shown) {
                     return None;
                 }
-                vertex(p)
+                hover_point(p)
             })
             .await?;
         self.edit(cx, "32 samples").await?;
         self.capture(cx, "zoom-editor").await?;
         dispatch(cx, key("escape"))?;
         self.until(cx, "editor dismissed over decoded trace", |p, _, _| {
-            (p.zoom_editor.is_none() && vertex(p).is_some()).then_some(())
+            (p.zoom_editor.is_none() && hover_point(p).is_some()).then_some(())
         })
         .await?;
         self.capture(cx, "sample-points").await?;
@@ -187,7 +189,7 @@ impl Journey {
             (p.settings.show_sample_ruler
                 && p.displayed.borrow().as_ref()?.viewport.span == 32.
                 && p.displayed.borrow().as_ref()?.viewport.first.fract().abs() == 0.5
-                && vertex(p).is_none())
+                && hover_point(p).is_none())
             .then_some(())
         })
         .await?;
@@ -199,8 +201,10 @@ impl Journey {
                 cx.notify();
             })
         })??;
-        self.until(cx, "points restored alongside ruler", |p, _, _| vertex(p))
-            .await?;
+        self.until(cx, "points restored alongside ruler", |p, _, _| {
+            hover_point(p)
+        })
+        .await?;
         dispatch(
             cx,
             PlatformInput::MouseMove(MouseMoveEvent {
@@ -234,7 +238,7 @@ impl Journey {
             (p.player.read(cx).status.playing
                 && view.span == 32.
                 && view.first > initial.frame_at(0.5) + 32.
-                && vertex(p).is_none())
+                && hover_point(p).is_none())
             .then_some(())
         })
         .await?;
@@ -248,7 +252,7 @@ impl Journey {
         })??;
         self.until(cx, "restored sample points", |p, _, cx| {
             (!p.player.read(cx).status.playing)
-                .then(|| vertex(p))
+                .then(|| hover_point(p))
                 .flatten()
         })
         .await?;
@@ -264,13 +268,13 @@ impl Journey {
             })
             .await?;
         self.until(cx, "suppressed scrub points", |p, _, cx| {
-            (p.player.read(cx).waveform_grabbed() && vertex(p).is_none()).then_some(())
+            (p.player.read(cx).waveform_grabbed() && hover_point(p).is_none()).then_some(())
         })
         .await?;
         gesture.finish(crate::audio::scrub::End::Cancel);
         self.until(cx, "restored after scrub", |p, _, cx| {
             (!p.player.read(cx).waveform_grabbed())
-                .then(|| vertex(p))
+                .then(|| hover_point(p))
                 .flatten()
         })
         .await?;
@@ -291,7 +295,7 @@ impl Journey {
                 if layout.bounds.size.width == previous_width {
                     return None;
                 }
-                let point = layout.physical(vertex(p)?);
+                let point = layout.physical(hover_point(p)?);
                 assert!(p.texture.sample_hit(point).is_some());
                 // Fail allocation at a stable size. Intermediate resize targets
                 // can legitimately recover on the very next layout.
@@ -312,12 +316,12 @@ impl Journey {
             },
         )
         .await?;
-        self.until(cx, "resident vertices after target retry", |p, _, _| {
-            vertex(p)
+        self.until(cx, "resident samples after target retry", |p, _, _| {
+            hover_point(p)
         })
         .await?;
         let narrow = self
-            .until(cx, "resized sample", |p, _, _| vertex(p))
+            .until(cx, "resized sample", |p, _, _| hover_point(p))
             .await?;
         dispatch(
             cx,

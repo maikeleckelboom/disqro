@@ -4,7 +4,7 @@ use gpui_kit::component::ActiveTheme;
 use waveform::inspection::SampleHit;
 
 /// Movement only schedules a scene update. The paint callback independently
-/// resolves the vertex against the source and exact PCM of its own draw.
+/// resolves the sample column against the source and exact PCM of its own draw.
 pub(super) fn listen(
     panel: &WeakEntity<Waveform>,
     texture: Texture,
@@ -77,9 +77,6 @@ pub(super) fn paint_ruler(
                 .any(|block| block.sample(t.frame).is_some())
         })
         .peekable();
-    if ticks.peek().is_none() {
-        return;
-    }
     window.paint_quad(fill(
         Bounds::new(point(b.left(), top), size(b.size.width, px(RULER_HEIGHT))),
         m.chrome.opacity(0.87),

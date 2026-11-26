@@ -12,22 +12,22 @@ Click the visible-span readout in a Waveform panel, or focus it with Tab and pre
 
 The wheel and inline editor share the existing 32-frame minimum and 120-second maximum. Density inputs use the panel's registered device-pixel width. Each panel owns its zoom.
 
-Right-click a waveform and enable **Show Sample Points** or **Show Sample Ruler**. Each panel saves the two preferences independently. Both start disabled. Overlays appear while stationary with decoded PCM resident and at least eight physical pixels between adjacent frames. Playback and audible scrubbing hide them.
+Right-click a waveform and enable **Show Sample Points** or **Show Sample Ruler**. Each panel saves the two preferences independently. Both start disabled. Both overlays require at least eight physical pixels between adjacent frames. Sample points and measurements require resident PCM and a stationary view. The ruler stays visible during playback at sample zoom and follows the displayed samples. Audible scrubbing hides both overlays.
 
-Hover over either channel's dot to inspect the stereo frame. A dashed guide marks its position. The warm ring identifies L and the cool ring identifies R. The rings nest when the vertices coincide. The right edge of the header shows the absolute zero-based source frame and exact L/R amplitudes. The two channel fields are sized for the visible samples. Hold **Shift** over a sample to see its source time and sample rate. CUE recordings also show track and program time where space permits. Release Shift to return to the amplitudes. At very narrow widths, the header keeps as many complete fields as fit on one line. Frame divided by rate gives the exact source timestamp in seconds. The decimal is rounded to twelve places.
+Move across the waveform canvas to inspect the nearest visible stereo frame at the pointer’s horizontal position. A dashed guide marks its position. The warm ring identifies L and the cool ring identifies R. The rings nest when the vertices coincide. The right edge of the header shows the absolute zero-based source frame and exact L/R amplitudes. The two channel fields are sized for the visible samples. Hold **Shift** over a sample to see its source time and sample rate. CUE recordings also show track and program time where space permits. Release Shift to return to the amplitudes. At very narrow widths, the header keeps as many complete fields as fit on one line. Frame divided by rate gives the exact source timestamp in seconds. The decimal is rounded to twelve places.
 
 The ruler counts visible sample positions from **1**. Labels stay centered beneath their ticks. As space narrows, the ruler labels fewer ticks and leaves an edge tick unlabeled when its number would cross the panel boundary. A missing PCM block leaves a gap in the ruler at its true position.
 
 ## Qualification
 
-The Windows fixture uses a private test desktop, an isolated profile, in-process GPUI input, and the silent qualification master fader. It checks inline commit, Escape, blur, invalid input, centered zoom, stereo PCM values, 32-frame playback, scrub suppression, hit registration after resize, and recovery after a failed target allocation.
+The Windows fixture uses a private test desktop, an isolated profile, in-process GPUI input, and the silent qualification master fader. It checks inline commit, Escape, blur, invalid input, centered zoom, stereo PCM values from hover above and below the trace, 32-frame playback with the ruler visible, scrub suppression, hit registration after resize, and recovery after a failed target allocation.
 
 ```powershell
 cargo build --locked --features qualification
 python -B tools/qualifyWaveformInspection.py target/debug/disqro.exe <new-output-directory>
 ```
 
-On the AMD Radeon 780M, 32 consecutive hardware D3D11 renders of a moving 32-frame view matched the accepted engine byte for byte. Both builds rendered the same 48 kHz stereo fixture at 640 × 180 pixels with gain 1, an initial center of 800.375 frames, and a 200-frame advance per refresh. The concatenated 14,745,600 RGBA bytes had SHA-256 `2542892c34cca0811a99b34215b86465860773e4d835c256355018a5b60f05d6`. The reference was `22d740d4ee1c0fbc3a42435b59c015fabde30291` and the inspected engine was `203a2327230e617a85dab038a64dfb405638b5a4`.
+On the AMD Radeon 780M, 32 consecutive hardware D3D11 renders of a moving 32-frame view matched the accepted engine byte for byte. Both builds rendered the same 48 kHz stereo fixture at 640 × 180 pixels with gain 1, an initial center of 800.375 frames, and a 200-frame advance per refresh. The canvas-hover update repeated this check with both overlays disabled and produced the same bytes. The concatenated 14,745,600 RGBA bytes had SHA-256 `2542892c34cca0811a99b34215b86465860773e4d835c256355018a5b60f05d6`. The reference was `22d740d4ee1c0fbc3a42435b59c015fabde30291` and the inspected engine was `203a2327230e617a85dab038a64dfb405638b5a4`.
 
 The earlier zoom-editor image was captured while the text `32 samples` was pending. The recorded viewport still spanned 384,000 frames at 48 kHz. The green block was the eight-second envelope of the stationary-amplitude fixture at the source boundary. The journey now checks the uncommitted viewport and captures the editor after reopening it over resident PCM at 32 frames.
 
