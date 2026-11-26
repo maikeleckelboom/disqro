@@ -43,6 +43,9 @@ pub(crate) struct WaveTrack {
     pub overview: Arc<Page>,
     pub identity: PlaybackIdentity,
     pub seek: Option<WaveSeekAnchor>,
+    /// Source frames the deck may seek to: the playing chapter for Track,
+    /// every authored chapter continuing it in this source for Full CD.
+    pub navigable: std::ops::Range<usize>,
     pub frame: usize,
     presentation: Option<Presentation>,
     pub playing: bool,
@@ -86,6 +89,7 @@ impl Player {
             overview: self.shapes.get(index)?.track.clone(),
             identity,
             seek,
+            navigable: self.navigable(program, index),
             frame: segment.elapsed_frame(self.status.position),
             presentation: self.status.presentation.clone(),
             playing: self.status.playing,
@@ -95,6 +99,32 @@ impl Player {
                 .filter(|gesture| !gesture.closed() && gesture.anchor.identity == identity)
                 .and_then(|gesture| gesture.frame()),
         })
+    }
+
+    /// The frames of the chapters that continue `index` in its physical
+    /// source. Full CD reaches all of them whatever the queue holds.
+    fn navigable(&self, p: &Program, index: usize) -> std::ops::Range<usize> {
+        let segment = &p.segments[index];
+        if !self.disc_view() {
+            return segment.frames.clone();
+        }
+        let joined = |a: &crate::timeline::Segment, b: &crate::timeline::Segment| {
+            Arc::ptr_eq(&a.source, &b.source) && a.frames.end == b.frames.start
+        };
+        let mut first = index;
+        while first > 0 && joined(&p.segments[first - 1], &p.segments[first]) {
+            first -= 1;
+        }
+        let mut last = index;
+        while last + 1 < p.segments.len() && joined(&p.segments[last], &p.segments[last + 1]) {
+            last += 1;
+        }
+        p.segments[first].frames.start..p.segments[last].frames.end
+    }
+
+    fn program_tracks(&self) -> Option<crate::library::TrackList> {
+        let p = self.program.as_ref().filter(|_| self.disc_view())?;
+        Some(p.segments.iter().map(|s| s.track.clone()).collect())
     }
 
     pub(crate) fn waveform_grabbed(&self) -> bool {
@@ -116,14 +146,26 @@ impl Player {
         {
             return None;
         }
-        let (_, bounds) = crate::audio::scrub_run(&self.queue, &anchor.source)?;
-        let gesture = Arc::new(Gesture::new(
+        // Full CD navigates the authored program; Track keeps the contiguous
+        // queue sequence.
+        let program = self.program_tracks();
+        let bounds = match &program {
+            Some(program) => {
+                crate::audio::program_run(program, &anchor.source, &anchor.playable)?.1
+            }
+            None => crate::audio::scrub_run(&self.queue, &anchor.source)?.1,
+        };
+        let gesture = Gesture::new(
             self.transport.sender().scrub_control,
             anchor,
             origin,
             was_playing,
             bounds,
-        ));
+        );
+        let gesture = Arc::new(match program {
+            Some(program) => gesture.within_program(program),
+            None => gesture,
+        });
         match self
             .transport
             .send(Command::BeginWaveScrub(gesture.clone()), self.status.entry)
@@ -143,12 +185,34 @@ impl Player {
         frame: usize,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.wave_track().and_then(|track| track.seek).as_ref() != Some(&anchor)
-            || !anchor.playable.contains(&frame)
-        {
+        let Some(track) = self
+            .wave_track()
+            .filter(|track| track.seek.as_ref() == Some(&anchor))
+        else {
             return false;
+        };
+        if anchor.playable.contains(&frame) {
+            self.command(Command::SeekWave { anchor, frame }, cx);
+            return true;
         }
-        self.command(Command::SeekWave { anchor, frame }, cx);
+        // Another chapter of the Full CD program in this source.
+        let Some((p, chapter)) = self
+            .program
+            .as_ref()
+            .filter(|_| track.navigable.contains(&frame))
+            .and_then(|p| {
+                let chapter = p.segments.iter().position(|s| {
+                    Arc::ptr_eq(&s.source, &anchor.source) && s.frames.contains(&frame)
+                })?;
+                Some((p.clone(), chapter))
+            })
+        else {
+            return false;
+        };
+        match self.target_frame(&p, chapter, frame) {
+            Ok(command) => self.command(command, cx),
+            Err(reason) => cx.emit(PlayerEvent::Notice(reason.into())),
+        }
         true
     }
     pub(super) fn request_wave(&mut self) {

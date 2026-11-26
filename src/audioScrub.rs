@@ -106,6 +106,9 @@ pub(crate) struct Gesture {
     pub origin: f64,
     pub was_playing: bool,
     pub bounds: Range<usize>,
+    /// The authored program the gesture navigates in Full CD, or `None` for
+    /// the queue-scoped Track perspective.
+    pub program: Option<crate::library::TrackList>,
     control: Arc<Control>,
     end: AtomicU8,
     closed: AtomicU8,
@@ -125,10 +128,17 @@ impl Gesture {
             origin,
             was_playing,
             bounds,
+            program: None,
             control,
             end: AtomicU8::new(0),
             closed: AtomicU8::new(0),
         }
+    }
+
+    /// Navigates the program's chapters regardless of the queue sequence.
+    pub(crate) fn within_program(mut self, program: crate::library::TrackList) -> Self {
+        self.program = Some(program);
+        self
     }
 
     pub(crate) fn move_to(&self, frame: f64, previous: f64, velocity: f64, at: Instant) {

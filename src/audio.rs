@@ -905,6 +905,37 @@ pub(crate) fn scrub_run(
     Some((first..last + 1, allowed))
 }
 
+/// The authored chapters around the one spanning `playable` that continue
+/// each other in `source`, independent of the queue: their indices in
+/// `program` and the source frames they cover.
+pub(crate) fn program_run(
+    program: &[Arc<Track>],
+    source: &crate::timeline::Source,
+    playable: &Range<usize>,
+) -> Option<(Range<usize>, Range<usize>)> {
+    let ranges: Vec<_> = program.iter().map(|track| source.playable(track)).collect();
+    let at = ranges
+        .iter()
+        .position(|range| range.as_ref() == Some(playable))?;
+    let joined = |a: usize, b: usize| {
+        ranges[a]
+            .as_ref()
+            .zip(ranges[b].as_ref())
+            .is_some_and(|(a, b)| a.end == b.start)
+    };
+    let mut first = at;
+    while first > 0 && joined(first - 1, first) {
+        first -= 1;
+    }
+    let mut last = at;
+    while last + 1 < ranges.len() && joined(last, last + 1) {
+        last += 1;
+    }
+    let start = ranges[first].as_ref()?.start;
+    let end = ranges[last].as_ref()?.end;
+    Some((first..last + 1, start..end))
+}
+
 fn disc_start(t: &Track) -> u64 {
     t.disc.as_ref().map_or(0, |d| d.start)
 }
@@ -1735,8 +1766,7 @@ impl Engine {
             || self.status.playing != gesture.was_playing
             || gesture.ending() == Some(scrub::End::Cancel)
             || !self.accepts_wave_seek(&gesture.anchor, gesture.origin.floor() as usize)
-            || !scrub_run(&self.queue, &gesture.anchor.source)
-                .is_some_and(|(_, bounds)| bounds == gesture.bounds)
+            || self.scrub_bounds(&gesture).as_ref() != Some(&gesture.bounds)
         {
             gesture.close();
             return Ok(());
@@ -1794,6 +1824,17 @@ impl Engine {
             updated: Instant::now(),
         });
         self.update_scrub()
+    }
+
+    /// The frames a gesture may reach: the program's chapters in its source
+    /// for Full CD, the contiguous queue sequence for Track.
+    fn scrub_bounds(&self, gesture: &scrub::Gesture) -> Option<Range<usize>> {
+        let source = &gesture.anchor.source;
+        match &gesture.program {
+            Some(program) => program_run(program, source, &gesture.anchor.playable),
+            None => scrub_run(&self.queue, source),
+        }
+        .map(|(_, bounds)| bounds)
     }
 
     fn close_scrub(&mut self) -> Option<Arc<scrub::Gesture>> {
@@ -1865,17 +1906,31 @@ impl Engine {
             self.end_voice(End::SourceFailed);
             return Ok(());
         }
-        let Some((mut indices, bounds)) = scrub_run(&self.queue, source) else {
-            return Ok(());
-        };
-        if bounds != gesture.bounds {
+        if self.scrub_bounds(gesture).as_ref() != Some(&gesture.bounds) {
             return Ok(());
         }
         let frame = frame.round() as usize;
-        let Some((index, segment)) = indices.find_map(|index| {
-            let segment = source.playable(&self.queue.entries[index].track)?;
-            segment.contains(&frame).then_some((index, segment))
-        }) else {
+        let destination = if let Some(program) = &gesture.program {
+            // Full CD: the authored chapter, reconciled into the queue now.
+            let (mut chapters, _) =
+                program_run(program, source, &gesture.anchor.playable).unwrap_or((0..0, 0..0));
+            chapters
+                .find_map(|chapter| {
+                    let segment = source.playable(&program[chapter])?;
+                    segment.contains(&frame).then_some((chapter, segment))
+                })
+                .and_then(|(chapter, segment)| {
+                    Some((self.queue.program_destination(program, chapter)?, segment))
+                })
+        } else {
+            scrub_run(&self.queue, source).and_then(|(mut indices, _)| {
+                indices.find_map(|index| {
+                    let segment = source.playable(&self.queue.entries[index].track)?;
+                    segment.contains(&frame).then_some((index, segment))
+                })
+            })
+        };
+        let Some((index, segment)) = destination else {
             return Ok(());
         };
         self.detach_voice();
