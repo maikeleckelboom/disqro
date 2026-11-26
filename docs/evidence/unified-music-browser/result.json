@@ -5,5 +5,7 @@
   "back_forward_restored": true,
   "playback_continued": true,
   "independent_splits": true,
-  "responsive_cases": 5
+  "responsive_cases": 5,
+  "favorites_column_suppressed": true,
+  "multi_remove_preserved_ratings": true
 }
