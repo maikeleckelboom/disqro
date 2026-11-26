@@ -79,6 +79,12 @@ Use `--layouts split wide maximized` to compare the split view with a full-width
 
 Use `--modes posted default --close-layouts maximized` to compare the delivered policy with the ordinary posted scheduler. For manual acceptance, use the regular release at 240 Hz, watch steady playback near 0.500 seconds in the maximized layout, and check responsiveness while scrubbing plus speaker-to-screen synchronization.
 
+## Regression checks
+
+The delivered build passed local formatting, strict Clippy, 243 Disqro tests, and a fresh-profile startup and shutdown. The engine tests, focused Win32 pacing tests, and D3D11 WARP regression suite passed. The muted two-deck scrub and device-recovery journeys completed. In a quiet private comparison with 469 recorded pointer inputs per build, pointer-to-waveform draw p99 was 4.305 ms for the baseline and 4.400 ms for the delivered build.
+
+The delivered trace build produced 103 frozen native images and geometry files byte-identical to the accepted native baseline. The older Electron-reference gate still reports the same 20 historical differences. The hosted Disqro workflow failed while authenticating to the private Waveform Native dependency. Local locked builds used the verified remote revision.
+
 ## Build identity
 
 The accepted baseline pinned Waveform Native and the GPUI Windows patch to `aebd66b9de6bb2a9e1f1a60c093caeb711d9a654`. The final foreground comparison used `0e0202e2f34b99370ed952f7ad7d6999d134e81d` for both. The release and its trace companion pin both to `3d9a8f5149483b051df7f0219bf1cbaf4c4c2555`, with the same revision in the lockfile. This revision selects the tested early scheduler for the maximized high-refresh case.
