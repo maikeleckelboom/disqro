@@ -10,11 +10,11 @@ import shutil
 import subprocess
 import zipfile
 
-from privateDesktop import run as private_desktop
+from private_desktop import run as private_desktop
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT / "tools" / "waveformParity"
+TOOLS = ROOT / "tools" / "waveform_parity"
 REFERENCE = "8107c46fd9c7cbb697927a59def9a52f9079dc4f"
 REJECTED = "a2e1590882fa9ff5b03d0ba9c5ee566590a68119"
 REVISIONS = {
@@ -69,7 +69,7 @@ def prepare(args):
                 "crates", "apps/desktop/native")
     example = native / "crates" / "playback" / "examples" / "disqro-oracle.rs"
     example.parent.mkdir(exist_ok=True)
-    stage_file(example, (TOOLS / "referenceAnalysis.rs").read_bytes())
+    stage_file(example, (TOOLS / "reference_analysis.rs").read_bytes())
     target = work / "build"
     command("cargo", "build", "--release", "--locked", "-p", "dekzer-playback",
             "--example", "disqro-oracle", "--target-dir", target, cwd=native)
@@ -140,11 +140,11 @@ def historical_analyzer(dekzer, work, name):
                 "crates", "apps/desktop/native")
     folder = native / "crates" / "playback" / "examples" / f"disqro-{name}"
     folder.mkdir(parents=True, exist_ok=True)
-    runner = (TOOLS / "historicalAnalysis.rs").read_text(encoding="utf-8")
+    runner = (TOOLS / "historical_analysis.rs").read_text(encoding="utf-8")
     if name == "ribbon":
         begin, end = runner.index("mod octave {"), runner.index("#[derive(Deserialize)]")
         runner = runner[:begin] + "mod octave;\n\n" + runner[end:]
-        shutil.copyfile(TOOLS / "historicalOctave.rs", folder / "octave.rs")
+        shutil.copyfile(TOOLS / "historical_octave.rs", folder / "octave.rs")
     (folder / "main.rs").write_text(runner, encoding="utf-8")
     if name == "spectral":
         # This revision's playback crate had no serde_json dev dependency.

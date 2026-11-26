@@ -14,7 +14,6 @@ mod diagnostics;
 mod disclosure;
 mod discovery;
 mod folders;
-#[path = "levelMeter.rs"]
 mod level_meter;
 mod levels;
 mod library;
@@ -30,28 +29,20 @@ mod queue;
 mod recording;
 mod release;
 mod signal;
-#[path = "spectralHistory.rs"]
 mod spectral_history;
 mod spectrum;
-#[path = "spectrumWorker.rs"]
 mod spectrum_worker;
-#[path = "stereoField.rs"]
 mod stereo_field;
 mod store;
 mod system;
 mod table;
 mod theme;
 mod timeline;
-#[path = "waveformDetail.rs"]
 mod waveform_detail;
-#[path = "waveformPortAnalysis.rs"]
 mod waveform_port_analysis;
 #[cfg(feature = "qualification")]
-#[path = "waveformPortQualification.rs"]
 mod waveform_port_qualification;
-#[path = "waveformRender.rs"]
 mod waveform_render;
-#[path = "waveform.rs"]
 mod waveform_source;
 mod workspace;
 

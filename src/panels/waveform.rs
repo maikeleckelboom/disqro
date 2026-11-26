@@ -30,16 +30,12 @@ use std::{
     time::Instant,
 };
 
-#[path = "waveformInspection.rs"]
 mod inspection;
 #[cfg(all(windows, feature = "qualification"))]
-#[path = "waveformInspectionJourney.rs"]
 mod inspection_journey;
 use waveform::inspection::SamplePoints;
 
-#[path = "waveformScrub.rs"]
 mod scrub;
-#[path = "waveformZoom.rs"]
 mod zoom;
 use scrub::Press;
 

@@ -387,5 +387,4 @@ fn measure_overview(
 }
 
 #[cfg(test)]
-#[path = "waveformBaselineTests.rs"]
 mod baseline_tests;

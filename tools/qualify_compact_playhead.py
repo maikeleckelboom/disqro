@@ -6,7 +6,7 @@ It reports how often the playhead moves, its steps in device pixels, and
 whether it stops while paused or hidden. With --deck it also opens a
 detailed waveform, so both playheads run on one clock.
 
-    python tools/qualifyCompactPlayhead.py <disqro.exe> <output> [--deck] [--seconds 6]
+    python tools/qualify_compact_playhead.py <disqro.exe> <output> [--deck] [--seconds 6]
 """
 import argparse
 import ctypes as C
@@ -22,10 +22,10 @@ import time
 import traceback
 import wave
 
-from privateDesktop import run
-from qualifySpectrum import find_window, profile, user32
-from qualifyWaveform import counter_frequency, performance_counter, settings
-from qualifyWaveformMotion import quantiles, real, records
+from private_desktop import run
+from qualify_spectrum import find_window, profile, user32
+from qualify_waveform import counter_frequency, performance_counter, settings
+from qualify_waveform_motion import quantiles, real, records
 
 
 def tone(path, seconds, rate=44100):

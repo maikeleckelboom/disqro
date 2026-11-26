@@ -38,7 +38,7 @@ To replay accepted matches from the local checkpoint against the shader, build w
 
 ```powershell
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformParity.py --dekzer C:/dev/dekzer --work .local/waveform-parity/oracle checkpoint-gpu --checkpoint .local/waveform-parity/checkpoint --exe target/release/disqro.exe --output .local/waveform-native-gpu/replay
+python -B tools/qualify_waveform_parity.py --dekzer C:/dev/dekzer --work .local/waveform-parity/oracle checkpoint-gpu --checkpoint .local/waveform-parity/checkpoint --exe target/release/disqro.exe --output .local/waveform-native-gpu/replay
 ```
 
 ## Loading and performance protocol
@@ -66,7 +66,7 @@ cargo test --release --locked timeline_waveform_baseline -- --ignored --nocaptur
 The native journey uses a muted playback graph, two detail panels, Full CD and an isolated profile. Its offscreen mode uses a private desktop. The foreground mode requires permission to bring the test player to the front. Native diagnostic draws and input handling are timed independently from offscreen D3D11 timestamp queries and foreground DXGI display statistics. DXGI's flip-model counters track the latest observation and can have gaps during resizing or compositor transitions. They cannot establish hardware input-to-photon latency. [Microsoft's DXGI timing API](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiswapchain-getframestatistics)
 
 ```powershell
-python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-native-gpu/native
+python -B tools/qualify_waveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-native-gpu/native
 ```
 
 The GPU timestamp run used 180 offscreen zoom updates per view with warm source buffers. The CPU columns measure waveform preparation and submission. GPU timestamps bracket the detail compute passes and Stroke draw on the Radeon 780M. This test excludes GPUI composition, presentation, and output sampling.

@@ -72,7 +72,7 @@ Close the player to finish the capture, then run this from the Disqro checkout o
 ```powershell
 $stageTrace = Join-Path $traceFolder 'stages.csv'
 $displayTrace = Join-Path $traceFolder 'dxgi.csv'
-python -B tools/qualifyWaveformMotion.py --trace $stageTrace --dxgi $displayTrace
+python -B tools/qualify_waveform_motion.py --trace $stageTrace --dxgi $displayTrace
 Remove-Item Env:DISQRO_PRESENTATION_STAGES, Env:DISQRO_DXGI_TRACE, Env:DISQRO_GPU_TIMESTAMPS
 ```
 

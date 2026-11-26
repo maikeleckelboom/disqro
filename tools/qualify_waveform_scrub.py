@@ -18,9 +18,9 @@ import time
 import traceback
 import wave
 
-from privateDesktop import run
-from qualifySpectrum import W, click_control, control_centers, find_window, screenshot, user32
-from qualifyWaveform import counter_frequency, drive, percentiles, performance_counter, settings, wheel
+from private_desktop import run
+from qualify_spectrum import W, click_control, control_centers, find_window, screenshot, user32
+from qualify_waveform import counter_frequency, drive, percentiles, performance_counter, settings, wheel
 
 
 def synthetic_cue(directory):

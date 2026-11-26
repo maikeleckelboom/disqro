@@ -13,7 +13,6 @@ use std::{
 };
 
 #[cfg(test)]
-#[path = "discoveryTests.rs"]
 mod tests;
 
 /// The opened folder's own subfolders, listed once per scan.

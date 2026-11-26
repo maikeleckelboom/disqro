@@ -65,7 +65,7 @@ The separate two-deck private run exercised live device recreation, an injected 
 
 ```powershell
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
+python -B tools/qualify_waveform.py target/release/disqro.exe .local/waveform-mission/fixtures/disc.cue .local/waveform-lifecycle --exercise-deck-lifecycle
 ```
 
 ## Replay after natural completion
@@ -84,7 +84,7 @@ Full CD continues to show the authored program. A seek can select any chapter in
 
 ```powershell
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformTransport.py target/release/disqro.exe .local/waveform-transport
+python -B tools/qualify_waveform_transport.py target/release/disqro.exe .local/waveform-transport
 ```
 
 The native runs use a private desktop and muted output. The release build also passed all 103 frozen Stroke views and 45 music views. In the two-deck lifecycle recheck, the paused surface repainted in 519 ms after the injected allocation failure. There was zero waveform work after minimize or closure, and audio callbacks continued after both decks closed.
@@ -115,7 +115,7 @@ cargo build --release --locked --features qualification
 $env:DISQRO_WAVE_BASELINE_SOURCE=(Resolve-Path .local/waveform-mission/fixtures/disc.cue).Path
 $env:DISQRO_WAVE_BASELINE_DETAIL='1'
 cargo test --release --locked --features qualification timeline_waveform_baseline -- --ignored --nocapture
-python -B tools/qualifyWaveform.py target/release/disqro.exe $env:DISQRO_WAVE_BASELINE_SOURCE .local/recovery --exercise-host-recovery
+python -B tools/qualify_waveform.py target/release/disqro.exe $env:DISQRO_WAVE_BASELINE_SOURCE .local/recovery --exercise-host-recovery
 ```
 
 For composed-frame qualification, provide Dekzer's `present-probe.exe` with `--foreground --display-probe PATH`. Supply a new output directory each time. Use `--warm-cache` with the first run's `Cache` directory for the second pass. To replay the frozen visual fixtures, use the checkpoint command in the native Stroke record. [Parity fixture workflow](waveform-native-gpu.md#visual-qualification)

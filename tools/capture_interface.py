@@ -5,7 +5,7 @@ Music Browser side by side, and saves native captures of their rows,
 disclosures and hover states. Every input goes only to the window this run
 creates; playback stays silent and the listener's own profile is untouched.
 
-    python tools/captureInterface.py <disqro.exe> <test.exe> <output> [--scale 100|native]
+    python tools/capture_interface.py <disqro.exe> <test.exe> <output> [--scale 100|native]
 """
 import argparse
 import ctypes as C
@@ -18,9 +18,9 @@ import time
 import traceback
 from ctypes import wintypes as W
 
-from privateDesktop import run
-from qualifyMusicBrowser import close, panel, tabs, wait_for
-from qualifySpectrum import click_control, find_window, screenshot
+from private_desktop import run
+from qualify_music_browser import close, panel, tabs, wait_for
+from qualify_spectrum import click_control, find_window, screenshot
 
 user32 = C.windll.user32
 

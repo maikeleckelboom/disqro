@@ -326,5 +326,4 @@ impl Field {
 }
 
 #[cfg(test)]
-#[path = "stereoFieldTests.rs"]
 mod tests;

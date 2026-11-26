@@ -51,10 +51,10 @@ Its original tiered worker strips are a separate presentation path.
 
 | Dekzer source | Recovered behavior | Disqro implementation |
 | --- | --- | --- |
-| `crates/playback/src/waveform.rs` and `waveform_detail.rs` | Half-open source buckets. Signed stereo extrema use the lowest and highest channel values. Earliest frame wins ties. Endpoints and RMS belong to whole columns. Stroke uses 32-frame evidence leaves and optionally finer dyadic leaves. Absolute source witnesses survive clipped CUE edges. | `src/waveformPortAnalysis.rs` |
+| `crates/playback/src/waveform_source.rs` and `waveform_detail.rs` | Half-open source buckets. Signed stereo extrema use the lowest and highest channel values. Earliest frame wins ties. Endpoints and RMS belong to whole columns. Stroke uses 32-frame evidence leaves and optionally finer dyadic leaves. Absolute source witnesses survive clipped CUE edges. | `src/waveform_port_analysis.rs` |
 | `crates/playback/src/waveform_bands.rs` | Four second-order Butterworth sections, with low-pass 200 Hz, middle high-pass 200 then low-pass 2500 Hz, and high-pass 2500 Hz. Independent stereo f64 filter states. Track-local 200 ms preroll for detail, clipped at a real boundary. Each band's absolute peak and mean of 12 ms causal smoothed stereo power are independent. RMS is the square root of the bucket power. | `src/waveformFilters.rs` |
 | `crates/playback/src/waveform_octave.rs` | Stroke takes `(L+R)/2` in f64 and symmetric Hann512 with a 256-frame source hop. At cell `k`, the read starts at `256k − 256`. Missing material outside the playable boundaries is zero-padded. FFT bins split at `[1,3,5,9,17,33,65,129,257]`. Power scale is `16 / (512 × Σ(window²))`. Detail measurements stay on the native 44.1 or 48 kHz grid. | `src/waveformOctave.rs` |
-| `apps/desktop/native/src/waveform.rs`, `waveform-model.ts`, `waveformGeometry.ts`, and `waveformPages.ts` | 262,144-frame evidence tiles reuse 32-frame leaves and octave cells across zoom. Denser leaves refine narrow cores, with PCM refinement for held intervals that lack useful witnesses. A cell sees its own interval and one neighbor on either side. Colour requests carry their own halo. | `src/waveform.rs`, `src/waveformDetail.rs`, and `src/waveformRender.rs` |
+| `apps/desktop/native/src/waveform_source.rs`, `waveform-model.ts`, `waveformGeometry.ts`, and `waveformPages.ts` | 262,144-frame evidence tiles reuse 32-frame leaves and octave cells across zoom. Denser leaves refine narrow cores, with PCM refinement for held intervals that lack useful witnesses. A cell sees its own interval and one neighbor on either side. Colour requests carry their own halo. | `src/waveform_source.rs`, `src/waveform_detail.rs`, and `src/waveform_render.rs` |
 | `apps/desktop/src/waveformStroke.ts` | Geometry uses whole source blocks counted from the playable segment's zero. At 48 kHz the anchor densities are 45, 90, 180 and 360 px/s. The 360 px/s block has 133 frames, skip 1, skip phase 0 and screen delta 0.39 px. The 44.1 kHz model has one measured 180 px/s anchor, a 122-frame block at 360 px/s, skip 1.001436, skip phase 1.02 and screen delta −0.19 px. Screen boundaries round to physical pixels. Source boundaries interpolate in projected time on a logarithmic density axis, then ceil once. Exact anchors use their original integer boundaries. | `src/waveformStroke.rs` |
 | `apps/desktop/src/waveformSourceCells.ts`, `waveformSourceTruth.ts` | The finest available evidence owns each disjoint source span. An extremum affects a cell only if its witness belongs to that intersection. A constant span proves the value across its range. Missing coverage and held coverage without usable witnesses have separate states. Exact silence has no body. | `src/waveformStroke.rs` |
 | `apps/desktop/src/waveformStrokeColour.ts` | Model time comes from the nominal block law at the physical column centre, then shifts by −60 source frames for colour only. Compress each band's square-root power using `log1p(exp(K) × amplitude) / log1p(exp(K))`, with `K = 2.8606101989383417`. Round that encoding to f32. Each of three adjacent hop cells contributes eight coefficients to each RGB channel. Fold and store in f32, interpolate adjacent folded cells, clamp each channel to 40–255, then apply intensity about the 150-code dark neutral. | `src/waveformStroke.rs` |
@@ -140,10 +140,10 @@ $recording = 'path-to-authorized-recording.wav'
 $reference = '.local/waveform-parity/recording-reference'
 $comparison = '.local/waveform-parity/recording-comparison'
 
-python -B tools/qualifyWaveformParity.py --dekzer $dekzer --work $work prepare
+python -B tools/qualify_waveform_parity.py --dekzer $dekzer --work $work prepare
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformParity.py --dekzer $dekzer --work $work replay --audio $recording --center 79 --output $reference
-python -B tools/qualifyWaveformParity.py --dekzer $dekzer --work $work compare --reference $reference --audio $recording --exe target/release/disqro.exe --output $comparison
+python -B tools/qualify_waveform_parity.py --dekzer $dekzer --work $work replay --audio $recording --center 79 --output $reference
+python -B tools/qualify_waveform_parity.py --dekzer $dekzer --work $work compare --reference $reference --audio $recording --exe target/release/disqro.exe --output $comparison
 ```
 
 The manifest records actual physical dimensions, DPR, source frames, gain,
@@ -165,7 +165,7 @@ It exports source boundaries, band energies and peaks, octave cells, leaf
 witnesses, per-column geometry and RGB, final pixels and an amplified
 absolute difference. An independent decode can hash both applications'
 stereo f32 PCM. The frozen limits are in
-[`tolerances.json`](../tools/waveformParity/tolerances.json). Source-cell
+[`tolerances.json`](../tools/waveform_parity/tolerances.json). Source-cell
 edges, extrema and leaf witnesses must match exactly. Original Stroke
 geometry has a 0.002-device-pixel ceiling, colour 0.005 code and final
 channels two codes. Canvas views have separate active-pixel P99 and

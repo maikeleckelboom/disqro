@@ -56,7 +56,7 @@ The matched output establishes stereo tone continuity at the process-loopback bo
 
 ## Docking, silence and transport
 
-The CPAL transport fixture separately verified that the PCM epoch remains stable across an adjacent CUE chapter and advances on seek. It exercised mute, pause, resume, stop, a burst of seeks and replacement with a 96 kHz source. Synthetic effect and worker fixtures verified reset and recalibration when the output sample rate itself changes. [Transport fixture](../src/audioTests.rs) · [Capture and rate fixtures](../src/spectrumWorker.rs)
+The CPAL transport fixture separately verified that the PCM epoch remains stable across an adjacent CUE chapter and advances on seek. It exercised mute, pause, resume, stop, a burst of seeks and replacement with a 96 kHz source. Synthetic effect and worker fixtures verified reset and recalibration when the output sample rate itself changes. [Transport fixture](../src/audio/tests.rs) · [Capture and rate fixtures](../src/spectrum_worker.rs)
 
 Native Windows UI Automation opened Spectrum from the panel picker, switched to Right and the bass range, opened a second instance, chose Bands, and split the tab group down. Selecting the Queue tab released the hidden plot's demand. Two successive two-second intervals showed no capture or FFT while callbacks continued. Reselecting the tab resumed the signal. A restart restored the two distinct IDs, split and settings. Closing both panels left the same decoder producing audio and capture stopped. The browser was filtered during playback, Track and Full CD were switched, and eight waveform seeks produced eight replacement voices with zero device, decoder or capture errors. Three unchanged position samples occurred across those seeks. The interactive trace recorded a single maximum renderer budget fraction of 55.2% with UI Automation attached. The steady trials above used the final release build without an attached automation client. [Interaction](evidence/spectrum/interaction.csv) · [Restart and close trace](evidence/spectrum/restored-trace.csv)
 
@@ -84,7 +84,7 @@ Both adapted UI previews also played the test disc with two independently config
 
 ## Reproduction
 
-Use the repository-pinned Rust toolchain on Windows. The desktop measurement helper uses Python 3 and Pillow. Supply a FLAC or CUE that references accessible media and use a new output directory for each trial. Its CSVs contain process CPU, window-thread CPU, private memory, callback and decode counters, capture frames and drops, transform and publication counts, and maximum timings. Its screenshot comes from the running native window. [Desktop harness](../tools/qualifySpectrum.py)
+Use the repository-pinned Rust toolchain on Windows. The desktop measurement helper uses Python 3 and Pillow. Supply a FLAC or CUE that references accessible media and use a new output directory for each trial. Its CSVs contain process CPU, window-thread CPU, private memory, callback and decode counters, capture frames and drops, transform and publication counts, and maximum timings. Its screenshot comes from the running native window. [Desktop harness](../tools/qualify_spectrum.py)
 
 ```powershell
 cargo build --locked --release
@@ -95,8 +95,8 @@ cargo test --locked --release signal::tests::time_observation -- --ignored --noc
 
 $disc = 'D:\Music\disc.cue'
 cargo build --locked --release --features qualification
-python tools/qualifySpectrum.py two target/release/disqro.exe $disc .local/spectrum-two
-python tools/qualifySpectrum.py soak target/release/disqro.exe $disc .local/spectrum-soak
+python tools/qualify_spectrum.py two target/release/disqro.exe $disc .local/spectrum-two
+python tools/qualify_spectrum.py soak target/release/disqro.exe $disc .local/spectrum-soak
 $env:DISQRO_SOAK_SOURCE = $disc
 $env:DISQRO_PLAYBACK_TRACE = "$PWD/.local/engine-soak.csv"
 cargo test --locked --release audio::tests::sustained_output_observation -- --exact --ignored --nocapture

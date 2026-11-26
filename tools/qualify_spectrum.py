@@ -426,7 +426,7 @@ if __name__ == "__main__":
                     traceback.print_exc(file=log)
             raise
     else:
-        from privateDesktop import run
+        from private_desktop import run
         if args.output.exists():
             parser.error("Use a new directory for each qualification")
         run([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--desktop-worker"], 720)

@@ -24,13 +24,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[path = "audioClock.rs"]
 mod clock;
 
 pub use crate::recording::Recording;
 pub(crate) use clock::Position as RendererPosition;
 
-#[path = "audioScrub.rs"]
 pub(crate) mod scrub;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
@@ -2217,5 +2215,4 @@ impl Engine {
 }
 
 #[cfg(test)]
-#[path = "audioTests.rs"]
 pub(crate) mod tests;

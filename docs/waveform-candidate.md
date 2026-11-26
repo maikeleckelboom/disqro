@@ -62,5 +62,5 @@ Reproduce the isolated control run with the existing qualification flag and a fr
 
 ```powershell
 cargo build --release --locked --features qualification
-python tools/qualifyWaveform.py target/release/disqro.exe .local/waveform-mission/fixtures/control.wav .local/waveform-mission/native-replay
+python tools/qualify_waveform.py target/release/disqro.exe .local/waveform-mission/fixtures/control.wav .local/waveform-mission/native-replay
 ```

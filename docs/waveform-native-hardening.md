@@ -87,7 +87,7 @@ $local = 'C:/dev/disqro/.local/waveform-native-hardening'
 ```
 
 The local wrapper validates the locked executable and fixture hashes in
-`prepared-timing.json` before invoking `tools/qualifyWaveformLoading.py`.
+`prepared-timing.json` before invoking `tools/qualify_waveform_loading.py`.
 The runner also accepts these inputs directly for reproduction elsewhere.
 
 Physical audibility, endpoint behavior outside the muted harness, physical

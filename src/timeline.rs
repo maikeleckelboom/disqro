@@ -387,5 +387,4 @@ fn describe(
 }
 
 #[cfg(test)]
-#[path = "timeline_tests.rs"]
 mod tests;

@@ -48,7 +48,6 @@ impl Plot {
         cx.notify();
     }
 }
-#[path = "waterfall.rs"]
 mod waterfall;
 const PAPER: [u8; 3] = [16, 20, 27];
 const EMBER: [[u8; 3]; 6] = [
@@ -439,7 +438,6 @@ impl SpectralScene<'_> {
         }
     }
 }
-#[path = "fieldGeometry.rs"]
 mod field_geometry;
 
 fn field_plot(

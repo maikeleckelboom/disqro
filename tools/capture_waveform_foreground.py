@@ -14,10 +14,10 @@ import tkinter as tk
 from tkinter import ttk
 from uuid import uuid4
 
-from analyzeWaveformForeground import analyze_take, summarize
-from qualifySpectrum import GpuTime, W, find_window, kernel, sample, user32
-from qualifyWaveform import counter_frequency, performance_counter, settings
-from qualifyWaveformMotion import Record, exact_zoom, real, zoom_controls
+from analyze_waveform_foreground import analyze_take, summarize
+from qualify_spectrum import GpuTime, W, find_window, kernel, sample, user32
+from qualify_waveform import counter_frequency, performance_counter, settings
+from qualify_waveform_motion import Record, exact_zoom, real, zoom_controls
 
 
 SPANS = ("6.000", "2.000", "1.799", "1.000", "0.500")

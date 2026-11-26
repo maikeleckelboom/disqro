@@ -24,10 +24,10 @@ cargo clippy --locked --all-targets --features qualification -- -D warnings
 cargo test --locked
 cargo test --locked six_figure_listening_snapshot -- --ignored --nocapture
 cargo build --locked --release --features qualification
-python -B tools/captureInterface.py <qualification-exe> <test-exe> <capture-directory>
-python -B tools/qualifyMusicBrowser.py <qualification-exe> <test-exe> <capture-directory>
-python -B tools/qualifyCompactPlayhead.py <qualification-exe> <capture-directory> --deck
-python -B tools/qualifyWaveformScrub.py <qualification-exe> <capture-directory>
+python -B tools/capture_interface.py <qualification-exe> <test-exe> <capture-directory>
+python -B tools/qualify_music_browser.py <qualification-exe> <test-exe> <capture-directory>
+python -B tools/qualify_compact_playhead.py <qualification-exe> <capture-directory> --deck
+python -B tools/qualify_waveform_scrub.py <qualification-exe> <capture-directory>
 ```
 
 Native screenshots record their measured window DPI. Compare playback traces under matched fixture, backend, and window conditions. Private-desktop draw cadence measures application behavior. Physical display cadence and audible acceptance require a foreground session. [Windows presentation qualification](playback-presentation.md)

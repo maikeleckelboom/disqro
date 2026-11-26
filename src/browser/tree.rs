@@ -2385,5 +2385,4 @@ impl Browser {
 }
 
 #[cfg(test)]
-#[path = "treeTests.rs"]
 mod tests;

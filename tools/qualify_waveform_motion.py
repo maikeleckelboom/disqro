@@ -22,10 +22,10 @@ import time
 import traceback
 from typing import NamedTuple
 
-from privateDesktop import run
-from qualifySpectrum import (GpuTime, W, click_control, find_window,
+from private_desktop import run
+from qualify_spectrum import (GpuTime, W, click_control, find_window,
                              kernel, sample, user32)
-from qualifyWaveform import (counter_frequency, gpu_memory, performance_counter,
+from qualify_waveform import (counter_frequency, gpu_memory, performance_counter,
                              settings, wheel)
 
 DECK = (0.62, 0.3)

@@ -36,5 +36,5 @@ The same release binary passed 103 frozen Stroke views and 45 additional music v
 ```powershell
 cargo test --locked --features qualification scrub
 cargo build --release --locked --features qualification
-python -B tools/qualifyWaveformScrub.py target/release/disqro.exe .local/waveform-scrub-qualification
+python -B tools/qualify_waveform_scrub.py target/release/disqro.exe .local/waveform-scrub-qualification
 ```

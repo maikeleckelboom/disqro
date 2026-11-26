@@ -20,9 +20,9 @@ from array import array
 
 from PIL import Image, ImageChops
 
-from privateDesktop import run
-from qualifySpectrum import find_window, screenshot
-from qualifyWaveform import settings
+from private_desktop import run
+from qualify_spectrum import find_window, screenshot
+from qualify_waveform import settings
 
 
 def measure(exe, folder, band, control_wav):

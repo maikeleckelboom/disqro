@@ -1571,7 +1571,6 @@ impl Browser {
 }
 
 #[cfg(all(test, windows))]
-#[path = "navigationTests.rs"]
 mod native_tests;
 
 /// Continues the CD of a queue entry from the program Disqro reads for it,

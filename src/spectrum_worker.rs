@@ -24,7 +24,6 @@ pub struct Reading {
     pub stereo: Stereo,
     pub published: Instant,
 }
-#[path = "visualStreams.rs"]
 mod visual_streams;
 use visual_streams::Streams;
 pub use visual_streams::{Delivery, Payload, Request, VisualFrame};
@@ -451,5 +450,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "visualizationTests.rs"]
 mod visualization_tests;

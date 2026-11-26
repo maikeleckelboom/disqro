@@ -14,8 +14,8 @@ import sys
 import time
 import traceback
 
-from privateDesktop import run
-from qualifySpectrum import (GpuTime, W, click_control, control_centers, find_window, kernel,
+from private_desktop import run
+from qualify_spectrum import (GpuTime, W, click_control, control_centers, find_window, kernel,
                              profile, sample, screenshot, user32)
 
 

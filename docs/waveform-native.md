@@ -62,7 +62,7 @@ library, queue and listening data are untouched.
 
 The original integration's locked suite passed with 210 tests. The
 release build with `qualification`
-passed all 103 frozen Stroke views through `tools/qualifyWaveformParity.py
+passed all 103 frozen Stroke views through `tools/qualify_waveform_parity.py
 checkpoint-gpu`, byte-identical to the previous production build, and the
 overview digests of `timeline_waveform_baseline` are unchanged on all
 fixtures. The private-desktop journeys passed: two decks, deck lifecycle

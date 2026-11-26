@@ -37,7 +37,7 @@ FLAC or CUE fixture.
 
 ```powershell
 cargo build --locked --release --features qualification
-python -B tools/qualifyWaveformMotion.py target/release/disqro.exe <source.cue> <output> --residency --panels 2 --reverse
+python -B tools/qualify_waveform_motion.py target/release/disqro.exe <source.cue> <output> --residency --panels 2 --reverse
 ```
 
 Use `--reactive` for the same build with read-ahead disabled and `--warm-from`

@@ -16,9 +16,9 @@ import time
 import traceback
 import wave
 
-from privateDesktop import run
-from qualifySpectrum import W, click_control, control_centers, find_window, screenshot, user32
-from qualifyWaveform import performance_counter, settings
+from private_desktop import run
+from qualify_spectrum import W, click_control, control_centers, find_window, screenshot, user32
+from qualify_waveform import performance_counter, settings
 
 
 CASES = ("replay", "single", "multiple", "only")

@@ -367,5 +367,4 @@ impl Ballistics {
 }
 
 #[cfg(test)]
-#[path = "spectrumTests.rs"]
 mod tests;

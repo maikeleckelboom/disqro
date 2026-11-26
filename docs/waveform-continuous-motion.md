@@ -29,7 +29,7 @@ the reported durations register within 0.0025 px of the requested origin
 
 ## Native qualification
 
-`tools/qualifyWaveformMotion.py` plays the 75-minute CUE fixture muted on a
+`tools/qualify_waveform_motion.py` plays the 75-minute CUE fixture muted on a
 private desktop with one deck (1,215 device pixels), zooms out to 120 s and
 in one wheel notch at a time, and holds each duration for four seconds. It
 compares the `e758d7d` qualification build with this branch on the same

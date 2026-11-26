@@ -14,9 +14,9 @@ import sys
 import time
 import traceback
 
-from privateDesktop import run
-from qualifyMusicBrowser import browser_states, close, launch, panel, tabs, wait_for
-from qualifySpectrum import click_control, control_centers, find_window, screenshot
+from private_desktop import run
+from qualify_music_browser import browser_states, close, launch, panel, tabs, wait_for
+from qualify_spectrum import click_control, control_centers, find_window, screenshot
 from ctypes import wintypes as W
 
 FOLDERS = 4200

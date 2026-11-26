@@ -11,8 +11,8 @@ import time
 import wave
 
 import numpy as np
-import qualifySpectrum as q
-from privateDesktop import run
+import qualify_spectrum as q
+from private_desktop import run
 
 
 # name, signal, axes, ink, physical window width/height, injected DPI (0 = actual)

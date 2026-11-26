@@ -24,7 +24,7 @@ The Windows fixture uses a private test desktop, an isolated profile, in-process
 
 ```powershell
 cargo build --locked --features qualification
-python -B tools/qualifyWaveformInspection.py target/debug/disqro.exe <new-output-directory>
+python -B tools/qualify_waveform_inspection.py target/debug/disqro.exe <new-output-directory>
 ```
 
 On the AMD Radeon 780M, 32 consecutive hardware D3D11 renders of a moving 32-frame view matched the accepted engine byte for byte. Both builds rendered the same 48 kHz stereo fixture at 640 × 180 pixels with gain 1, an initial center of 800.375 frames, and a 200-frame advance per refresh. The canvas-hover update repeated this check with both overlays disabled and produced the same bytes. The concatenated 14,745,600 RGBA bytes had SHA-256 `2542892c34cca0811a99b34215b86465860773e4d835c256355018a5b60f05d6`. The reference was `22d740d4ee1c0fbc3a42435b59c015fabde30291` and the inspected engine was `203a2327230e617a85dab038a64dfb405638b5a4`.

@@ -1,4 +1,4 @@
-//! Compiled as an example inside the pinned Dekzer checkout by qualifyWaveformParity.py.
+//! Compiled as an example inside the pinned Dekzer checkout by qualify_waveform_parity.py.
 use dekzer_playback::{
     Decoder,
     waveform::{ANALYSIS, Analyzer, Page},

@@ -6,7 +6,7 @@ then cut to that chapter alone and, optionally, an unrelated recording, and
 the player restored. In the Track perspective the waveform must end where
 the chapter ends. With --full-cd the authored program continues instead.
 
-    python tools/captureTimelineBoundary.py <disqro.exe> <output> [--unrelated] [--full-cd]
+    python tools/capture_timeline_boundary.py <disqro.exe> <output> [--unrelated] [--full-cd]
 """
 import argparse
 import json
@@ -17,10 +17,10 @@ import sys
 import time
 import traceback
 
-from privateDesktop import run
-from qualifySpectrum import find_window, screenshot, user32
-from qualifyWaveform import settings
-from qualifyWaveformScrub import rows, synthetic_cue, wait_for
+from private_desktop import run
+from qualify_spectrum import find_window, screenshot, user32
+from qualify_waveform import settings
+from qualify_waveform_scrub import rows, synthetic_cue, wait_for
 
 
 def launch(exe, output, source=None):

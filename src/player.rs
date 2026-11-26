@@ -28,9 +28,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-#[path = "player_cursor.rs"]
 mod cursor;
-#[path = "player_wave.rs"]
 mod wave;
 use crate::level_meter::LevelMeter;
 pub(crate) use wave::WaveStrip;

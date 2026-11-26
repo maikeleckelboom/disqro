@@ -68,7 +68,7 @@ DXGI dirty rectangles are available on the shared swap chain. A partial update w
 Run the collector from a normal PowerShell session and click **Start capture** in the launcher. The launcher transfers focus only to the test window it creates. Close the ordinary player first, approve PresentMon's elevation prompt, and let the test windows remain in the foreground through the run.
 
 ```powershell
-python -B tools/captureWaveformForeground.py --baseline $baselineTraceExe `
+python -B tools/capture_waveform_foreground.py --baseline $baselineTraceExe `
     --candidate $candidateTraceExe --presentmon $presentMon --source $recording `
     --source-rate 48000 --refresh 240 --output $capture --screen --limit 540
 ```

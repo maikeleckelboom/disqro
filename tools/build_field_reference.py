@@ -23,7 +23,7 @@ def build(repo, scratch, target):
         shutil.copytree(repo / name, scratch / name)
     with (scratch / "Cargo.toml").open("a", encoding="utf-8") as manifest:
         manifest.write('\n[[bin]]\nname = "field-reference"\npath = "src/main.rs"\n')
-    streams = scratch / "src/visualStreams.rs"
+    streams = scratch / "src/spectrum_worker/visual_streams.rs"
     replace_once(streams, "struct Group {", "struct Group {\n    reference: Vec<kira::Frame>,\n    held: bool,")
     replace_once(streams, "field.push(h.tail(BLOCK));", """
                     assert!(crate::audio::silent_qualification());
@@ -43,7 +43,7 @@ def build(repo, scratch, target):
                             g.held = true;
                         }
                     }""")
-    plot = scratch / "src/panels/instrumentPlot.rs"
+    plot = scratch / "src/panels/instruments/plot.rs"
     replace_once(plot, "cache.field_image(a, f, r, w);", """cache.field_image(a, f, r, w);
         static RECORDED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         if RECORDED.get().is_none() {

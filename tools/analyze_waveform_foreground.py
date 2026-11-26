@@ -6,7 +6,7 @@ import csv
 import json
 import math
 
-from qualifyWaveformMotion import quantiles, real, records, signed
+from qualify_waveform_motion import quantiles, real, records, signed
 
 
 def read_rows(path):
