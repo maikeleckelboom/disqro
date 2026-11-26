@@ -225,15 +225,11 @@ impl Store {
         Some(key)
     }
 
-    fn engine_keys(&mut self, keys: &[Key]) -> Vec<store::Key> {
-        keys.iter()
-            .filter_map(|key| {
-                Some(store::Key {
-                    source: self.register(&key.source)?,
-                    request: key.request,
-                })
-            })
-            .collect()
+    fn engine_key(&mut self, key: &Key) -> Option<store::Key> {
+        Some(store::Key {
+            source: self.register(&key.source)?,
+            request: key.request,
+        })
     }
 
     fn set_view(
@@ -243,12 +239,26 @@ impl Store {
         prefetch: &[Key],
         preview: Option<FrameRange>,
     ) -> (Evidence, bool) {
-        let engine = self.engine_keys(keys);
-        let ahead = self.engine_keys(prefetch);
+        let mut unavailable_samples = 0;
+        let engine: Vec<_> = keys
+            .iter()
+            .filter_map(|key| {
+                let registered = self.engine_key(key);
+                if registered.is_none() && matches!(key.request, Request::Samples(_)) {
+                    unavailable_samples += 1;
+                }
+                registered
+            })
+            .collect();
+        let ahead: Vec<_> = prefetch
+            .iter()
+            .filter_map(|key| self.engine_key(key))
+            .collect();
         let (mut evidence, changed) =
             self.evidence
                 .request(store::ViewId(id), &engine, &ahead, preview);
         evidence.coverage.unavailable += keys.len() - engine.len();
+        evidence.coverage.missing_samples += unavailable_samples;
         self.collect_sources();
         (evidence, changed)
     }
@@ -363,7 +373,11 @@ mod tests {
             assert!(store.publish(0, unrelated, measured(0)));
             key
         };
-        left.tiles(0, Key::samples(&original, 0..16_384), None);
+        let ahead = Key::samples(&original, 8192..16_384);
+        let coverage = left.tiles_ahead(0, first.clone(), ahead, None).coverage;
+        assert!(coverage.complete());
+        assert_eq!(coverage.exact, 1);
+        assert_eq!(coverage.missing_samples, 0);
         let late = store.lock().unwrap().next(0).unwrap();
         assert_eq!(late.reservation.key().source, retired);
         assert_eq!(store.lock().unwrap().evidence.reserved_bytes(), 65_536);
@@ -384,7 +398,10 @@ mod tests {
             assert!(store.publish(0, fresh, measured(0)));
         }
         assert_eq!(right.tiles(0, second, None).coverage.exact, 1);
-        assert_eq!(left.tiles(0, first, None).coverage.unavailable, 1);
+        let rejected_ahead = Key::samples(&original, 8192..16_384);
+        let coverage = left.tiles_ahead(0, first, rejected_ahead, None).coverage;
+        assert_eq!(coverage.unavailable, 1);
+        assert_eq!(coverage.missing_samples, 1);
         assert_eq!(left.tiles(0, wanted, None).coverage.exact, 1);
         drop(original);
         assert!(weak.upgrade().is_none());
