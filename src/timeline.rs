@@ -344,7 +344,7 @@ fn describe(
         // Keep a verified length tied to the authored sheet revision for offline files.
         if let (Some(c), Some((p, s))) = (cache, sheet) {
             let _ = c.0.execute(
-                "INSERT OR REPLACE INTO disc_sources_v1 VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO disc_sources VALUES(?,?,?,?,?,?,?,?)",
                 params![
                     p.as_os_str().as_encoded_bytes(),
                     s.stamp.bytes,
@@ -367,7 +367,7 @@ fn describe(
         }
     } else {
         let known=cache.zip(sheet).and_then(|(c,(p,s))|c.0.query_row(
-            "SELECT bytes,modified,rate,frames FROM disc_sources_v1 WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
+            "SELECT bytes,modified,rate,frames FROM disc_sources WHERE sheet=? AND sheet_bytes=? AND sheet_modified=? AND path=?",
             params![p.as_os_str().as_encoded_bytes(),s.stamp.bytes,s.stamp.modified,key],|r|Ok(Source{path:path.into(),stamp:Stamp{bytes:r.get(0)?,modified:r.get(1)?},object:None,rate:r.get(2)?,frames:r.get::<_,i64>(3)? as usize,available:false})).ok());
         known.with_context(|| {
             format!(

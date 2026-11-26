@@ -1,8 +1,8 @@
 //! Waveform surfaces in Disqro's views, drawn by Waveform Native.
-use crate::waveform_render::{Role, Style, View};
 use gpui_kit::{prelude::*, *};
 use std::{ops::Range, sync::atomic::Ordering};
 use waveform::PixelViewport;
+use waveform::{Role, Style, View};
 
 pub use waveform::Viewport;
 pub use waveform::gpui::{SurfaceEvidence as Evidence, WaveformSurface as Texture};
@@ -60,8 +60,8 @@ pub fn paint(evidence: Evidence, surface: Surface, texture: Texture) -> impl Int
 #[cfg(test)]
 mod tests {
     use super::{Surface, Viewport};
-    use crate::waveform_render::Role;
     use gpui_kit::{Bounds, point, px, size};
+    use waveform::Role;
 
     #[test]
     fn surface_targets_share_the_logical_transform_at_three_display_scales() {

@@ -45,10 +45,12 @@ impl Revision {
         })
     }
 }
+pub(crate) const DATABASE: &str = "music-cache-v2.sqlite3";
+
 impl Cache {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         fs::create_dir_all(dir)?;
-        let db = Connection::open(dir.join("music-cache-v1.sqlite3"))?;
+        let db = Connection::open(dir.join(DATABASE))?;
         db.busy_timeout(std::time::Duration::from_millis(200))?;
         db.execute_batch("PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
@@ -58,14 +60,9 @@ impl Cache {
                 ordinal INTEGER, source TEXT NOT NULL, number INTEGER, first_tick INTEGER, last_tick INTEGER,
                 title TEXT, artist TEXT, album TEXT, album_artist TEXT, year INTEGER, disc_number INTEGER, PRIMARY KEY(sheet,ordinal)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS audio_tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
-            DROP TABLE IF EXISTS wave_pages_v1;
-            DROP TABLE IF EXISTS wave_pages_v2;
-            DROP TABLE IF EXISTS wave_evidence_v1;
-            DROP TABLE IF EXISTS wave_evidence_v2;
-            DROP TABLE IF EXISTS wave_evidence_v3;
-            CREATE TABLE IF NOT EXISTS wave_evidence_v4(path BLOB, requested BLOB, size INTEGER, modified INTEGER,
+            CREATE TABLE IF NOT EXISTS wave_evidence(path BLOB, requested BLOB, size INTEGER, modified INTEGER,
                 volume INTEGER, object INTEGER, data BLOB, UNIQUE(path,requested));
-            CREATE TABLE IF NOT EXISTS disc_sources_v1(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
+            CREATE TABLE IF NOT EXISTS disc_sources(sheet BLOB, sheet_bytes INTEGER, sheet_modified INTEGER,
                 path BLOB, bytes INTEGER, modified INTEGER, rate INTEGER, frames INTEGER, PRIMARY KEY(sheet,path)) WITHOUT ROWID;")?;
         Ok(Self(db))
     }
@@ -185,6 +182,16 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opening_the_current_cache_leaves_previous_files_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let previous = dir.path().join("music-cache-v1.sqlite3");
+        fs::write(&previous, b"previous cache").unwrap();
+        drop(Cache::open(dir.path()).unwrap());
+        assert_eq!(fs::read(previous).unwrap(), b"previous cache");
+        assert!(dir.path().join(DATABASE).exists());
+    }
+
     #[test]
     fn changed_sheet_atomically_replaces_all_chapters_and_keeps_numbering() {
         let dir = tempfile::tempdir().unwrap();

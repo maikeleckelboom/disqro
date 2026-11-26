@@ -238,7 +238,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     let source = &p.segments[0].source;
     let exact = waveform_source::Evidence {
         playable: 0..source.frames,
-        plan: crate::waveform_port_analysis::Plan {
+        plan: waveform::analysis::Plan {
             start_frame: boundary - 1,
             end_frame: boundary + 1,
             frames_per_column: 32,
@@ -263,7 +263,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(
         cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v4", [], |r| r
+            .query_row("SELECT count(*) FROM wave_evidence", [], |r| r
                 .get::<_, i64>(0))
             .unwrap(),
         1
@@ -276,7 +276,7 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     assert_eq!(leaf.bounds(), page.leaves().unwrap().bounds());
     let next_chapter = waveform_source::Evidence {
         playable: p.segments[1].frames.clone(),
-        plan: crate::waveform_port_analysis::Plan::overview(rate, p.segments[1].frames.len(), 128),
+        plan: waveform::analysis::Plan::overview(rate, p.segments[1].frames.len(), 128),
     };
     let silent =
         waveform_source::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
@@ -354,7 +354,7 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
         (id, store.marks_for(&ids).unwrap(), totals)
     };
     fs::create_dir(&cache_path).unwrap();
-    let database = cache_path.join("music-cache-v1.sqlite3");
+    let database = cache_path.join(crate::cache::DATABASE);
     {
         let db = rusqlite::Connection::open(&database).unwrap();
         db.execute_batch("CREATE TABLE wave_evidence_v3(path BLOB, requested BLOB, size INTEGER,
@@ -369,7 +369,7 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
     let source = &segment.source;
     let request = waveform_source::Evidence {
         playable: segment.frames.clone(),
-        plan: crate::waveform_port_analysis::Plan::overview(source.rate, segment.frames.len(), 128),
+        plan: waveform::analysis::Plan::overview(source.rate, segment.frames.len(), 128),
     };
     let expected = {
         let cache = Cache::open(&cache_path).unwrap();
@@ -399,7 +399,7 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
         assert_eq!(
             cache
                 .0
-                .execute("UPDATE wave_evidence_v4 SET data=?1", [corrupt])
+                .execute("UPDATE wave_evidence SET data=?1", [corrupt])
                 .unwrap(),
             1
         );
@@ -420,7 +420,7 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
     assert_eq!(
         cache
             .0
-            .query_row("SELECT data FROM wave_evidence_v4", [], |r| r
+            .query_row("SELECT data FROM wave_evidence", [], |r| r
                 .get::<_, Vec<u8>>(0))
             .unwrap(),
         record
@@ -467,12 +467,12 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
     let mut decoder = None;
     let request = |start_frame, end_frame| waveform_source::Evidence {
         playable: 0..source.frames,
-        plan: crate::waveform_port_analysis::Plan {
+        plan: waveform::analysis::Plan {
             start_frame,
             end_frame,
             frames_per_column: 256,
             leaf_frames: Some(32),
-            octave: Some(crate::waveform_port_analysis::Spectrum::Blackman),
+            octave: Some(waveform::analysis::Spectrum::Blackman),
             overview: false,
             fallback_energy: false,
             preview: false,
@@ -494,7 +494,7 @@ fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
 
 #[test]
 fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
-    use crate::waveform_port_analysis::{Plan, Spectrum};
+    use waveform::analysis::{Plan, Spectrum};
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.wav");
     fixture(&path, 96_000, 11_231);
@@ -564,7 +564,7 @@ fn replacing_a_source_with_the_same_length_and_time_invalidates_wave_pages() {
     assert!(source.object.is_some());
     let request = waveform_source::Evidence {
         playable: 0..source.frames,
-        plan: crate::waveform_port_analysis::Plan::overview(source.rate, source.frames, 128),
+        plan: waveform::analysis::Plan::overview(source.rate, source.frames, 128),
     };
     let old_page =
         waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();

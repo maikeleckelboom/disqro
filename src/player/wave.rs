@@ -5,11 +5,11 @@ use crate::theme::Materials;
 use crate::{
     overview::{self, Surface, Texture, Viewport},
     timeline::{Overview, Source},
-    waveform_render::{Page, Role as WaveRole},
 };
 use gpui_kit::component::Selectable;
 use std::time::Instant;
 use std::{cell::RefCell, collections::BTreeMap};
+use waveform::{EvidencePage as Page, Role as WaveRole};
 
 const UNAVAILABLE_POSITION: &str = "This waveform position is unavailable.";
 const UNAVAILABLE_RECORDING: &str = "This recording is unavailable.";

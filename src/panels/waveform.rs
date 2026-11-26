@@ -8,8 +8,6 @@ use crate::{
     theme::materials,
     timeline::Source,
     waveform_detail::{Coverage, View},
-    waveform_port_analysis::DETAIL_SECONDS,
-    waveform_render::Role,
 };
 use gpui_kit::{
     assets::IconName,
@@ -29,6 +27,8 @@ use std::{
     sync::{Arc, atomic::Ordering::Relaxed},
     time::Instant,
 };
+use waveform::Role;
+use waveform::analysis::DETAIL_SECONDS;
 
 mod inspection;
 #[cfg(all(windows, feature = "qualification"))]

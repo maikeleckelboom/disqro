@@ -39,10 +39,8 @@ mod table;
 mod theme;
 mod timeline;
 mod waveform_detail;
-mod waveform_port_analysis;
 #[cfg(feature = "qualification")]
 mod waveform_port_qualification;
-mod waveform_render;
 mod waveform_source;
 mod workspace;
 

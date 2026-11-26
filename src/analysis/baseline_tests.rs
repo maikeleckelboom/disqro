@@ -71,7 +71,7 @@ fn timeline_waveform_baseline() {
         let measure_detail = env::var_os("DISQRO_WAVE_BASELINE_DETAIL").is_some();
         let segment = &program.segments[active];
         let surface = crate::overview::Surface {
-            role: crate::waveform_render::Role::Detail,
+            role: waveform::Role::Detail,
             rate: segment.source.rate,
             playable: 0..segment.source.frames,
             viewport: crate::overview::Viewport::centered(
@@ -152,9 +152,7 @@ fn timeline_waveform_baseline() {
         let geometry = geometry(&shapes);
         let pages: i64 = cache
             .0
-            .query_row("SELECT count(*) FROM wave_evidence_v4", [], |row| {
-                row.get(0)
-            })
+            .query_row("SELECT count(*) FROM wave_evidence", [], |row| row.get(0))
             .unwrap();
         let ms = |time: Duration| time.as_secs_f64() * 1000.0;
         println!(
@@ -172,11 +170,8 @@ fn timeline_waveform_baseline() {
             pages,
             cache
                 .0
-                .query_row(
-                    "SELECT sum(length(data)) FROM wave_evidence_v4",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
+                .query_row("SELECT sum(length(data)) FROM wave_evidence", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             geometry.digest,
         );

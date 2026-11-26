@@ -5,8 +5,6 @@ use crate::{
     library::{DiscContext, Track},
     timeline::Program,
     waveform_detail::{Store, View},
-    waveform_port_analysis::{EVIDENCE_FRAMES, OVERVIEW_COLUMNS, Plan},
-    waveform_render::Page,
     waveform_source::{self, Evidence, Reader},
 };
 use std::{
@@ -18,6 +16,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use waveform::EvidencePage as Page;
+use waveform::analysis::{EVIDENCE_FRAMES, OVERVIEW_COLUMNS, Plan};
 #[derive(Clone, Default)]
 pub struct Shape {
     pub track: Arc<Page>,

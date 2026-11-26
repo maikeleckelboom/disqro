@@ -8,13 +8,13 @@ use crate::{
     library::Track,
     recording::Recording,
     timeline::Source,
-    waveform_port_analysis::{LEAF, Plan},
-    waveform_render::Page,
 };
 use anyhow::{Result, ensure};
 use kira::{Frame, sound::streaming::Decoder};
 use rusqlite::params;
 use std::{ops::Range, path::PathBuf, sync::atomic::Ordering::Relaxed};
+use waveform::EvidencePage as Page;
+use waveform::analysis::{LEAF, Plan};
 use waveform::{Analyzer, EvidenceRequest, FrameRange, SampleRate, evidence_codec};
 
 pub struct Reader {
@@ -162,7 +162,7 @@ pub fn cached(source: &Source, request: &Evidence, cache: Option<&Cache>) -> Opt
     let engine = request.request().ok()?;
     let db = &cache?.0;
     let mut query = db.prepare_cached(
-        "SELECT data FROM wave_evidence_v4 WHERE path=? AND requested=? AND size=? AND modified=? AND volume IS ? AND object IS ?",
+        "SELECT data FROM wave_evidence WHERE path=? AND requested=? AND size=? AND modified=? AND volume IS ? AND object IS ?",
     ).ok()?;
     let page = query
         .query_row(
@@ -202,7 +202,7 @@ pub fn store(source: &Source, request: &Evidence, cache: Option<&Cache>, page: &
     };
     if let Ok(tx) = cache.0.unchecked_transaction() {
         let written = tx.prepare_cached(
-            "INSERT OR REPLACE INTO wave_evidence_v4(path,requested,size,modified,volume,object,data) VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO wave_evidence(path,requested,size,modified,volume,object,data) VALUES(?,?,?,?,?,?,?)",
         ).and_then(|mut query| query.execute(params![
             source.path.as_os_str().as_encoded_bytes(), engine.canonical_bytes(), source.stamp.bytes,
             source.stamp.modified, source.object.map(|p| p.0), source.object.map(|p| p.1), bytes
@@ -210,7 +210,7 @@ pub fn store(source: &Source, request: &Evidence, cache: Option<&Cache>, page: &
         if written.is_ok() {
             if tx.last_insert_rowid() % 32 == 0 {
                 let _ = tx.execute(
-                    "DELETE FROM wave_evidence_v4 WHERE rowid <= (SELECT rowid FROM wave_evidence_v4 ORDER BY rowid DESC LIMIT 1 OFFSET 512)",
+                    "DELETE FROM wave_evidence WHERE rowid <= (SELECT rowid FROM wave_evidence ORDER BY rowid DESC LIMIT 1 OFFSET 512)",
                     [],
                 );
             }
