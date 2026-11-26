@@ -49,6 +49,14 @@ def copy_library(source, destination):
         # Preserve allocation even when the last identity was deleted.
         db.execute("DELETE FROM main.sqlite_sequence")
         db.execute("INSERT INTO main.sqlite_sequence SELECT * FROM source.sqlite_sequence")
+        # Preserve personal references to recordings without verifiable payload evidence.
+        unavailable = db.execute(
+            """UPDATE tracks SET present = 0 WHERE present = 1 AND (
+                anchor IN (SELECT id FROM files WHERE sample IS NULL) OR
+                source IN (SELECT id FROM files WHERE sample IS NULL)
+            )"""
+        ).rowcount
+        db.execute("UPDATE files SET present = 0 WHERE sample IS NULL")
         # Re-read tags and CUE metadata on the first scan of the new copy.
         db.execute("UPDATE files SET tagged = NULL")
         performers = db.execute(
@@ -69,6 +77,7 @@ def copy_library(source, destination):
         if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise ValueError("An integrity check failed in the converted library")
         db.commit()
+        return unavailable
 
 
 def copy_profile(source, destination):
@@ -81,11 +90,12 @@ def copy_profile(source, destination):
     with tempfile.TemporaryDirectory(prefix="disqro-library-copy-", dir=destination.parent) as temp:
         staging = Path(temp) / "profile"
         staging.mkdir()
-        copy_library(library, staging / library.name)
+        unavailable = copy_library(library, staging / library.name)
         workspace = source / "workspace-v1.json"
         if workspace.is_file():
             shutil.copyfile(workspace, staging / workspace.name)
         staging.rename(destination)
+        return unavailable
 
 
 if __name__ == "__main__":
@@ -94,6 +104,8 @@ if __name__ == "__main__":
     parser.add_argument("destination", type=Path)
     args = parser.parse_args()
     try:
-        copy_profile(args.source.resolve(strict=True), args.destination.absolute())
+        unavailable = copy_profile(args.source.resolve(strict=True), args.destination.absolute())
+        if unavailable:
+            print(f"Preserved {unavailable} recordings with unavailable source evidence.")
     except (OSError, ValueError, sqlite3.Error) as error:
         parser.exit(1, f"{error}\n")

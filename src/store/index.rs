@@ -161,7 +161,7 @@ impl Missing {
         e.volume.is_some()
             && e.index.is_some_and(|id| id != 0)
             && (self.volume, self.index) == (e.volume, e.index)
-            && self.sample.is_none_or(|s| s == e.sample)
+            && self.sample == Some(e.sample)
             && self.modified == new.modified
             && self.plausible(new, e)
     }

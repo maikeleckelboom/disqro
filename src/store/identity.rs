@@ -11,7 +11,7 @@ use std::{
 pub(super) struct Evidence {
     pub volume: Option<i64>,
     pub index: Option<i64>,
-    /// V1 prefix digest, also used to narrow relocation candidates.
+    /// Prefix digest, used to narrow relocation candidates.
     pub digest: i64,
     pub sample: i64,
     /// Whole payload or a FLAC stream checksum corroborated by frame samples.
@@ -46,19 +46,40 @@ impl Revision {
             && (self.volume, self.index) == (e.volume, e.index);
         let same_revision =
             self.size == size && self.modified == modified && self.digest == Some(e.digest);
-        match self.sample {
-            // Schema 1 only sampled the prefix. Establish the new baseline
-            // once for an unchanged revision of the same native object.
-            None => same_object && same_revision,
-            Some(sample) => {
-                sample == e.sample
-                    && (e.strong
-                        || same_object
-                        || (e.index.unwrap_or(0) == 0
-                            && self.index.unwrap_or(0) == 0
-                            && same_revision))
-            }
-        }
+        self.sample == Some(e.sample)
+            && (e.strong
+                || same_object
+                || (e.index.unwrap_or(0) == 0 && self.index.unwrap_or(0) == 0 && same_revision))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prefix_and_native_file_id_cannot_replace_payload_evidence() {
+        let revision = Revision {
+            size: 10,
+            modified: 20,
+            volume: Some(3),
+            index: Some(4),
+            digest: Some(50),
+            sample: None,
+        };
+        let current = Evidence {
+            volume: Some(3),
+            index: Some(4),
+            digest: 50,
+            sample: 60,
+            strong: true,
+        };
+        assert!(!revision.matches(10, 20, &current));
+        let verified = Revision {
+            sample: Some(current.sample),
+            ..revision
+        };
+        assert!(verified.matches(10, 20, &current));
     }
 }
 
