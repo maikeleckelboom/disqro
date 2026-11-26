@@ -706,19 +706,41 @@ impl Tree {
         deep.sort();
         let mut closed: Vec<_> = self.closed.iter().cloned().collect();
         closed.sort();
-        let links = self
-            .expanded
-            .iter()
-            .chain(deep.iter().flatten())
-            .chain(&closed)
-            .filter_map(|id| Some((id.clone(), self.links.get(id)?.clone())))
+        let mut links: Vec<_> = self
+            .intent_links()
+            .into_iter()
+            .map(|id| (id.clone(), self.links[&id].clone()))
             .collect();
+        links.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Expansion {
             open: self.expanded.clone(),
             deep,
             closed,
             links,
         }
+    }
+
+    /// Only the ancestor chains connecting explicit intent need to survive eviction.
+    fn intent_links(&self) -> HashSet<TreeId> {
+        let mut keep = HashSet::new();
+        for marker in self
+            .expanded
+            .iter()
+            .chain(self.deep.iter().flatten())
+            .chain(&self.closed)
+        {
+            let mut current = marker;
+            while let Some(parent) = self.links.get(current) {
+                if !keep.insert(current.clone()) {
+                    break;
+                }
+                let Some(parent) = parent else {
+                    break;
+                };
+                current = parent;
+            }
+        }
+        keep
     }
 
     /// Whether an item inside a subtree that is expanded throughout (`deep`)
@@ -764,7 +786,7 @@ impl Tree {
     /// seen, or for folders by their paths.
     fn descends(&self, id: &TreeId, ancestor: &TreeId) -> bool {
         let mut current = id;
-        for _ in 0..256 {
+        for _ in 0..self.links.len() {
             match self.links.get(current) {
                 Some(Some(parent)) if parent == ancestor => return true,
                 Some(Some(parent)) => current = parent,
@@ -772,7 +794,7 @@ impl Tree {
             }
         }
         match (id, ancestor) {
-            (TreeId::Folder(_, path), TreeId::Folder(_, above)) => path
+            (TreeId::Folder(root, path), TreeId::Folder(other, above)) if root == other => path
                 .strip_prefix(above.as_str())
                 .is_some_and(|rest| rest.starts_with(['\\', '/'])),
             _ => false,
@@ -939,7 +961,8 @@ impl Tree {
             .chain(self.deep.iter().flatten())
             .chain(&self.closed)
             .collect();
-        let keep: HashSet<TreeId> = kept.into_iter().cloned().collect();
+        let mut keep = self.intent_links();
+        keep.extend(kept.into_iter().cloned());
         self.links.retain(|key, _| keep.contains(key));
         let open: HashSet<&TreeId> = self.links.keys().collect();
         let first: HashSet<TreeId> = self

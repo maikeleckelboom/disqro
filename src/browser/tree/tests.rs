@@ -977,3 +977,31 @@ fn expansion_survives_a_restart_and_stale_results_never_reopen() {
     assert!(!view.tree.branches.contains_key(&pending) || !view.tree.has_open_inside(&Some(a)));
     assert_eq!(view.len, 2);
 }
+
+#[test]
+fn saved_exceptions_keep_unloaded_indexed_ancestors_across_subtree_commands() {
+    use crate::collection::DiscId;
+    let collection = TreeId::Collection(7);
+    let release = TreeId::Release(DiscId::Library(18));
+    let disc = TreeId::Disc(DiscId::Library(19));
+    let other = TreeId::Disc(DiscId::Library(43));
+    let mut tree = Tree::default();
+    tree.deep.insert(None);
+    tree.closed.extend([disc.clone(), other.clone()]);
+    tree.links.extend([
+        (disc.clone(), Some(release.clone())),
+        (release, Some(collection.clone())),
+        (collection.clone(), None),
+        (other.clone(), Some(TreeId::Collection(8))),
+        (TreeId::Collection(8), None),
+    ]);
+    tree.reconcile();
+    let mut restored = Tree::default();
+    restored.set_expansion(tree.expansion());
+    restored.expand_all(Some(collection.clone()), &None);
+    assert!(!restored.closed.contains(&disc));
+    assert!(restored.closed.contains(&other));
+    restored.collapse_all(Some(collection.clone()), &None);
+    assert!(restored.closed.contains(&collection));
+    assert!(restored.closed.contains(&other));
+}
