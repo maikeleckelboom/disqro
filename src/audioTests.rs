@@ -452,6 +452,26 @@ fn qualification_tap_reads_full_level_while_every_output_sample_is_zero() {
     check_chapter_render(true);
 }
 
+// The scheduler owns this decoder until it has queued the final source
+// frame. Packet decode counters alone can run ahead of the playback ring.
+impl Drop for ObservedDecoder {
+    fn drop(&mut self) {
+        let (done, signal) = &self.state.decoder_finished;
+        *done.lock().unwrap() = true;
+        signal.notify_one();
+    }
+}
+
+fn await_queued_fixture(voice: &OutputVoice, expected_frames: usize) {
+    let (done, signal) = &voice.state.decoder_finished;
+    let (done, _) = signal
+        .wait_timeout_while(done.lock().unwrap(), Duration::from_secs(3), |done| !*done)
+        .unwrap();
+    assert!(*done, "decoder did not finish queuing the fixture");
+    assert_eq!(voice.state.decoded.load(Ordering::Acquire), expected_frames);
+    assert!(voice.pop_error().is_none());
+}
+
 fn check_chapter_render(silent: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("disc.wav");
@@ -480,13 +500,19 @@ fn check_chapter_render(silent: bool) {
             progress: None,
         })
         .unwrap();
+    // The 9,600-frame disc fits in Kira's 16,384-frame stream ring. This
+    // offline backend can consume faster than real time, so begin the sample
+    // comparison only once the scheduler has queued the whole fixture.
+    await_queued_fixture(&voice, 9600);
     let mut frames = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && voice.state() != PlaybackState::Stopped {
-        let mut block = [0.; 256];
+    let mut block = [0.; 256];
+    // Allow one extra block to drain the interpolator's history frame.
+    for _ in 0..=9600_usize.div_ceil(block.len() / 2) {
+        if voice.state() == PlaybackState::Stopped {
+            break;
+        }
         render(&mut output, &mut block);
         frames.extend_from_slice(block.as_chunks::<2>().0);
-        std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(voice.state(), PlaybackState::Stopped);
     let presented = voice
@@ -509,11 +535,12 @@ fn check_chapter_render(silent: bool) {
     }
     let start = frames.iter().position(|s| s[0] != 0.).unwrap();
     let boundary = disc_frame(tracks[1].disc.as_ref().unwrap().start, 48000);
-    for i in boundary - 512..boundary + 512 {
+    assert_eq!(boundary, 5120);
+    for i in 0..9600 {
         assert_eq!(
             frames[start + i],
             samples(i).map(|s| f32::from(s) / 32768.),
-            "rendered frame {i}"
+            "rendered frame {i} (chapter boundary {boundary})"
         );
     }
 }

@@ -570,6 +570,8 @@ struct OutputState {
     // The actual contiguous decoded extent, including the voice's seek origin.
     decoded: AtomicUsize,
     decode_failed: AtomicBool,
+    #[cfg(test)]
+    decoder_finished: (Mutex<bool>, std::sync::Condvar),
     error: Mutex<Option<io::Error>>,
 }
 
