@@ -67,6 +67,18 @@ The versioned design and coding guides informed the review. The implemented cont
 
 The synthetic window-DPI transitions in the deck lifecycle harness exercise resource reconstruction. They do not establish monitor DPI or physical display cadence. Pointer-to-audio measurements end at the silent callback. Physical listening quality, presented-frame pacing and detailed waveform microjudder remain outside these measurements.
 
+## Reproducing the scale checks
+
+~~~powershell
+cargo test --locked expanded_pages_release_empty_and_nested_branches_and_reload_backward -- --nocapture
+cargo test --locked expanded_indexed_releases_reload_their_authored_discs_after_eviction -- --nocapture
+cargo test --locked independent_large_artist_and_release_shelves_page_in_both_directions -- --ignored --nocapture
+cargo test --locked six_figure_listening_snapshot -- --ignored --nocapture
+python -B tools/qualify_catalog_playback.py <qualification-exe> <test-exe> <new-output-directory>
+~~~
+
+The native folder and catalog journey creates its own audio, database and workspace under the new output directory. The waveform replay uses the frozen local facts pack. [Native waveform qualification](waveform-visual-recovery.md)
+
 ## Remaining engineering limits
 
 - Physical folder search covers open branches and labels its scope. Native filesystem enumeration does not provide an indexed ordering. Initial multi-page index construction and an unsorted seek may reread directory entries. Once a sorted snapshot exists, page movement uses indexed ranks. Construction latency on remote filesystems remains unmeasured.
@@ -148,4 +160,3 @@ The following inventory covers moved or removed first-party code and qualificati
 | `tools/waveformParity/tolerances.json` | Removed |
 
 </details>
-
