@@ -73,8 +73,9 @@ def journey(exe, test_exe, output):
         screenshot(hwnd, output / "chevron-hover.png")
 
         # Start playback, then open an overview: the section stays expanded.
-        click_control(hwnd, wait_for(process, "Chapter 01")[1])
-        click_control(hwnd, wait_for(process, "Chapter 01")[1])
+        chapter = wait_for(process, "Chapter 01")[1]
+        click_control(hwnd, chapter)
+        click_control(hwnd, chapter)
         wait_for(process, "Pause")
         click_control(hwnd, empty)
         wait_for(process, "Collapse Collections")
