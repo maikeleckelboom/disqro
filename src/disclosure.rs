@@ -45,7 +45,7 @@ impl<K: Eq + Hash> VirtualFocus<K> {
         } else {
             self.insertions.set(count);
         }
-        let handle = cx.focus_handle();
+        let handle = cx.focus_handle().tab_stop(true);
         handles.insert(key, handle.downgrade());
         handle
     }
@@ -170,3 +170,6 @@ impl RenderOnce for Disclosure {
             })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -104,7 +104,8 @@ def press(hwnd, key):
 
 def reverse_tab(hwnd):
     # SetKeyboardState is thread-local. Attach only the worker and its private
-    # test window, send Tab synchronously, and restore before detaching.
+    # test window and restore before detaching. The Windows backend handles
+    # keydown in the message pump, so it must be queued.
     current = C.windll.kernel32.GetCurrentThreadId()
     target = user32.GetWindowThreadProcessId(hwnd, None)
     message = W.MSG()
@@ -120,8 +121,9 @@ def reverse_tab(hwnd):
         if not user32.SetKeyboardState(keys):
             raise C.WinError()
         try:
-            user32.SendMessageW(hwnd, 0x0100, 0x09, 0x000F0001)
-            user32.SendMessageW(hwnd, 0x0101, 0x09, 0xC00F0001)
+            press(hwnd, 0x09)
+            # Hold the modifier across dispatch, as with a physical chord.
+            time.sleep(0.2)
         finally:
             user32.SetKeyboardState(saved)
     finally:
