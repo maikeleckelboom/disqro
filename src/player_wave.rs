@@ -8,8 +8,8 @@ use crate::{
     waveform_render::{Page, Role as WaveRole},
 };
 use gpui_kit::component::Selectable;
-use std::collections::BTreeMap;
 use std::time::Instant;
+use std::{cell::RefCell, collections::BTreeMap};
 
 const UNAVAILABLE_POSITION: &str = "This waveform position is unavailable.";
 const UNAVAILABLE_RECORDING: &str = "This recording is unavailable.";
@@ -52,12 +52,46 @@ pub(crate) struct WaveTrack {
     pub scrub_frame: Option<f64>,
 }
 
+/// The source frame a playhead shows, and how it got there.
+pub(crate) struct Presented {
+    pub frame: f64,
+    /// Whether playback moves it.
+    pub advancing: bool,
+    pub sample: Option<crate::audio::RendererPosition>,
+}
+
 impl WaveTrack {
     pub fn position(&self, at: Instant) -> Option<crate::audio::RendererPosition> {
         self.presentation.as_ref().map_or(
             Some(crate::audio::RendererPosition::held(self.frame as f64)),
             |clock| clock.position(at),
         )
+    }
+
+    /// The frame every playhead shows when `at` reaches the screen: the
+    /// grabbed frame while the detailed waveform is held, otherwise the
+    /// stabilized audio clock, which never moves back from `previous` (the
+    /// frame this playhead last showed for this playback) while it advances.
+    pub fn presented_frame(&self, at: Instant, previous: Option<f64>) -> Presented {
+        if let Some(target) = self.scrub_frame {
+            return Presented {
+                frame: target,
+                advancing: false,
+                sample: None,
+            };
+        }
+        let sample = self.position(at);
+        let mut frame = sample.map_or_else(|| previous.unwrap_or(self.frame as f64), |p| p.frame);
+        if let Some(previous) = previous
+            && (self.playing || sample.is_some_and(|position| position.advancing))
+        {
+            frame = frame.max(previous);
+        }
+        Presented {
+            frame: frame.clamp(0., self.source.frames.saturating_sub(1) as f64),
+            advancing: self.playing || sample.is_some_and(|p| p.advancing),
+            sample,
+        }
     }
 }
 
@@ -537,6 +571,7 @@ impl Player {
         &self,
         progress: f32,
         active: bool,
+        cursor: AnyElement,
         m: &Materials,
         cx: &Context<Self>,
         images: &mut BTreeMap<usize, Texture>,
@@ -670,70 +705,167 @@ impl Player {
             }
         }
         wave.when(active, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(relative(progress))
-                    .w(px(2.))
-                    .ml(px(-1.))
-                    .bg(m.wave.cursor),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|p, e: &MouseDownEvent, _, cx| {
-                    if let Some(identity) = p.status.playback_identity() {
-                        p.scrub = Some(StripSeek {
-                            identity,
-                            disc: p.disc_view(),
-                            bounds: p.seek_bounds.get(),
-                            preview: None,
-                        });
-                        p.move_scrub(e.position.x, cx);
-                    }
-                }),
-            )
-            .on_drag(Scrub, |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| Scrub)
-            })
-            .on_drag_move(cx.listener(|p, e: &DragMoveEvent<Scrub>, _, cx| {
-                p.move_scrub(e.event.position.x, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
-            )
+            d.child(cursor)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|p, e: &MouseDownEvent, _, cx| {
+                        if let Some(identity) = p.status.playback_identity() {
+                            p.scrub = Some(StripSeek {
+                                identity,
+                                disc: p.disc_view(),
+                                bounds: p.seek_bounds.get(),
+                                preview: None,
+                            });
+                            p.move_scrub(e.position.x, cx);
+                        }
+                    }),
+                )
+                .on_drag(Scrub, |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| Scrub)
+                })
+                .on_drag_move(cx.listener(|p, e: &DragMoveEvent<Scrub>, _, cx| {
+                    p.move_scrub(e.event.position.x, cx);
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|p, e: &MouseUpEvent, _, cx| p.end_scrub(e.position.x, cx)),
+                )
         })
     }
 }
 
 /// Reuse the waveform scene on meter-only redraws. Player notifications still
 /// invalidate it for transport, scrubbing, perspective and analysis updates.
-pub(super) struct WaveStrip {
+/// Between them, only its playhead moves, through `animate`.
+pub(crate) struct WaveStrip {
     player: WeakEntity<Player>,
     images: BTreeMap<usize, Texture>,
     generation: u64,
+    motion: crate::panels::waveform::Motion,
+    cursor: Rc<RefCell<cursor::Cursor>>,
+    /// Where the playhead is by the last transport snapshot, for when the
+    /// clock cannot place it.
+    progress: Rc<Cell<f64>>,
+    /// Shared with the player: whether the playhead moves without the strip
+    /// being rebuilt, so position alone need not redraw the player.
+    retained: Rc<Cell<bool>>,
 }
 
 impl WaveStrip {
-    pub(super) fn new(player: Entity<Player>, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(
+        player: Entity<Player>,
+        motion: crate::panels::waveform::Motion,
+        retained: Rc<Cell<bool>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
         Self {
             player: player.downgrade(),
             images: BTreeMap::new(),
             generation: 0,
+            motion,
+            cursor: Default::default(),
+            progress: Default::default(),
+            retained,
         }
+    }
+
+    /// Moves the playhead for the frame shown at `now`. Returns whether it
+    /// keeps moving. Nothing else in the strip or the player is rebuilt.
+    pub(crate) fn animate(
+        &mut self,
+        now: Instant,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if window.visibility() != WindowVisibility::Visible {
+            return false;
+        }
+        let Some(player) = self.player.upgrade() else {
+            return false;
+        };
+        let player = player.read(cx);
+        if !player.visible || player.status.track.is_none() {
+            return false;
+        }
+        let track = player.wave_track();
+        let color = materials(cx).wave.cursor;
+        let mut cursor = self.cursor.borrow_mut();
+        let Some(place) = cursor.place(track.as_ref(), now) else {
+            return false;
+        };
+        #[cfg(windows)]
+        if !cursor.repaint(Some(place.fraction), color, window) {
+            drop(cursor);
+            cx.notify();
+            return false;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (color, window);
+            drop(cursor);
+            cx.notify();
+        }
+        place.moving
+    }
+
+    /// The playhead over the overview: a GPU target the strip paints once and
+    /// `animate` redraws, or an element where no target is available.
+    fn cursor(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (cursor, motion, strip) = (self.cursor.clone(), self.motion.clone(), cx.weak_entity());
+        let progress = self.progress.clone();
+        let (player, retained) = (self.player.clone(), self.retained.clone());
+        let color = materials(cx).wave.cursor;
+        canvas(
+            |_, _, _| (),
+            move |bounds, _, window, cx| {
+                let Some(player) = player.upgrade() else {
+                    return;
+                };
+                let (track, visible) = {
+                    let player = player.read(cx);
+                    (player.wave_track(), player.visible)
+                };
+                let at = crate::panels::waveform::frame_time(Instant::now());
+                let mut cursor = cursor.borrow_mut();
+                let place = cursor.place(track.as_ref(), at);
+                let fraction = place.as_ref().map_or(progress.get(), |p| p.fraction);
+                #[cfg(windows)]
+                let drawn = cursor.paint(bounds, Some(fraction), color, window);
+                #[cfg(not(windows))]
+                let drawn = false;
+                retained.set(drawn);
+                if !drawn {
+                    let x = bounds.origin.x + bounds.size.width * fraction as f32;
+                    let width = px(cursor::WIDTH);
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(x - width / 2., bounds.origin.y),
+                            size(width, bounds.size.height),
+                        ),
+                        color,
+                    ));
+                }
+                if drawn && visible && place.is_some_and(|p| p.moving) {
+                    motion.request_strip(strip.clone(), window);
+                }
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
     }
 }
 
 impl Render for WaveStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::diagnostics::stage(crate::diagnostics::begin_stage(), "wave_strip_render", 0, 0);
+        let cursor = self.cursor(cx);
         self.player
             .clone()
             .update(cx, |p, cx| {
@@ -747,9 +879,33 @@ impl Render for WaveStrip {
                 } else {
                     0.
                 }) as f32;
+                {
+                    let mut cursor = self.cursor.borrow_mut();
+                    cursor.preview = p.scrub_fraction();
+                    let mapping = p.program.clone().zip(p.visible_wave_segment()).map(
+                        |(program, (segment, _))| cursor::Mapping {
+                            program,
+                            segment,
+                            full_cd: p.disc_view(),
+                        },
+                    );
+                    if mapping
+                        .as_ref()
+                        .map(|m| (Arc::as_ptr(&m.program), m.segment, m.full_cd))
+                        != cursor
+                            .mapping
+                            .as_ref()
+                            .map(|m| (Arc::as_ptr(&m.program), m.segment, m.full_cd))
+                    {
+                        cursor.reset();
+                    }
+                    cursor.mapping = mapping;
+                }
+                self.progress.set(f64::from(progress));
                 p.waveform(
                     progress,
                     p.status.track.is_some(),
+                    cursor,
                     materials(cx),
                     cx,
                     &mut self.images,

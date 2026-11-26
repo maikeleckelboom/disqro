@@ -147,6 +147,14 @@ impl Segment {
                 self.source.rate,
             ) - frame_time(self.frames.start, self.source.rate))
     }
+    /// Program time at a fractional source `frame`, for positions between
+    /// frames such as an interpolated playhead. Agrees with [`Self::at`] at
+    /// whole frames to within a nanosecond.
+    pub fn at_fractional(&self, frame: f64) -> f64 {
+        let (start, end) = (self.frames.start as f64, self.frames.end as f64);
+        self.time.start as f64
+            + (frame.clamp(start, end) - start) * SECOND as f64 / f64::from(self.source.rate)
+    }
     pub fn elapsed_frame(&self, elapsed: f64) -> usize {
         self.frames.start
             + ((elapsed.max(0.) * f64::from(self.source.rate)).round() as usize)

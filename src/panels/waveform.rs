@@ -70,8 +70,9 @@ fn signed_ns(a: Instant, b: Instant) -> i64 {
         - b.saturating_duration_since(a).as_nanos() as i64
 }
 
-/// All decks in the workspace use one native frame request. Motion updates
-/// textures the scene already references. Layout owns bounds and hit testing.
+/// All decks in the workspace, and the compact waveform's playhead, use one
+/// native frame request. Motion updates textures the scene already
+/// references. Layout owns bounds and hit testing.
 #[derive(Clone, Default)]
 pub(crate) struct Motion(Rc<RefCell<MotionState>>);
 
@@ -80,6 +81,8 @@ struct MotionState {
     panels: Vec<WeakEntity<Waveform>>,
     presented: Vec<WeakEntity<Waveform>>,
     spare: Vec<WeakEntity<Waveform>>,
+    /// The compact waveform waiting for the next frame.
+    strip: Option<WeakEntity<crate::player::WaveStrip>>,
     armed: bool,
 }
 
@@ -137,6 +140,23 @@ impl Motion {
         {
             state.panels.push(panel);
         }
+        drop(state);
+        self.arm(window);
+    }
+
+    /// Moves the compact waveform's playhead on the next frame, together
+    /// with every deck that moves.
+    pub(crate) fn request_strip(
+        &self,
+        strip: WeakEntity<crate::player::WaveStrip>,
+        window: &mut Window,
+    ) {
+        self.0.borrow_mut().strip = Some(strip);
+        self.arm(window);
+    }
+
+    fn arm(&self, window: &mut Window) {
+        let mut state = self.0.borrow_mut();
         if state.armed {
             return;
         }
@@ -148,11 +168,14 @@ impl Motion {
         let motion = self.clone();
         crate::diagnostics::stage(requested, "wave_request", 0, 0);
         window.on_next_frame(move |window, cx| {
-            let panels = {
+            let (panels, strip) = {
                 let mut state = motion.0.borrow_mut();
                 state.armed = false;
                 let spare = std::mem::take(&mut state.spare);
-                std::mem::replace(&mut state.panels, spare)
+                (
+                    std::mem::replace(&mut state.panels, spare),
+                    state.strip.take(),
+                )
             };
             let mut panels = panels;
             let woke = Instant::now();
@@ -184,6 +207,13 @@ impl Motion {
                 });
             }
             motion.0.borrow_mut().spare = panels;
+            if let Some(strip) = strip {
+                let _ = strip.update(cx, |strip, cx| {
+                    if strip.animate(now, window, cx) {
+                        motion.request_strip(cx.weak_entity(), window);
+                    }
+                });
+            }
             let lag = woke.saturating_duration_since(now).as_micros() as u64;
             crate::diagnostics::stage(start, "wave_frame", count, lag);
         });
@@ -260,17 +290,10 @@ impl DeckPosition {
         } else {
             let previous = self
                 .last
-                .filter(|(identity, _)| track.identity.continues(*identity));
-            let sample = track.position(at);
-            let previous_frame = previous.map(|(_, frame)| frame);
-            let mut frame =
-                sample.map_or_else(|| previous_frame.unwrap_or(track.frame as f64), |p| p.frame);
-            if let Some(previous) = previous_frame
-                && (track.playing || sample.is_some_and(|position| position.advancing))
-            {
-                frame = frame.max(previous);
-            }
-            frame = frame.clamp(0., track.source.frames.saturating_sub(1) as f64);
+                .filter(|(identity, _)| track.identity.continues(*identity))
+                .map(|(_, frame)| frame);
+            let presented = track.presented_frame(at, previous);
+            let (frame, sample) = (presented.frame, presented.sample);
             if let (Some(d), Some(sample)) = (crate::diagnostics::get(), sample) {
                 d.wave_clock_age_us
                     .fetch_max(sample.observation_age_ns / 1000, Relaxed);
@@ -293,7 +316,7 @@ impl DeckPosition {
             self.last = Some((track.identity, frame));
             (
                 frame,
-                track.playing || sample.is_some_and(|p| p.advancing),
+                presented.advancing,
                 sample.map_or(f64::NAN, |sample| sample.frame),
             )
         };

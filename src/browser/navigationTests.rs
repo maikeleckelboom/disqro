@@ -46,7 +46,8 @@ fn delayed_ranked_reveal_respects_browser_navigation_and_lifetime() {
                 .update(cx, |_, w, cx| {
                     let catalog = cx.new(|cx| Catalog::open(None, cx));
                     let folders = cx.new(Folders::new);
-                    let player = cx.new(|cx| Player::new(0., false, false, None, cx));
+                    let player =
+                        cx.new(|cx| Player::new(0., false, false, None, Default::default(), cx));
                     let mut new_browser = || {
                         cx.new(|cx| {
                             Browser::new(

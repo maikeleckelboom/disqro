@@ -271,12 +271,14 @@ impl Workspace {
             catalog.update(cx, |c, cx| c.watch_listening(updates, cx));
             writer
         });
+        let wave_motion = crate::panels::waveform::Motion::default();
         let player = cx.new(|cx| {
             Player::new(
                 volume,
                 saved.full_cd,
                 saved.show_levels,
                 listening.clone(),
+                wave_motion.clone(),
                 cx,
             )
         });
@@ -299,7 +301,7 @@ impl Workspace {
         let services = Services {
             field_readouts: cx.new(|_| Default::default()),
             player: player.clone(),
-            wave_motion: Default::default(),
+            wave_motion,
             catalog: catalog.clone(),
             locations: locations.clone(),
             router: router.clone(),
