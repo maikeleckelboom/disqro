@@ -225,18 +225,29 @@ impl Store {
         Some(key)
     }
 
-    fn set_view(&mut self, id: u64, keys: &[Key], preview: Option<FrameRange>) -> (Evidence, bool) {
-        let engine: Vec<_> = keys
-            .iter()
+    fn engine_keys(&mut self, keys: &[Key]) -> Vec<store::Key> {
+        keys.iter()
             .filter_map(|key| {
                 Some(store::Key {
                     source: self.register(&key.source)?,
                     request: key.request,
                 })
             })
-            .collect();
-        let changed = self.evidence.set_view(store::ViewId(id), engine.clone());
-        let mut evidence = self.evidence.evidence(&engine, preview);
+            .collect()
+    }
+
+    fn set_view(
+        &mut self,
+        id: u64,
+        keys: &[Key],
+        prefetch: &[Key],
+        preview: Option<FrameRange>,
+    ) -> (Evidence, bool) {
+        let engine = self.engine_keys(keys);
+        let ahead = self.engine_keys(prefetch);
+        let (mut evidence, changed) =
+            self.evidence
+                .request(store::ViewId(id), &engine, &ahead, preview);
         evidence.coverage.unavailable += keys.len() - engine.len();
         self.collect_sources();
         (evidence, changed)
@@ -259,14 +270,26 @@ impl View {
         Self { id, shared, wake }
     }
 
+    #[cfg(test)]
     pub fn tiles(&self, revision: u64, keys: Vec<Key>, preview: Option<Range<usize>>) -> Evidence {
+        self.tiles_ahead(revision, keys, vec![], preview)
+    }
+
+    /// `prefetch` is decoded ahead of need and is not part of the coverage.
+    pub fn tiles_ahead(
+        &self,
+        revision: u64,
+        keys: Vec<Key>,
+        prefetch: Vec<Key>,
+        preview: Option<Range<usize>>,
+    ) -> Evidence {
         let mut store = self.shared.lock().unwrap();
         if store.revision != revision {
             return Evidence::default();
         }
         let preview =
             preview.and_then(|range| FrameRange::new(range.start as u64, range.end as u64).ok());
-        let (evidence, changed) = store.set_view(self.id, &keys, preview);
+        let (evidence, changed) = store.set_view(self.id, &keys, &prefetch, preview);
         if changed {
             let _ = self.wake.try_send(());
         }
@@ -274,7 +297,13 @@ impl View {
     }
 
     pub fn clear(&self) {
-        if self.shared.lock().unwrap().set_view(self.id, &[], None).1 {
+        if self
+            .shared
+            .lock()
+            .unwrap()
+            .set_view(self.id, &[], &[], None)
+            .1
+        {
             let _ = self.wake.try_send(());
         }
     }
