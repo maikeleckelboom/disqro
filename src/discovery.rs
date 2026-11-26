@@ -181,7 +181,9 @@ pub(crate) fn walk(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) -> Option<Sources> {
-    walk_bounded(root, recursive, None, cache, alive, publish)
+    walk_bounded(root, recursive, None, alive, publish, &mut |path| {
+        library::browse_while(path, cache, alive)
+    })
 }
 
 /// Keep the interactive scan bounded even when a drive root was explicitly
@@ -192,9 +194,9 @@ fn walk_bounded(
     root: &Path,
     recursive: bool,
     limit: Option<usize>,
-    cache: Option<&Cache>,
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
+    browse: &mut dyn FnMut(&Path) -> anyhow::Result<library::Folder>,
 ) -> Option<Sources> {
     let mut todo = vec![root.to_owned()];
     let mut visited = 0;
@@ -214,7 +216,7 @@ fn walk_bounded(
             break;
         }
         visited += 1;
-        match library::browse_while(&path, cache, alive) {
+        match browse(&path) {
             Ok(folder) => {
                 if path == root {
                     batch.root = Some(Root {
@@ -271,8 +273,23 @@ fn scan_into(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) {
+    scan_with(root, recursive, cache, alive, publish, &mut |path| {
+        library::browse_while(path, cache, alive)
+    });
+}
+
+/// Discovers folders listed by `browse`, then reads the tags of the
+/// recordings they hold. Only recordings `browse` returned are opened.
+fn scan_with(
+    root: &Path,
+    recursive: bool,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+    browse: &mut dyn FnMut(&Path) -> anyhow::Result<library::Folder>,
+) {
     let limit = recursive.then_some(BROWSER_FOLDER_LIMIT);
-    let Some(sources) = walk_bounded(root, recursive, limit, cache, alive, publish) else {
+    let Some(sources) = walk_bounded(root, recursive, limit, alive, publish, browse) else {
         return;
     };
     let mut batch = Batch::default();
@@ -335,41 +352,99 @@ pub(crate) struct FolderBranch {
     pub dirs: Vec<PathBuf>,
     pub programs: Vec<Arc<crate::collection::Disc>>,
     pub unreadable: HashSet<PathBuf>,
+    /// Where the next page starts when more entries follow.
+    pub next: Option<library::ListingCursor>,
+    /// The recordings are one page of a folder too large to group by album.
+    pub paged: bool,
+    pub notice: Option<String>,
 }
 
-pub(crate) fn tree_folder(folder: &Path, alive: &dyn Fn() -> bool) -> anyhow::Result<FolderBranch> {
+/// One page of a folder for the Tree view: up to `limit` subfolders after
+/// `after`, then its recordings. Only the recordings on this page are read.
+pub(crate) fn tree_folder(
+    folder: &Path,
+    after: Option<&library::ListingCursor>,
+    limit: usize,
+    alive: &dyn Fn() -> bool,
+) -> anyhow::Result<FolderBranch> {
+    let listing = library::list_page(folder, after, limit, true, alive)?;
+    let mut next = listing.next_dir.map(library::ListingCursor::Dirs);
+    let Some(files) = listing.files else {
+        return Ok(FolderBranch {
+            dirs: listing.dirs,
+            programs: Vec::new(),
+            unreadable: HashSet::new(),
+            next,
+            paged: false,
+            notice: None,
+        });
+    };
+    let (audio, sheets, claims, paged) = match files {
+        library::ListedFiles::All { audio, sheets } => (audio, sheets.clone(), sheets, false),
+        library::ListedFiles::Page {
+            audio,
+            sheets,
+            claims,
+            next: resume,
+        } => {
+            next = resume.map(library::ListingCursor::Files);
+            (audio, sheets, claims, true)
+        }
+    };
     let cache =
         crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
-    let mut dirs = None;
-    let mut notice = None;
+    let mut page = Some(library::browse_files(
+        library::Folder {
+            cover: listing.cover,
+            notices: listing.notices,
+            complete: listing.complete,
+            ..Default::default()
+        },
+        audio,
+        &sheets,
+        &claims,
+        cache.as_ref(),
+        alive,
+    )?);
     let mut rows = Vec::new();
     let mut covers = HashMap::new();
     let mut unreadable = HashSet::new();
-    scan_into(folder, false, cache.as_ref(), alive, &mut |batch| {
-        if let Some(root) = batch.root {
-            dirs = Some(root.dirs);
-        }
-        notice = notice.take().or(batch.notice);
-        covers.extend(batch.covers);
-        unreadable.extend(batch.unreadable);
-        for (index, track) in batch.rows {
-            if index == rows.len() {
-                rows.push(track);
-            } else {
-                rows[index] = track;
+    let mut listed = false;
+    let mut notice = None;
+    scan_with(
+        folder,
+        false,
+        cache.as_ref(),
+        alive,
+        &mut |batch| {
+            listed |= batch.root.is_some();
+            notice = notice.take().or(batch.notice);
+            covers.extend(batch.covers);
+            unreadable.extend(batch.unreadable);
+            for (index, track) in batch.rows {
+                if index == rows.len() {
+                    rows.push(track);
+                } else {
+                    rows[index] = track;
+                }
             }
-        }
-        alive()
-    });
+            alive()
+        },
+        &mut |_| {
+            page.take()
+                .ok_or_else(|| anyhow::anyhow!("The folder is unavailable."))
+        },
+    );
     anyhow::ensure!(alive(), crate::store::Cancelled);
-    let dirs = dirs.ok_or_else(|| {
-        anyhow::anyhow!(notice.unwrap_or_else(|| "The folder is unavailable.".into()))
-    })?;
+    anyhow::ensure!(listed, "The folder is unavailable.");
     let programs = crate::collection::Discs::group(rows.iter().flatten(), &covers, folder);
     Ok(FolderBranch {
-        dirs,
+        dirs: listing.dirs,
         programs,
         unreadable,
+        next,
+        paged,
+        notice: notice.filter(|_| paged),
     })
 }
 

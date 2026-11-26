@@ -1124,8 +1124,14 @@ impl Browser {
                 browser.update(cx, |b, cx| b.set_filter_open(true, window, cx));
             });
         }
+        let scope = self.tree_filter_scope(cx);
         h_flex()
             .id("browser-filter")
+            .when_some(scope, |d, scope| {
+                d.tooltip(move |w, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(scope).build(w, cx)
+                })
+            })
             .flex_shrink(1.)
             .min_w_0()
             .w(width)
@@ -1160,7 +1166,7 @@ impl Browser {
                         .xsmall()
                         .appearance(false)
                         .cleanable(!tight)
-                        .aria_label("Filter this view"),
+                        .aria_label(scope.unwrap_or("Filter this view")),
                 ),
             )
             .capture_key_down(cx.listener(|b, e: &KeyDownEvent, w, cx| {

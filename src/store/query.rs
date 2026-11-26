@@ -209,10 +209,19 @@ pub struct AlbumStructure {
     pub release: Option<AlbumRelease>,
 }
 
+/// One page of the recordings a collection folder holds itself.
 pub(crate) struct IndexedBranch {
-    pub dirs: Vec<PathBuf>,
     pub programs: Vec<AlbumRow>,
     pub loose: Vec<Arc<Track>>,
+    /// Where the next page starts when more recordings follow.
+    pub next: Option<ContentsCursor>,
+}
+
+/// A position among a folder's albums and, within a loose album, its tracks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ContentsCursor {
+    pub album: usize,
+    pub track: usize,
 }
 
 /// Which discs an album query reads.
@@ -841,16 +850,134 @@ impl Store {
         Ok(out)
     }
 
-    /// Only the immediate indexed children and the musical programs owned by
-    /// this directory. Named CD siblings can form a release when the catalog
-    /// confirms they account for every program under the directory.
+    /// The musical programs and loose recordings owned by this directory,
+    /// at most `limit` of them from `at`. Named CD siblings can form a
+    /// release when the catalog confirms they account for every program
+    /// under the directory. Every statement is bounded by `limit`.
     pub(crate) fn tree_folder(
         &self,
         root: RootId,
         path: &Path,
+        at: ContentsCursor,
         limit: usize,
     ) -> Result<IndexedBranch> {
+        let limit = limit.max(1);
         let snapshot = self.db.unchecked_transaction()?;
+        let mut folders = vec![path.to_owned()];
+        let page = Some((limit + 1, at.album));
+        let mut albums = self.album_page(Albums::TreeFolders(root, &folders), "", page)?;
+        if at == ContentsCursor::default() && albums.is_empty() {
+            let dirs = self.disc_candidates(root, path)?;
+            if !dirs.is_empty() {
+                folders = dirs;
+                albums = self.album_page(Albums::TreeFolders(root, &folders), "", page)?;
+            }
+        }
+        let more_albums = albums.len() > limit;
+        albums.truncate(limit);
+        let mut programs = Vec::new();
+        let mut loose = Vec::new();
+        let mut next = None;
+        for (index, album) in albums.into_iter().enumerate() {
+            let position = at.album + index;
+            if programs.len() + loose.len() >= limit {
+                next = Some(ContentsCursor {
+                    album: position,
+                    track: 0,
+                });
+                break;
+            }
+            if album.authored
+                || album
+                    .folder
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::release::disc_folder)
+                    .is_some()
+            {
+                programs.push(album);
+                continue;
+            }
+            let scope = Scope::Album(album.id);
+            let keys = self.disc_keys(scope)?;
+            let first = if position == at.album { at.track } else { 0 };
+            let room = limit - programs.len() - loose.len();
+            let end = keys.len().min(first.saturating_add(room));
+            loose.extend(
+                self.rows(scope, keys.get(first..end).unwrap_or_default())?
+                    .into_iter()
+                    .filter(|row| row.available)
+                    .map(|row| row.track),
+            );
+            if end < keys.len() {
+                next = Some(ContentsCursor {
+                    album: position,
+                    track: end,
+                });
+                break;
+            }
+        }
+        if next.is_none() && more_albums {
+            next = Some(ContentsCursor {
+                album: at.album + limit,
+                track: 0,
+            });
+        }
+        snapshot.commit()?;
+        Ok(IndexedBranch {
+            programs,
+            loose,
+            next,
+        })
+    }
+
+    /// Folders holding present recordings that match `search`, in one
+    /// collection or in every collection. At most `limit` folders are read,
+    /// and the flag says whether more matched.
+    pub(crate) fn tree_matches(
+        &self,
+        root: Option<RootId>,
+        search: &str,
+        limit: usize,
+    ) -> Result<(Vec<PathBuf>, bool)> {
+        let mut args: Vec<Box<dyn ToSql>> = vec![];
+        let mut filter = vec!["t.present = 1".to_owned()];
+        match root {
+            Some(root) => {
+                args.push(Box::new(root));
+                filter.push(format!("t.root_id = ?{}", args.len()));
+            }
+            None => filter.push("t.root_id IS NOT NULL".into()),
+        }
+        let terms = Term::parse(search);
+        if terms.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        filter.extend(terms.iter().map(|t| t.sql(&mut args)));
+        let sql = format!(
+            "SELECT DISTINCT al.folder FROM tracks t JOIN albums al ON al.id = t.album_id
+             JOIN files s ON s.id = t.source
+             LEFT JOIN ratings r ON r.track_id = t.id
+             LEFT JOIN likes l ON l.track_id = t.id
+             {} LIMIT {}",
+            where_clause(&filter),
+            limit + 1
+        );
+        let mut folders: Vec<PathBuf> = self
+            .db
+            .prepare(&sql)?
+            .query_map(params_from_iter(args.iter()), |r| {
+                Ok(PathBuf::from(r.get::<_, String>(0)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let more = folders.len() > limit;
+        folders.truncate(limit);
+        Ok((folders, more))
+    }
+
+    /// Named CD folders directly below `path` that hold every indexed
+    /// program under it, so they can form one release. At most 32 are read.
+    fn disc_candidates(&self, root: RootId, path: &Path) -> Result<Vec<PathBuf>> {
         let sep = std::path::MAIN_SEPARATOR;
         let prefix = format!("{}{sep}", super::path_key(path).trim_end_matches(sep));
         let next = char::from_u32(u32::from(sep) + 1).expect("path separator");
@@ -861,71 +988,48 @@ impl Store {
              FROM albums al WHERE al.root_id = ?1 AND al.sort_key >= ?2 AND al.sort_key < ?3
                AND child <> '' AND EXISTS(SELECT 1 FROM tracks t
                    WHERE t.album_id = al.id AND t.root_id = al.root_id AND t.present)
-             ORDER BY child COLLATE NOCASE LIMIT ?5",
+             ORDER BY child COLLATE NOCASE LIMIT 33",
         )?;
         let dirs: Vec<PathBuf> = statement
-            .query_map(
-                params![root, prefix, upper, sep.to_string(), limit as i64],
-                |r| Ok(path.join(r.get::<_, String>(0)?)),
-            )?
+            .query_map(params![root, prefix, upper, sep.to_string()], |r| {
+                Ok(path.join(r.get::<_, String>(0)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
-        let cd_candidates = dirs.len() >= 2
-            && dirs.len() <= 32
+        let named = (2..=32).contains(&dirs.len())
             && dirs.iter().all(|dir| {
                 dir.file_name()
                     .and_then(|n| n.to_str())
                     .and_then(crate::release::disc_folder)
                     .is_some()
             });
-        let mut folders = vec![path.to_owned()];
-        let mut albums = self.album_rows(Albums::TreeFolders(root, &folders), "")?;
-        if cd_candidates && albums.is_empty() {
-            let count: i64 = self.db.query_row(
-                "SELECT count(*) FROM albums al
-                 WHERE al.root_id = ?1 AND al.sort_key >= ?2 AND al.sort_key < ?3
-                   AND EXISTS(SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.root_id = al.root_id AND t.present)",
-                params![root, prefix, upper], |r| r.get(0)
-            )?;
-            if count == dirs.len() as i64 {
-                folders = dirs.clone();
-                albums = self.album_rows(Albums::TreeFolders(root, &folders), "")?;
-            }
+        if !named {
+            return Ok(Vec::new());
         }
-        let mut programs = Vec::new();
-        let mut loose = Vec::new();
-        for album in albums.into_iter().take(limit) {
-            if album.authored
-                || album
-                    .folder
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .and_then(crate::release::disc_folder)
-                    .is_some()
-            {
-                programs.push(album);
-            } else {
-                let scope = Scope::Album(album.id);
-                let keys = self.disc_keys(scope)?;
-                loose.extend(
-                    self.rows(
-                        scope,
-                        &keys[..keys.len().min(limit.saturating_sub(loose.len()))],
-                    )?
-                    .into_iter()
-                    .filter(|row| row.available)
-                    .map(|row| row.track),
-                );
-            }
-        }
-        snapshot.commit()?;
-        Ok(IndexedBranch {
-            dirs,
-            programs,
-            loose,
+        let count: i64 = self.db.query_row(
+            "SELECT count(*) FROM albums al
+             WHERE al.root_id = ?1 AND al.sort_key >= ?2 AND al.sort_key < ?3
+               AND EXISTS(SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.root_id = al.root_id AND t.present)",
+            params![root, prefix, upper],
+            |r| r.get(0),
+        )?;
+        Ok(if count == dirs.len() as i64 {
+            dirs
+        } else {
+            Vec::new()
         })
     }
 
     fn album_rows(&self, albums: Albums, search: &str) -> Result<Vec<AlbumRow>> {
+        self.album_page(albums, search, None)
+    }
+
+    /// Album rows, at most `page.0` of them after skipping `page.1`.
+    fn album_page(
+        &self,
+        albums: Albums,
+        search: &str,
+        page: Option<(usize, usize)>,
+    ) -> Result<Vec<AlbumRow>> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let mut filter = vec![match &albums {
             Albums::Disc(id) => {
@@ -986,8 +1090,11 @@ impl Store {
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
              {} GROUP BY al.id
-             ORDER BY coalesce(al.year, 4294967295), al.sort_key, al.id",
-            where_clause(&filter)
+             ORDER BY coalesce(al.year, 4294967295), al.sort_key, al.id{}",
+            where_clause(&filter),
+            page.map_or_else(String::new, |(limit, offset)| format!(
+                " LIMIT {limit} OFFSET {offset}"
+            )),
         );
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), |r| {

@@ -21,7 +21,15 @@ use std::ops::Range;
 pub(crate) struct TreeTable {
     pub(super) tree: Tree,
     pub(super) rows: Vec<TreeRow>,
+    /// Rows whose batches load as the viewport approaches them.
+    boundaries: Vec<Boundary>,
+    /// The rows the table last showed.
+    shown: Range<usize>,
     pub(super) filter: String,
+    /// Catalog folders holding matches for `filter`, in an indexed tree.
+    pub(super) descendants: Option<Arc<Descendants>>,
+    /// Supersedes a catalog match query when the filter changes again.
+    pub(super) matching: Ticket,
     pub(super) selected: Option<TreeId>,
     pub(super) restore: Option<(Option<TreeId>, Viewport)>,
     pub(super) workers: Arc<async_lock::Semaphore>,
@@ -44,7 +52,11 @@ impl TreeTable {
         Self {
             tree: Tree::default(),
             rows: Vec::new(),
+            boundaries: Vec::new(),
+            shown: 0..0,
             filter: String::new(),
+            descendants: None,
+            matching: Ticket::default(),
             selected: None,
             restore: None,
             workers: Arc::new(async_lock::Semaphore::new(2)),
@@ -146,16 +158,41 @@ impl TreeTable {
         let height = crate::table::ROW_HEIGHT;
         let d = table.delegate();
         let view = Viewport::capture(table, height, |index| d.row_key(index));
-        let rows = d.tree.visible(d.sort, &d.filter, &|track| {
-            d.catalog.read(cx).mark_of(track)
-        });
+        let descendants = d
+            .descendants
+            .as_deref()
+            .filter(|matches| matches.query == d.filter);
+        let (rows, boundaries) = d
+            .tree
+            .visible_with(d.sort, &d.filter, descendants, &|track| {
+                d.catalog.read(cx).mark_of(track)
+            });
+        table.delegate_mut().boundaries = boundaries;
         table.delegate_mut().rows = rows;
         let d = table.delegate();
         let position = d.selected.as_ref().and_then(|id| d.position(id));
         reselect(table, position, cx);
         view.restore(table, height, |key| table.delegate().row_position(key));
         Self::restore_view(table, cx);
+        table.delegate().request_near(cx);
         cx.notify();
+    }
+
+    /// Asks the browser for every batch near the rows the table shows.
+    fn request_near(&self, cx: &mut App) {
+        let wants: Vec<_> = self
+            .boundaries
+            .iter()
+            .filter(|boundary| boundary.near(&self.shown))
+            .map(|boundary| (boundary.branch.clone(), boundary.want))
+            .collect();
+        if wants.is_empty() {
+            return;
+        }
+        let browser = self.browser.clone();
+        cx.defer(move |cx| {
+            let _ = browser.update(cx, |b, cx| b.load_tree(wants, cx));
+        });
     }
 
     fn field(&self, index: usize) -> Field {
@@ -255,8 +292,11 @@ impl TableDelegate for TreeTable {
         let field = self.field(col);
         let node = match self.rows.get(row)? {
             TreeRow::Node { node, .. } => node,
-            TreeRow::Message { text, .. } => {
-                return (field == Field::Title).then(|| text.clone().into());
+            other => {
+                return other
+                    .text()
+                    .filter(|_| field == Field::Title)
+                    .map(Into::into);
             }
         };
         let title = node.value(field);
@@ -302,6 +342,7 @@ impl TableDelegate for TreeTable {
                 .when(field == Field::Title, |cell| {
                     cell.child(div().truncate().child(text.clone()))
                 }),
+            TreeRow::Released { .. } => cell,
             TreeRow::Node { node, depth, .. } => {
                 let label = node.value(field);
                 if field != Field::Title {
@@ -375,10 +416,12 @@ impl TableDelegate for TreeTable {
 
     fn visible_rows_changed(
         &mut self,
-        _: Range<usize>,
+        visible: Range<usize>,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        self.shown = visible;
+        self.request_near(cx);
         let browser = self.browser.clone();
         cx.defer_in(window, move |_, _, cx| {
             let _ = browser.update(cx, |_, cx| cx.emit(ViewChanged));
