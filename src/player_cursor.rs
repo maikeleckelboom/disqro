@@ -82,16 +82,14 @@ pub(super) struct Cursor {
     pub drawn: Option<f64>,
     #[cfg(windows)]
     target: Option<Target>,
-    /// Drawing into a GPU target failed; the strip falls back to an element.
-    pub unavailable: bool,
 }
 
 #[cfg(windows)]
 struct Target {
     texture: gpui_windows_gpu::GpuTexture,
+    device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
     size: Size<DevicePixels>,
     scale: f32,
-    bounds: Bounds<Pixels>,
 }
 
 /// Where the cursor is at `at`, and whether playback moves it.
@@ -111,6 +109,9 @@ impl Cursor {
         }
         let track = track?;
         let mapping = self.mapping.as_ref()?;
+        if mapping.program.segments.get(mapping.segment)?.source != track.source {
+            return None;
+        }
         let previous = self
             .last
             .filter(|(identity, _)| track.identity.continues(*identity))
@@ -140,43 +141,26 @@ impl Cursor {
         color: Hsla,
         window: &mut Window,
     ) -> bool {
-        if self.unavailable {
-            return false;
-        }
         let scale = window.scale_factor();
         let size = size(
             DevicePixels((f32::from(bounds.size.width) * scale).round().max(1.) as i32),
             DevicePixels((f32::from(bounds.size.height) * scale).round().max(1.) as i32),
         );
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|target| target.size != size || target.scale != scale)
-        {
-            self.target = None;
-            self.drawn = None;
-            match gpui_windows_gpu::with_d3d11(window, |_, device, _| {
-                gpui_windows_gpu::GpuTexture::new(device, size)
+        let prepared = gpui_windows_gpu::with_d3d11(window, |_, device, _| {
+            if self.target.as_ref().is_none_or(|target| {
+                target.size != size || target.scale != scale || &target.device != device
             }) {
-                Ok(texture) => {
-                    self.target = Some(Target {
-                        texture,
-                        size,
-                        scale,
-                        bounds,
-                    })
-                }
-                Err(_) => {
-                    self.unavailable = true;
-                    return false;
-                }
+                self.drawn = None;
+                self.target = Some(Target {
+                    texture: gpui_windows_gpu::GpuTexture::new(device, size)?,
+                    device: device.clone(),
+                    size,
+                    scale,
+                });
             }
-        }
-        if let Some(target) = &mut self.target {
-            target.bounds = bounds;
-        }
-        if self.draw(fraction, color, window).is_err() {
-            self.unavailable = true;
+            Ok(())
+        });
+        if prepared.is_err() || self.draw(fraction, color, window).is_err() {
             self.target = None;
             return false;
         }
@@ -195,14 +179,18 @@ impl Cursor {
         color: Hsla,
         window: &mut Window,
     ) -> bool {
-        if self.target.is_none() || self.unavailable {
+        if self.target.is_none() {
             return false;
         }
         let x = fraction.and_then(|fraction| self.device_x(fraction));
         if x.is_some() && x == self.drawn {
             return true;
         }
-        self.draw(fraction, color, window).is_ok()
+        if self.draw(fraction, color, window).is_err() {
+            self.target = None;
+            return false;
+        }
+        true
     }
 
     #[cfg(windows)]
@@ -230,7 +218,8 @@ impl Cursor {
         let line = f64::from(WIDTH * target.scale);
         let rgba = Rgba::from(color);
         let view = target.texture.target().clone();
-        gpui_windows_gpu::with_d3d11(window, |_, _, context| {
+        gpui_windows_gpu::with_d3d11(window, |_, device, context| {
+            anyhow::ensure!(&target.device == device, "Compact playhead device changed");
             let context: ID3D11DeviceContext1 = context.cast()?;
             let view: windows::Win32::Graphics::Direct3D11::ID3D11View = view.cast()?;
             // SAFETY: the view belongs to this device and stays alive for the
