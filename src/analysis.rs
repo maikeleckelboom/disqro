@@ -10,6 +10,7 @@ use crate::{
     waveform_source::{self, Evidence, Reader},
 };
 use std::{
+    cell::Cell,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
@@ -55,7 +56,7 @@ impl Analysis {
             .name("disqro-waveform".into())
             .spawn(move || {
                 let mut cache = None;
-                let mut reader = None;
+                let mut detail_reader = None;
                 let mut watching: Option<(u64, Arc<Program>)> = None;
                 loop {
                     match rx.recv_timeout(Duration::from_secs(2)) {
@@ -66,7 +67,7 @@ impl Analysis {
                             {
                                 let _ = tx.send_blocking((*id, Update::Changed));
                                 watching = None;
-                                reader = None;
+                                detail_reader = None;
                             }
                             continue;
                         }
@@ -79,20 +80,24 @@ impl Analysis {
                             .is_some_and(|(id, _)| version.load(Relaxed) != *id)
                         {
                             watching = None;
-                            reader = None;
+                            detail_reader = None;
                         }
                         if let Some((id, _)) = &watching {
                             let current = || version.load(Relaxed) == *id;
-                            let mut session = DecoderSession {
-                                cache: cache.as_ref(),
-                                reader: &mut reader,
-                            };
-                            while load_detail(*id, &tiles, &mut session, &current, &tx) {}
+                            while load_detail(
+                                *id,
+                                &tiles,
+                                cache.as_ref(),
+                                &mut detail_reader,
+                                &current,
+                                &tx,
+                            ) {}
                         }
                         continue;
                     };
                     watching = None;
-                    reader = None;
+                    let mut overview_reader = None;
+                    detail_reader = None;
                     let current = || version.load(Relaxed) == job.id;
                     if cache.is_none() {
                         cache = crate::profile::location()
@@ -115,12 +120,19 @@ impl Analysis {
                                     &active,
                                     DecoderSession {
                                         cache: cache.as_ref(),
-                                        reader: &mut reader,
+                                        reader: &mut overview_reader,
                                     },
                                     current,
                                     &send,
-                                    &|session| {
-                                        load_detail(job.id, &tiles, session, &current, &tx);
+                                    |session| {
+                                        load_detail(
+                                            job.id,
+                                            &tiles,
+                                            session.cache,
+                                            &mut detail_reader,
+                                            &current,
+                                            &tx,
+                                        );
                                     },
                                 );
                                 watching = Some((job.id, p));
@@ -179,7 +191,8 @@ struct DecoderSession<'a> {
 fn load_detail(
     revision: u64,
     detail: &Mutex<Store>,
-    session: &mut DecoderSession<'_>,
+    cache: Option<&Cache>,
+    reader: &mut Option<Reader>,
     current: &impl Fn() -> bool,
     updates: &async_channel::Sender<(u64, Update)>,
 ) -> bool {
@@ -189,9 +202,47 @@ fn load_detail(
     let Some(key) = detail.lock().unwrap().next(revision) else {
         return false;
     };
-    let still_wanted = || current() && detail.lock().unwrap().is_current(revision, &key);
-    let tile = key.load(session.cache, session.reader, &still_wanted).ok();
-    if detail.lock().unwrap().publish(revision, key, tile) {
+    let work = key.reservation();
+    let start = crate::diagnostics::begin_stage();
+    let deadline = work.deadline();
+    #[cfg(feature = "qualification")]
+    if start.is_some() {
+        crate::diagnostics::stage(
+            start,
+            "wave_evidence_started",
+            work.serial(),
+            crate::waveform_detail::trace_key(&work.key()),
+        );
+    }
+    let canceled = Cell::new(false);
+    let still_wanted = || {
+        if !canceled.get() && (!current() || !detail.lock().unwrap().is_current(revision, &key)) {
+            canceled.set(true);
+        }
+        !canceled.get()
+    };
+    let tile = key.load(cache, reader, &still_wanted).ok();
+    let ready = tile.is_some();
+    let mut store = detail.lock().unwrap();
+    let published = if canceled.get() {
+        store.abandon(key);
+        false
+    } else {
+        store.publish(revision, key, tile)
+    };
+    drop(store);
+    if start.is_some() {
+        crate::diagnostics::stage(
+            start,
+            "wave_evidence_completed",
+            work.serial(),
+            u64::from(ready)
+                | (u64::from(deadline.is_some_and(|due| Instant::now() > due)) << 1)
+                | (u64::from(published) << 2)
+                | (u64::from(canceled.get()) << 3),
+        );
+    }
+    if published {
         let _ = updates.try_send((revision, Update::Detail));
     }
     true
@@ -208,7 +259,7 @@ fn analyse(
     mut session: DecoderSession<'_>,
     current: impl Fn() -> bool,
     send: &impl Fn(Update) -> bool,
-    before_chunk: &impl Fn(&mut DecoderSession<'_>),
+    mut before_chunk: impl FnMut(&mut DecoderSession<'_>),
 ) {
     let mut held = vec![None::<Arc<Page>>; program.segments.len()];
     for preview in [true, false] {
@@ -260,7 +311,7 @@ fn analyse(
                 held[i].clone(),
                 &mut session,
                 &current,
-                before_chunk,
+                &mut before_chunk,
                 &publish,
             );
             match result {
@@ -287,7 +338,7 @@ fn measure_overview(
     geometry: Option<Arc<Page>>,
     session: &mut DecoderSession<'_>,
     current: &impl Fn() -> bool,
-    before_chunk: &impl Fn(&mut DecoderSession<'_>),
+    before_chunk: &mut impl FnMut(&mut DecoderSession<'_>),
     publish: &impl Fn(Arc<Page>) -> bool,
 ) -> anyhow::Result<Option<Arc<Page>>> {
     let mut analyzer = request.begin(source.rate)?;

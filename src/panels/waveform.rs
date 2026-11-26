@@ -7,7 +7,7 @@ use crate::{
     player::{Player, PlayerEvent, WaveTrack},
     theme::materials,
     timeline::Source,
-    waveform_detail::{Coverage, Key, View},
+    waveform_detail::{Coverage, View},
     waveform_port_analysis::DETAIL_SECONDS,
     waveform_render::Role,
 };
@@ -232,6 +232,7 @@ impl DeckPosition {
             self.source = Some(track.source.clone());
             self.inspecting = None;
             self.last = None;
+            self.velocity = Default::default();
         }
         let (frame, advancing, observed_frame) = if let Some(target) = track.scrub_frame {
             (target, false, target)
@@ -485,39 +486,33 @@ impl Waveform {
             self.detail.clear();
             return (surface, evidence, Coverage::default());
         };
-        let physical = view.required_range();
-        let width = view.width as f64;
-        let mut prefetch = vec![];
-        let mut keys = if viewport.span < width * 3. && viewport.span < 40_960. {
-            let first = (viewport.first.floor() as usize).saturating_sub(4);
-            let end = (viewport.frame_at(1.).ceil() as usize + 5).min(track.source.frames);
-            let velocity = self.position.velocity.current();
-            if let Ok(visible) = waveform::FrameRange::new(first.min(end) as u64, end as u64) {
-                for block in waveform::planning::sample_prefetch(
-                    track.source.frames as u64,
-                    visible,
-                    velocity,
-                ) {
-                    let range = block.start as usize..block.end as usize;
-                    prefetch.extend(Key::samples(&track.source, range));
-                }
-            }
-            Key::samples(&track.source, first..end)
-        } else {
-            vec![]
+        let (true, Ok(rate)) = (
+            track.source.available,
+            waveform::SampleRate::new(track.source.rate),
+        ) else {
+            self.detail.clear();
+            return (surface, evidence, Coverage::default());
         };
-        keys.extend(Key::geometry(
-            &track.source,
-            surface.playable.clone(),
-            physical,
-            width,
-            viewport.span / f64::from(track.source.rate),
-        ));
-        let preview = (!track.overview.facts().is_empty())
-            .then(|| track.range.start..track.range.start + track.overview.frame_count());
+        let preview = (!track.overview.facts().is_empty()).then(|| waveform::FrameRange {
+            start: track.range.start as u64,
+            end: (track.range.start + track.overview.frame_count()) as u64,
+        });
         let loaded = self
             .detail
-            .tiles_ahead(track.generation, keys, prefetch, preview);
+            .residency(track.generation, &track.source, preview, |latency| {
+                waveform::planning::residency(
+                    rate,
+                    waveform::FrameRange {
+                        start: 0,
+                        end: track.source.frames as u64,
+                    },
+                    view.required_range(),
+                    viewport,
+                    view.width as f64,
+                    self.position.velocity,
+                    latency,
+                )
+            });
         evidence.pages = loaded.pages;
         evidence.samples = loaded.samples;
         (surface, evidence, loaded.coverage)
@@ -728,6 +723,12 @@ impl Render for Waveform {
             .update(&track, frame_time(Instant::now()), grabbed);
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let (surface, evidence, coverage) = self.prepare(&track, self.layout.get(), active);
+        crate::diagnostics::stage(
+            crate::diagnostics::begin_stage(),
+            "wave_scene",
+            self.position.viewport.span.to_bits(),
+            coverage.approximate as u64,
+        );
         self.coverage = Self::coverage(coverage, track.source.available);
         let failed = self.texture.unavailable();
         let limited = self.texture.limited();

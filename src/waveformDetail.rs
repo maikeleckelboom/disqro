@@ -9,15 +9,23 @@ use crate::{
     timeline::Source,
     waveform_source::{self, Evidence as RequestEvidence, Reader},
 };
+#[cfg(test)]
+use std::ops::Range;
+#[cfg(feature = "qualification")]
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::OnceLock,
+};
 use std::{
     collections::HashMap,
-    ops::Range,
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
 };
 use waveform::{
-    FrameRange, SampleBlock, SampleRate, SourceKey, planning,
-    store::{self, Budget, EvidenceStore, Request, Reservation},
+    FrameRange, SampleBlock, SourceKey, planning,
+    store::{self, Budget, DecodeLatency, EvidenceStore, Request, Reservation},
 };
 
 pub use waveform::store::Coverage;
@@ -46,6 +54,7 @@ impl Key {
         }
     }
 
+    #[cfg(test)]
     pub fn samples(source: &Arc<Source>, range: Range<usize>) -> Vec<Self> {
         if !source.available {
             return vec![];
@@ -60,6 +69,7 @@ impl Key {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn geometry(
         source: &Arc<Source>,
         playable: Range<usize>,
@@ -68,7 +78,7 @@ impl Key {
         seconds: f64,
     ) -> Vec<Self> {
         let (Ok(rate), Ok(segment)) = (
-            SampleRate::new(source.rate),
+            waveform::SampleRate::new(source.rate),
             FrameRange::new(playable.start as u64, playable.end as u64),
         ) else {
             return vec![];
@@ -115,6 +125,10 @@ impl Key {
 }
 
 impl Work {
+    pub fn reservation(&self) -> Reservation {
+        self.reservation
+    }
+
     pub fn load(
         &self,
         cache: Option<&Cache>,
@@ -155,6 +169,8 @@ impl Store {
     pub fn reset(&mut self, revision: u64) {
         self.revision = revision;
         self.validated.clear();
+        self.evidence.clear_views();
+        self.collect_sources();
     }
 
     /// Publish identities resolved by the background program reader. View
@@ -185,10 +201,7 @@ impl Store {
             .expect("demand retains its source registration");
         Some(Work {
             reservation,
-            key: Key {
-                source: source.clone(),
-                request: key.request,
-            },
+            key: Key::new(source, key.request),
         })
     }
 
@@ -196,10 +209,14 @@ impl Store {
         self.revision == revision && self.evidence.is_current(work.reservation)
     }
 
+    pub fn abandon(&mut self, work: Work) {
+        self.evidence.abandon(work.reservation);
+        self.collect_sources();
+    }
+
     pub fn publish(&mut self, revision: u64, work: Work, value: Option<Tile>) -> bool {
         if !self.is_current(revision, &work) {
-            self.evidence.abandon(work.reservation);
-            self.collect_sources();
+            self.abandon(work);
             return false;
         }
         let tile = value.map(|tile| match tile {
@@ -243,6 +260,7 @@ impl Store {
         Some(key)
     }
 
+    #[cfg(test)]
     fn engine_key(&mut self, key: &Key) -> Option<store::Key> {
         Some(store::Key {
             source: self.register(&key.source)?,
@@ -250,6 +268,7 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     fn set_view(
         &mut self,
         id: u64,
@@ -291,11 +310,33 @@ pub struct View {
     id: u64,
     shared: Arc<Mutex<Store>>,
     wake: mpsc::SyncSender<()>,
+    #[cfg(feature = "qualification")]
+    trace: RefCell<ResidencyTrace>,
+}
+
+#[cfg(feature = "qualification")]
+#[derive(Default)]
+struct ResidencyTrace {
+    requested: HashSet<store::Key>,
+    consumed: HashSet<store::Key>,
+}
+
+#[cfg(feature = "qualification")]
+pub fn trace_key(key: &store::Key) -> u64 {
+    let mut hash = DefaultHasher::new();
+    key.hash(&mut hash);
+    hash.finish()
 }
 
 impl View {
     pub fn new(id: u64, shared: Arc<Mutex<Store>>, wake: mpsc::SyncSender<()>) -> Self {
-        Self { id, shared, wake }
+        Self {
+            id,
+            shared,
+            wake,
+            #[cfg(feature = "qualification")]
+            trace: RefCell::default(),
+        }
     }
 
     #[cfg(test)]
@@ -303,7 +344,7 @@ impl View {
         self.tiles_ahead(revision, keys, vec![], preview)
     }
 
-    /// `prefetch` is decoded ahead of need and is not part of the coverage.
+    #[cfg(test)]
     pub fn tiles_ahead(
         &self,
         revision: u64,
@@ -324,14 +365,122 @@ impl View {
         evidence
     }
 
+    pub fn residency(
+        &self,
+        revision: u64,
+        source: &Arc<Source>,
+        preview: Option<FrameRange>,
+        plan: impl FnOnce(DecodeLatency) -> planning::ResidencyPlan,
+    ) -> Evidence {
+        let mut store = self.shared.lock().unwrap();
+        if store.revision != revision {
+            return Evidence::default();
+        }
+        let id = store::ViewId(self.id);
+        let plan = plan(store.evidence.decode_latency());
+        let Some(source) = store.register(source) else {
+            store.evidence.clear_view(id);
+            store.collect_sources();
+            let mut evidence = Evidence::default();
+            evidence.coverage.unavailable = plan.required.len();
+            evidence.coverage.missing_samples = plan
+                .required
+                .iter()
+                .filter(|request| matches!(request, Request::Samples(_)))
+                .count();
+            return evidence;
+        };
+        let key = |request| store::Key { source, request };
+        let required: Vec<_> = plan.required.into_iter().map(key).collect();
+        let ahead: Vec<_> = plan.ahead.into_iter().map(|item| item.map(key)).collect();
+        #[cfg(feature = "qualification")]
+        let ahead = {
+            static REACTIVE: OnceLock<bool> = OnceLock::new();
+            if *REACTIVE.get_or_init(|| std::env::var_os("DISQRO_RESIDENCY_REACTIVE").is_some()) {
+                Vec::new()
+            } else {
+                ahead
+            }
+        };
+        let (evidence, changed) = store.evidence.request_timed(id, &required, &ahead, preview);
+        if let Some(timestamp) = crate::diagnostics::begin_stage() {
+            let at = Some(timestamp);
+            #[cfg(feature = "qualification")]
+            {
+                let mut trace = self.trace.borrow_mut();
+                trace.requested.retain(|key| {
+                    required.contains(key) || ahead.iter().any(|item| item.key == *key)
+                });
+                trace
+                    .consumed
+                    .retain(|key| required.contains(key) && store.evidence.is_exact(key));
+                for (key, speculative) in required
+                    .iter()
+                    .map(|key| (key, false))
+                    .chain(ahead.iter().map(|item| (&item.key, true)))
+                {
+                    if trace.requested.insert(*key) {
+                        crate::diagnostics::stage(
+                            at,
+                            "wave_evidence_requested",
+                            trace_key(key),
+                            (self.id << 1) | u64::from(speculative),
+                        );
+                    }
+                    if !speculative && store.evidence.is_exact(key) && trace.consumed.insert(*key) {
+                        crate::diagnostics::stage(
+                            at,
+                            "wave_evidence_consumed",
+                            trace_key(key),
+                            self.id,
+                        );
+                    }
+                }
+            }
+            let visible = store.evidence.visible_residency(&required);
+            for (stage, count) in [
+                ("wave_residency_geometry", visible.geometry),
+                ("wave_residency_spectral", visible.spectral),
+                ("wave_residency_pcm", visible.pcm),
+            ] {
+                crate::diagnostics::stage(
+                    at,
+                    stage,
+                    count.exact as u64,
+                    (self.id << 32) | count.missing as u64,
+                );
+            }
+            if changed {
+                crate::diagnostics::stage(at, "wave_evidence_demand", self.id, ahead.len() as u64);
+                crate::diagnostics::stage(
+                    at,
+                    "wave_evidence_bytes",
+                    store.evidence.resident_bytes() as u64,
+                    store.evidence.reserved_bytes() as u64,
+                );
+            }
+        }
+        if changed {
+            store.collect_sources();
+        }
+        drop(store);
+        if changed {
+            let _ = self.wake.try_send(());
+        }
+        evidence
+    }
+
     pub fn clear(&self) {
-        if self
-            .shared
-            .lock()
-            .unwrap()
-            .set_view(self.id, &[], &[], None)
-            .1
+        #[cfg(feature = "qualification")]
         {
+            let mut trace = self.trace.borrow_mut();
+            trace.requested.clear();
+            trace.consumed.clear();
+        }
+        let mut store = self.shared.lock().unwrap();
+        if store.evidence.clear_view(store::ViewId(self.id)) {
+            store.collect_sources();
+            drop(store);
             let _ = self.wake.try_send(());
         }
     }
