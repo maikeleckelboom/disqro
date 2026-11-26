@@ -161,7 +161,7 @@ impl Missing {
         e.volume.is_some()
             && e.index.is_some_and(|id| id != 0)
             && (self.volume, self.index) == (e.volume, e.index)
-            && self.sample.is_none_or(|s| s == e.sample)
+            && self.sample == Some(e.sample)
             && self.modified == new.modified
             && self.plausible(new, e)
     }
@@ -180,13 +180,13 @@ fn scan_transaction<'db>(
         |row| row.get(0),
     )?;
     if !current || !alive() {
-        return Err(super::worker::Cancelled.into());
+        return Err(super::worker::Canceled.into());
     }
     Ok(tx)
 }
 
 /// Indexes a registered collection. `alive` turning false cancels the scan;
-/// a cancelled or partly unreadable scan never marks anything missing.
+/// a canceled or partly unreadable scan never marks anything missing.
 pub fn index_root(
     store: &mut Store,
     root: RootId,
@@ -210,7 +210,7 @@ pub fn index_root(
         |r| r.get(0),
     )?;
     progress(Progress::Walking);
-    let found = walk(&path, alive).ok_or(super::worker::Cancelled)?;
+    let found = walk(&path, alive).ok_or(super::worker::Canceled)?;
     let mut uncertain = found.failed_sheets;
     // Every file the walk found, with its size and time.
     let groups = groups(found.tracks);
@@ -223,7 +223,7 @@ pub fn index_root(
             .chain(g.tracks.iter().map(|t| (&t.source, AUDIO)));
         for (p, kind) in paths {
             if !alive() {
-                return Err(super::worker::Cancelled.into());
+                return Err(super::worker::Canceled.into());
             }
             if by_path.contains_key(p) {
                 continue;
@@ -376,7 +376,7 @@ pub fn index_root(
     let mut pending = groups.iter().peekable();
     while pending.peek().is_some() {
         if !alive() {
-            return Err(super::worker::Cancelled.into());
+            return Err(super::worker::Canceled.into());
         }
         let mut prepared = Vec::new();
         let mut count = 0;
@@ -478,8 +478,9 @@ pub fn index_root(
         |row| row.get(0),
     )?;
     if !current || !alive() {
-        return Err(super::worker::Cancelled.into());
+        return Err(super::worker::Canceled.into());
     }
+    Store::refresh_release_index(&tx, root)?;
     store.remember_listening_releases(&tx, root)?;
     tx.commit()?;
     Ok(summary)
@@ -533,8 +534,9 @@ fn enriched(db: &Connection, t: &Arc<Track>, source: Option<&FileInfo>) -> Resul
     }
     let recorded = db
         .prepare_cached(
-            "SELECT t.title, t.artist, t.album, t.number, t.disc_number, t.year, t.duration
+            "SELECT t.title, t.artist, t.album, t.number, t.disc_number, t.year, t.duration, credit.name
              FROM tracks t JOIN files f ON f.id = t.anchor
+             LEFT JOIN artists credit ON credit.id = t.album_artist_id
              WHERE f.path_key = ?1 AND t.part = 0 AND f.tagged = ?2 AND f.size = ?3 AND f.sample = ?4 AND f.digest = ?5",
         )?
         .query_row(params![source.key, source.modified, source.size, source.evidence.sample, source.evidence.digest], |r| {
@@ -546,6 +548,7 @@ fn enriched(db: &Connection, t: &Arc<Track>, source: Option<&FileInfo>) -> Resul
             t.disc_number = r.get(4)?;
             t.year = r.get(5)?;
             t.duration = r.get(6)?;
+            t.album_artist = r.get(7)?;
             Ok(t)
         })
         .optional()?;
@@ -653,10 +656,10 @@ fn album_for(
     let sort_key = format!("{}\u{1}{}", path_key(folder), title.to_lowercase());
     Ok(tx
         .prepare_cached(
-            "INSERT INTO albums(key, root_id, title, artist, year, folder, cover, sort_key)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO albums(key, root_id, title, year, folder, cover, sort_key)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(key) DO UPDATE SET root_id = coalesce(excluded.root_id, root_id),
-                title = excluded.title, artist = excluded.artist, year = excluded.year,
+                title = excluded.title, year = excluded.year,
                 folder = excluded.folder, cover = coalesce(excluded.cover, cover),
                 sort_key = excluded.sort_key
              RETURNING id",
@@ -666,7 +669,6 @@ fn album_for(
                 key,
                 root,
                 title,
-                t.artist,
                 t.year,
                 folder.to_string_lossy(),
                 cover.map(|c| c.to_string_lossy()),
@@ -691,6 +693,7 @@ fn upsert_track(
     let (first, last) = t.disc.as_ref().map_or((None, None), |d| {
         (Some(d.start as i64), d.end.map(|e| e as i64))
     });
+    let credit = super::artists::record_credits(tx, t)?;
     if t.disc.is_some() {
         tx.prepare_cached(
             "UPDATE tracks SET present = 0 WHERE anchor = ?1 AND part = ?2 AND present = 1
@@ -701,16 +704,16 @@ fn upsert_track(
     tx.prepare_cached(
         "INSERT INTO tracks(anchor, part, source, first_tick, last_tick, root_id, album_id, ordinal,
             title, artist, album, number, disc_number, year, duration, format,
-            title_key, artist_key, album_key, search, present, seen, added_at)
+            title_key, artist_key, album_key, search, present, seen, added_at, album_artist_id)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-            ?17, ?18, ?19, ?20, 1, ?21, ?22)
+            ?17, ?18, ?19, ?20, 1, ?21, ?22, ?23)
          ON CONFLICT(anchor, part, source, ifnull(first_tick,-1), ifnull(last_tick,-1)) DO UPDATE SET
             root_id = coalesce(excluded.root_id, root_id), album_id = excluded.album_id,
             ordinal = excluded.ordinal, title = excluded.title, artist = excluded.artist,
             album = excluded.album, number = excluded.number, disc_number = excluded.disc_number,
             year = excluded.year, duration = coalesce(excluded.duration, duration),
             format = excluded.format, title_key = excluded.title_key,
-            artist_key = excluded.artist_key, album_key = excluded.album_key,
+            artist_key = excluded.artist_key, album_key = excluded.album_key, album_artist_id = excluded.album_artist_id,
             search = excluded.search, present = 1, seen = CASE WHEN excluded.root_id IS NULL THEN seen ELSE excluded.seen END",
     )?
     .execute(params![
@@ -731,11 +734,12 @@ fn upsert_track(
         t.duration,
         t.format(),
         t.title.to_lowercase(),
-        t.artist.to_lowercase(),
+        credit.performer_key,
         t.album.to_lowercase(),
         search_text(t),
         generation,
-        now()
+        now(),
+        credit.album_artist
     ])?;
     Ok(())
 }
@@ -780,7 +784,7 @@ fn enrich(
     let total = todo.len();
     for (n, chunk) in todo.chunks(64).enumerate() {
         if !alive() {
-            return Err(super::worker::Cancelled.into());
+            return Err(super::worker::Canceled.into());
         }
         let read: Vec<_> = chunk
             .iter()
@@ -834,11 +838,12 @@ fn enrich(
                     .and_then(|d| covers.get(d))
                     .map(PathBuf::as_path);
                 let album = album_for(&tx, &t, &group, f.id, Some(root), cover)?;
+                let credit = super::artists::record_credits(&tx, &t)?;
                 tx.prepare_cached(
                     "UPDATE tracks SET title = ?2, artist = ?3, album = ?4, number = ?5,
                         disc_number = ?6, year = ?7, duration = ?8, title_key = ?9,
                         artist_key = ?10, album_key = ?11, search = ?12, album_id = ?13,
-                        ordinal = ?14
+                        ordinal = ?14, album_artist_id = ?15
                      WHERE id = ?1",
                 )?
                 .execute(params![
@@ -851,11 +856,12 @@ fn enrich(
                     t.year,
                     t.duration,
                     t.title.to_lowercase(),
-                    t.artist.to_lowercase(),
+                    credit.performer_key,
                     t.album.to_lowercase(),
                     search_text(&t),
                     album,
-                    ordinal
+                    ordinal,
+                    credit.album_artist
                 ])?;
             }
         }

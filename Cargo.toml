@@ -6,9 +6,17 @@ publish = false
 description = "Native local music player for Windows"
 
 [features]
-qualification = ["gpui-windows-gpu/frame-statistics", "gpui-kit/profiler"]
+qualification = [
+    "gpui-windows-gpu/frame-statistics",
+    "gpui-kit/profiler",
+    "waveform-native/qualification",
+]
 
 [dependencies]
+# Waveform Native: analysis, evidence, Stroke projection, the D3D11 renderer
+# and GPUI surfaces. The same pinned revision supplies the GPUI platform
+# patch below (docs/waveform-native.md).
+waveform-native = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "3d9a8f5149483b051df7f0219bf1cbaf4c4c2555", features = ["gpui"] }
 async-lock = "3.5"
 hashlink = "0.12"
 gpui-kit = { version = "=0.10.0", features = ["gpui-fast"] }
@@ -32,16 +40,13 @@ rusqlite = { version = "=0.40.2", features = ["bundled", "hooks"] }
 chrono = "=0.4.45"
 
 [target.'cfg(windows)'.dependencies]
-bytemuck = { version = "1", features = ["derive"] }
-gpui-windows-gpu = { package = "gpui-fast-windows", version = "=0.1.17" }
+gpui-windows-gpu = { package = "gpui-fast-windows", version = "=0.1.17", features = ["maximized-frame-pacing"] }
 windows = { version = "=0.62.2", features = [
     "Foundation",
     "Media",
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_Direct3D_Fxc",
-    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
@@ -54,14 +59,14 @@ windows = { version = "=0.62.2", features = [
 
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = "3"
-windows = { version = "=0.62.2", features = ["Win32_Graphics_Direct3D_Fxc"] }
 
+# Cargo applies patches only from the root workspace. Waveform Native carries
+# the single copy of GPUI's same-device texture bridge.
 [patch.crates-io]
-gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
+gpui-fast-windows = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "3d9a8f5149483b051df7f0219bf1cbaf4c4c2555" }
 
 [profile.dev]
 debug = 0
-incremental = false
 
 [profile.release]
 strip = "debuginfo"

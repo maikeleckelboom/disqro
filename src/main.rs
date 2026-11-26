@@ -11,15 +11,16 @@ mod catalog;
 mod collection;
 mod cue;
 mod diagnostics;
+mod disclosure;
 mod discovery;
 mod folders;
-#[path = "levelMeter.rs"]
 mod level_meter;
 mod levels;
 mod library;
 mod listening;
 mod location;
 mod movie;
+mod ordered_result;
 mod overview;
 mod panels;
 mod places;
@@ -29,28 +30,19 @@ mod queue;
 mod recording;
 mod release;
 mod signal;
-#[path = "spectralHistory.rs"]
 mod spectral_history;
 mod spectrum;
-#[path = "spectrumWorker.rs"]
 mod spectrum_worker;
-#[path = "stereoField.rs"]
 mod stereo_field;
 mod store;
 mod system;
 mod table;
 mod theme;
 mod timeline;
-mod waveform;
-#[path = "waveformDetail.rs"]
 mod waveform_detail;
-#[path = "waveformPortAnalysis.rs"]
-mod waveform_port_analysis;
-#[cfg(feature = "qualification")]
-#[path = "waveformPortQualification.rs"]
-mod waveform_port_qualification;
-#[path = "waveformRender.rs"]
-mod waveform_render;
+#[cfg(all(windows, feature = "qualification"))]
+mod waveform_qualification;
+mod waveform_source;
 mod workspace;
 
 use gpui_kit::{component::TitleBar, prelude::*, *};
@@ -58,9 +50,11 @@ use workspace::*;
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut source = args.next();
-    #[cfg(feature = "qualification")]
-    if source.as_deref() == Some(std::ffi::OsStr::new("--waveform-parity")) {
-        std::process::exit(waveform_port_qualification::run(args));
+    if source.as_deref() == Some(std::ffi::OsStr::new("--render-waveform-cases")) {
+        #[cfg(all(windows, feature = "qualification"))]
+        std::process::exit(waveform_qualification::run(args));
+        #[cfg(not(all(windows, feature = "qualification")))]
+        std::process::exit(2);
     }
     if source.as_deref() == Some(std::ffi::OsStr::new("--qualify-silent")) {
         if !cfg!(feature = "qualification") || std::env::var_os("DISQRO_PROFILE_DIR").is_none() {
@@ -71,7 +65,10 @@ fn main() {
     }
     diagnostics::start();
     #[cfg(all(windows, feature = "qualification"))]
-    waveform_render::gpu::qualification::start_presentation_trace();
+    {
+        waveform_qualification::start_presentation_trace();
+        waveform_qualification::arm_target_failure();
+    }
     let arg = source
         .map(std::path::PathBuf::from)
         .and_then(|p| std::path::absolute(p).ok());
@@ -79,8 +76,10 @@ fn main() {
         .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            diagnostics::observe_waveform_surfaces(cx);
             theme::install(theme::Appearance::Dark, cx);
             workspace::bind_keys(cx);
+            disclosure::bind_keys(cx);
             location::bind_keys(cx);
             panels::queue::bind_keys(cx);
             panels::listening::bind_keys(cx);
@@ -97,7 +96,7 @@ fn main() {
             gpui_kit::open_window(options, cx, move |window, cx| {
                 window.set_window_title("Disqro");
                 #[cfg(all(windows, feature = "qualification"))]
-                waveform_render::gpu::qualification::exercise_device_recreation(window, cx);
+                waveform_qualification::exercise_device_recreation(window, cx);
                 cx.new(|cx| Workspace::new(arg, window, cx))
             })
             .expect("Could not open Disqro");

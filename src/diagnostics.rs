@@ -31,6 +31,7 @@ pub struct Counters {
     pub frames: AtomicU64,
     pub paint_us: AtomicU64,
     pub wave_upload_bytes: AtomicU64,
+    pub wave_total_upload_bytes: AtomicU64,
     pub wave_gpu_draws: AtomicU64,
     pub wave_gpu_errors: AtomicU64,
     pub wave_input_us: AtomicU64,
@@ -90,6 +91,102 @@ pub fn stage(start: Option<i64>, label: &'static str, value: u64, detail: u64) {
     #[cfg(not(all(windows, feature = "qualification")))]
     let _ = (start, label, value, detail);
 }
+pub fn with_panel<T>(panel: u64, run: impl FnOnce() -> T) -> T {
+    #[cfg(all(windows, feature = "qualification"))]
+    return gpui_windows_gpu::frame_statistics::with_panel(panel, run);
+    #[cfg(not(all(windows, feature = "qualification")))]
+    {
+        let _ = panel;
+        run()
+    }
+}
+
+#[cfg(all(windows, feature = "qualification"))]
+pub struct AudioStage {
+    qpc: i64,
+    ticks: i64,
+    label: &'static str,
+    voice: u64,
+    cursor: u64,
+}
+
+#[cfg(all(windows, feature = "qualification"))]
+pub struct AudioTrace {
+    voice: u64,
+    started: i64,
+    producer: rtrb::Producer<AudioStage>,
+}
+
+#[cfg(all(windows, feature = "qualification"))]
+static AUDIO_TRACE_DROPS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(all(windows, feature = "qualification"))]
+impl AudioTrace {
+    pub fn channel() -> Option<(Self, rtrb::Consumer<AudioStage>)> {
+        static NEXT_VOICE: AtomicU64 = AtomicU64::new(1);
+        begin_stage()?;
+        let (producer, consumer) = rtrb::RingBuffer::new(2_048);
+        let voice = NEXT_VOICE.fetch_add(1, Relaxed);
+        Some((
+            Self {
+                voice,
+                started: 0,
+                producer,
+            },
+            consumer,
+        ))
+    }
+
+    fn push(&mut self, qpc: i64, ticks: i64, label: &'static str, cursor: u64) {
+        if self
+            .producer
+            .push(AudioStage {
+                qpc,
+                ticks,
+                label,
+                voice: self.voice,
+                cursor,
+            })
+            .is_err()
+        {
+            AUDIO_TRACE_DROPS.fetch_add(1, Relaxed);
+        }
+    }
+
+    pub fn callback(&mut self, frame: f64) {
+        let now = gpui_windows_gpu::frame_statistics::qpc();
+        self.started = now;
+        self.push(now, 0, "audio_callback", frame.to_bits());
+    }
+
+    pub fn commit(&mut self, frame: usize) {
+        let now = gpui_windows_gpu::frame_statistics::qpc();
+        self.push(
+            now,
+            now.saturating_sub(self.started),
+            "audio_commit",
+            frame as u64,
+        );
+    }
+
+    pub fn drain(consumer: &mut rtrb::Consumer<AudioStage>) {
+        use gpui_windows_gpu::frame_statistics::{qpc, record_sample};
+        while let Ok(sample) = consumer.pop() {
+            record_sample(
+                sample.qpc,
+                sample.ticks,
+                sample.label,
+                sample.voice,
+                sample.cursor,
+            );
+        }
+        let dropped = AUDIO_TRACE_DROPS.swap(0, Relaxed);
+        if dropped > 0 {
+            record_sample(qpc(), 0, "audio_trace_dropped", dropped, 0);
+        }
+    }
+}
+
 pub fn start() {
     let Some(path) = std::env::var_os("DISQRO_PLAYBACK_TRACE") else {
         return;
@@ -117,6 +214,7 @@ pub fn start() {
                 ("wave_paints", &d.frames),
                 ("wave_paint_max_us", &d.paint_us),
                 ("wave_source_upload_bytes", &d.wave_upload_bytes),
+                ("wave_total_upload_bytes", &d.wave_total_upload_bytes),
                 ("wave_gpu_draws", &d.wave_gpu_draws),
                 ("wave_gpu_errors", &d.wave_gpu_errors),
                 ("wave_input_to_draw_max_us", &d.wave_input_us),
@@ -213,4 +311,33 @@ impl ViewTrace {
             }
         }
     }
+}
+
+/// Counts Waveform Native surface draws, uploads and failures in the trace.
+pub fn observe_waveform_surfaces(cx: &mut gpui_kit::App) {
+    #[cfg(windows)]
+    waveform::gpui::observe_surfaces(cx, |event| match event {
+        waveform::gpui::SurfaceEvent::Drawn(stats) => {
+            if let Some(d) = get() {
+                d.wave_gpu_draws.fetch_add(1, Relaxed);
+                d.wave_upload_bytes
+                    .fetch_add(stats.source_uploaded_bytes, Relaxed);
+                d.wave_total_upload_bytes
+                    .fetch_add(stats.uploaded_bytes, Relaxed);
+            }
+            stage(
+                begin_stage(),
+                "shared_device_update",
+                stats.uploaded_bytes,
+                stats.source_uploaded_bytes,
+            );
+        }
+        waveform::gpui::SurfaceEvent::Failed => {
+            if let Some(d) = get() {
+                d.wave_gpu_errors.fetch_add(1, Relaxed);
+            }
+        }
+    });
+    #[cfg(not(windows))]
+    let _ = cx;
 }

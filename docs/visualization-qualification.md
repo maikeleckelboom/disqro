@@ -62,8 +62,8 @@ The harness starts the player on a separate Win32 desktop and closes it after ea
 
 ```powershell
 cargo build --release --locked --features qualification
-python tools/qualifySpectrum.py all target/release/disqro.exe 'C:/fixtures/disc.cue' .local/trial-all
-python tools/qualifySpectrum.py sustained target/release/disqro.exe 'C:/fixtures/disc.cue' .local/trial-sustained
+python tools/qualify_spectrum.py all target/release/disqro.exe 'C:/fixtures/disc.cue' .local/trial-all
+python tools/qualify_spectrum.py sustained target/release/disqro.exe 'C:/fixtures/disc.cue' .local/trial-sustained
 ```
 
 Use a new output directory for each trial and a source longer than the run. Python 3.11+ and Pillow are required. The harness writes the restored workspace, one-second trace, aggregate CSV and a native screenshot. The sustained trial preceded a targeted fix for a new device’s initial sequence position and a Waterfall height-label clarification. The complete short-run matrix, dock checks and native screenshots use the reviewed binary. The replacement-device fixture and a focused worker test cover those discontinuity boundaries.

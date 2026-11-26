@@ -1,0 +1,596 @@
+use crate::{
+    audio::tests::fixture,
+    cache::Cache,
+    library::{DiscContext, Track},
+    timeline::*,
+    waveform_source,
+};
+use lofty::{
+    config::WriteOptions,
+    prelude::*,
+    tag::{Tag, TagType},
+};
+use std::{fs, path::Path, sync::Arc};
+
+fn overview(track: &Track, program: Option<&Program>) -> Option<(&'static str, bool)> {
+    Overview::for_track(track, program).map(|o| (o.label, o.enabled))
+}
+
+fn tagged_mp3(dir: &Path, name: &str, album: &str, disc: u32, number: u32) -> Arc<Track> {
+    let path = dir.join(name);
+    // Silent MPEG-1 Layer III frames at 44.1 kHz and 128 kbit/s.
+    let mut frame = [0; 417];
+    frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+    let mut info = frame;
+    info[36..40].copy_from_slice(b"Info");
+    info[40..44].copy_from_slice(&1_u32.to_be_bytes());
+    info[44..48].copy_from_slice(&8_u32.to_be_bytes());
+    let mut bytes = info.to_vec();
+    bytes.extend_from_slice(&frame.repeat(8));
+    fs::write(&path, bytes).unwrap();
+    let mut tag = Tag::new(TagType::Id3v2);
+    tag.set_album(album.into());
+    tag.set_disk(disc);
+    tag.set_track(number);
+    tag.save_to_path(&path, WriteOptions::default()).unwrap();
+    let mut track = Track::file(path);
+    assert!(track.read_tags());
+    Arc::new(track)
+}
+
+#[test]
+fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cue = String::new();
+    let mut number = 0;
+    for (name, rate, frames, ticks) in [
+        ("a", 44100, 44117, &[3, 12][..]),
+        ("b", 48000, 48011, &[2, 40]),
+        ("c", 96000, 96007, &[0, 7]),
+        ("d", 32000, 32001, &[0, 1, 2, 74]),
+    ] {
+        fixture(&dir.path().join(format!("{name}.wav")), rate, frames);
+        cue.push_str(&format!("FILE {name}.wav WAVE\n"));
+        for tick in ticks {
+            number += 1;
+            cue.push_str(&format!(
+                "TRACK {number:02} AUDIO\nINDEX 01 00:00:{tick:02}\n"
+            ));
+        }
+    }
+    let sheet = dir.path().join("mix.cue");
+    fs::write(&sheet, cue).unwrap();
+    let track = Arc::new(crate::cue::read(&sheet).unwrap().remove(1));
+    let p = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    assert!(p.full_cd);
+    assert_eq!(p.segments.len(), 12);
+    let mut count = 0;
+    for (i, s) in p.segments.iter().enumerate() {
+        assert_eq!(
+            p.inspection_chapter(&s.source, s.frames.start),
+            Some((
+                s.track.disc.as_ref().unwrap().number,
+                0.,
+                s.time.start as f64 / SECOND as f64
+            ))
+        );
+        assert!(p.inspection_chapter(&s.source, s.source.frames).is_none());
+        for f in s.frames.clone() {
+            assert_eq!(p.locate(s.at(f)), Some((i, f)));
+            assert_eq!(p.locate(s.at(f + 1) - 1), Some((i, f)));
+            count += 1;
+        }
+        if let Some(next) = p.segments.get(i + 1) {
+            assert_eq!(p.locate(s.time.end), Some((i + 1, next.frames.start)));
+        }
+    }
+    assert_eq!(count, 220136);
+    assert_eq!(p.segments[3].time.start, 1_000_385_488);
+    assert_eq!(p.locate(p.duration), None);
+}
+#[test]
+fn standalone_recordings_and_one_track_albums_have_no_second_perspective() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("single.wav");
+    fixture(&wav, 32000, 32000);
+    let single = Arc::new(Track::file(wav));
+    let p = Program::resolve(&single, DiscContext::Selected, None).unwrap();
+    assert!(!p.full_cd && p.limitation.is_some());
+    assert_eq!(overview(&single, None), None);
+    assert_eq!(overview(&single, Some(&p)), None);
+
+    let only = tagged_mp3(dir.path(), "only.mp3", "Single", 1, 1);
+    let p = Program::resolve(&only, DiscContext::Inferred, None).unwrap();
+    assert!(p.full_cd && p.segments.len() == 1);
+    assert_eq!(overview(&only, Some(&p)), None);
+}
+
+#[test]
+fn tagged_album_overview_follows_track_numbers_and_stays_on_the_playing_disc() {
+    let dir = tempfile::tempdir().unwrap();
+    let album = "Serato Scratch Beats";
+    let two = tagged_mp3(dir.path(), "a.mp3", album, 1, 2);
+    let one = tagged_mp3(dir.path(), "b.mp3", album, 1, 1);
+    tagged_mp3(dir.path(), "other.mp3", "Other Album", 1, 1);
+
+    let resolve = || Program::resolve(&two, DiscContext::Inferred, None).unwrap();
+    assert_eq!(overview(&two, None), Some(("Album", false)));
+    let p = resolve();
+    assert_eq!(overview(&two, Some(&p)), Some(("Album", true)));
+    assert_eq!(p.segments.len(), 2);
+    assert_eq!(p.index(&one), Some(0));
+    assert_eq!(p.index(&two), Some(1));
+
+    let unrelated = tagged_mp3(dir.path(), "disc2.mp3", album, 2, 1);
+    let p = resolve();
+    assert_eq!(overview(&two, Some(&p)), Some(("Disc", true)));
+    assert_eq!(p.segments.len(), 2);
+    assert_eq!(p.index(&unrelated), None);
+    assert_eq!(p.locate(p.segments[1].time.start), Some((1, 0)));
+}
+
+#[test]
+fn explicit_cd_cue_and_other_authored_recordings_label_the_same_timeline_differently() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(&dir.path().join("session.wav"), 48000, 96000);
+    for (name, label) in [
+        ("Live (CD1).cue", "Full CD"),
+        ("Live.cue", "Full Recording"),
+    ] {
+        let path = dir.path().join(name);
+        fs::write(
+            &path,
+            "FILE session.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+        )
+        .unwrap();
+        let chapter = Arc::new(crate::cue::read(&path).unwrap().pop().unwrap());
+        let p = Program::resolve(&chapter, DiscContext::Inferred, None).unwrap();
+        assert_eq!(overview(&chapter, None), Some((label, false)));
+        assert_eq!(overview(&chapter, Some(&p)), Some((label, true)));
+        assert_eq!(p.index(&chapter), Some(1));
+        assert_eq!(p.locate(SECOND), Some((1, 48000)));
+        assert_eq!(p.duration, 2 * SECOND);
+    }
+}
+
+#[test]
+fn selecting_loose_files_can_resolve_a_program_without_claiming_cd_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["one.wav", "two.wav"] {
+        fixture(&dir.path().join(name), 32000, 32000);
+    }
+    let one = Arc::new(Track::file(dir.path().join("one.wav")));
+    let p = Program::resolve(&one, DiscContext::Inferred, None).unwrap();
+    assert_eq!(overview(&one, Some(&p)), None);
+    let p = Program::resolve(&one, DiscContext::Selected, None).unwrap();
+    assert_eq!(overview(&one, Some(&p)), Some(("Full Program", true)));
+    assert_eq!(p.segments.len(), 2);
+}
+
+#[test]
+fn stale_tagged_album_context_has_a_disabled_album_overview() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut track = Track::file(dir.path().join("unretagged.wav"));
+    fixture(&track.source, 32000, 32000);
+    // A restored queue can still know the album after its file loses the tag.
+    track.album = "Old Album".into();
+    let track = Arc::new(track);
+    let p = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let o = Overview::for_track(&track, Some(&p)).unwrap();
+    assert_eq!((o.label, o.enabled), ("Album", false));
+    assert_eq!(
+        o.unavailable_tip(p.limitation.as_deref(), false),
+        "Album waveform unavailable · No larger sequence was found"
+    );
+    assert_eq!(p.segments.len(), 1);
+}
+#[test]
+fn missing_recording_requires_a_verified_duration_for_this_sheet_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.wav");
+    let b = dir.path().join("b.wav");
+    fixture(&a, 32000, 32100);
+    let cue = dir.path().join("set.cue");
+    let text = "FILE b.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nFILE a.wav WAVE\nTRACK 02 AUDIO\nINDEX 01 00:00:01";
+    fs::write(&cue, text).unwrap();
+    let track = Arc::new(crate::cue::read(&cue).unwrap().pop().unwrap());
+    let db = Cache::open(dir.path()).unwrap();
+    let resolve = || Program::resolve(&track, DiscContext::Inferred, Some(&db)).unwrap();
+    let incomplete = resolve();
+    assert!(!incomplete.full_cd);
+    assert_eq!(
+        overview(&track, Some(&incomplete)),
+        Some(("Full Recording", false))
+    );
+    fixture(&b, 48000, 24111);
+    let present = resolve();
+    assert!(present.full_cd);
+    fs::remove_file(&b).unwrap();
+    let offline = resolve();
+    assert!(offline.full_cd);
+    assert_eq!(
+        overview(&track, Some(&offline)),
+        Some(("Full Recording", true))
+    );
+    assert_eq!(present.duration, offline.duration);
+    assert!(!offline.segments[0].source.available);
+    fs::write(&cue, format!("REM changed\n{text}")).unwrap();
+    assert!(!resolve().full_cd);
+}
+#[test]
+fn source_page_reused_across_chapters_and_invalidated_on_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stereo.wav");
+    let rate = 32000;
+    let frames = rate as usize;
+    fixture(&path, rate, frames);
+    let mut wav = fs::read(&path).unwrap();
+    wav[44..].fill(0);
+    let boundary = crate::recording::disc_frame(1, rate);
+    let offset = 44 + (boundary - 1) * 4;
+    wav[offset..offset + 4].copy_from_slice(&[0xff, 0x7f, 0x00, 0x80]);
+    fs::write(&path, &wav).unwrap();
+    let cue = dir.path().join("s.cue");
+    fs::write(&cue,"FILE stereo.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:00:01").unwrap();
+    let track = Arc::new(crate::cue::read(&cue).unwrap().pop().unwrap());
+    let cache = Cache::open(dir.path()).unwrap();
+    let p = Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
+    let source = &p.segments[0].source;
+    let exact = waveform_source::Evidence {
+        playable: 0..source.frames,
+        plan: waveform::analysis::Plan {
+            start_frame: boundary - 1,
+            end_frame: boundary + 1,
+            frames_per_column: 32,
+            leaf_frames: Some(32),
+            octave: None,
+            overview: false,
+            fallback_energy: false,
+            preview: false,
+        },
+    };
+    let page = waveform_source::load(source, &exact, Some(&cache), &mut None, &|| true).unwrap();
+    let mut reader = None;
+    let cached = waveform_source::load(
+        &p.segments[1].source,
+        &exact,
+        Some(&cache),
+        &mut reader,
+        &|| true,
+    )
+    .unwrap();
+    assert!(reader.is_none());
+    assert_eq!(
+        cache
+            .0
+            .query_row("SELECT count(*) FROM wave_evidence", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let leaf = cached.leaves().unwrap();
+    let offset = (boundary - 1 - leaf.first_cell_frame()) as u32;
+    assert_eq!(leaf.witnesses(0), [offset; 2]);
+    assert_eq!(leaf.bounds()[0], -1.0);
+    assert!(leaf.bounds()[1] > 0.99);
+    assert_eq!(leaf.bounds(), page.leaves().unwrap().bounds());
+    let next_chapter = waveform_source::Evidence {
+        playable: p.segments[1].frames.clone(),
+        plan: waveform::analysis::Plan::overview(rate, p.segments[1].frames.len(), 128),
+    };
+    let silent =
+        waveform_source::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
+    assert!(silent.facts().iter().all(|value| *value == 0.0));
+    let samples =
+        waveform_source::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true)
+            .unwrap();
+    assert_eq!(samples[0].right, -1.);
+    assert!(samples[0].left > 0.99);
+    assert_eq!([samples[1].left, samples[1].right], [0., 0.]);
+    fixture(&path, rate, frames + 1);
+    assert!(!p.unchanged());
+    assert!(waveform_source::load(source, &exact, Some(&cache), &mut None, &|| true).is_err());
+    let changed = Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
+    assert!(
+        waveform_source::load(
+            &changed.segments[0].source,
+            &exact,
+            Some(&cache),
+            &mut None,
+            &|| false
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records() {
+    use crate::{
+        listening::{Occurrence, Recording},
+        profile::{Profile, SavedQueue},
+        queue::Queue,
+        store::{Locator, Store},
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let root = profile.path();
+    let cache_path = root.join("Cache");
+    let library_path = root.join("library.sqlite3");
+    let workspace = root.join("workspace-v1.json");
+    let audio = root.join("original.wav");
+    fixture(&audio, 32_000, 32_003);
+    let track = Arc::new(Track::file(audio));
+    let mut queue = Queue::default();
+    queue.replace([track.clone(), track.clone()].into_iter().collect(), 1);
+    let queue_ids: Vec<_> = queue.entries.iter().map(|entry| entry.id).collect();
+    let profile_bytes = serde_json::to_vec(&Profile {
+        queue: Some(SavedQueue {
+            queue,
+            position: 0.25,
+        }),
+        full_cd: true,
+        ..Default::default()
+    })
+    .unwrap();
+    fs::write(&workspace, &profile_bytes).unwrap();
+    let (track_id, marks, totals) = {
+        let mut store = Store::open(&library_path).unwrap();
+        let ids = store.resolve(std::slice::from_ref(&track)).unwrap();
+        let id = ids[0];
+        store.set_rating(&ids, 4).unwrap();
+        store.set_liked(&ids, true).unwrap();
+        let recording = Recording {
+            track: track.clone(),
+            source: crate::cache::Stamp::read(&track.source),
+            source_object: crate::store::NativeFile::of(&fs::File::open(&track.source).unwrap()),
+            sheet: None,
+            sheet_object: None,
+        };
+        let at = 1_700_000_000_000_000;
+        let mut play = Occurrence::new(recording, at);
+        let checkpoint = play.credit(Some(10.), at, 6_000_000).unwrap();
+        store.checkpoint_listening(&checkpoint).unwrap();
+        let totals = store.listening_totals(id).unwrap();
+        assert_eq!(totals.credited_us, 6_000_000);
+        (id, store.marks_for(&ids).unwrap(), totals)
+    };
+    fs::create_dir(&cache_path).unwrap();
+    let database = cache_path.join("music-cache-v1.sqlite3");
+    {
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.execute_batch("CREATE TABLE wave_evidence_v3(path BLOB, requested BLOB, size INTEGER,
+                modified INTEGER, volume INTEGER, object INTEGER, data BLOB, UNIQUE(path, requested));
+            INSERT INTO wave_evidence_v3 VALUES (x'01', x'02', 19, 20, NULL, NULL, x'0304');
+            CREATE TABLE tags(path BLOB PRIMARY KEY, bytes INTEGER, modified INTEGER, data BLOB) WITHOUT ROWID;
+            INSERT INTO tags VALUES (x'41', 19, 20, x'42');").unwrap();
+    }
+
+    let p = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let segment = &p.segments[0];
+    let source = &segment.source;
+    let request = waveform_source::Evidence {
+        playable: segment.frames.clone(),
+        plan: waveform::analysis::Plan::overview(source.rate, segment.frames.len(), 128),
+    };
+    let expected = {
+        let cache = Cache::open(&cache_path).unwrap();
+        let old: i64 = cache
+            .0
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='wave_evidence_v3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0);
+        assert!(waveform_source::cached(source, &request, Some(&cache)).is_none());
+        waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap()
+    };
+    let record = waveform::evidence_codec::encode(&expected, &request.request().unwrap()).unwrap();
+    let mut invalid_facts = record.clone();
+    invalid_facts[24..28].copy_from_slice(&f32::NAN.to_le_bytes());
+    let mut incompatible = record.clone();
+    incompatible[4] ^= 0x80;
+    for corrupt in [
+        &invalid_facts[..],
+        &record[..record.len() - 1],
+        &incompatible,
+    ] {
+        let cache = Cache::open(&cache_path).unwrap();
+        assert_eq!(
+            cache
+                .0
+                .execute("UPDATE wave_evidence SET data=?1", [corrupt])
+                .unwrap(),
+            1
+        );
+        assert!(waveform_source::cached(source, &request, Some(&cache)).is_none());
+        let mut reader = None;
+        let rebuilt =
+            waveform_source::load(source, &request, Some(&cache), &mut reader, &|| true).unwrap();
+        assert!(reader.is_some());
+        assert_eq!(expected, rebuilt);
+    }
+    let cache = Cache::open(&cache_path).unwrap();
+    let mut reader = None;
+    assert_eq!(
+        waveform_source::load(source, &request, Some(&cache), &mut reader, &|| true).unwrap(),
+        expected
+    );
+    assert!(reader.is_none());
+    assert_eq!(
+        cache
+            .0
+            .query_row("SELECT data FROM wave_evidence", [], |r| r
+                .get::<_, Vec<u8>>(0))
+            .unwrap(),
+        record
+    );
+    assert_eq!(
+        rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        )
+        .unwrap()
+        .query_row("SELECT data FROM tags WHERE path=x'41'", [], |r| r
+            .get::<_, Vec<u8>>(0))
+        .unwrap(),
+        b"B"
+    );
+
+    assert_eq!(fs::read(&workspace).unwrap(), profile_bytes);
+    let (profile, warning) = crate::profile::restore(&workspace).unwrap();
+    assert!(warning.is_none());
+    assert!(profile.full_cd);
+    let saved = profile.queue.unwrap();
+    assert_eq!(
+        saved
+            .queue
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        queue_ids
+    );
+    assert_eq!(saved.queue.current, Some(1));
+    assert_eq!(saved.position, 0.25);
+    let library = Store::open(&library_path).unwrap();
+    assert_eq!(library.find(&Locator::of(&track)).unwrap(), Some(track_id));
+    assert_eq!(library.marks_for(&[track_id]).unwrap(), marks);
+    assert_eq!(library.listening_totals(track_id).unwrap(), totals);
+}
+
+#[test]
+fn spectral_pages_agree_from_a_seek_and_sequential_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stereo.wav");
+    fixture(&path, 8000, 48000);
+    let track = Arc::new(Track::file(path));
+    let program = Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let source = &program.segments[0].source;
+    let mut decoder = None;
+    let request = |start_frame, end_frame| waveform_source::Evidence {
+        playable: 0..source.frames,
+        plan: waveform::analysis::Plan {
+            start_frame,
+            end_frame,
+            frames_per_column: 256,
+            leaf_frames: Some(32),
+            octave: Some(waveform::analysis::Spectrum::Blackman),
+            overview: false,
+            fallback_energy: false,
+            preview: false,
+        },
+    };
+    waveform_source::load(source, &request(0, 32000), None, &mut decoder, &|| true).unwrap();
+    let next = request(32000, 48000);
+    let sequential = waveform_source::load(source, &next, None, &mut decoder, &|| true).unwrap();
+    let seek = waveform_source::load(source, &next, None, &mut None, &|| true).unwrap();
+    assert_eq!(
+        sequential.leaves().unwrap().offsets(),
+        seek.leaves().unwrap().offsets()
+    );
+    assert_eq!(
+        sequential.octave().unwrap().powers(),
+        seek.octave().unwrap().powers()
+    );
+}
+
+#[test]
+fn coarse_unaligned_leaves_keep_true_extrema_after_a_cache_round_trip() {
+    use waveform::analysis::{Plan, Spectrum};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.wav");
+    fixture(&path, 96_000, 11_231);
+    let cache = Cache::open(dir.path()).unwrap();
+    let program =
+        Program::resolve(&Arc::new(Track::file(path)), DiscContext::Inferred, None).unwrap();
+    let source = &program.segments[0].source;
+    let request = waveform_source::Evidence {
+        playable: 117..11_169,
+        plan: Plan {
+            start_frame: 51,
+            end_frame: 9701,
+            frames_per_column: 1024,
+            leaf_frames: Some(512),
+            octave: Some(Spectrum::Blackman),
+            overview: false,
+            fallback_energy: false,
+            preview: false,
+        },
+    };
+    let page = waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
+    let samples = waveform_source::samples(source, 168..9818, &mut None, &|| true).unwrap();
+    let detail = page.leaves().unwrap();
+    for (index, bounds) in detail.bounds().as_chunks::<2>().0.iter().enumerate() {
+        let first = detail.first_cell_frame() + index * detail.leaf_frames();
+        let begin = first.max(168) - 168;
+        let end = (first + detail.leaf_frames()).min(9818) - 168;
+        let extrema = samples[begin..end].iter().fold(
+            [f32::INFINITY, f32::NEG_INFINITY],
+            |[lo, hi], frame| {
+                [
+                    lo.min(frame.left.min(frame.right)),
+                    hi.max(frame.left.max(frame.right)),
+                ]
+            },
+        );
+        assert_eq!(*bounds, extrema);
+        let [a, b] = detail
+            .witnesses(index)
+            .map(|offset| samples[first + offset as usize - 168]);
+        assert_eq!(a.left.min(a.right), extrema[0]);
+        assert_eq!(b.left.max(b.right), extrema[1]);
+    }
+    let cached = waveform_source::cached(source, &request, Some(&cache)).unwrap();
+    assert_eq!(cached.pooled_spectrum(), page.pooled_spectrum());
+    assert_eq!(cached.leaves().unwrap().offsets(), detail.offsets());
+    assert!(
+        page.pooled_spectrum()
+            .unwrap()
+            .iter()
+            .any(|power| *power > 0.)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn replacing_a_source_with_the_same_length_and_time_invalidates_wave_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.wav");
+    let replacement = dir.path().join("replacement.wav");
+    fixture(&path, 8000, 8000);
+    let track = Arc::new(Track::file(path.clone()));
+    let cache = Cache::open(dir.path()).unwrap();
+    let resolve = || Program::resolve(&track, DiscContext::Inferred, Some(&cache)).unwrap();
+    let original = resolve();
+    let source = &original.segments[0].source;
+    assert!(source.object.is_some());
+    let request = waveform_source::Evidence {
+        playable: 0..source.frames,
+        plan: waveform::analysis::Plan::overview(source.rate, source.frames, 128),
+    };
+    let old_page =
+        waveform_source::load(source, &request, Some(&cache), &mut None, &|| true).unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[44..].fill(0);
+    fs::write(&replacement, bytes).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    fs::rename(&path, dir.path().join("retained.wav")).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    assert!(!original.unchanged());
+    let new = resolve();
+    let changed = &new.segments[0].source;
+    assert_eq!(source.stamp, changed.stamp);
+    assert_ne!(source.object, changed.object);
+    assert!(waveform_source::cached(changed, &request, Some(&cache)).is_none());
+    let new_page =
+        waveform_source::load(changed, &request, Some(&cache), &mut None, &|| true).unwrap();
+    assert!(old_page.facts().iter().any(|m| *m != 0.));
+    assert!(new_page.facts().iter().all(|m| *m == 0.));
+}

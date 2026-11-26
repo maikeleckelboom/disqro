@@ -14,9 +14,16 @@ pub(super) fn label_width(group: &TabGroupContext, ix: usize, window: &Window, c
     let panel = &group.panels()[ix];
     let text =
         crate::theme::label_width(tab_label(panel, cx), px(crate::theme::size::TEXT), window);
-    window.pixel_snap(tab_width(text, is_utility(panel, cx), |width| {
+    let natural = tab_width(text, is_utility(panel, cx), |width| {
         window.pixel_snap(px(width))
-    }))
+    });
+    device_ceil(natural, window.scale_factor())
+}
+
+/// The smallest whole number of device pixels that holds `width`. Layout
+/// snaps a half device pixel toward zero, which would take it from the label.
+fn device_ceil(width: Pixels, scale: f32) -> Pixels {
+    px((f32::from(width) * scale - 1e-3).ceil() / scale)
 }
 
 pub(super) fn keyboard_tab(
@@ -232,7 +239,9 @@ pub(super) fn drop_targets(
 
 #[cfg(test)]
 mod tests {
-    use super::{InsertionSlot, SPACING, SWITCHER, TabLabels, insertion_slot, tab_width};
+    use super::{
+        InsertionSlot, SPACING, SWITCHER, TabLabels, device_ceil, insertion_slot, tab_width,
+    };
     use gpui_kit::{Bounds, point, px, size};
 
     #[test]
@@ -246,6 +255,22 @@ mod tests {
         let needed = music + library + px(SPACING + crate::theme::size::TAB_DROP);
         assert!(!labels.fit(needed, px).overflow);
         assert!(labels.fit(needed - px(1.), px).overflow);
+    }
+
+    #[test]
+    fn natural_tab_widths_never_lose_a_device_pixel_to_layout_snapping() {
+        // At 150 % the Library tab needed 60⅓ logical pixels: 90.5 device
+        // pixels, which layout rounded down to 90 and truncated the label.
+        assert_eq!(device_ceil(px(60. + 1. / 3.), 1.5), px(91. / 1.5));
+        for scale in [1., 1.25, 1.5, 1.75, 2.] {
+            for width in [57., 60.5, 61., 95., 120.25] {
+                let snapped = device_ceil(px(width), scale);
+                let device = f32::from(snapped) * scale;
+                assert!(snapped >= px(width - 1e-3));
+                assert!((device - device.round()).abs() < 1e-3);
+                assert!(f32::from(snapped) - width < 1. / scale);
+            }
+        }
     }
 
     #[test]

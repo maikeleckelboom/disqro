@@ -1,0 +1,2596 @@
+{
+  "baseline": "4d5e6f3852fcc905c0429a1a49eef7c616520be1",
+  "recordings": {
+    "breathe": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 8.374265707018463,
+        "origin": 0,
+        "frameCount": 11005144,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11005144
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "b24c250e47400e5fb91dbf29e670a67a55229321b851a574173b9a92e5f8920a",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 1410,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          2256000.0,
+          5328000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "3384f6cb0b96e2b27fc9cfe4060c3b17ea45a1eadfec70998484ff83197d36f5",
+        "geometrySha256": "53ec65f305c720fa2c12bd4b1b137ab5b74338044c67738579b9e73ec1be50e5"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 3780,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3024000.0,
+          4560000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "945489e1855da0d1d043b5f24168c352e18e2bd263c7558a9d1976fcf786f0da",
+        "geometrySha256": "3f03073abef3f6f4e9b62fe9d107559e624050956f252adddb34155becccd720"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 8520,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3408000.0,
+          4176000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "bb331f629bd99865b7bff4e6c41ccb86c0ec65f1af3c732efd7a2c2a6525f9f0",
+        "geometrySha256": "149aa2954f25f77a522b95d705dde42da7278fa292558270922c18f79f468814"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 18000,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3600000.0,
+          3984000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "a02530cdf6ddb7b43933ef4b198575b4380ea6141b1845548dce6c523d8baae7",
+        "geometrySha256": "4bba699fc1ce1e538c2c07a62faf9f9ca1013a62fcfe9655416d5f3652874754"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 36960,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3696000.0,
+          3888000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "adf841f3902f4ea4c681d6fb71013818adc1e30d22f2329992bbd52fd54097a9",
+        "geometrySha256": "eb486b3026b50aa8e6bb405a9f33e79e723a779c7f00b11537a1644ab773bfff"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 74880,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3744000.0,
+          3840000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "9fcfb7e0f1b05e6d89bdb94e30cdf2853622b8f40d13cf3789e0e95b824bd586",
+        "geometrySha256": "4e8804c60d123bee19a10e0da8b073d04b76738ca60d408b2911c2ffd0ec5b0c"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 5.23391606688654,
+        "origin": 0,
+        "frameCount": 11005144,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11005144
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "51be70d358dab9248c4897700a587427460c913e60845ae48c5ecabfb44a4d33",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 46800,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3744000.0,
+          3840000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "22cd4ab42be60ddcb09913037120242baeb6b60534557eb46dfe601d3aaf55cb",
+        "geometrySha256": "01fad5a90e3257f59a283b13768e361a40cd43e3df5a77124756c762ed8adc7c"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 11250,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3600000.0,
+          3984000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "d537285af8d1c92985a9216f0a423871928b69bc23c5fb7e347fa4cc9242fe90",
+        "geometrySha256": "5fedfddad4ee25106a404a1ad0370ae5d4cdd4be587c66d035420d98a96f6436"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 2.442494164547052,
+        "origin": 0,
+        "frameCount": 11005144,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11005144
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "d44c02ad82879f6ecf583d724f9aa583433f025fba307341730f7b3db4c9cd2d",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 21840,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3744000.0,
+          3840000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "eb43ea45fd1548a7bc36c362509df3b02291a8ae2050e63692e5deb6a196a1c2",
+        "geometrySha256": "8352866a81891e5e1ae546f06ff8919a87455a002c4bc9e9bc6fb2a9114c07d1"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 5250,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11005144,
+        "visibleFrames": [
+          3600000.0,
+          3984000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "f186517e1025191cc269dd14688397a5d254275e9ef532ea38afda4ac21565ea",
+        "geometrySha256": "cd6da38ef7a5b8f880431ee2fbbcc526a29ad668a47e5a114b5121c710b35f52"
+      }
+    ],
+    "control": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 80.0,
+        "origin": 0,
+        "frameCount": 1058400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          1058400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "f16aba423fd7e527c546bd93724d681f157dde4595d722a2a2c4217bb58e9efd",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          0.0,
+          705600.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "4945b9ab80f0d86d746d582c6189fc2a659ccf96d0013bc0616c364bd96d59a6",
+        "geometrySha256": "5d34810f14e0f673eb93bf7abc6396c568e7ff5123b601d526b0c3d412fc1942"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 960,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          176400.0,
+          529200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "fdcea9c4f6db812e4e4d9cb72e6a1d58af3f6ccb65e851ede289b87a774ebcf3",
+        "geometrySha256": "a49e42d67cafeac2ff5b9d0bdefed30bf0aaba3bad80fdaf0ae8195509ace19c"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 2880,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          264600.0,
+          441000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "2ffe9abbc83f2fe9a8de69d5d9ab2d6aad895e04f5017da44611c4bd8167aad2",
+        "geometrySha256": "106b6d69f9475227457cdf338e97a90f5390deb745b2cad181d8985b3fb58cdc"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 6720,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          308700.0,
+          396900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "744e5d56443596d40fdb540ffa790a1347acc18327788307853ca3a415ca16fd",
+        "geometrySha256": "290af537d4332002c23c7ab8601aad95ac0588c33d6c9ff1b89d1d0404c478e7"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-0.021s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 730469,
+        "pixelsPerSecond": 91428.57142857142,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          352337.15671875,
+          353263.25671875005
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "7740cfd67475854de3f633dae56868aa2b6ae0e059a029daf266b581f6ad6519",
+        "geometrySha256": "aab6ca7c0ff1aadc4566a1e1a59313d1782db631758e9804597825b7a3e47d2a"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 50.0,
+        "origin": 0,
+        "frameCount": 1058400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          1058400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "1fd753830f9ee2096ed6bc54bc21f744127445297562b1ea1d31a4a02d62df73",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 4200,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          308700.0,
+          396900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "a34a89d1886beba2a56636f35be091a7568f86b52a8cfa0ba8672923d91a3e3a",
+        "geometrySha256": "cd867a120e5ea1979adb72bf568feba623e1bac1a178fbed465d732bdf7c865a"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 600,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          176400.0,
+          529200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "60b7f2bd7b56993082e202d29039a5b45041467c5dc0282cf5610909e4033243",
+        "geometrySha256": "b9c6426130628a15dcc58ca428b8d7b82101d9b80ad282c06e203d30f5ee9cbf"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 23.333333333333332,
+        "origin": 0,
+        "frameCount": 1058400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          1058400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "e1bb99ecc3317af03773d0ffcd6874fac619a09eb700a273e15844f95dc23dec",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 1960,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          308700.0,
+          396900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "1d73b0a109e8b72465067327655d5f59f0837f8a70c8ea1d4841db26f396d481",
+        "geometrySha256": "1703cee8181d811aca8437c729713104470a1d3a56cd3664f4fbf6cd7f209c6f"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 280,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 1058400,
+        "visibleFrames": [
+          176400.0,
+          529200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "c3aaade23970bfcc7e772bc746b5fba3a1996eca48de277af0bba17d86d04491",
+        "geometrySha256": "05008a70a6bab6367e31f9d86a65d7ff213d2b1292c7aa5d8fc5e6ae85084d36"
+      }
+    ],
+    "hard-dance": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 11.232438345906449,
+        "origin": 0,
+        "frameCount": 8204808,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          8204808
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "df3807a5a7fb5f51204ef3f3b7e407fec55877591c238589e6faf9c0125c8cf1",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 1050,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          1680000.0,
+          4752000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "83ac9c848bc717fb9d7572e62be251ad8ac1697ab438d1704b6beb0c26283054",
+        "geometrySha256": "7f9b73a59bc5852e8cb9d1cbfa69899d7f471cfc8c9f443b467ed582a42c2b28"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 3060,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          2448000.0,
+          3984000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "36a7cfc35aab1eebcbedccaf31f06e85f5b66636fc6b3d4b0d02a2f124d868a4",
+        "geometrySha256": "3107c7244fc6293f79b694d70cee48421b121fb7e092eb2f4fd62585daae5fcc"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 7080,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          2832000.0,
+          3600000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "d8c7c58f5618704f1cc1edeb8632550717c05fef88bfe4825d4c46ed4603056b",
+        "geometrySha256": "2826af04cc19837f1c631cafdd6ae84d61ac450bef340f50c29dd39678972168"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 15120,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3024000.0,
+          3408000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "f9c5a2b402748e76f960b0e1001cdf0ae190ca61fafc409d1ba2fd453a9c0fbc",
+        "geometrySha256": "276d07891102ebbb1c3a24a83fc402c9c8387fbcea9686da1cbc341a80de1013"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 31200,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3120000.0,
+          3312000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "9a342ccb455e9b027422092c97b73355f2aeb17d63d93b4bf57cefdc85db705a",
+        "geometrySha256": "3cb02a29a4e455bd2fcb76a473e248b0ff198ba5761247f8ec003bab7eb4685b"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 63360,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3168000.0,
+          3264000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "78ff1812807f5ab93ef7af3445f77995d99daf3225b38089daa3220454e8ee81",
+        "geometrySha256": "d7324944d15164d17990255175effb91372e2c0c35618e78312a334153a7b6a7"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 7.020273966191531,
+        "origin": 0,
+        "frameCount": 8204808,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          8204808
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "416bed2de0caa36fdbf6f54822344a23bc15a60eeb9dde325803cd2ea1545586",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 39600,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3168000.0,
+          3264000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "7db638548c270e12df4239a07c992b5235781b6a3d3981e0ff7e95dad7b18789",
+        "geometrySha256": "7fb9143c3b571644f287fa1cca1f113cae770cf77d1e10305ee30f975bc4db1b"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 9450,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3024000.0,
+          3408000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "118a64a75ed7f6b38f38d268c16e804372307ad2cd5191cf17b82eb1d948ed33",
+        "geometrySha256": "974e0c356bb4a71e674146952cb9bc5707fcfc3df859634e38eaea1d7508528e"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 3.276127850889381,
+        "origin": 0,
+        "frameCount": 8204808,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          8204808
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "a3afda9e404da507d1853fc816930bfd40d93984d68dcb5e7517dc1735dedae6",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 18480,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3168000.0,
+          3264000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-8.json",
+        "imageSha256": "fbc1c850d14b405458e9866b731ef8b46b907b087832db5611207f11329246a6",
+        "geometrySha256": "bd1cfacb21525fb74896dd0d9173afc5448b5cc0d88813ef4c916d035de11d96"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 4410,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 8204808,
+        "visibleFrames": [
+          3024000.0,
+          3408000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "7dd9bba2818fe6189ed799ac1337fc8ff2589a5ed42a861bbe74e9a213ce46f9",
+        "geometrySha256": "a13b1a9a5e18e796996d6c6875cb0ee9e1f6d0ea16b9c658404648f999001186"
+      }
+    ],
+    "oldskool-fire": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 7.925582086533321,
+        "origin": 0,
+        "frameCount": 11628168,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11628168
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "224a5932e9cc66d54099d5ca5c7aa4c3e43df5553935bfea3a40e97d01a1accf",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 1920,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          3072000.0,
+          6144000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "481a48ea811ee36ca0a5dd38acfb51ecb02b2aa36f658289f88808b90c13e26c",
+        "geometrySha256": "a38fb7579a6de1abe1552be3a2ab37746692a96d7a869aa162b7dfe38a80da07"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 4800,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          3840000.0,
+          5376000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "ad369faacb6c86e4c808a0d2f3371fc0f1b2aad988b25648ba8971334cd01390",
+        "geometrySha256": "bec36798a24ffdd4203d26940703ca4326f847b178db8062dceb73e85af00d05"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 10560,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4224000.0,
+          4992000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "41c7b0c759ef9781d46fba30db76c716ac1d2c41113ea68c32c6550c35037c60",
+        "geometrySha256": "0433ac766b1fadd1353dcc09c59f9156651a00b97c4e862c98554c9bae5d325f"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 22080,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4416000.0,
+          4800000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "d466cc64ef2664a03e80db983ac4cde4e08fb37eb962d57048cbd359be47dff9",
+        "geometrySha256": "f9b06916530b4f12db0de766bb48535b31096b2e7980f6ab8e56e08c63d4e741"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 45120,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4512000.0,
+          4704000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "54b36f5cf13f228ce1c6776275cce2120c6b0f39e56d356d618c4301bb67bff3",
+        "geometrySha256": "a294bfe3c91a06ed7b3132b44f26f2d2711d44e9ddd25094aff7f942a1602564"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 91200,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4560000.0,
+          4656000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "44b67c9fd268002466c2913cb2b6bad4b2c51ee384855033e322ee1e106bf2bc",
+        "geometrySha256": "676c8c6127a196ab2809c70f9eb1fd1a7d05d1c51f6ef625a37487bb9a2b353b"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 4.953488804083326,
+        "origin": 0,
+        "frameCount": 11628168,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11628168
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "9ceb95771459ecebf0b9621067da78096b20451dd0c5d25df1528f25c33dde71",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 57000,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4560000.0,
+          4656000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "4feb6b1744baa5d0d0fb839acac4b66f7ad1a9e417c5873131915036560df06f",
+        "geometrySha256": "d059db4db09d3b81187d10a6061adabda31060c44e6b8a9d12d54f85f646f034"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 13800,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4416000.0,
+          4800000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "d7a888b115ca5f97164d44d87e9699bf179e1da5d67900cf0179ccfddee5e1ac",
+        "geometrySha256": "4b9cfe133bd2ec2fab95930500ad2689ead3ba684ad0ff8a1f77de3de2f84b02"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 2.3116281085722186,
+        "origin": 0,
+        "frameCount": 11628168,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          11628168
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "81ddd888b5d622d4ab44e2fa5c9169d8173140c28c2088ba1c7cef1d9607015d",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 26600,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4560000.0,
+          4656000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "7656e7b7e9fdaa6dc4085aab5fbc087ebe7d2d5911d8011ec853ac4d8c3359f7",
+        "geometrySha256": "7d2a7a4a71381506c292897be4aa037ec7be629bb69369d1a4981517f955a296"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 6440,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 11628168,
+        "visibleFrames": [
+          4416000.0,
+          4800000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "c5b74d17ee3e1017bb9485389c7b510bae85ee9ece3308ba2bca9d896e6a345b",
+        "geometrySha256": "6f01cbb1ed7468e56ac834497a73492713353373e9ca4eba1d450a34b0c0b858"
+      }
+    ],
+    "retained-changing-wav": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 4.571653673909438,
+        "origin": 0,
+        "frameCount": 18521088,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          18521088
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "998a0f9e1ec7c5cfa78d838bd6dee29cae0b3bbc02aa422ddeae26fc68fa70ea",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 1980,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          2910600.0,
+          5733000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "c5f1d94950b0ab65931ba750778aa1a59e2d9c3332e3b1ec23c1b3ecf8e7d5c0",
+        "geometrySha256": "52567c78ba2ce97e8ec5225fcfcdfc2e0f3a7616da5824ae7ae1533f667e0f0b"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 4920,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          3616200.0,
+          5027400.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "f4e5b5bfb5bc42ce8709bbad7285e679af9cd853df893a5e8ec6689faae04184",
+        "geometrySha256": "e1bc94419cf7dce476b1e8f3e026a8756eea968fd9479c4a206382dcce3ca6f1"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 10800,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          3969000.0,
+          4674600.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "3fb357ba42edd2f8f8370fe6f89cbe01492791d57ed1c18e3b4d2076d56eb469",
+        "geometrySha256": "8a7c50a4c4f629c675df73ba83cb19ae1c8632ea7afb1ccd67e7109f5c102626"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 22560,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4145400.0,
+          4498200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "0b3915695b860e6bad446941935c7df4068b5361bdc778b9a4d402a02ceaf4bc",
+        "geometrySha256": "faca611e71e3ac056edea471d2b01e1d8633b5379e5a5d5e51ab24c32b0bfef8"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 46080,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4233600.0,
+          4410000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "84205eb1c5b497d92a61a8ea912933f8d1254b38aa8a09c4cf96fe5bbc325505",
+        "geometrySha256": "66b9757a7ce6397cac488952c2bc04ff27f658c434242aa537f0dd64d53ee440"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 93120,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4277700.0,
+          4365900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "b3dfc81f5596d4609524ef629d75ed5b6738d2e5cbe6972d72c93069b0471d84",
+        "geometrySha256": "f5232a048e8daa488c1e8b277ddb0136834dad81af82358812c352d56e95cb7f"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 2.8572835461933987,
+        "origin": 0,
+        "frameCount": 18521088,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          18521088
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "409adb50b0c9d8aa3c0c7a43ba001bc07b5479647a43d3ddeb3eb5902d668ecc",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 58200,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4277700.0,
+          4365900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "2894b8d237fdfa08b8cfc5e6f2012cbaf026ecd033d24078f7c2aa987c53750b",
+        "geometrySha256": "c575aa6944c2dbd9a10329f28553a7a6a899f1fc50cb1d34ec0e3e82b3238270"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 14100,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4145400.0,
+          4498200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "ded46c80898f469d2f54c96db5b941193dae6f614afe92a74971f2dfb55e3e4c",
+        "geometrySha256": "bcc00bdb58ad4fe23f7abbfe040c4503b13a4b11c6ac48a6b39ab7638288679c"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 1.333398988223586,
+        "origin": 0,
+        "frameCount": 18521088,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          18521088
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "93dee3ad7fdbb954b74063a6caf10792ab37a692b8a600327e58a13be2dea853",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 27160,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4277700.0,
+          4365900.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "789ea0598b2b453a03e8db9d89b0f11932469b8eb79c38bc0513c084ccb13bc6",
+        "geometrySha256": "812903e9f486101edc5703115e338c669a635802b24c8bd4857b82ab69e3ab8f"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 6580,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 18521088,
+        "visibleFrames": [
+          4145400.0,
+          4498200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "0fd76c43be7993ee6a4ba1728a104129a36e28e5b13172eac870c82c066d139f",
+        "geometrySha256": "0d2a523624d484d4b460153c514ec6dd2a6409c33ff2d0fe566bbbd6afad1c4f"
+      }
+    ],
+    "techno": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 4.774058957141632,
+        "origin": 0,
+        "frameCount": 19304328,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          19304328
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "dfaddb8f14934c4305f6411991ab6a1ff3ba908b0a4ce1d0e698fe1dcc8b76a3",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 2130,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          3408000.0,
+          6480000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "eac8f02f3f47b7ae140427a3f794143452892f6c3238f55e4845a56ef57677de",
+        "geometrySha256": "3dfeb971b980884a6ed68691619e3e6e13db0621aace3c76f39ad27ee684f055"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 5220,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4176000.0,
+          5712000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "2bdc753a7187e73b00ef9d596d6b2838b8d9486da114e1986ed787e0ff0e8423",
+        "geometrySha256": "300a67ac44a8f419525f17148123ea4f650e49cd896832a3b90246201cdd1cb4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 11400,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4560000.0,
+          5328000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "e3f59b449dab34b79edcc28d41323488f0450b2bdf15086c0505d1600e3c9513",
+        "geometrySha256": "15cbc844f5a653d558138c760513610f37b6157d526f03ceb8710dc690981cfb"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 23760,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4752000.0,
+          5136000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "794b245d4d75531ed278eceef755d833b205a495e9b4897a31d058099ade22a2",
+        "geometrySha256": "93240f5da3e2383c4f32e3be7d951f1a5b664479f9c6efed623810609490c752"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 48480,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4848000.0,
+          5040000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "8ffcf2d733618d59c757fe4f545e59f8471c5f6e3f05816a42bdfc5021b0a349",
+        "geometrySha256": "4b92f9b17727c1da646def65fac93e87cde960e4456213acdcbd53ad1eacb318"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 97920,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4896000.0,
+          4992000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "a0a16e2ab8f564040887214a28a732863d95baa290f0a7470773cc6a389de20b",
+        "geometrySha256": "1b5052f39ed7ad5694410622dbb965d0a1ee85b890f6f23b98ad4d8b3ac891f1"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 2.9837868482135197,
+        "origin": 0,
+        "frameCount": 19304328,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          19304328
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "262d02b8018b80ef1c1ac48c38783794e33a7fdb30b58b3b8ef34cd48f7d893b",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 61200,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4896000.0,
+          4992000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "cfcd7dcfb6bb20b95f5076b321e35eeba9b412509ded15d4242f65d86c251143",
+        "geometrySha256": "974141c45091d4b7da245a01e2297fb2f1c96a85633ed2583e20d4a4ff1d6715"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 14850,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4752000.0,
+          5136000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "62862c59d9699eeb1b3c562cdfd5d60b48f682a8dbfc353bcf544b9573322ba4",
+        "geometrySha256": "c8f011c7d1d33e4d1191da6c571b6c06ef429e11f697f856ddf166b5f4e025fa"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 1.3924338624996426,
+        "origin": 0,
+        "frameCount": 19304328,
+        "rate": 48000,
+        "visibleFrames": [
+          0,
+          19304328
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "7541c692f11565d240235c4e024dbef98aaea9002618ed37af27d566885b9e7a",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 28560,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4896000.0,
+          4992000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "13edf0a3d5d5594037bdb1ec09ad3cade3840f92c5d678a2a80a941c857ed4e7",
+        "geometrySha256": "598c411a084515113bf6b47d6a8f103a8239522f6e1801a26c8444cbe3332d82"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 6930,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 48000,
+        "frameCount": 19304328,
+        "visibleFrames": [
+          4752000.0,
+          5136000.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "af32f71c9b7cc0c6b363e5ddcc6b7cdbb2452603738b946b1c5ef31befda654e",
+        "geometrySha256": "357fc23de39ad1611ccfab2e2dcefba2131cccc691c1d536bc22ccaffdc4b1da"
+      }
+    ],
+    "thunderdome-96-cd1": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 0.4078742387763773,
+        "origin": 0,
+        "frameCount": 207593400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          207593400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "2a7f56b332f7c64cab2e8ef43c62e3eb05912cd6c3c80576d9c56c7dcea56183",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 35040,
+        "pixelsPerSecond": 30.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          51508800.0,
+          54331200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "140b33724f8450de0acd80e394187e09779bd8262b7927ba4010759fa79f3cbc",
+        "geometrySha256": "5a97d62b4bb351ec0aea4b3c3523683cf441c48aba569a264b089972e3a842bf"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 71040,
+        "pixelsPerSecond": 60.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52214400.0,
+          53625600.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "605e84cf0211826b39f2409f61c71a59ce0366ba208250510470f4737e4211ad",
+        "geometrySha256": "96600007edffca7bfe03663e33c11ca468cc403db0e066778508e6612a457a95"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 143040,
+        "pixelsPerSecond": 120.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52567200.0,
+          53272800.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "9cbd1a66988311ff1875e5739a667293719369f9690a2a98dc409e233f64ec3b",
+        "geometrySha256": "38a858c3a65aa8e80fa5c14a1a9ed423801c84f82ddec015a177ca06b490e73b"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 287040,
+        "pixelsPerSecond": 240.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52743600.0,
+          53096400.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "19dead6a41fb5d0955b7702e6057ca6c61ce231eef9c9d991185a012cf801dc7",
+        "geometrySha256": "2d6dc5ac2746ed6f21cdc7edb3b3b3c7985c21d28c2d5a49d9e9d76458045205"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 575040,
+        "pixelsPerSecond": 480.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52831800.0,
+          53008200.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "3a6c219ccf6890c1bb02777783d21455f167d8e8ca12b297353c8aa445081a27",
+        "geometrySha256": "263e5d79f39ec69ffed2f0d8d657b5c4ea34491aab6e6c3ddc9e8afcd7181715"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 1151040,
+        "pixelsPerSecond": 960.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52875900.0,
+          52964100.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "de4b1ca08de767495f09bfb04494488ba1085ec595dff5de3ec26c44dd87c486",
+        "geometrySha256": "ffc2edec97f823ed32386f9b18ef587096772b58afa9f49f09f37c61eaeef70d"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 0.2549213992352358,
+        "origin": 0,
+        "frameCount": 207593400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          207593400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "ffb19066aa6d90457790231e14301919c7053d45fedcf86c263b45ad77beb312",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 719400,
+        "pixelsPerSecond": 600.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52875900.0,
+          52964100.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "8e2af81178bb60bd8ef1d953db67419b5f945e45b9385259264d1f7a302ee268",
+        "geometrySha256": "1c8f9a11a11148eefa4cf6cf1174578b0331d660fc8ad69fa39a68ea83480332"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 179400,
+        "pixelsPerSecond": 150.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52743600.0,
+          53096400.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "68aec29730396447500df1683230fca44c551ea2706fa95769c3ad3211975fae",
+        "geometrySha256": "56c331749db6a703594be88a0f4850d92ae0faa6a13f60b2fe4219f454b65657"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 0.11896331964311004,
+        "origin": 0,
+        "frameCount": 207593400,
+        "rate": 44100,
+        "visibleFrames": [
+          0,
+          207593400
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "5df240d7ad603b737025c5f6d1ab0d94e75f657d81e76f03f6ed6223a57abbcf",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 335720,
+        "pixelsPerSecond": 280.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52875900.0,
+          52964100.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "1a83cd70377b31f46940490590c5c9291de513633f6c5e540449c9645ba8c708",
+        "geometrySha256": "609959ce9aa329e8f5889f51de0e79431b9379079ac22315c1295e95e5ac04b2"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 83720,
+        "pixelsPerSecond": 70.0,
+        "origin": 0,
+        "rate": 44100,
+        "frameCount": 207593400,
+        "visibleFrames": [
+          52743600.0,
+          53096400.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "ae97484cb132d762c2d64d6d1e7358efa55982d3dbb42a8c0c436c723931a78e",
+        "geometrySha256": "2e1490979e9c8e73d25cadffb03cbe09dd8656d8e8c42800c295db4625afe6fb"
+      }
+    ],
+    "thunderdome-96-cue-track": [
+      {
+        "role": "overview",
+        "id": "stroke-overview-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 0,
+        "pixelsPerSecond": 2.2464898595943836,
+        "origin": 29712816,
+        "frameCount": 37690800,
+        "rate": 44100,
+        "visibleFrames": [
+          29712816,
+          67403616
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "f89e498a63f6a7419b64c35bb48a2a22786e0253bf936f2445049015056923c1",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-64s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 2190,
+        "pixelsPerSecond": 30.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          32932116.0,
+          35754516.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-1.json",
+        "imageSha256": "518b804a5a98eed4f8a89af45464b9de48f4de0d6b81a00f96566b5f93074f02",
+        "geometrySha256": "91c23766b3be6842d4b120394eb1dff81440016a40025eacb83eff9a68220765"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-32s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 5340,
+        "pixelsPerSecond": 60.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          33637716.0,
+          35048916.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-2.json",
+        "imageSha256": "a5ae35d472a758733fa1b870585095500e25d6a13492b9b95e20e67bdef04454",
+        "geometrySha256": "a126994501036c431e045a9207ed6a130fbd2fa4789229ab3e6f67f4d02eb507"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-16s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 11640,
+        "pixelsPerSecond": 120.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          33990516.0,
+          34696116.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-3.json",
+        "imageSha256": "6bb571561d3d03b7c0cf8765063f4d5ec22c3167ef45d27c2cd539e9b5a04058",
+        "geometrySha256": "fa6b2fd226804ddc80c1d88d3c69d08f157ea5d627befcf3f4da16275daf888f"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 24240,
+        "pixelsPerSecond": 240.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34166916.0,
+          34519716.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "1a8e17ad2f9cde8f81bdc1b530969cb1958618e7b32a7c379e9031b59b87c874",
+        "geometrySha256": "ebcc79e34a1b00c8721f550c6c52ace9302cae07873018386abd59e4535784b1"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-4s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 49440,
+        "pixelsPerSecond": 480.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34255116.0,
+          34431516.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-5.json",
+        "imageSha256": "dee0cd5fbedcd4fb8267ac87a18199eb2f87547cb7b1af65d8d5d8823e6f88f5",
+        "geometrySha256": "d5192413c8f821a02959fe6695d383d8998ab6aedd82bf269806d3c5ef1386fd"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1920",
+        "width": 1920,
+        "height": 166,
+        "dpr": 1.5,
+        "first": 99840,
+        "pixelsPerSecond": 960.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34299216.0,
+          34387416.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "7bf8f805d7e486abf97c1cfffc7d22b15fb7d6e58114e75f2ce71074b371d96a",
+        "geometrySha256": "0e50e9f39746df51649e3a8485f7fbf3fee34f5d617d2ea76106214a1ea440db"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 0,
+        "pixelsPerSecond": 1.4040561622464898,
+        "origin": 29712816,
+        "frameCount": 37690800,
+        "rate": 44100,
+        "visibleFrames": [
+          29712816,
+          67403616
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "dab54f80f0d9e8e0ec6fa2b738755d8821e6f1dc33e39583bcf7d7021d2132fa",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 62400,
+        "pixelsPerSecond": 600.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34299216.0,
+          34387416.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-6.json",
+        "imageSha256": "612b190fd61d337842e93f2c891439d3c912bad4066c50ceddd5f6fa35b16c0c",
+        "geometrySha256": "cc935713c01b41e9f38566ea66360f5596e90ed9acade650b0f2f2f356d98fa4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-1200",
+        "width": 1200,
+        "height": 132,
+        "dpr": 1,
+        "first": 15150,
+        "pixelsPerSecond": 150.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34166916.0,
+          34519716.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "2f02d5abaf920f896dc4bf9d21ad775299f1e5f679020edf59422d4c910781d8",
+        "geometrySha256": "c3c6283d09c8e945a866e764d8901883a6734a1172288b76ab67c9e82ba76193"
+      },
+      {
+        "role": "overview",
+        "id": "stroke-overview-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 0,
+        "pixelsPerSecond": 0.6552262090483619,
+        "origin": 29712816,
+        "frameCount": 37690800,
+        "rate": 44100,
+        "visibleFrames": [
+          29712816,
+          67403616
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-0.json",
+        "imageSha256": "a2d7c14eec35bb5fa7eccc6e5515c40ae69b441b6e1e0ee094cb91e0e1c9595b",
+        "geometrySha256": "f82745f8413486e55c821975f8bbd6bc25eaa22e620d4ba1d2c8c6122121e7d4"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-2s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 29120,
+        "pixelsPerSecond": 280.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34299216.0,
+          34387416.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-7.json",
+        "imageSha256": "c42db2873038c1a7886a8b35d7703a06ba3de8fd7d621ab5dc87ca2f74c8c267",
+        "geometrySha256": "81cec7c29bbe4398cfa15af5414e98e2afe7aff2f85d9cc4f119cc8402345df5"
+      },
+      {
+        "role": "detail",
+        "id": "stroke-8s-560",
+        "width": 560,
+        "height": 36,
+        "dpr": 2,
+        "first": 7070,
+        "pixelsPerSecond": 70.0,
+        "origin": 29712816,
+        "rate": 44100,
+        "frameCount": 37690800,
+        "visibleFrames": [
+          34166916.0,
+          34519716.0
+        ],
+        "style": {
+          "gain": 1,
+          "intensity": 1,
+          "light": false,
+          "mode": "stroke"
+        },
+        "pages": "facts-4.json",
+        "imageSha256": "6469af9457611f9c40b70b538d55098161346e9e23dc072446c12081cbd6a2f8",
+        "geometrySha256": "c8959a12a54118e54b6b6d23fa041d7103f5016b1cc69a3b35574861a2477e86"
+      }
+    ]
+  }
+}

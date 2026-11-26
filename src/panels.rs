@@ -161,7 +161,7 @@ impl PanelRecord {
 /// take the app rather than a context of their own.
 #[allow(unused_variables)]
 pub trait PaneContent: 'static {
-    /// The content itself, for the workspace to recognise a type it coordinates.
+    /// The content itself, for the workspace to recognize a type it coordinates.
     fn as_any(&self) -> &dyn std::any::Any;
     fn view(&self) -> AnyView;
     fn focus_handle(&self, cx: &App) -> FocusHandle;
@@ -438,22 +438,33 @@ pub enum Destination {
         path: PathBuf,
         root: Option<PathBuf>,
     },
+    FolderPage {
+        path: PathBuf,
+        page: crate::collection::Page,
+    },
     View(Location),
 }
 impl Destination {
     /// The same explicit browser actions for every navigation destination.
     pub fn open_items(self, menu: PopupMenu, router: Entity<Router>) -> PopupMenu {
         use gpui_kit::component::menu::PopupMenuItem;
-        let tab = router.clone();
+        let beside = router.clone();
         let destination = self.clone();
+        self.open_in_new_tab(menu, router)
+            .item(PopupMenuItem::new("Open Beside").on_click(move |_, _, cx| {
+                beside.update(cx, |_, cx| {
+                    cx.emit(RouterEvent::Beside(destination.clone()))
+                });
+            }))
+    }
+
+    pub fn open_in_new_tab(self, menu: PopupMenu, router: Entity<Router>) -> PopupMenu {
+        use gpui_kit::component::menu::PopupMenuItem;
         menu.item(
             PopupMenuItem::new("Open in New Tab").on_click(move |_, _, cx| {
-                tab.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination.clone())));
+                router.update(cx, |_, cx| cx.emit(RouterEvent::Open(self.clone())));
             }),
         )
-        .item(PopupMenuItem::new("Open Beside").on_click(move |_, _, cx| {
-            router.update(cx, |_, cx| cx.emit(RouterEvent::Beside(self.clone())));
-        }))
     }
 
     pub fn apply(self, browser: &mut Browser, window: &mut Window, cx: &mut Context<Browser>) {
@@ -463,6 +474,7 @@ impl Destination {
                 root: Some(root),
             } => browser.open_in(path, root, window, cx),
             Self::Folder { path, root: None } => browser.open(path, window, cx),
+            Self::FolderPage { path, page } => browser.open_folder_page(path, page, window, cx),
             Self::View(location) => browser.show(location, window, cx),
         }
     }

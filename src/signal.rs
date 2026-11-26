@@ -163,5 +163,4 @@ impl SignalTap {
 }
 
 #[cfg(test)]
-#[path = "signalTests.rs"]
 mod tests;

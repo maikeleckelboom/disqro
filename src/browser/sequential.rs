@@ -488,21 +488,17 @@ impl Browser {
         )
     }
 
-    pub(super) fn reveal_collection_scope(&self, folder: &Path, cx: &App) -> Option<PathBuf> {
-        self.physical_scope(folder, cx)
-            .filter(|scope| !scope.release_only)
-            .map(|scope| scope.path)
-    }
-
     pub(super) fn refresh_folder_traversal(&mut self, cx: &mut Context<Self>) {
-        let scope = if self.location.is_folder() && self.folder_ready && !self.busy {
-            self.physical_sequence_disc()
-                .and_then(DiscId::folder)
-                .filter(|folder| crate::places::same_path(folder, &self.path))
-                .and_then(|folder| self.physical_scope(folder, cx))
-        } else {
-            None
-        };
+        let scope =
+            if !self.listing_tree() && self.location.is_folder() && self.folder_ready && !self.busy
+            {
+                self.physical_sequence_disc()
+                    .and_then(DiscId::folder)
+                    .filter(|folder| crate::places::same_path(folder, &self.path))
+                    .and_then(|folder| self.physical_scope(folder, cx))
+            } else {
+                None
+            };
         if self.folder_traversal.scope == scope {
             return;
         }
@@ -694,7 +690,9 @@ impl Browser {
             _ => return None,
         };
         let node = sequence.adjacent(&current, kind, next)?;
-        Some((node.route(kind, root, folder)?, node.label(kind, false)))
+        let mut route = node.route(kind, root, folder)?;
+        route.shelf.clone_from(&self.shelf_origin);
+        Some((route, node.label(kind, false)))
     }
 
     pub(crate) fn sequence_label(&self, kind: SequenceKind, next: bool) -> Option<String> {

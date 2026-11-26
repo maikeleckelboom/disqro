@@ -22,8 +22,21 @@ jobs:
         run: rustup component add rustfmt clippy
       - name: Formatting
         run: cargo fmt --all -- --check
+      - name: Source naming
+        run: python tools/check_names.py
+      - name: American English
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'typos.zip'
+          $bin = Join-Path $env:RUNNER_TEMP 'typos'
+          Invoke-WebRequest 'https://github.com/crate-ci/typos/releases/download/v1.52.2/typos-v1.52.2-x86_64-pc-windows-msvc.zip' -OutFile $archive
+          if ((Get-FileHash $archive).Hash -ne 'AB79036832CEA0F2A21AA947731D39512250CC0F7A6A2F6ADD26262738A8CC11') { throw 'Unexpected typos archive' }
+          Expand-Archive -LiteralPath $archive -DestinationPath $bin
+          & "$bin/typos.exe" .
+      - name: Native output comparator
+        run: python -B -m unittest discover -s tools -p test_waveform_parity.py
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests
         run: cargo test --locked
       - name: Build Windows player

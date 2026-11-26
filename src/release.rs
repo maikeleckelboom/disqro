@@ -1,6 +1,6 @@
 //! Releases: the discs that together make up one authored album.
 //!
-//! A release is only recognised on evidence that can be pointed to:
+//! A release is only recognized on evidence that can be pointed to:
 //!
 //! - **Disc folders.** A folder whose music lives entirely in two or more
 //!   subfolders named as discs (`CD1`, `CD 2`, `Disc 3`, `CD1 - Subtitle`),
@@ -10,12 +10,12 @@
 //!
 //! In both cases the discs' album titles must agree once their disc markers
 //! are removed, and a marker in a title must agree with the disc's number.
-//! Volumes, editions and compilations in neighbouring folders never merge, and
+//! Volumes, editions and compilations in neighboring folders never merge, and
 //! anything ambiguous stays a set of independent discs: a missed release is
 //! better than a wrong one.
 use std::{collections::HashMap, hash::Hash, path::Path};
 
-/// The Albums / CDs order projected from an already ordered collection.
+/// The Releases order projected from an already ordered collection.
 /// A release occupies the position of its first authored disc. Its other
 /// discs are moved beneath it in authored order, regardless of their sort keys.
 pub enum Ordered {
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn ambiguous_discs_stay_independent() {
         let none = |discs: &[(&str, &str, Option<u32>)]| assert_eq!(group(discs), [], "{discs:?}");
-        // Neighbouring volumes and editions.
+        // Neighboring volumes and editions.
         none(&[
             (r"M:\TD\[1] Thunderdome I", "Thunderdome I", None),
             (r"M:\TD\[2] Thunderdome II", "Thunderdome II", None),

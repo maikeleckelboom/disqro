@@ -7,8 +7,9 @@
 //! the active Music Browser whether or not the panel is shown.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, INDENT, ROW, disclosure},
+    nav::{DraggedFolder, INDENT, ROW},
 };
+use crate::disclosure::{Disclosure, VirtualFocus};
 use crate::{
     assets::FileIcon,
     catalog::Catalog,
@@ -50,7 +51,9 @@ pub struct LocationsChanged;
 /// The Places and the folder tree beneath them.
 pub struct Locations {
     pub places: Places,
-    available: Arc<[bool]>,
+    available: std::collections::HashMap<PathBuf, bool>,
+    availability_task: Option<Task<()>>,
+    _expansion: Subscription,
     pub folders: Entity<Folders>,
 }
 impl EventEmitter<LocationsChanged> for Locations {}
@@ -59,13 +62,14 @@ impl Locations {
     pub fn new(saved: Option<PlacesState>, expanded: Vec<String>, cx: &mut Context<Self>) -> Self {
         let folders = cx.new(Folders::new);
         folders.update(cx, |f, _| f.restore_expanded(expanded));
-        cx.subscribe(&folders, |_, _, _: &ExpansionChanged, cx| {
+        let expansion = cx.subscribe(&folders, |_, _, _: &ExpansionChanged, cx| {
             cx.emit(LocationsChanged)
-        })
-        .detach();
+        });
         let mut this = Self {
             places: Places::restore(saved),
-            available: Arc::from([]),
+            available: Default::default(),
+            availability_task: None,
+            _expansion: expansion,
             folders,
         };
         this.check_availability(cx);
@@ -90,16 +94,23 @@ impl Locations {
     /// not stall the window.
     fn check_availability(&mut self, cx: &mut Context<Self>) {
         let paths: Vec<PathBuf> = self.places.items.iter().map(|p| p.path.clone()).collect();
-        cx.spawn(async move |this, cx| {
-            let available: Arc<[bool]> = cx
-                .background_spawn(async move { paths.iter().map(|p| p.is_dir()).collect() })
+        self.availability_task = Some(cx.spawn(async move |this, cx| {
+            let available = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|p| {
+                            let available = p.is_dir();
+                            (p, available)
+                        })
+                        .collect()
+                })
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.available = available;
                 cx.notify();
             });
-        })
-        .detach();
+        }));
     }
     /// Every Place is a root of the tree; drives yield to the other Places
     /// when choosing where to show a folder.
@@ -137,40 +148,53 @@ pub struct LocationsPanel {
     model: Entity<Locations>,
     router: Entity<Router>,
     catalog: Entity<Catalog>,
-    renaming: Option<(usize, Entity<InputState>)>,
+    renaming: Option<(PathBuf, Entity<InputState>)>,
+    row_focus: Rc<VirtualFocus<(SharedString, bool)>>,
+    _model_subscription: Subscription,
     focus: FocusHandle,
 }
 
 impl LocationsPanel {
     fn new(services: &Services, _: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.observe(&services.locations, |_, _, cx| cx.notify())
-            .detach();
+        let model_subscription = cx.observe(&services.locations, |_, _, cx| cx.notify());
         Self {
             model: services.locations.clone(),
             router: services.router.clone(),
             catalog: services.catalog.clone(),
             renaming: None,
+            _model_subscription: model_subscription,
+            row_focus: Default::default(),
             focus: cx.focus_handle(),
         }
     }
     fn folders(&self, cx: &App) -> Entity<Folders> {
         self.model.read(cx).folders.clone()
     }
-    fn start_rename(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(place) = self.model.read(cx).places.items.get(ix) else {
+    fn start_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(place) = self
+            .model
+            .read(cx)
+            .places
+            .items
+            .iter()
+            .find(|p| same_path(&p.path, &path))
+        else {
             return;
         };
         let name = place.name();
+        let editing = path.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         cx.subscribe_in(&input, window, move |s, input, e, window, cx| match e {
             InputEvent::PressEnter { .. } | InputEvent::Blur
-                if s.renaming.as_ref().is_some_and(|(i, _)| *i == ix) =>
+                if s.renaming.as_ref().is_some_and(|(p, _)| *p == editing) =>
             {
                 let label = input.read(cx).value().to_string();
                 s.renaming = None;
                 s.model.update(cx, |m, cx| {
-                    m.places.rename(ix, &label);
-                    m.changed(cx);
+                    if let Some(ix) = m.places.position(&editing) {
+                        m.places.rename(ix, &label);
+                        m.changed(cx);
+                    }
                 });
                 if matches!(e, InputEvent::PressEnter { .. }) {
                     s.focus.focus(window, cx);
@@ -184,7 +208,7 @@ impl LocationsPanel {
             s.focus(window, cx);
             s.select_all(window, cx);
         });
-        self.renaming = Some((ix, input));
+        self.renaming = Some((path, input));
         cx.notify();
     }
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -302,12 +326,11 @@ impl LocationsPanel {
         router: Entity<Router>,
         folders: Entity<Folders>,
         catalog: Entity<Catalog>,
-        ix: usize,
         path: PathBuf,
         menu: PopupMenu,
     ) -> PopupMenu {
         let (b, c) = (this.clone(), this);
-        let (open, tab, library) = (path.clone(), path.clone(), path);
+        let (open, tab, library, rename) = (path.clone(), path.clone(), path.clone(), path.clone());
         let (r1, f1) = (router.clone(), folders.clone());
         let menu = menu.item(
             PopupMenuItem::new("Open")
@@ -333,7 +356,7 @@ impl LocationsPanel {
             PopupMenuItem::new("Rename Shortcut")
                 .icon(IconName::Pencil)
                 .on_click(move |_, w, cx| {
-                    let _ = b.update(cx, |s, cx| s.start_rename(ix, w, cx));
+                    let _ = b.update(cx, |s, cx| s.start_rename(rename.clone(), w, cx));
                 }),
         )
         .item(
@@ -343,8 +366,10 @@ impl LocationsPanel {
                     let _ = c.update(cx, |s, cx| {
                         s.renaming = None;
                         s.model.update(cx, |m, cx| {
-                            m.places.remove(ix);
-                            m.changed(cx);
+                            if let Some(ix) = m.places.position(&path) {
+                                m.places.remove(ix);
+                                m.changed(cx);
+                            }
                         });
                     });
                 }),
@@ -408,12 +433,11 @@ impl LocationsPanel {
             .places
             .items
             .iter()
-            .enumerate()
-            .map(|(i, p)| PlaceRow {
+            .map(|p| PlaceRow {
                 path: p.path.clone(),
                 name: p.name().into(),
                 origin: p.origin.clone(),
-                available: model.available.get(i).copied().unwrap_or(true),
+                available: model.available.get(&p.path).copied().unwrap_or(true),
             })
             .collect();
         let renaming = self.renaming.clone();
@@ -427,11 +451,13 @@ impl LocationsPanel {
             self.catalog.clone(),
         );
         let model_handle = self.model.clone();
-        tree(&state, move |ix, entry, selected, _, cx| {
+        let focus = self.row_focus.clone();
+        tree(&state, move |_, entry, selected, _, cx| {
             let depth = entry.depth();
             let id = entry.item().id.clone();
+            let row_id = ElementId::Name(id.clone());
             let Some((root, path)) = folders.read(cx).entry(&id) else {
-                return ListItem::new(("location", ix)).h(px(ROW));
+                return ListItem::new(row_id).h(px(ROW));
             };
             let place = (depth == 0)
                 .then(|| places.iter().position(|p| same_path(&p.path, &root)))
@@ -448,27 +474,24 @@ impl LocationsPanel {
                 None if temporary => FileIcon::Drive.icon(),
                 None => FileIcon::Folder.icon(),
             };
-            let toggle = folders.clone();
-            let toggle_id = id.clone();
-            let expander = disclosure(
-                ("location-disclosure", ix),
-                entry.is_folder().then(|| entry.is_expanded()),
-                &m,
-            )
-            .when(entry.is_folder(), |d| {
-                d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx));
-                    })
-            });
+            let expander = if entry.is_folder() || !available {
+                let toggle = folders.clone();
+                let toggle_id = id.clone();
+                Disclosure::new("location-disclosure", entry.is_expanded(), label.clone())
+                    .track_focus(focus.handle((id.clone(), true), cx))
+                    .disabled(!available)
+                    .on_toggle(move |_, cx| toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx)))
+                    .into_any_element()
+            } else {
+                Disclosure::slot().into_any_element()
+            };
             let content = h_flex()
-                .id(("location-row", ix))
+                .id("location-row")
                 .size_full()
                 .gap(px(4.))
                 .min_w_0()
                 .items_center()
-                .text_size(px(13.))
+                .text_size(px(crate::theme::size::TEXT))
                 .text_color(if selected {
                     m.text
                 } else if temporary {
@@ -488,7 +511,7 @@ impl LocationsPanel {
                 );
             let editing = renaming
                 .as_ref()
-                .filter(|(i, _)| Some(*i) == place)
+                .filter(|(p, _)| depth == 0 && same_path(p, &root))
                 .map(|(_, input)| input.clone());
             let content = if let Some(input) = editing {
                 let s = panel.clone();
@@ -508,6 +531,7 @@ impl LocationsPanel {
             } else {
                 let (r, f) = (router.clone(), folders.clone());
                 let (open_root, open_path) = (root.clone(), path.clone());
+                let row_focus = focus.handle((id.clone(), false), cx);
                 let open = move |e: &ClickEvent, window: &mut Window, cx: &mut App| {
                     // The tree's own click handling would select by row
                     // position and toggle expansion. Navigate by path instead.
@@ -516,7 +540,9 @@ impl LocationsPanel {
                     if !new_tab {
                         let state = f.read(cx).state.clone();
                         state.update(cx, |t, cx| {
-                            t.focus(window, cx);
+                            if !matches!(e, ClickEvent::Keyboard(_)) {
+                                t.focus(window, cx);
+                            }
                             t.set_selected_index(t.index_of(&id), cx);
                         });
                     }
@@ -533,9 +559,16 @@ impl LocationsPanel {
                 let dragged = DraggedFolder {
                     path: path.clone(),
                     label: label.clone(),
-                    place,
+                    place: place.is_some(),
                 };
                 content
+                    .role(Role::Button)
+                    .aria_label(format!("Open {label}"))
+                    .aria_selected(selected)
+                    .key_context("NavigationRow")
+                    .track_focus(&row_focus)
+                    .tab_stop(true)
+                    .focus_visible(|d| d.bg(m.control).text_color(m.accent))
                     .child(
                         div()
                             .flex_1()
@@ -560,27 +593,33 @@ impl LocationsPanel {
                     .when(available && !temporary, |d| {
                         d.on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
                     })
-                    .when_some(place, |d, i| {
+                    .when(place.is_some(), |d| {
+                        let destination = path.clone();
                         // Dropping a Place onto another moves it there.
                         let model = model_handle.clone();
                         d.drag_over::<DraggedFolder>(move |d, dragged, _, _| {
-                            if dragged.place.is_some() {
+                            if dragged.place {
                                 d.border_t_2().border_color(m.accent)
                             } else {
                                 d
                             }
                         })
                         .on_drop(move |d: &DraggedFolder, _, cx| {
-                            if let Some(from) = d.place {
+                            if d.place {
                                 model.update(cx, |m, cx| {
-                                    m.places.move_item(from, i);
-                                    m.changed(cx);
+                                    if let (Some(from), Some(to)) = (
+                                        m.places.position(&d.path),
+                                        m.places.position(&destination),
+                                    ) {
+                                        m.places.move_item(from, to);
+                                        m.changed(cx);
+                                    }
                                 });
                             }
                         })
                     })
             };
-            ListItem::new(("location", ix))
+            ListItem::new(row_id)
                 .h(px(ROW))
                 .p_0()
                 .rounded(px(5.))
@@ -590,15 +629,12 @@ impl LocationsPanel {
             let Some((root, path)) = menu_folders.read(cx).entry(&entry.item().id) else {
                 return menu;
             };
-            if entry.depth() == 0
-                && let Some(ix) = menu_places.iter().position(|p| same_path(&p.path, &root))
-            {
+            if entry.depth() == 0 && menu_places.iter().any(|p| same_path(&p.path, &root)) {
                 return Self::place_menu(
                     menu_panel.clone(),
                     menu_router.clone(),
                     menu_folders.clone(),
                     catalog.clone(),
-                    ix,
                     path,
                     menu,
                 );
@@ -624,11 +660,13 @@ impl Render for LocationsPanel {
         let menu_model = self.model.clone();
         let (menu_this, model) = (cx.weak_entity(), self.model.clone());
         let end_drop = move |d: &DraggedFolder, _: &mut Window, cx: &mut App| {
-            if let Some(from) = d.place {
+            if d.place {
                 model.update(cx, |m, cx| {
                     let end = m.places.items.len();
-                    m.places.move_item(from, end);
-                    m.changed(cx);
+                    if let Some(from) = m.places.position(&d.path) {
+                        m.places.move_item(from, end);
+                        m.changed(cx);
+                    }
                 });
             }
         };
@@ -656,7 +694,7 @@ impl Render for LocationsPanel {
                     .pb(px(6.))
                     // Space below the last row takes a Place to the end.
                     .drag_over::<DraggedFolder>(move |d, dragged, _, _| {
-                        if dragged.place.is_some() {
+                        if dragged.place {
                             d.border_b_2().border_color(m.accent.opacity(0.6))
                         } else {
                             d

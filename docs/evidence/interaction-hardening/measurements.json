@@ -1,0 +1,298 @@
+{
+  "baseline": "4d5e6f3852fcc905c0429a1a49eef7c616520be1",
+  "toolchain": "rustc 1.99.1, x86_64-pc-windows-msvc",
+  "treeBaselineModel": {
+    "peakWorkingSetBytes": 99852288,
+    "maxSampledPrivateBytes": 92823552,
+    "seconds": 3.0541988,
+    "code": 0
+  },
+  "fixtures": [
+    {
+      "test": "browser::tree::tests::expanded_pages_release_empty_and_nested_branches_and_reload_backward",
+      "peakWorkingSetBytes": 61411328,
+      "maxSampledPrivateBytes": 50302976,
+      "wallSeconds": 4.249396,
+      "exitCode": 0
+    },
+    {
+      "test": "browser::tree::tests::expanded_indexed_releases_reload_their_authored_discs_after_eviction",
+      "peakWorkingSetBytes": 83673088,
+      "maxSampledPrivateBytes": 73134080,
+      "wallSeconds": 1.5438116,
+      "exitCode": 0
+    },
+    {
+      "test": "store::tests::independent_large_artist_and_release_shelves_page_in_both_directions",
+      "peakWorkingSetBytes": 33243136,
+      "maxSampledPrivateBytes": 20267008,
+      "wallSeconds": 4.140928,
+      "exitCode": 0
+    },
+    {
+      "test": "store::tests::six_figure_listening_snapshot",
+      "peakWorkingSetBytes": 57913344,
+      "maxSampledPrivateBytes": 44568576,
+      "wallSeconds": 5.74165,
+      "exitCode": 0
+    },
+    {
+      "test": "discovery::tests::six_figure_collection_projection",
+      "peakWorkingSetBytes": 132632576,
+      "maxSampledPrivateBytes": 118136832,
+      "wallSeconds": 86.6657834,
+      "exitCode": 0
+    }
+  ],
+  "catalogPlayback": {
+    "cardinality": 40960,
+    "treeFolders": 4400,
+    "secondsIncludingUIAutomation": {
+      "Artists": 1.5,
+      "Releases": 2.172,
+      "Open Tree fixture": 1.266,
+      "Tree": 1.297
+    },
+    "queuePosition": 0.6619999999999999,
+    "current": 5
+  },
+  "gpuParity": {
+    "baseline": "4d5e6f3852fcc905c0429a1a49eef7c616520be1",
+    "exeSha256": "8ed64f9af2b460019732e243596463a267e5b363f3744df92a7ae3385b81709c",
+    "cases": 103,
+    "filesChecked": 206,
+    "differences": []
+  },
+  "lifecycle": {
+    "paused_recovery_ms": 511.59,
+    "minimized_frames": 0,
+    "frames_after_close": 0,
+    "deck_dispatches_after_close": 0,
+    "compact_draws_after_close": 163,
+    "closed_tabs": 2,
+    "synthetic_dpi": [
+      96,
+      192,
+      144
+    ],
+    "playback_after_close": true,
+    "decode_errors": 0,
+    "device_errors": 0,
+    "wave_gpu_errors": 1
+  },
+  "productionSha256": "3f982e2c4f7cb8f38dc2d15a1c224deee78de40df0c269d5c4c1cafe94c68189",
+  "captures": {
+    "overview.png": {
+      "nativeDpi": 144,
+      "width": 1842,
+      "height": 1161,
+      "changedPixels": 0,
+      "matchingControlRects": 14
+    },
+    "narrow-overview.png": {
+      "nativeDpi": 144,
+      "width": 1842,
+      "height": 1161,
+      "changedPixels": 0,
+      "matchingControlRects": 14
+    },
+    "wide-overview.png": {
+      "nativeDpi": 144,
+      "width": 1842,
+      "height": 1161,
+      "changedPixels": 0,
+      "matchingControlRects": 14
+    }
+  },
+  "compact": {
+    "baseline-compact": {
+      "draws": {
+        "playing": 1446,
+        "paused": 0,
+        "hidden": 0,
+        "resumed": 482
+      },
+      "agreement": {
+        "shared_frames": 1440,
+        "distance_px": {
+          "p50": 0.0,
+          "p95": 2.273181642920008e-14,
+          "p99": 2.273181642920008e-14,
+          "max": 1.39767278001246e-07
+        }
+      },
+      "drawsPerSecond": 241.0
+    },
+    "final-compact": {
+      "draws": {
+        "playing": 1446,
+        "paused": 0,
+        "hidden": 0,
+        "resumed": 480
+      },
+      "agreement": {
+        "shared_frames": 1440,
+        "distance_px": {
+          "p50": 0.0,
+          "p95": 2.273181642920008e-14,
+          "p99": 2.273181642920008e-14,
+          "max": 4.546363285840016e-14
+        }
+      },
+      "drawsPerSecond": 241.0
+    }
+  },
+  "accessibility": {
+    "Browse Playlists": {
+      "name": "Browse Playlists",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Reference Library": {
+      "name": "Reference Library",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Collapse Reference Library": {
+      "name": "Collapse Reference Library",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Evening Session": {
+      "name": "Evening Session",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Recently Played": {
+      "name": "Recently Played",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "All Music": {
+      "name": "All Music",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Favorites": {
+      "name": "Favorites",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Collapse Playlists": {
+      "name": "Collapse Playlists",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Browse Collections": {
+      "name": "Browse Collections",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Artists": {
+      "name": "Artists",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Collapse Collections": {
+      "name": "Collapse Collections",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Collapse Live Set": {
+      "name": "Collapse Live Set",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Expanded",
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Add Music Folder.": {
+      "name": "Add Music Folder.",
+      "patterns": [
+        "InvokePatternIdentifiers.Pattern"
+      ],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Releases": {
+      "name": "Releases",
+      "patterns": [],
+      "focusable": true,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": true
+    },
+    "Expand Offline fixture": {
+      "name": "Expand Offline fixture",
+      "patterns": [
+        "ExpandCollapsePatternIdentifiers.Pattern"
+      ],
+      "expanded": "Collapsed",
+      "focusable": false,
+      "focused": false,
+      "role": "ControlType.Button",
+      "enabled": false
+    }
+  },
+  "compatibilityDpi": 96,
+  "twoDeckSweep": {
+    "phases": 36,
+    "maxResidentAndReservedBytes": 9388044,
+    "qualificationErrors": [],
+    "geometryMissesAfterFirstExact": 0,
+    "traceRecordsDropped": 0
+  }
+}

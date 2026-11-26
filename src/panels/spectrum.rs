@@ -21,7 +21,6 @@ use gpui_kit::{
     *,
 };
 use std::rc::Rc;
-#[path = "spectrumPlot.rs"]
 mod plot;
 use plot::Plot;
 

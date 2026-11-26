@@ -128,13 +128,13 @@ impl MusicTable {
                 self.play_folder(FolderAction::Collection, original, cx);
             }
             Contents::Library(p) => {
-                let Scope::Library(root) = p.scope else {
+                if !matches!(p.scope, Scope::Library(_) | Scope::CollectionFolder(_)) {
                     return;
-                };
+                }
                 play_library(
                     &self.catalog,
                     &self.player,
-                    ListeningList::Collection(root, p.search.clone()),
+                    ListeningList::Collection(p.scope, p.search.clone()),
                     None,
                     |tracks, _| Command::PlayList(tracks, false),
                     cx,
