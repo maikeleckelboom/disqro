@@ -20,9 +20,18 @@ use std::ops::Range;
 
 pub(crate) struct TreeTable {
     pub(super) tree: Tree,
+    /// The rows shown, with each run of released items as one entry.
     pub(super) rows: Vec<TreeRow>,
+    /// The first row of each entry of `rows`.
+    starts: Vec<usize>,
+    /// The rows `rows` span.
+    len: usize,
+    /// The row of each item shown.
+    index: HashMap<TreeId, usize>,
     /// Rows whose batches load as the viewport approaches them.
     boundaries: Vec<Boundary>,
+    /// The rows each page's items occupy.
+    spans: Vec<Span>,
     /// The rows the table last showed.
     shown: Range<usize>,
     pub(super) filter: String,
@@ -52,7 +61,11 @@ impl TreeTable {
         Self {
             tree: Tree::default(),
             rows: Vec::new(),
+            starts: Vec::new(),
+            len: 0,
+            index: HashMap::new(),
             boundaries: Vec::new(),
+            spans: Vec::new(),
             shown: 0..0,
             filter: String::new(),
             descendants: None,
@@ -71,16 +84,61 @@ impl TreeTable {
     }
 
     pub(super) fn position(&self, id: &TreeId) -> Option<usize> {
-        self.rows
-            .iter()
-            .position(|row| row.node().is_some_and(|node| node.id == *id))
+        self.index.get(id).copied()
+    }
+
+    /// The entry shown at row `index`.
+    pub(super) fn row(&self, index: usize) -> Option<&TreeRow> {
+        let entry = self.starts.partition_point(|start| *start <= index);
+        let row = self.rows.get(entry.checked_sub(1)?)?;
+        (index < self.starts[entry - 1] + row.span()).then_some(row)
     }
 
     pub(crate) fn row_key(&self, index: usize) -> Option<RowKey> {
-        self.rows
-            .get(index)?
+        self.row(index)?
             .node()
             .map(|node| RowKey::Tree(node.id.clone()))
+    }
+
+    /// Takes a batch a request read, under the current filter.
+    pub(super) fn take(
+        &mut self,
+        id: Option<TreeId>,
+        fetch: &Fetch,
+        result: anyhow::Result<Branch>,
+        cx: &App,
+    ) {
+        let catalog = self.catalog.read(cx);
+        let marks = |track: &Track| catalog.mark_of(track);
+        let lens = Lens::new(&self.filter, self.descendants.as_deref(), &marks);
+        let tree = &mut self.tree;
+        tree.pending.remove(&id);
+        match (fetch, result) {
+            (Fetch::First, result) => tree.insert_branch(
+                id,
+                result.unwrap_or_else(|err| Branch {
+                    notice: Some(format!("{err:#}")),
+                    ..Default::default()
+                }),
+                lens.as_ref(),
+            ),
+            (fetch, Ok(page)) => {
+                tree.receive(&id, fetch, page, lens.as_ref());
+            }
+            (_, Err(err)) => {
+                if let Some(branch) = tree.branches.get_mut(&id) {
+                    branch.wanted = None;
+                    branch.notice = Some(format!("{err:#}"));
+                }
+            }
+        }
+    }
+
+    /// Marks the pages near the shown rows as in use.
+    fn touch(&mut self) {
+        let near =
+            self.shown.start.saturating_sub(LOOKAHEAD)..self.shown.end.saturating_add(LOOKAHEAD);
+        self.tree.touch(&self.spans, near);
     }
 
     pub(crate) fn selected_key(&self) -> Option<RowKey> {
@@ -89,8 +147,7 @@ impl TreeTable {
 
     pub(crate) fn on_selection(&mut self, index: usize) {
         let id = self
-            .rows
-            .get(index)
+            .row(index)
             .and_then(TreeRow::node)
             .map(|node| node.id.clone());
         if id != self.selected {
@@ -158,17 +215,35 @@ impl TreeTable {
         let height = crate::table::ROW_HEIGHT;
         let d = table.delegate();
         let view = Viewport::capture(table, height, |index| d.row_key(index));
-        let descendants = d
-            .descendants
-            .as_deref()
-            .filter(|matches| matches.query == d.filter);
-        let (rows, boundaries) = d
-            .tree
-            .visible_with(d.sort, &d.filter, descendants, &|track| {
-                d.catalog.read(cx).mark_of(track)
-            });
-        table.delegate_mut().boundaries = boundaries;
-        table.delegate_mut().rows = rows;
+        let catalog = d.catalog.clone();
+        let d = table.delegate_mut();
+        d.tree.set_sort(d.sort);
+        d.tree.set_query(&d.filter);
+        let marks = |track: &Track| catalog.read(cx).mark_of(track);
+        let lens = Lens::new(&d.filter, d.descendants.as_deref(), &marks);
+        let Projection {
+            rows,
+            len,
+            boundaries,
+            spans,
+            ..
+        } = d.tree.project(lens.as_ref());
+        d.boundaries = boundaries;
+        d.spans = spans;
+        d.rows = rows;
+        d.starts.clear();
+        d.index.clear();
+        let mut at = 0;
+        for row in &d.rows {
+            d.starts.push(at);
+            if let TreeRow::Node { node, .. } = row {
+                d.index.entry(node.id.clone()).or_insert(at);
+            }
+            at += row.span();
+        }
+        debug_assert_eq!(at, len);
+        d.len = len;
+        d.touch();
         let d = table.delegate();
         let position = d.selected.as_ref().and_then(|id| d.position(id));
         reselect(table, position, cx);
@@ -184,7 +259,7 @@ impl TreeTable {
             .boundaries
             .iter()
             .filter(|boundary| boundary.near(&self.shown))
-            .map(|boundary| (boundary.branch.clone(), boundary.want))
+            .map(|boundary| (boundary.branch.clone(), boundary.want, boundary.search))
             .collect();
         if wants.is_empty() {
             return;
@@ -258,7 +333,7 @@ impl TableDelegate for TreeTable {
         self.layout.fields().len()
     }
     fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
+        self.len
     }
     fn column(&self, index: usize, _: &App) -> Column {
         self.table_column(index)
@@ -290,7 +365,7 @@ impl TableDelegate for TreeTable {
 
     fn cell_label(&self, row: usize, col: usize, cx: &App) -> Option<SharedString> {
         let field = self.field(col);
-        let node = match self.rows.get(row)? {
+        let node = match self.row(row)? {
             TreeRow::Node { node, .. } => node,
             other => {
                 return other
@@ -335,7 +410,10 @@ impl TableDelegate for TreeTable {
         let field = self.field(col);
         let m = *materials(cx);
         let cell = h_flex().size_full().min_w_0().gap(px(6.));
-        match &self.rows[index] {
+        let Some(row) = self.row(index) else {
+            return cell;
+        };
+        match row {
             TreeRow::Message { depth, text, .. } => cell
                 .pl(px((*depth).min(10) as f32 * 14. + 22.))
                 .text_color(m.text_faint)
@@ -421,6 +499,7 @@ impl TableDelegate for TreeTable {
         cx: &mut Context<TableState<Self>>,
     ) {
         self.shown = visible;
+        self.touch();
         self.request_near(cx);
         let browser = self.browser.clone();
         cx.defer_in(window, move |_, _, cx| {
@@ -435,7 +514,7 @@ impl TableDelegate for TreeTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let Some(node) = self.rows.get(index).and_then(TreeRow::node).cloned() else {
+        let Some(node) = self.row(index).and_then(TreeRow::node).cloned() else {
             return menu;
         };
         let place = self

@@ -25,12 +25,20 @@ pub(crate) use table::TreeTable;
 const EXPANSION_LIMIT: usize = 128;
 /// Items one request lists, reads and materializes for a branch.
 const PAGE: usize = 4096;
-/// Pages one branch keeps loaded. Loading another releases the farthest.
+/// Pages one branch keeps loaded while browsing. Loading another releases
+/// the farthest.
 const RESIDENT_PAGES: usize = 4;
 /// Rows beyond the viewport at which the next batch is requested.
 pub(super) const LOOKAHEAD: usize = 512;
 const PARALLEL_BRANCHES: usize = 4;
+/// Items held across every branch: loaded pages, the filter matches of
+/// released pages and the open items that keep their place. Pages the
+/// viewport is not near are released first, so the total bounds memory,
+/// never what can be reached.
 const LOADED_NODE_LIMIT: usize = 32_768;
+/// Items a branch may hold to be sorted as a whole. A larger branch keeps
+/// the order it is read in, and says so.
+const SORTED_BRANCH_LIMIT: usize = 24_576;
 /// Catalog folders with matching recordings that filtering resolves.
 const MATCHED_FOLDERS: usize = 4096;
 
@@ -69,6 +77,44 @@ impl Descendants {
             Item::Disc { disc, .. } => key(&disc.folder),
             Item::Track { .. } => false,
         }
+    }
+}
+
+/// What a filter keeps of a branch.
+struct Lens<'a> {
+    query: &'a str,
+    terms: Vec<crate::store::Term>,
+    marks: &'a dyn Fn(&Track) -> crate::store::Mark,
+    descendants: Option<&'a Descendants>,
+}
+
+impl<'a> Lens<'a> {
+    /// A lens for `query`, or none when nothing is filtered.
+    fn new(
+        query: &'a str,
+        descendants: Option<&'a Descendants>,
+        marks: &'a dyn Fn(&Track) -> crate::store::Mark,
+    ) -> Option<Self> {
+        (!query.trim().is_empty()).then(|| Self {
+            query,
+            terms: crate::store::Term::parse(query),
+            marks,
+            descendants: descendants.filter(|d| d.query == query),
+        })
+    }
+
+    fn matches(&self, node: &Node) -> bool {
+        node.matches(&self.terms, self.marks)
+    }
+
+    /// Whether the catalog knows of matches inside an item not yet read.
+    fn holds(&self, node: &Node) -> bool {
+        self.descendants.is_some_and(|d| d.contains(node))
+    }
+
+    /// Whether a filtered view can show `node`, or reach a match through it.
+    fn keeps(&self, node: &Node, open: bool) -> bool {
+        open || self.matches(node) || self.holds(node)
     }
 }
 
@@ -251,9 +297,13 @@ enum TreeRow {
         depth: usize,
         text: String,
     },
-    /// A released item of a large branch. Its page loads again as the
-    /// viewport approaches, so the rows keep their place in the list.
-    Released { parent: Option<TreeId> },
+    /// Consecutive items of a released page, held as one entry however many
+    /// rows they span. The page loads again as the viewport approaches, so
+    /// the items keep their place in the list.
+    Released {
+        parent: Option<TreeId>,
+        count: usize,
+    },
 }
 
 impl TreeRow {
@@ -276,6 +326,14 @@ impl TreeRow {
             Self::Node { parent, .. }
             | Self::Message { parent, .. }
             | Self::Released { parent, .. } => parent.as_ref(),
+        }
+    }
+
+    /// The rows this entry spans.
+    fn span(&self) -> usize {
+        match self {
+            Self::Released { count, .. } => *count,
+            _ => 1,
         }
     }
 }
@@ -351,6 +409,75 @@ struct Slot {
     start: Option<Cursor>,
     len: usize,
     nodes: Option<Vec<Node>>,
+    /// The open items of a released page, by position, so their branches
+    /// keep their rows and stay reachable.
+    anchors: Vec<(usize, Node)>,
+    /// What a filter keeps of a released page. A filter reads each page
+    /// once and needs only these to stay loaded.
+    hits: Option<Hits>,
+    /// When the viewport was last near the page.
+    used: u64,
+}
+
+struct Hits {
+    query: String,
+    nodes: Vec<Node>,
+}
+
+impl Slot {
+    fn new(start: Option<Cursor>, nodes: Vec<Node>) -> Self {
+        Self {
+            start,
+            len: nodes.len(),
+            nodes: Some(nodes),
+            anchors: Vec::new(),
+            hits: None,
+            used: 0,
+        }
+    }
+
+    /// Items the page holds in memory.
+    fn resident(&self) -> usize {
+        self.nodes.as_ref().map_or(0, Vec::len)
+            + self.anchors.len()
+            + self.hits.as_ref().map_or(0, |hits| hits.nodes.len())
+    }
+
+    fn hits(&self, query: &str) -> Option<&[Node]> {
+        self.hits
+            .as_ref()
+            .filter(|hits| hits.query == query)
+            .map(|hits| hits.nodes.as_slice())
+    }
+
+    /// Fills the page with its items again.
+    fn load(&mut self, nodes: Vec<Node>) {
+        self.len = nodes.len();
+        self.nodes = Some(nodes);
+        self.anchors.clear();
+        self.hits = None;
+    }
+
+    /// Drops the page's items. Open items stay as anchors and, under a
+    /// filter, so do the items it keeps.
+    fn release(&mut self, open: &dyn Fn(&TreeId) -> bool, lens: Option<&Lens>) {
+        let Some(nodes) = self.nodes.take() else {
+            return;
+        };
+        self.anchors = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| open(&node.id))
+            .map(|(index, node)| (index, node.clone()))
+            .collect();
+        self.hits = lens.map(|lens| Hits {
+            query: lens.query.to_owned(),
+            nodes: nodes
+                .into_iter()
+                .filter(|node| lens.keeps(node, open(&node.id)))
+                .collect(),
+        });
+    }
 }
 
 /// A batch a branch waits for.
@@ -382,20 +509,19 @@ impl Fetch {
 struct Branch {
     pages: Vec<Slot>,
     notice: Option<String>,
-    limited: bool,
     /// Where the next page starts when more items follow.
     more: Option<Cursor>,
-    wanted: Option<Want>,
+    /// The batch the branch waits for, and whether a filter searches it
+    /// rather than the viewport showing it.
+    wanted: Option<(Want, bool)>,
+    /// Too large to sort as a whole, so shown in the order it is read.
+    unsorted: bool,
 }
 
 impl Branch {
     fn page(nodes: Vec<Node>, more: Option<Cursor>) -> Self {
         Self {
-            pages: vec![Slot {
-                start: None,
-                len: nodes.len(),
-                nodes: Some(nodes),
-            }],
+            pages: vec![Slot::new(None, nodes)],
             more,
             ..Default::default()
         }
@@ -418,31 +544,45 @@ impl Branch {
             .flatten()
     }
 
+    /// Items that can be open: every loaded item and the anchors of
+    /// released pages.
+    fn reachable(&self) -> impl Iterator<Item = &Node> {
+        self.pages.iter().flat_map(|page| {
+            page.nodes
+                .iter()
+                .flatten()
+                .chain(page.anchors.iter().map(|(_, node)| node))
+        })
+    }
+
     fn resident(&self) -> usize {
+        self.pages.iter().map(Slot::resident).sum()
+    }
+
+    /// Items known so far, loaded or released.
+    fn len(&self) -> usize {
+        self.pages.iter().map(|page| page.len).sum()
+    }
+
+    fn loaded_pages(&self) -> usize {
         self.pages
             .iter()
-            .filter_map(|page| page.nodes.as_ref())
-            .map(Vec::len)
-            .sum()
+            .filter(|page| page.nodes.is_some())
+            .count()
     }
 
     fn complete(&self) -> bool {
         self.more.is_none() && self.pages.iter().all(|page| page.nodes.is_some())
     }
 
-    /// Releases the loaded page farthest from `keep`. Returns whether one was.
-    fn release_farthest(&mut self, keep: usize) -> bool {
-        let farthest = self
-            .pages
+    /// The loaded page farthest from `keep`.
+    fn farthest(&self, keep: usize) -> Option<usize> {
+        self.pages
             .iter()
             .enumerate()
             .filter(|(index, page)| *index != keep && page.nodes.is_some())
             .max_by_key(|(index, _)| index.abs_diff(keep))
-            .map(|(index, _)| index);
-        if let Some(index) = farthest {
-            self.pages[index].nodes = None;
-        }
-        farthest.is_some()
+            .map(|(index, _)| index)
     }
 }
 
@@ -452,6 +592,8 @@ pub(super) struct Boundary {
     pub(super) rows: std::ops::Range<usize>,
     pub(super) branch: Option<TreeId>,
     pub(super) want: Want,
+    /// A filter reads this batch wherever the viewport is.
+    pub(super) search: bool,
 }
 
 impl Boundary {
@@ -459,6 +601,15 @@ impl Boundary {
         self.rows.start < visible.end.saturating_add(LOOKAHEAD)
             && self.rows.end.saturating_add(LOOKAHEAD) > visible.start
     }
+}
+
+/// The rows a page's items occupy, so the pages the viewport approaches
+/// stay loaded.
+#[derive(Clone, Debug)]
+struct Span {
+    branch: Option<TreeId>,
+    page: usize,
+    rows: std::ops::Range<usize>,
 }
 
 struct Request(Ticket);
@@ -474,6 +625,13 @@ struct Tree {
     branches: HashMap<Option<TreeId>, Branch>,
     pending: HashMap<Option<TreeId>, Request>,
     root: Option<Source>,
+    sort: Option<(Field, ColumnSort)>,
+    /// The filter whose matches released pages keep.
+    query: String,
+    /// The filter's matches fill the loaded total, so it reads no further.
+    saturated: bool,
+    /// Advances whenever the viewport moves, to order pages by use.
+    clock: u64,
 }
 
 impl Tree {
@@ -484,6 +642,10 @@ impl Tree {
             .filter(|key| seen.insert(key.clone()))
             .take(EXPANSION_LIMIT)
             .collect();
+    }
+
+    fn is_open(&self, id: &TreeId) -> bool {
+        self.expanded.contains(id)
     }
 
     fn toggle(&mut self, id: TreeId) {
@@ -498,21 +660,20 @@ impl Tree {
         self.prune();
     }
 
+    /// Drops the branches no open item reaches, which cancels their requests.
     fn prune(&mut self) {
         fn visit(tree: &Tree, key: Option<TreeId>, reachable: &mut HashSet<Option<TreeId>>) {
             if !reachable.insert(key.clone()) {
                 return;
             }
             if let Some(branch) = tree.branches.get(&key) {
-                for node in branch.nodes() {
-                    if tree.expanded.contains(&node.id) {
+                for node in branch.reachable() {
+                    if tree.is_open(&node.id) {
                         visit(tree, Some(node.id.clone()), reachable);
                     }
                 }
             }
         }
-        // Retry limited branches after a disclosure frees room.
-        self.branches.retain(|_, branch| !branch.limited);
         let mut reachable = HashSet::new();
         visit(self, None, &mut reachable);
         self.branches.retain(|key, _| reachable.contains(key));
@@ -523,75 +684,104 @@ impl Tree {
         self.branches.values().map(Branch::resident).sum()
     }
 
-    fn insert_branch(&mut self, id: Option<TreeId>, mut branch: Branch) {
-        let remaining = LOADED_NODE_LIMIT.saturating_sub(self.loaded());
-        if let Some(page) = branch.pages.first_mut()
-            && let Some(nodes) = &mut page.nodes
-            && nodes.len() > remaining
-        {
-            nodes.truncate(remaining);
-            page.len = nodes.len();
-            branch.limited = true;
-            branch.more = None;
-            branch.notice = Some("Collapse another branch to make room for more items.".into());
+    /// Whether the active sort orders the items of branch `id`. Discs and
+    /// releases keep their authored order.
+    fn sorts(&self, id: &Option<TreeId>) -> bool {
+        self.sort.is_some() && !matches!(id, Some(TreeId::Disc(_) | TreeId::Release(_)))
+    }
+
+    /// Keeps released pages' matches only for `query`.
+    fn set_query(&mut self, query: &str) {
+        if self.query == query {
+            return;
         }
-        self.branches.insert(id, branch);
+        query.clone_into(&mut self.query);
+        self.saturated = false;
+        for page in self.branches.values_mut().flat_map(|b| b.pages.iter_mut()) {
+            if page.hits.as_ref().is_some_and(|hits| hits.query != query) {
+                page.hits = None;
+            }
+        }
+    }
+
+    fn set_sort(&mut self, sort: Option<(Field, ColumnSort)>) {
+        if self.sort != sort {
+            self.sort = sort;
+            for branch in self.branches.values_mut() {
+                branch.unsorted = false;
+            }
+        }
+    }
+
+    /// Marks the pages the viewport is near as in use.
+    fn touch(&mut self, spans: &[Span], near: std::ops::Range<usize>) {
+        self.clock += 1;
+        let clock = self.clock;
+        for span in spans {
+            if span.rows.start < near.end
+                && span.rows.end.max(span.rows.start + 1) > near.start
+                && let Some(page) = self
+                    .branches
+                    .get_mut(&span.branch)
+                    .and_then(|branch| branch.pages.get_mut(span.page))
+            {
+                page.used = clock;
+            }
+        }
+    }
+
+    /// Takes the first page of a branch. Every open branch reads its first
+    /// page, so it counts as unused until the viewport comes near it.
+    fn insert_branch(&mut self, id: Option<TreeId>, branch: Branch, lens: Option<&Lens>) {
+        self.branches.insert(id.clone(), branch);
+        self.settle(&id, 0, false, lens);
     }
 
     /// Asks for a batch of a branch. Returns whether it is wanted now.
-    fn want(&mut self, id: &Option<TreeId>, want: Want) -> bool {
+    fn want(&mut self, id: &Option<TreeId>, want: Want, search: bool) -> bool {
         let pending = self.pending.contains_key(id);
+        let query = self.query.clone();
         let Some(branch) = self.branches.get_mut(id) else {
             return false;
         };
         let valid = match want {
             Want::Next => branch.more.is_some(),
-            Want::Page(index) => branch.pages.get(index).is_some_and(|p| p.nodes.is_none()),
+            Want::Page(index) => branch
+                .pages
+                .get(index)
+                .is_some_and(|p| p.nodes.is_none() && !(search && p.hits(&query).is_some())),
         };
         if !valid || pending || branch.wanted.is_some() {
             return false;
         }
-        branch.wanted = Some(want);
+        branch.wanted = Some((want, search));
         true
     }
 
     /// Takes the batch a request read. A batch for a position the branch no
-    /// longer waits at is stale and ignored. While browsing, a branch keeps
-    /// `RESIDENT_PAGES` loaded and releases the farthest; a filter keeps
-    /// every page it searched, within the loaded total.
+    /// longer waits at is stale and ignored.
     fn receive(
         &mut self,
         id: &Option<TreeId>,
         fetch: &Fetch,
         page: Branch,
-        filtering: bool,
+        lens: Option<&Lens>,
     ) -> bool {
         if *fetch == Fetch::First {
-            self.insert_branch(id.clone(), page);
+            self.insert_branch(id.clone(), page, lens);
             return true;
         }
-        let loaded = self.loaded();
+        let clock = self.clock;
         let Some(branch) = self.branches.get_mut(id) else {
             return false;
         };
-        branch.wanted = None;
-        let others = loaded - branch.resident();
-        let nodes: Vec<Node> = page.nodes().cloned().collect();
+        let search = branch.wanted.take().is_some_and(|(_, search)| search);
+        let mut nodes: Vec<Node> = page.nodes().cloned().collect();
         let keep = match fetch {
             Fetch::Next(cursor) if branch.more.as_ref() == Some(cursor) => {
-                let known: HashSet<_> = branch.nodes().map(|node| node.id.clone()).collect();
-                let nodes: Vec<_> = nodes
-                    .into_iter()
-                    .filter(|n| !known.contains(&n.id))
-                    .collect();
-                if filtering && loaded + nodes.len() > LOADED_NODE_LIMIT {
-                    return true;
-                }
-                branch.pages.push(Slot {
-                    start: Some(cursor.clone()),
-                    len: nodes.len(),
-                    nodes: Some(nodes),
-                });
+                let known: HashSet<_> = branch.reachable().map(|node| &node.id).collect();
+                nodes.retain(|n| !known.contains(&n.id));
+                branch.pages.push(Slot::new(Some(cursor.clone()), nodes));
                 branch.more = page.more;
                 branch.pages.len() - 1
             }
@@ -601,21 +791,87 @@ impl Tree {
                     .get(*index)
                     .is_some_and(|slot| slot.start == *start && slot.nodes.is_none()) =>
             {
-                let slot = &mut branch.pages[*index];
-                slot.len = nodes.len();
-                slot.nodes = Some(nodes);
+                // A page read again holds what it held unless the folder
+                // changed; an item another page lists stays there.
+                let others: HashSet<_> = branch
+                    .pages
+                    .iter()
+                    .enumerate()
+                    .filter(|(at, _)| at != index)
+                    .flat_map(|(_, page)| page.nodes.iter().flatten())
+                    .map(|node| node.id.clone())
+                    .collect();
+                nodes.retain(|n| !others.contains(&n.id));
+                branch.pages[*index].load(nodes);
                 *index
             }
             _ => return false,
         };
+        branch.pages[keep].used = if search { 0 } else { clock };
         branch.notice = page.notice;
-        if !filtering {
-            while (branch.pages.iter().filter(|p| p.nodes.is_some()).count() > RESIDENT_PAGES
-                || others + branch.resident() > LOADED_NODE_LIMIT)
-                && branch.release_farthest(keep)
-            {}
-        }
+        self.settle(id, keep, search, lens);
         true
+    }
+
+    /// Keeps the loaded total within its bound after page `keep` of branch
+    /// `id` was read. While browsing, a branch keeps `RESIDENT_PAGES`
+    /// unless it is sorted; then pages the viewport is not near are
+    /// released, least recently used first. The pages the viewport is near
+    /// are never released, so loading cannot alternate between them. A page
+    /// a filter searched keeps only its matches when there is no room, and
+    /// once even those fill the total, the filter reads no further.
+    fn settle(&mut self, id: &Option<TreeId>, keep: usize, search: bool, lens: Option<&Lens>) {
+        let sorts = self.sorts(id);
+        let expanded = &self.expanded;
+        let open = |id: &TreeId| expanded.contains(id);
+        if let Some(branch) = self.branches.get_mut(id) {
+            if sorts && !branch.unsorted && branch.len() > SORTED_BRANCH_LIMIT {
+                branch.unsorted = true;
+            }
+            if !sorts || branch.unsorted {
+                while branch.loaded_pages() > RESIDENT_PAGES
+                    && let Some(index) = branch.farthest(keep)
+                {
+                    branch.pages[index].release(&open, lens);
+                }
+            }
+        }
+        while self.loaded() > LOADED_NODE_LIMIT {
+            let clock = self.clock;
+            let least = self
+                .branches
+                .iter()
+                .flat_map(|(key, branch)| {
+                    branch
+                        .pages
+                        .iter()
+                        .enumerate()
+                        .map(move |(index, page)| (key, index, page))
+                })
+                .filter(|(key, index, page)| {
+                    page.nodes.is_some() && page.used < clock && !(*key == id && *index == keep)
+                })
+                .min_by_key(|(_, _, page)| page.used)
+                .map(|(key, index, _)| (key.clone(), index));
+            let expanded = &self.expanded;
+            let open = |id: &TreeId| expanded.contains(id);
+            let page = match least {
+                Some((key, index)) => self.branches.get_mut(&key).map(|b| &mut b.pages[index]),
+                None if search && lens.is_some() => self
+                    .branches
+                    .get_mut(id)
+                    .and_then(|b| b.pages.get_mut(keep))
+                    .filter(|page| page.nodes.is_some()),
+                None => None,
+            };
+            match page {
+                Some(page) => page.release(&open, lens),
+                None => {
+                    self.saturated |= lens.is_some();
+                    break;
+                }
+            }
+        }
     }
 
     fn next_request(&self) -> Option<(Option<TreeId>, Source, Fetch)> {
@@ -631,8 +887,8 @@ impl Tree {
             if let Some(branch) = tree.branches.get(&id) {
                 if !tree.pending.contains_key(&id) {
                     let fetch = match branch.wanted {
-                        Some(Want::Next) => branch.more.clone().map(Fetch::Next),
-                        Some(Want::Page(index)) => branch
+                        Some((Want::Next, _)) => branch.more.clone().map(Fetch::Next),
+                        Some((Want::Page(index), _)) => branch
                             .pages
                             .get(index)
                             .map(|page| Fetch::Page(index, page.start.clone())),
@@ -642,8 +898,8 @@ impl Tree {
                         return Some((id, source()?, fetch));
                     }
                 }
-                for node in branch.nodes() {
-                    if tree.expanded.contains(&node.id)
+                for node in branch.reachable() {
+                    if tree.is_open(&node.id)
                         && let Some(next) = find(tree, Some(node.id.clone()), Some(node))
                     {
                         return Some(next);
@@ -663,177 +919,304 @@ impl Tree {
     }
 
     /// The rows to show. A filter keeps matching items and the ancestors of
-    /// matches in loaded branches. With `descendants` from the catalog it also
-    /// keeps folders whose unloaded contents match.
+    /// matches; with `descendants` from the catalog it also keeps folders
+    /// whose unloaded contents match.
     #[cfg(test)]
     fn visible(
-        &self,
+        &mut self,
         sort: Option<(Field, ColumnSort)>,
         filter: &str,
         marks: &dyn Fn(&Track) -> crate::store::Mark,
     ) -> Vec<TreeRow> {
-        self.visible_with(sort, filter, None, marks).0
+        self.set_sort(sort);
+        self.set_query(filter);
+        self.project(Lens::new(filter, None, marks).as_ref()).rows
     }
 
-    fn visible_with(
-        &self,
-        sort: Option<(Field, ColumnSort)>,
-        filter: &str,
-        descendants: Option<&Descendants>,
-        marks: &dyn Fn(&Track) -> crate::store::Mark,
-    ) -> (Vec<TreeRow>, Vec<Boundary>) {
-        struct Projection<'a> {
-            boundaries: Vec<Boundary>,
-            marks: &'a dyn Fn(&Track) -> crate::store::Mark,
-            descendants: Option<&'a Descendants>,
-            filter: &'a str,
-            terms: Vec<crate::store::Term>,
-            sort: Option<(Field, ColumnSort)>,
-            rows: Vec<TreeRow>,
+    fn project<'a>(&'a self, lens: Option<&'a Lens<'a>>) -> Projection<'a> {
+        let mut view = Projection {
+            tree: self,
+            lens,
+            rows: Vec::new(),
+            len: 0,
+            boundaries: Vec::new(),
+            spans: Vec::new(),
+        };
+        view.visit(None, 0, false);
+        if lens.is_some() && self.saturated {
+            view.push(TreeRow::Message {
+                parent: None,
+                depth: 0,
+                text: "More matches than can be listed · Refine the filter".into(),
+            });
         }
-        fn visit(
-            tree: &Tree,
-            parent: Option<TreeId>,
-            depth: usize,
-            inherited: bool,
-            authored: bool,
-            view: &mut Projection<'_>,
-        ) {
-            let Some(branch) = tree.branches.get(&parent) else {
-                if inherited || view.filter.is_empty() {
-                    view.rows.push(TreeRow::Message {
-                        parent,
-                        depth,
-                        text: "Loading…".into(),
+        view
+    }
+}
+
+/// The rows of a tree, with the batches they wait for.
+struct Projection<'a> {
+    tree: &'a Tree,
+    lens: Option<&'a Lens<'a>>,
+    rows: Vec<TreeRow>,
+    /// The rows `rows` span.
+    len: usize,
+    boundaries: Vec<Boundary>,
+    spans: Vec<Span>,
+}
+
+impl Projection<'_> {
+    fn push(&mut self, row: TreeRow) {
+        self.len += row.span();
+        self.rows.push(row);
+    }
+
+    fn boundary(
+        &mut self,
+        rows: std::ops::Range<usize>,
+        branch: &Option<TreeId>,
+        want: Want,
+        search: bool,
+    ) {
+        self.boundaries.push(Boundary {
+            rows,
+            branch: branch.clone(),
+            want,
+            search,
+        });
+    }
+
+    fn visit(&mut self, parent: Option<TreeId>, depth: usize, inherited: bool) {
+        let tree = self.tree;
+        let Some(branch) = tree.branches.get(&parent) else {
+            if inherited || self.lens.is_none() {
+                self.push(TreeRow::Message {
+                    parent,
+                    depth,
+                    text: "Loading…".into(),
+                });
+            }
+            return;
+        };
+        let sorts = tree.sorts(&parent);
+        let sorted = sorts && !branch.unsorted;
+        if self.lens.is_some() && !inherited {
+            self.search(branch, &parent, depth, sorted);
+        } else {
+            self.browse(branch, &parent, depth, sorted);
+        }
+        let text = if let Some(text) = &branch.notice {
+            Some(text.clone())
+        } else if sorts && branch.unsorted {
+            Some("Too many items to sort · Shown in folder order".into())
+        } else if branch.pages.iter().all(|page| page.len == 0)
+            && branch.more.is_none()
+            && depth > 0
+            && (inherited || self.lens.is_none())
+        {
+            Some("No folders or supported recordings".into())
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            self.push(TreeRow::Message {
+                parent,
+                depth,
+                text,
+            });
+        }
+    }
+
+    /// Every item of a branch, in place, with released pages as runs of
+    /// rows the viewport loads again.
+    fn browse(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize, sorted: bool) {
+        if sorted {
+            let start = self.len;
+            if branch.complete() {
+                let mut nodes: Vec<&Node> = branch.nodes().collect();
+                sort_nodes(&mut nodes, self.tree.sort);
+                for node in nodes {
+                    self.node(node, parent, depth, true);
+                }
+            } else {
+                // A sorted branch is shown once all of it is read, never in
+                // part.
+                let count = branch.len();
+                if count > 0 {
+                    self.push(TreeRow::Released {
+                        parent: parent.clone(),
+                        count,
                     });
                 }
-                return;
-            };
-            let filtering = !view.filter.is_empty();
-            // Only a complete branch can be sorted. A partial one keeps the
-            // order it is read in, so later batches extend it in place.
-            let sort = view.sort.filter(|_| !authored && branch.complete());
-            let mut siblings: Vec<Result<&Node, (usize, usize)>> = Vec::new();
-            for (index, page) in branch.pages.iter().enumerate() {
-                match &page.nodes {
-                    Some(nodes) => siblings.extend(nodes.iter().map(Ok)),
-                    None if !filtering => siblings.push(Err((index, page.len))),
-                    // A filter reads released pages of open branches again.
-                    None => view.boundaries.push(Boundary {
-                        rows: 0..usize::MAX,
-                        branch: parent.clone(),
-                        want: Want::Page(index),
-                    }),
-                }
-            }
-            if let Some((field, direction)) = sort {
-                let mut siblings_sorted: Vec<&Node> =
-                    siblings.iter().filter_map(|s| s.ok()).collect();
-                siblings_sorted.sort_by_cached_key(|node| {
-                    let value = node.value(field);
-                    let numeric = match &node.item {
-                        Item::Track { track, .. } if field == Field::Length => track.duration,
-                        Item::Disc { disc, .. } if field == Field::Length => Some(disc.duration()),
-                        _ if matches!(field, Field::Number | Field::Count | Field::Year) => {
-                            value.parse().ok()
-                        }
-                        _ => None,
-                    };
-                    let key = (
-                        numeric.map_or(0, |value| value.max(0.).to_bits()),
-                        value.to_lowercase(),
-                    );
-                    if direction == ColumnSort::Descending {
-                        (None, Some(std::cmp::Reverse(key)))
-                    } else {
-                        (Some(key), None)
-                    }
-                });
-                siblings = siblings_sorted.into_iter().map(Ok).collect();
-            }
-            for sibling in siblings {
-                let node = match sibling {
-                    Ok(node) => node,
-                    Err((page, len)) => {
-                        view.boundaries.push(Boundary {
-                            rows: view.rows.len()..view.rows.len() + len,
-                            branch: parent.clone(),
-                            want: Want::Page(page),
-                        });
-                        view.rows.extend((0..len).map(|_| TreeRow::Released {
-                            parent: parent.clone(),
-                        }));
-                        continue;
-                    }
-                };
-                let matched =
-                    inherited || view.filter.is_empty() || node.matches(&view.terms, view.marks);
-                let holds_matches = !matched && view.descendants.is_some_and(|d| d.contains(node));
-                let start = view.rows.len();
-                view.rows.push(TreeRow::Node {
-                    node: node.clone(),
+                self.push(TreeRow::Message {
                     parent: parent.clone(),
                     depth,
+                    text: "Sorting…".into(),
                 });
-                if tree.expanded.contains(&node.id) {
-                    visit(
-                        tree,
-                        Some(node.id.clone()),
-                        depth + 1,
-                        matched,
-                        matches!(node.item, Item::Disc { .. } | Item::Release { .. }),
-                        view,
-                    );
-                }
-                if !matched && !holds_matches && view.rows.len() == start + 1 {
-                    view.rows.pop();
+                let missing = branch
+                    .pages
+                    .iter()
+                    .position(|page| page.nodes.is_none())
+                    .map(Want::Page)
+                    .or(branch.more.is_some().then_some(Want::Next));
+                if let Some(want) = missing {
+                    self.boundary(start..self.len, parent, want, false);
                 }
             }
-            if branch.more.is_some() {
-                // A filter keeps reading the branch; browsing reads ahead of
-                // the viewport.
-                let end = view.rows.len();
-                view.boundaries.push(Boundary {
-                    rows: if filtering {
-                        0..usize::MAX
-                    } else {
-                        end.saturating_sub(1)..end
-                    },
+            for page in 0..branch.pages.len() {
+                self.spans.push(Span {
                     branch: parent.clone(),
-                    want: Want::Next,
+                    page,
+                    rows: start..self.len,
                 });
             }
-            if let Some(text) = &branch.notice {
-                view.rows.push(TreeRow::Message {
-                    parent,
-                    depth,
-                    text: text.clone(),
-                });
-            } else if branch.pages.iter().all(|page| page.len == 0)
-                && branch.more.is_none()
-                && depth > 0
-                && (inherited || view.filter.is_empty())
-            {
-                view.rows.push(TreeRow::Message {
-                    parent,
-                    depth,
-                    text: "No folders or supported recordings".into(),
+            return;
+        }
+        for (index, page) in branch.pages.iter().enumerate() {
+            let start = self.len;
+            match &page.nodes {
+                Some(nodes) => {
+                    for node in nodes {
+                        self.node(node, parent, depth, true);
+                    }
+                }
+                None => {
+                    let mut at = 0;
+                    for (offset, node) in &page.anchors {
+                        if *offset > at {
+                            self.push(TreeRow::Released {
+                                parent: parent.clone(),
+                                count: offset - at,
+                            });
+                        }
+                        self.node(node, parent, depth, true);
+                        at = offset + 1;
+                    }
+                    if page.len > at {
+                        self.push(TreeRow::Released {
+                            parent: parent.clone(),
+                            count: page.len - at,
+                        });
+                    }
+                    self.boundary(start..self.len, parent, Want::Page(index), false);
+                }
+            }
+            self.spans.push(Span {
+                branch: parent.clone(),
+                page: index,
+                rows: start..self.len,
+            });
+        }
+        if branch.more.is_some() {
+            let end = self.len;
+            self.boundary(end.saturating_sub(1)..end, parent, Want::Next, false);
+        }
+    }
+
+    /// The items of a branch a filter keeps. The filter reads every page
+    /// of the branch wherever the viewport is, keeping only what it needs.
+    fn search(&mut self, branch: &Branch, parent: &Option<TreeId>, depth: usize, sorted: bool) {
+        let Some(lens) = self.lens else {
+            return;
+        };
+        let saturated = self.tree.saturated;
+        let mut found: Vec<(usize, &Node)> = Vec::new();
+        let mut complete = branch.more.is_none();
+        for (index, page) in branch.pages.iter().enumerate() {
+            match (&page.nodes, page.hits(lens.query)) {
+                (Some(nodes), _) => found.extend(nodes.iter().map(|node| (index, node))),
+                (None, Some(hits)) => found.extend(hits.iter().map(|node| (index, node))),
+                (None, None) => {
+                    complete = false;
+                    if !saturated {
+                        self.boundary(0..usize::MAX, parent, Want::Page(index), true);
+                    }
+                }
+            }
+        }
+        if branch.more.is_some() && !saturated {
+            self.boundary(0..usize::MAX, parent, Want::Next, true);
+        }
+        let start = self.len;
+        let mut spans: Vec<Option<std::ops::Range<usize>>> = vec![None; branch.pages.len()];
+        if sorted {
+            let mut nodes: Vec<&Node> = found.iter().map(|(_, node)| *node).collect();
+            sort_nodes(&mut nodes, self.tree.sort);
+            for node in nodes {
+                self.node(node, parent, depth, lens.matches(node));
+            }
+            for (index, _) in &found {
+                spans[*index] = Some(start..self.len);
+            }
+        } else {
+            for (index, node) in found {
+                let at = self.len;
+                self.node(node, parent, depth, lens.matches(node));
+                let span = spans[index].get_or_insert(at..at);
+                span.end = self.len;
+            }
+        }
+        for (page, rows) in spans.into_iter().enumerate() {
+            if let Some(rows) = rows {
+                self.spans.push(Span {
+                    branch: parent.clone(),
+                    page,
+                    rows,
                 });
             }
         }
-
-        let mut view = Projection {
-            boundaries: Vec::new(),
-            marks,
-            descendants,
-            filter,
-            terms: crate::store::Term::parse(filter),
-            sort,
-            rows: Vec::new(),
-        };
-        visit(self, None, 0, false, false, &mut view);
-        (view.rows, view.boundaries)
+        if sorted && !complete && !saturated {
+            self.push(TreeRow::Message {
+                parent: parent.clone(),
+                depth,
+                text: "Searching…".into(),
+            });
+        }
     }
+
+    /// One item and, when it is open, its branch. A filter drops an item
+    /// that neither matches nor leads to a match.
+    fn node(&mut self, node: &Node, parent: &Option<TreeId>, depth: usize, matched: bool) {
+        let holds = !matched && self.lens.is_some_and(|lens| lens.holds(node));
+        let (row, len) = (self.rows.len(), self.len);
+        self.push(TreeRow::Node {
+            node: node.clone(),
+            parent: parent.clone(),
+            depth,
+        });
+        if self.tree.is_open(&node.id) {
+            self.visit(Some(node.id.clone()), depth + 1, matched);
+        }
+        if !matched && !holds && self.rows.len() == row + 1 {
+            self.rows.pop();
+            self.len = len;
+        }
+    }
+}
+
+/// Orders sibling items by `sort`, numbers by value and text without case.
+fn sort_nodes(nodes: &mut [&Node], sort: Option<(Field, ColumnSort)>) {
+    let Some((field, direction)) = sort else {
+        return;
+    };
+    nodes.sort_by_cached_key(|node| {
+        let value = node.value(field);
+        let numeric = match &node.item {
+            Item::Track { track, .. } if field == Field::Length => track.duration,
+            Item::Disc { disc, .. } if field == Field::Length => Some(disc.duration()),
+            _ if matches!(field, Field::Number | Field::Count | Field::Year) => value.parse().ok(),
+            _ => None,
+        };
+        let key = (
+            numeric.map_or(0, |value| value.max(0.).to_bits()),
+            value.to_lowercase(),
+        );
+        if direction == ColumnSort::Descending {
+            (None, Some(std::cmp::Reverse(key)))
+        } else {
+            (Some(key), None)
+        }
+    });
 }
 
 /// One page of a folder read from disk.
@@ -1260,27 +1643,7 @@ impl Browser {
                         return;
                     }
                     b.tree.update(cx, |table, cx| {
-                        let filtering = !table.delegate().filter.is_empty();
-                        let state = &mut table.delegate_mut().tree;
-                        state.pending.remove(&id);
-                        match (&fetch, result) {
-                            (Fetch::First, result) => state.insert_branch(
-                                id,
-                                result.unwrap_or_else(|err| Branch {
-                                    notice: Some(format!("{err:#}")),
-                                    ..Default::default()
-                                }),
-                            ),
-                            (fetch, Ok(page)) => {
-                                state.receive(&id, fetch, page, filtering);
-                            }
-                            (_, Err(err)) => {
-                                if let Some(branch) = state.branches.get_mut(&id) {
-                                    branch.wanted = None;
-                                    branch.notice = Some(format!("{err:#}"));
-                                }
-                            }
-                        }
+                        table.delegate_mut().take(id, &fetch, result, cx);
                         TreeTable::project(table, cx);
                     });
                     b.pump_tree(cx);
@@ -1320,12 +1683,16 @@ impl Browser {
 
     /// Requests the batches the viewport approaches. Loading is driven by
     /// the table, never by the listener.
-    pub(super) fn load_tree(&mut self, wants: Vec<(Option<TreeId>, Want)>, cx: &mut Context<Self>) {
+    pub(super) fn load_tree(
+        &mut self,
+        wants: Vec<(Option<TreeId>, Want, bool)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut any = false;
         self.tree.update(cx, |table, _| {
             let tree = &mut table.delegate_mut().tree;
-            for (branch, want) in wants {
-                any |= tree.want(&branch, want);
+            for (branch, want, search) in wants {
+                any |= tree.want(&branch, want, search);
             }
         });
         if any {
@@ -1351,7 +1718,7 @@ impl Browser {
         let rows = &table.delegate().rows;
         table
             .selected_row()
-            .and_then(|index| rows.get(index))
+            .and_then(|index| table.delegate().row(index))
             .and_then(TreeRow::node)
             .filter(|node| !node.expandable())
             .or_else(|| {
@@ -1391,7 +1758,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let row = self.tree.read(cx).delegate().rows.get(index).cloned();
+        let row = self.tree.read(cx).delegate().row(index).cloned();
         let Some(node) = row.as_ref().and_then(TreeRow::node).cloned() else {
             return;
         };
@@ -1544,7 +1911,7 @@ impl Browser {
             return;
         };
         let tree = state.delegate();
-        let Some(row) = tree.rows.get(index) else {
+        let Some(row) = tree.row(index) else {
             return;
         };
         let selected = row.node();
@@ -1569,8 +1936,7 @@ impl Browser {
                     && expanded =>
             {
                 if tree
-                    .rows
-                    .get(index + 1)
+                    .row(index + 1)
                     .is_some_and(|child| child.parent() == Some(&node.id) && child.node().is_some())
                 {
                     self.tree
