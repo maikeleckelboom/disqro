@@ -216,7 +216,7 @@ fn agreed_credit<'a>(credits: impl IntoIterator<Item = Option<&'a str>>) -> Opti
 }
 
 /// A row in a browser directory.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Shelf {
     Disc(Arc<Disc>),
     Release(Arc<Release>),
@@ -284,8 +284,12 @@ pub struct Release {
     complete: bool,
 }
 
+mod paging;
+pub(crate) use paging::{ShelfIndex, ShelfPage};
+
 pub struct Discs {
-    pub rows: Vec<Shelf>,
+    rows: Vec<Shelf>,
+    page: Option<ShelfPage>,
     original: Arc<[Shelf]>,
     pub(crate) shelf_layout: Layout,
     directory_layout: Layout,
@@ -313,6 +317,7 @@ impl Discs {
             router: None,
             tracks: Some(tracks),
             rows: Vec::new(),
+            page: None,
             original: Arc::default(),
             shelf_layout,
             directory_layout: Layout::for_fields(&[Field::Title]),
@@ -333,6 +338,7 @@ impl Discs {
     }
 
     pub(crate) fn set_rows(&mut self, rows: Vec<Shelf>) {
+        self.page = None;
         self.original = rows.into();
         self.project();
     }
@@ -351,6 +357,14 @@ impl Discs {
     }
 
     fn update_order(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
+        if table.delegate().page.is_some() {
+            if let Some(browser) = table.delegate().browser.clone() {
+                cx.defer(move |cx| {
+                    let _ = browser.update(cx, |b, cx| b.refresh_paged_shelf(cx));
+                });
+            }
+            return;
+        }
         let row_height = table.delegate().row_height();
         let key = |index| table.delegate().rows.get(index).map(Shelf::key);
         let selected = table.selected_row().and_then(key);
@@ -803,6 +817,26 @@ impl Shelf {
 pub const ARTIST: &str = "Artist";
 const SHELF_COVER: f32 = 32.;
 
+pub(crate) fn shelf_order(parent: &Shelf, field: Field) -> (u64, String) {
+    match field {
+        Field::Year | Field::Count | Field::Length => {
+            let (year, count, duration) = match parent {
+                Shelf::Disc(d) => (d.year, d.count, d.duration),
+                Shelf::Release(r) => (r.year, r.count, r.duration),
+                Shelf::Link(..) => (None, 0, 0.),
+                Shelf::Artist(artist) => (None, artist.tracks, 0.),
+            };
+            let number = match field {
+                Field::Year => u64::from(year.unwrap_or(0)),
+                Field::Count => count as u64,
+                _ => duration.max(0.).to_bits(),
+            };
+            (number, String::new())
+        }
+        _ => (0, parent.label(field).to_lowercase()),
+    }
+}
+
 fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: &mut Vec<Shelf>) {
     let mut families = Vec::new();
     let mut start = 0;
@@ -817,23 +851,7 @@ fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: 
     }
     families.sort_by_cached_key(|family| {
         let parent = &family[0];
-        match field {
-            Field::Year | Field::Count | Field::Length => {
-                let (year, count, duration) = match parent {
-                    Shelf::Disc(d) => (d.year, d.count, d.duration),
-                    Shelf::Release(r) => (r.year, r.count, r.duration),
-                    Shelf::Link(..) => (None, 0, 0.),
-                    Shelf::Artist(artist) => (None, artist.tracks, 0.),
-                };
-                let number = match field {
-                    Field::Year => u64::from(year.unwrap_or(0)),
-                    Field::Count => count as u64,
-                    _ => duration.max(0.).to_bits(),
-                };
-                (number, String::new())
-            }
-            _ => (0, parent.label(field).to_lowercase()),
-        }
+        shelf_order(parent, field)
     });
     if direction == ColumnSort::Descending {
         families.reverse();
@@ -923,7 +941,9 @@ impl TableDelegate for Discs {
         self.layout().fields().len()
     }
     fn rows_count(&self, _: &App) -> usize {
-        self.rows.len()
+        self.page
+            .as_ref()
+            .map_or(self.rows.len(), |page| page.index.len)
     }
     fn column(&self, i: usize, _: &App) -> Column {
         self.table_column(i)
@@ -953,7 +973,7 @@ impl TableDelegate for Discs {
         self.table_tail()
     }
     fn cell_label(&self, r: usize, c: usize, cx: &App) -> Option<SharedString> {
-        let row = self.rows.get(r)?;
+        let row = self.row(r)?;
         let field = self.column_field(c);
         let label = row.label(field);
         Some(if field == Field::Title && self.row_playing(row, cx) {
@@ -978,10 +998,11 @@ impl TableDelegate for Discs {
     }
     fn visible_rows_changed(
         &mut self,
-        _: Range<usize>,
+        visible: Range<usize>,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        self.request_shelf_page(visible, cx);
         if let Some(browser) = self.browser.clone() {
             cx.defer_in(window, move |_, _, cx| {
                 let _ = browser.update(cx, |_, cx| cx.emit(crate::browser::ViewChanged));
@@ -996,7 +1017,6 @@ impl TableDelegate for Discs {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let m = *materials(cx);
-        let row = &self.rows[r];
         let field = self.column_field(c);
         let cell = h_flex()
             .size_full()
@@ -1009,6 +1029,9 @@ impl TableDelegate for Discs {
             } else {
                 m.text_muted
             });
+        let Some(row) = self.row(r) else {
+            return cell;
+        };
         let (cover, member, discs) = match row {
             Shelf::Disc(d) => (d.cover.as_ref(), d.member_label(), None),
             Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
@@ -1132,7 +1155,7 @@ impl TableDelegate for Discs {
         cx: &mut Context<TableState<Self>>,
     ) -> gpui_kit::component::menu::PopupMenu {
         let (Some(browser), Some(tracks), Some(row)) =
-            (self.browser.clone(), self.tracks.clone(), self.rows.get(ix))
+            (self.browser.clone(), self.tracks.clone(), self.row(ix))
         else {
             return menu;
         };

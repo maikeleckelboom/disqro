@@ -20,6 +20,7 @@ mod library;
 mod listening;
 mod location;
 mod movie;
+mod ordered_result;
 mod overview;
 mod panels;
 mod places;

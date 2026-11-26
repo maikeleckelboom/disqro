@@ -682,7 +682,7 @@ impl Browser {
         }
     }
     pub fn show_disc(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        match self.discs.read(cx).delegate().rows.get(ix).cloned() {
+        match self.discs.read(cx).delegate().row(ix).cloned() {
             Some(Shelf::Disc(d)) => self.open_disc(&d, window, cx),
             Some(Shelf::Release(r)) => self.open_release(
                 &r.key,
@@ -988,11 +988,9 @@ impl Browser {
             let height = table.delegate().row_height();
             let selected = table
                 .selected_row()
-                .and_then(|i| table.delegate().rows.get(i))
-                .map(Shelf::key);
-            let viewport = crate::table::Viewport::capture(table, height, |i| {
-                table.delegate().rows.get(i).map(Shelf::key)
-            });
+                .and_then(|i| table.delegate().key_at(i));
+            let viewport =
+                crate::table::Viewport::capture(table, height, |i| table.delegate().key_at(i));
             table.delegate_mut().empty = empty.into();
             if table.delegate().directory_label != label {
                 table.delegate_mut().directory_label = label;
@@ -1000,54 +998,111 @@ impl Browser {
             }
             table.delegate_mut().set_rows(rows);
             let height = table.delegate().row_height();
-            let ix = selected.and_then(|k| table.delegate().rows.iter().position(|r| r.key() == k));
+            let ix = selected.and_then(|k| table.delegate().position(&k));
             reselect(table, ix, cx);
-            viewport.restore(table, height, |key| {
-                table
-                    .delegate()
-                    .rows
-                    .iter()
-                    .position(|row| row.key() == *key)
-            });
+            viewport.restore(table, height, |key| table.delegate().position(key));
             cx.notify();
         });
     }
-    /// Lists the library's artists, read by the library worker and replaced
-    /// by a newer filter or destination before they arrive.
-    fn filter_artists(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_paged_shelf(&mut self, cx: &mut Context<Self>) {
+        let artists = self.location == Location::Artists;
+        if !artists && self.location != Location::Releases {
+            return;
+        }
         let Some(store) = self.catalog.read(cx).handle() else {
             return;
         };
-        self.table.update(cx, |t, cx| {
-            t.delegate_mut()
-                .set_rows(Arc::default(), Sections::default(), cx);
+        if artists {
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut()
+                    .set_rows(Arc::default(), Sections::default(), cx)
+            });
+        }
+        let table = self.discs.read(cx);
+        let d = table.delegate();
+        let sort = d.sort.filter(|(field, _)| {
+            if artists {
+                d.artist_layout.has(*field)
+            } else {
+                d.shelf_layout.has(*field)
+            }
         });
+        let selected = table.selected_row().and_then(|r| d.key_at(r));
+        let view = crate::table::Viewport::capture(table, d.row_height(), |i| d.key_at(i));
+        let mut keys = self
+            .pending
+            .as_ref()
+            .map_or_else(Vec::new, Pending::shelf_keys);
+        keys.extend(selected.clone());
+        keys.extend(view.anchor.clone());
+        let recording = self.pending.as_ref().is_some_and(Pending::is_recording);
+        let location = self.location.clone();
         let search = self.query.clone();
-        let generation = self.albums.next();
-        let artists = store.query(&self.albums, generation, move |s| {
-            Ok(s.artists(&search)?
-                .into_iter()
-                .map(|artist| Shelf::Artist(Arc::new(artist)))
-                .collect::<Vec<_>>())
+        let ticket = self.albums.clone();
+        let generation = ticket.next();
+        self.shelf_loading = true;
+        self.busy = artists;
+        let watch = ticket.clone();
+        let reader = store.query(&self.albums, generation, move |s| {
+            s.reader(watch, generation)
         });
-        self.busy = true;
-        cx.spawn(async move |this, cx| {
-            let result = artists.await;
-            let _ = this.update(cx, |b, cx| {
-                if !b.albums.is_current(generation) || b.location != Location::Artists {
+        cx.spawn(async move |browser, cx| {
+            let result = match reader.await {
+                Ok(store) => {
+                    cx.background_spawn(async move {
+                        let index = crate::collection::ShelfIndex::build(
+                            &store, artists, &search, sort, ticket, generation,
+                        )?;
+                        let (page, rows) = crate::collection::ShelfPage::initial(
+                            index.snapshot,
+                            &keys,
+                            recording,
+                        )?;
+                        anyhow::Ok((page, rows, index.count, index.duration))
+                    })
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            let _ = browser.update(cx, |b, cx| {
+                if !b.albums.is_current(generation) || b.location != location {
                     return;
                 }
+                b.shelf_loading = false;
                 b.busy = false;
-                let rows = match result {
-                    Ok(rows) => rows,
-                    Err(e) if crate::store::is_canceled(&e) => return,
-                    Err(e) => {
-                        b.notice = Some(format!("{e:#}"));
-                        Vec::new()
+                let label = artists.then_some(crate::collection::ARTIST);
+                match result {
+                    Ok((page, rows, count, duration)) => {
+                        b.count = count;
+                        b.duration = (!artists).then_some(duration);
+                        b.discs.update(cx, |table, cx| {
+                            let d = table.delegate_mut();
+                            d.directory_label = label;
+                            d.empty = match (artists, b.query.is_empty()) {
+                                (true, true) => "No artists",
+                                (true, false) => "No matching artists",
+                                (false, true) => "No releases",
+                                (false, false) => "No matching releases",
+                            }
+                            .into();
+                            d.install_page(page, rows);
+                            table.refresh(cx);
+                            let pos = selected
+                                .as_ref()
+                                .and_then(|key| table.delegate().position(key));
+                            reselect(table, pos, cx);
+                            view.restore(table, table.delegate().row_height(), |k| {
+                                table.delegate().position(k)
+                            });
+                            cx.notify();
+                        });
                     }
-                };
-                b.count = rows.len();
-                b.set_shelf(rows, Some(crate::collection::ARTIST), cx);
+                    Err(err) if crate::store::is_canceled(&err) => return,
+                    Err(err) => {
+                        b.notice = Some(format!("{err:#}"));
+                        b.set_shelf(Vec::new(), label, cx);
+                    }
+                }
                 b.finish_listing(cx);
                 cx.emit(ViewChanged);
                 cx.notify();
@@ -1057,7 +1112,7 @@ impl Browser {
     }
     fn filter_directory(&mut self, cx: &mut Context<Self>) {
         if self.location == Location::Artists {
-            self.filter_artists(cx);
+            self.refresh_paged_shelf(cx);
             return;
         }
         let catalog = self.catalog.read(cx);
@@ -1158,6 +1213,10 @@ impl Browser {
         });
     }
     fn load_albums(&mut self, cx: &mut Context<Self>) {
+        if self.location == Location::Releases {
+            self.refresh_paged_shelf(cx);
+            return;
+        }
         let location = self.location.clone();
         let (Location::Library(_) | Location::Releases | Location::Artist { .. }, Some(store)) =
             (&location, self.catalog.read(cx).handle())

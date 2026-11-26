@@ -155,7 +155,7 @@ impl Reader {
             let more = page.more.take();
             writer = cx
                 .background_spawn(async move {
-                    writer.append(page, sort)?;
+                    writer.append_nodes(page, sort.0)?;
                     anyhow::Ok(writer)
                 })
                 .await?;
@@ -166,7 +166,11 @@ impl Reader {
         }
         let ticket = self.ticket.clone();
         let generation = self.generation;
-        cx.background_spawn(async move { writer.finish(sort.1, ticket, generation)?.page(0) })
-            .await
+        cx.background_spawn(async move {
+            writer
+                .finish(sort.1 == ColumnSort::Descending, ticket, generation)?
+                .page(0)
+        })
+        .await
     }
 }

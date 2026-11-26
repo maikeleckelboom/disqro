@@ -1233,6 +1233,33 @@ impl Store {
         search: &str,
         page: Option<(usize, usize)>,
     ) -> Result<Vec<AlbumRow>> {
+        let mut rows = Vec::new();
+        self.visit_albums(albums.clone(), search, page, false, |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        if matches!(albums, Albums::Release(_)) {
+            rows.sort_by_key(|row| row.release.as_ref().map(|r| r.number));
+        }
+        Ok(rows)
+    }
+
+    pub(crate) fn visit_releases(
+        &self,
+        search: &str,
+        visit: impl FnMut(AlbumRow) -> Result<()>,
+    ) -> Result<()> {
+        self.visit_albums(Albums::Catalog, search, None, true, visit)
+    }
+
+    fn visit_albums(
+        &self,
+        albums: Albums,
+        search: &str,
+        page: Option<(usize, usize)>,
+        families: bool,
+        mut visit: impl FnMut(AlbumRow) -> Result<()>,
+    ) -> Result<()> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let mut filter = vec![match &albums {
             Albums::Disc(id) => {
@@ -1288,6 +1315,12 @@ impl Store {
         filter.extend(Term::parse(search).iter().map(|t| t.sql(&mut args)));
         // Section artwork belongs to the complete CUE, independent of
         // which chapters pass the outer query's filter.
+        let family_keys = if families {
+            ", coalesce(d.first_id, al.id) AS family, coalesce(d.number, 0) AS member,
+            row_number() OVER (ORDER BY coalesce(al.year, 4294967295), al.sort_key, al.id) AS ordinal"
+        } else {
+            ""
+        };
         let sql = format!(
             "SELECT al.id, al.title, al.year, al.folder, al.cover, count(t.id),
                 total(t.duration), count(t.duration) = count(t.id),
@@ -1299,7 +1332,7 @@ impl Store {
                     WHERE ch.album_id = al.id AND ch.present = 1
                 ) END,
                 al.key LIKE 'sheet:%' OR max(trim(t.album) <> '') OR max(coalesce(t.disc_number,0)) > 0,
-                credit.name, d.first_id, d.title, d.number, d.subtitle
+                credit.name, d.first_id, d.title, d.number, d.subtitle{family_keys}
              FROM tracks t JOIN albums al ON al.id = t.album_id
              LEFT JOIN release_discs d ON d.album_id = al.id
              LEFT JOIN artists credit ON credit.id = al.album_artist_id
@@ -1314,6 +1347,14 @@ impl Store {
                 " LIMIT {limit} OFFSET {offset}"
             )),
         );
+        // Visit complete families in the position of their first numbered
+        // member, matching the shelf's default order even for filtered CDs.
+        let sql = if families {
+            format!("WITH discs AS ({sql}) SELECT * FROM discs ORDER BY
+                first_value(ordinal) OVER (PARTITION BY family ORDER BY member, ordinal), member, ordinal")
+        } else {
+            sql
+        };
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(args.iter()), |r| {
             let folder = PathBuf::from(r.get::<_, String>(3)?);
@@ -1344,11 +1385,10 @@ impl Store {
                 },
             })
         })?;
-        let mut rows: Vec<AlbumRow> = rows.collect::<rusqlite::Result<_>>()?;
-        if matches!(albums, Albums::Release(_)) {
-            rows.sort_by_key(|row| row.release.as_ref().map(|r| r.number));
+        for row in rows {
+            visit(row?)?;
         }
-        Ok(rows)
+        Ok(())
     }
     fn album_root(&self, album: AlbumId) -> Result<Option<RootId>> {
         Ok(self

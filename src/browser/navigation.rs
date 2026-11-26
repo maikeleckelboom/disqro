@@ -444,6 +444,18 @@ pub(super) struct Pending {
 }
 
 impl Pending {
+    pub(super) fn shelf_keys(&self) -> Vec<RowKey> {
+        self.target
+            .iter()
+            .chain(&self.bookmark.viewport.anchor)
+            .chain(&self.bookmark.selected)
+            .cloned()
+            .collect()
+    }
+    pub(super) fn is_recording(&self) -> bool {
+        self.recording
+    }
+
     pub(super) fn indexed_child(&self) -> Option<Scope> {
         match self.target.as_ref()? {
             RowKey::Disc(DiscId::Library(id)) => Some(Scope::Album(*id)),
@@ -511,7 +523,7 @@ impl Browser {
         }
         if self.listing_shelf() {
             let table = self.discs.read(cx);
-            let key = |i| table.delegate().rows.get(i).map(Shelf::key);
+            let key = |i| table.delegate().key_at(i);
             Bookmark {
                 selected: table.selected_row().and_then(key),
                 marked: None,
@@ -1037,21 +1049,14 @@ impl Browser {
             return;
         };
         let listing_shelf = self.listing_shelf();
-        let shelf_position =
-            |discs: &Discs, key: &RowKey| discs.rows.iter().position(|r| r.key() == *key);
+        let shelf_position = |discs: &Discs, key: &RowKey| discs.position(key);
         let target = pending.target.as_ref().and_then(|key| {
             if listing_shelf {
                 let shelf = self.discs.read(cx).delegate();
                 if pending.recording
                     && let RowKey::Disc(id) = key
                 {
-                    shelf.rows.iter().position(|row| match row {
-                        Shelf::Release(release) => {
-                            release.discs.iter().any(|disc| disc.id.same(id))
-                        }
-                        Shelf::Disc(disc) => disc.id.same(id),
-                        _ => false,
-                    })
+                    shelf.recording_disc(id)
                 } else {
                     shelf_position(shelf, key)
                 }

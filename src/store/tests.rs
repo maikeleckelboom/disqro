@@ -1342,3 +1342,63 @@ fn artists_separate_track_and_album_artists_and_keep_compilations_open() {
     index(&mut s, id);
     assert_eq!(s.artists("Various").unwrap()[0].id, various.id);
 }
+
+#[test]
+#[ignore = "high-cardinality artist and release qualification"]
+fn independent_large_artist_and_release_shelves_page_in_both_directions() {
+    use crate::{
+        collection::{Shelf, ShelfIndex},
+        table::{Field, RowKey},
+    };
+    use gpui_kit::component::table::ColumnSort;
+    const N: usize = 40_960;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("library.sqlite3")).unwrap();
+    let root = store.add_root(dir.path()).unwrap();
+    let tx = store.db.transaction().unwrap();
+    tx.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?2)
+        INSERT INTO files(id,path,path_key,name,kind,root_id,size,modified)
+        SELECT i,printf('music/%06d.wav',i),printf('music/%06d.wav',i),'fixture.wav',0,?1,400,1 FROM n",
+        rusqlite::params![root, N as i64]).unwrap();
+    tx.execute_batch("INSERT INTO artists(id,key,name) SELECT id,printf('artist %06d',id),printf('Artist %06d',id) FROM files;
+        INSERT INTO albums(id,key,root_id,title,folder,sort_key,is_release)
+            SELECT id,path,root_id,printf('Release %06d',id),'music',path,1 FROM files;
+        INSERT INTO tracks(anchor,part,source,root_id,album_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+            SELECT f.id,0,f.id,f.root_id,a.id,f.path,p.name,a.title,'WAV',f.path,p.key,lower(a.title),f.path,1
+            FROM files f JOIN artists p ON p.id=f.id JOIN albums a ON a.id=f.id;").unwrap();
+    tx.commit().unwrap();
+    for artists in [true, false] {
+        let ticket = Ticket::default();
+        let generation = ticket.next();
+        let start = std::time::Instant::now();
+        let reader = store.reader(ticket.clone(), generation).unwrap();
+        let index = ShelfIndex::build(
+            &reader,
+            artists,
+            "",
+            Some((Field::Title, ColumnSort::Descending)),
+            ticket,
+            generation,
+        )
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!((index.snapshot.len, index.count), (N, N));
+        let start = std::time::Instant::now();
+        for offset in [0, N - 256, 256, 0] {
+            let page = index.snapshot.rows::<Shelf>(offset, 256).unwrap();
+            assert_eq!(page.len(), 256);
+            let id = (N - offset) as i64;
+            let key = if artists {
+                RowKey::Artist(ArtistId(id))
+            } else {
+                RowKey::Disc(crate::collection::DiscId::Library(id))
+            };
+            assert_eq!(page[0].key(), key);
+            assert_eq!(index.snapshot.position(&key).unwrap(), Some(offset));
+        }
+        eprintln!(
+            "artists={artists} cardinality={N} index={elapsed:?} four_pages_and_ranks={:?}",
+            start.elapsed()
+        );
+    }
+}

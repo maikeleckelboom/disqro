@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArtistId(pub i64);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArtistRow {
     pub id: ArtistId,
     pub name: String,
@@ -73,7 +73,21 @@ pub(super) fn active() -> String {
 }
 
 impl Store {
+    #[cfg(test)]
     pub fn artists(&self, search: &str) -> Result<Vec<ArtistRow>> {
+        let mut rows = Vec::new();
+        self.visit_artists(search, |row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
+    }
+
+    pub(crate) fn visit_artists(
+        &self,
+        search: &str,
+        mut visit: impl FnMut(ArtistRow) -> Result<()>,
+    ) -> Result<()> {
         let sql = format!(
             "SELECT p.id, p.name,
                 (SELECT count(*) FROM tracks t WHERE {PERFORMS} AND t.artist_key = p.key),
@@ -100,7 +114,10 @@ impl Store {
                 releases: r.get::<_, i64>(3)? as usize,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        for row in rows {
+            visit(row?)?;
+        }
+        Ok(())
     }
 }
 

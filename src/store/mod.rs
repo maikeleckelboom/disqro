@@ -209,6 +209,18 @@ impl Store {
         configure(&db)?;
         Ok(Self { db })
     }
+    /// A long-running result scan must not monopolize the catalog mailbox.
+    /// Open only after the main writer has initialized the file.
+    pub(crate) fn reader(&self, ticket: Ticket, generation: u64) -> Result<Self> {
+        let path = self
+            .db
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("Library has no backing file"))?;
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.progress_handler(2048, Some(move || !ticket.is_current(generation)))?;
+        Ok(Self { db })
+    }
+
     #[cfg(test)]
     pub fn memory() -> Self {
         let mut db = Connection::open_in_memory().unwrap();

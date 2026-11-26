@@ -410,17 +410,19 @@ fn a_filter_finds_matches_beyond_the_loaded_total_and_stops_reading() {
 #[test]
 fn large_branch_order_and_identity_seek_share_the_same_disk_index() {
     // The background index owns ordering, including ties across source pages.
-    let mut writer = super::snapshot::Writer::new().unwrap();
+    let writer = super::snapshot::Writer::new().unwrap();
     let sort = (Field::Title, ColumnSort::Descending);
     let all = folders(45_067);
     for page in all.chunks(PAGE) {
         writer
-            .append(Branch::page(page.to_vec(), None), sort)
+            .append_nodes(Branch::page(page.to_vec(), None), sort.0)
             .unwrap();
     }
     let ticket = Ticket::default();
     let generation = ticket.next();
-    let index = writer.finish(sort.1, ticket, generation).unwrap();
+    let index = writer
+        .finish(sort.1 == ColumnSort::Descending, ticket, generation)
+        .unwrap();
     let mut previous = String::new();
     for offset in (0..all.len()).step_by(PAGE) {
         let page = index.page(offset).unwrap();
@@ -1030,8 +1032,7 @@ fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
             } else {
                 Vec::new()
             };
-            tree.branches
-                .insert(Some(id), Branch::page(children.to_vec(), None));
+            tree.branches.insert(Some(id), Branch::page(children, None));
         }
         tree.reconcile();
         peak = peak.max(tree.loaded());
