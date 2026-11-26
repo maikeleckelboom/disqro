@@ -1,6 +1,6 @@
 # Unified Music Browser qualification
 
-The Music Browser keeps its breadcrumb, navigation history, local filter, and connected view tabs in a single row. The allocated pane width determines whether the row shows labels, icons, a view picker, or the panel menu. Library destinations precede the Collections and Playlists overviews and their entries.
+The Music Browser keeps its breadcrumb, navigation history, local filter, and connected view tabs in a single row. The allocated pane width determines whether the row shows labels, icons, a view picker, or the panel menu. Library destinations precede the Collections and Playlists overviews and their entries. The Collections and Playlists headings share the sidebar rows' hover, selection, and focus treatment. Click a heading to open its overview, or its chevron to collapse or expand the section without navigating. Each section remembers whether it is collapsed across restarts. With a heading focused, Left collapses and Right expands it. The trailing buttons add a music folder or a new playlist.
 
 Tracks and Releases use the saved folder scope. A registered collection initially includes its indexed descendants. A location initially shows its own folder. Tree loads a branch when its disclosure opens, and filtering keeps the ancestors of matches in open branches. Select a row and use Right or Left to expand, collapse, or move to its child or parent. Enter opens a destination or plays a track. The context menu can open a destination in another tab or split.
 
@@ -24,6 +24,7 @@ The native fixture used a 20-chapter CUE with one FLAC image, a second disc with
 ## Native captures
 
 - [Library sidebar](evidence/unified-music-browser/library-sidebar.png)
+- [Section heading hover](evidence/unified-music-browser/sidebar-heading-hover.png), [selected overview](evidence/unified-music-browser/sidebar-overview.png), [collapsed sections](evidence/unified-music-browser/sidebar-collapsed.png), and [selected collection](evidence/unified-music-browser/sidebar-child.png)
 - [Favorites](evidence/unified-music-browser/favorites.png) and [Favorite column in Tracks](evidence/unified-music-browser/favorite-header.png)
 - [Releases](evidence/unified-music-browser/releases.png)
 - [Expanded Tree](evidence/unified-music-browser/expanded-tree.png)

@@ -65,10 +65,15 @@ pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -
         })
 }
 
-/// Every Library destination shares the same leading icon and label columns.
-pub fn nav_row(
+/// The leading icon column every navigation row shares.
+pub const ICON: f32 = 16.;
+/// Space between the leading icon column and the label.
+const ICON_GAP: f32 = 2.;
+
+/// The surface every navigation row shares: height, insets, hover,
+/// selection and keyboard focus. Rows add their own leading column and label.
+pub fn nav_surface(
     id: ElementId,
-    icon: Icon,
     label: SharedString,
     selected: bool,
     m: &Materials,
@@ -76,7 +81,7 @@ pub fn nav_row(
     h_flex()
         .id(id)
         .role(Role::Button)
-        .aria_label(label.clone())
+        .aria_label(label)
         .tab_stop(true)
         .h(px(ROW))
         .mx(px(6.))
@@ -85,7 +90,7 @@ pub fn nav_row(
         .rounded(px(5.))
         .flex_shrink_0()
         .items_center()
-        .text_size(px(13.))
+        .text_size(px(crate::theme::size::TEXT))
         .cursor_pointer()
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(m.selected))
@@ -94,11 +99,70 @@ pub fn nav_row(
         .border_1()
         .border_color(transparent_black())
         .focus_visible(|d| d.text_color(m.text).border_color(m.focus_line()))
+}
+
+/// Every Library destination shares the same leading icon and label columns.
+pub fn nav_row(
+    id: ElementId,
+    icon: Icon,
+    label: SharedString,
+    selected: bool,
+    m: &Materials,
+) -> Stateful<Div> {
+    nav_surface(id, label.clone(), selected, m)
         .child(
-            icon.size(px(16.))
+            icon.size(px(ICON))
                 .flex_shrink_0()
-                .mr(px(2.))
+                .mr(px(ICON_GAP))
                 .text_color(if selected { m.accent } else { m.text_faint }),
         )
         .child(div().flex_1().min_w_0().truncate().child(label))
+}
+
+/// A section heading in a navigation list. Its disclosure chevron sits in the
+/// leading icon column and only expands or collapses the section. The rest of
+/// the row opens the section's overview.
+pub fn section_row(
+    id: ElementId,
+    title: SharedString,
+    open: bool,
+    selected: bool,
+    m: &Materials,
+    on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let action = if open { "Collapse" } else { "Expand" };
+    nav_surface(id, format!("Browse {title}").into(), selected, m)
+        .aria_expanded(open)
+        .font_weight(FontWeight::MEDIUM)
+        .child(
+            div()
+                .id("disclosure")
+                .role(Role::Button)
+                .aria_label(format!("{action} {title}"))
+                .aria_expanded(open)
+                .size(px(ICON))
+                .mr(px(ICON_GAP))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.))
+                .hover(|d| d.bg(m.control_hover))
+                .child(
+                    Icon::new(if open {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.))
+                    .text_color(m.text_faint),
+                )
+                // The heading opens its overview on click. The chevron must not.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    on_toggle(window, cx);
+                }),
+        )
+        .child(div().flex_1().min_w_0().truncate().child(title))
 }
