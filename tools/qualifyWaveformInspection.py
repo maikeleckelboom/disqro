@@ -9,6 +9,7 @@ import struct
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -16,33 +17,42 @@ import time
 import wave
 from array import array
 
+from PIL import Image, ImageChops
+
 from privateDesktop import run
 from qualifySpectrum import find_window, screenshot
 from qualifyWaveform import settings
 
 
-def measure(exe, folder):
+def measure(exe, folder, band, control_wav):
     folder.mkdir(parents=True, exist_ok=False)
     recordings = folder / "Signal studies"
     recordings.mkdir()
     source = recordings / "Stereo inspection.wav"
-    rate = 48000
-    second = array("h")
-    for i in range(rate):
-        for frequency, phase in [(1847, 0), (2333, 0.4)]:
-            second.append(round(21500 * math.sin(math.tau * i * frequency / rate + phase)))
-    with wave.open(str(source), "wb") as out:
-        out.setparams((2, 2, rate, 0, "NONE", ""))
-        for _ in range(60):
-            out.writeframesraw(second.tobytes())
+    if control_wav:
+        shutil.copyfile(control_wav, source)
+    else:
+        rate = 48000
+        second = array("h")
+        frequencies = {"mid": (1847, 2333), "bass": (83, 127), "high": (7393, 8681)}[band]
+        for i in range(rate):
+            for frequency, phase in zip(frequencies, (0, 0.4)):
+                second.append(round(21500 * math.sin(math.tau * i * frequency / rate + phase)))
+        with wave.open(str(source), "wb") as out:
+            out.setparams((2, 2, rate, 0, "NONE", ""))
+            for _ in range(60):
+                out.writeframesraw(second.tobytes())
     cue = recordings / "Stereo inspection.cue"
+    # At 3.2 seconds the frozen control contains a 6.3 kHz mono tone.
+    # Starting the CUE chapter here exercises coincident channel outlines.
+    index, next_index = ("00:03:08", "00:18:00") if control_wav else ("00:00:03", "00:30:00")
     cue.write_text('FILE "Stereo inspection.wav" WAVE\n'
-                   'TRACK 01 AUDIO\nTITLE "Stereo reference"\nINDEX 01 00:00:03\n'
-                   'TRACK 02 AUDIO\nTITLE "Continuation"\nINDEX 01 00:30:00\n', encoding="ascii")
+                   f'TRACK 01 AUDIO\nTITLE "Stereo reference"\nINDEX 01 {index}\n'
+                   f'TRACK 02 AUDIO\nTITLE "Continuation"\nINDEX 01 {next_index}\n', encoding="ascii")
     profile = settings(cue, 1)
     def restore(node):
         if node["panel_name"] == "disqro.waveform":
-            node["info"]["panel"]["state"] = {"showSamplePoints": True}
+            node["info"]["panel"]["state"] = {"showSamplePoints": True, "showSampleRuler": True}
         for child in node["children"]:
             restore(child)
     restore(profile["layout"]["center"])
@@ -50,7 +60,9 @@ def measure(exe, folder):
     stages = folder / "stages.csv"
     env = dict(os.environ, DISQRO_PROFILE_DIR=str(folder), DISQRO_INSPECTION_JOURNEY=str(folder),
                DISQRO_PRESENTATION_STAGES=str(stages))
-    captures = ("zoom-editor", "sample-points", "sample-inspector", "playback")
+    if control_wav:
+        env["DISQRO_INSPECTION_MIN_FRAME"] = str(round(3.2 * 44100))
+    captures = ("zoom-editor", "sample-points", "sample-ruler", "sample-inspector", "cue-times", "playback", "sample-narrow")
     log = folder / "journey.log"
     with log.open("w", encoding="utf-8") as stream:
         player = subprocess.Popen([exe, "--qualify-silent", cue], env=env, stdout=stream, stderr=stream)
@@ -74,12 +86,28 @@ def measure(exe, folder):
                                 continue
                             hit = hits[-1]
                             frame, bits = int(hit["value"]), int(hit["detail"])
+                            if control_wav:
+                                assert 3 * 44100 <= frame < 4 * 44100, "Expected the control's treble section"
                             measured = struct.unpack(">ff", bits.to_bytes(8, "big"))
-                            start = 2 * (frame % rate)
-                            assert measured == tuple(v / 32768 for v in second[start:start + 2])
+                            with wave.open(str(source), "rb") as reference:
+                                reference.setpos(frame)
+                                stereo = struct.unpack("<hh", reference.readframes(1))
+                            assert measured == tuple(v / 32768 for v in stereo)
 
                         time.sleep(0.2)
                         screenshot(find_window(player.pid), path)
+                        if name in ("sample-inspector", "cue-times"):
+                            baseline = "sample-points" if name == "sample-inspector" else "sample-inspector"
+                            with Image.open(folder / (baseline + ".png")) as before, Image.open(path) as after:
+                                diff = ImageChops.difference(before, after).convert("L")
+                                # The fixture's header is above the waveform. Holding Shift
+                                # changes measurements with the same sample still selected.
+                                header = diff.crop((0, 0, diff.width, round(diff.height * 0.09)))
+                                assert sum(header.histogram()[12:]) > 200, f"{name} header did not change"
+                                if name == "cue-times":
+                                    body = diff.crop((diff.width // 2, round(diff.height * 0.11),
+                                                      diff.width, round(diff.height * 0.82)))
+                                    assert body.getbbox() is None, "CUE times changed waveform pixels"
                 time.sleep(0.05)
             raise RuntimeError("Inspection journey did not complete. See " + str(log))
         finally:
@@ -92,9 +120,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exe", type=lambda p: Path(p).resolve(strict=True))
     parser.add_argument("output", type=lambda p: Path(p).resolve())
+    parser.add_argument("--control-wav", type=lambda p: Path(p).resolve(strict=True), help="Use Waveform Native's 24-second synthetic control WAV")
+    parser.add_argument("--band", choices=("mid", "bass", "high"), default="mid")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
-        measure(args.exe, args.output)
+        measure(args.exe, args.output, args.band, args.control_wav)
     else:
-        run([sys.executable, "-B", str(Path(__file__).resolve()), str(args.exe), str(args.output), "--worker"], 90)
+        fixture = ["--control-wav", str(args.control_wav)] if args.control_wav else []
+        run([sys.executable, "-B", str(Path(__file__).resolve()), str(args.exe), str(args.output), "--band", args.band, *fixture, "--worker"], 90)

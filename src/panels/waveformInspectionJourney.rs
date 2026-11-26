@@ -79,7 +79,15 @@ impl Journey {
     }
 
     async fn run(self, cx: &mut AsyncWindowContext) -> anyhow::Result<()> {
+        let minimum_frame = std::env::var("DISQRO_INSPECTION_MIN_FRAME")
+            .ok()
+            .map(|v| v.parse::<usize>())
+            .transpose()?
+            .unwrap_or_default();
         self.until(cx, "playing surface", |p, _, cx| {
+            if p.player.read(cx).wave_track()?.frame < minimum_frame {
+                return None;
+            }
             if p.displayed.borrow().is_none() || !p.player.read(cx).status.playing {
                 return None;
             }
@@ -141,7 +149,10 @@ impl Journey {
             Some(())
         })
         .await?;
-        self.capture(cx, "zoom-editor").await?;
+        self.until(cx, "original span while the edit is pending", |p, _, _| {
+            (p.displayed.borrow().as_ref()?.viewport == initial).then_some(())
+        })
+        .await?;
         dispatch(cx, key("enter"))?;
         // Recovering the center from first + half-span can lose an ulp of
         // the wider viewport when the recording starts near its left edge.
@@ -157,7 +168,39 @@ impl Journey {
                 vertex(p)
             })
             .await?;
+        self.edit(cx, "32 samples").await?;
+        self.capture(cx, "zoom-editor").await?;
+        dispatch(cx, key("escape"))?;
+        self.until(cx, "editor dismissed over decoded trace", |p, _, _| {
+            (p.zoom_editor.is_none() && vertex(p).is_some()).then_some(())
+        })
+        .await?;
         self.capture(cx, "sample-points").await?;
+        cx.update(|_, cx| {
+            self.panel.update(cx, |p, cx| {
+                p.settings.show_sample_points = false;
+                p.position.inspecting = Some(initial.frame_at(0.5).floor() + 0.5);
+                cx.notify();
+            })
+        })??;
+        self.until(cx, "ruler without sample points", |p, _, _| {
+            (p.settings.show_sample_ruler
+                && p.displayed.borrow().as_ref()?.viewport.span == 32.
+                && p.displayed.borrow().as_ref()?.viewport.first.fract().abs() == 0.5
+                && vertex(p).is_none())
+            .then_some(())
+        })
+        .await?;
+        self.capture(cx, "sample-ruler").await?;
+        cx.update(|_, cx| {
+            self.panel.update(cx, |p, cx| {
+                p.settings.show_sample_points = true;
+                p.position.inspecting = None;
+                cx.notify();
+            })
+        })??;
+        self.until(cx, "points restored alongside ruler", |p, _, _| vertex(p))
+            .await?;
         dispatch(
             cx,
             PlatformInput::MouseMove(MouseMoveEvent {
@@ -166,6 +209,18 @@ impl Journey {
             }),
         )?;
         self.capture(cx, "sample-inspector").await?;
+        let modifier = |shift| {
+            PlatformInput::ModifiersChanged(ModifiersChangedEvent {
+                modifiers: Modifiers {
+                    shift,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        };
+        dispatch(cx, modifier(true))?;
+        self.capture(cx, "cue-times").await?;
+        dispatch(cx, modifier(false))?;
         cx.update(|_, cx| {
             self.panel.update(cx, |p, cx| {
                 assert!(same_center(p.position.viewport));
@@ -223,7 +278,10 @@ impl Journey {
             .until(cx, "registered surface before resize", |p, w, _| {
                 let width = p.displayed.borrow().as_ref()?.layout.bounds.size.width;
                 let old = w.viewport_size();
-                w.resize(size(old.width - px(100.), old.height - px(60.)));
+                w.resize(size(
+                    (old.width - px(520.)).max(px(600.)),
+                    old.height - px(60.),
+                ));
                 Some(width)
             })
             .await?;
@@ -258,6 +316,17 @@ impl Journey {
             vertex(p)
         })
         .await?;
+        let narrow = self
+            .until(cx, "resized sample", |p, _, _| vertex(p))
+            .await?;
+        dispatch(
+            cx,
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: narrow,
+                ..Default::default()
+            }),
+        )?;
+        self.capture(cx, "sample-narrow").await?;
         eprintln!("inspection-complete");
         Ok(())
     }
