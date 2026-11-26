@@ -2531,7 +2531,7 @@ dependencies = [
 [[package]]
 name = "gpui-fast-windows"
 version = "0.1.17"
-source = "git+https://github.com/maikeleckelboom/waveform-native?rev=9d86d28b91b9dc25e38e513b2385d8a545e89065#9d86d28b91b9dc25e38e513b2385d8a545e89065"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=22d740d4ee1c0fbc3a42435b59c015fabde30291#22d740d4ee1c0fbc3a42435b59c015fabde30291"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -7927,7 +7927,7 @@ dependencies = [
 [[package]]
 name = "waveform-core"
 version = "0.1.0"
-source = "git+https://github.com/maikeleckelboom/waveform-native?rev=9d86d28b91b9dc25e38e513b2385d8a545e89065#9d86d28b91b9dc25e38e513b2385d8a545e89065"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=22d740d4ee1c0fbc3a42435b59c015fabde30291#22d740d4ee1c0fbc3a42435b59c015fabde30291"
 dependencies = [
  "realfft",
  "serde",
@@ -7936,7 +7936,7 @@ dependencies = [
 [[package]]
 name = "waveform-d3d11"
 version = "0.1.0"
-source = "git+https://github.com/maikeleckelboom/waveform-native?rev=9d86d28b91b9dc25e38e513b2385d8a545e89065#9d86d28b91b9dc25e38e513b2385d8a545e89065"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=22d740d4ee1c0fbc3a42435b59c015fabde30291#22d740d4ee1c0fbc3a42435b59c015fabde30291"
 dependencies = [
  "bytemuck",
  "serde",
@@ -7947,7 +7947,7 @@ dependencies = [
 [[package]]
 name = "waveform-gpui"
 version = "0.1.0"
-source = "git+https://github.com/maikeleckelboom/waveform-native?rev=9d86d28b91b9dc25e38e513b2385d8a545e89065#9d86d28b91b9dc25e38e513b2385d8a545e89065"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=22d740d4ee1c0fbc3a42435b59c015fabde30291#22d740d4ee1c0fbc3a42435b59c015fabde30291"
 dependencies = [
  "anyhow",
  "gpui-fast-windows",
@@ -7961,7 +7961,7 @@ dependencies = [
 [[package]]
 name = "waveform-native"
 version = "0.1.0"
-source = "git+https://github.com/maikeleckelboom/waveform-native?rev=9d86d28b91b9dc25e38e513b2385d8a545e89065#9d86d28b91b9dc25e38e513b2385d8a545e89065"
+source = "git+https://github.com/maikeleckelboom/waveform-native?rev=22d740d4ee1c0fbc3a42435b59c015fabde30291#22d740d4ee1c0fbc3a42435b59c015fabde30291"
 dependencies = [
  "waveform-core",
  "waveform-d3d11",

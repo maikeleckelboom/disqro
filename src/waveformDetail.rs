@@ -225,19 +225,40 @@ impl Store {
         Some(key)
     }
 
-    fn set_view(&mut self, id: u64, keys: &[Key], preview: Option<FrameRange>) -> (Evidence, bool) {
+    fn engine_key(&mut self, key: &Key) -> Option<store::Key> {
+        Some(store::Key {
+            source: self.register(&key.source)?,
+            request: key.request,
+        })
+    }
+
+    fn set_view(
+        &mut self,
+        id: u64,
+        keys: &[Key],
+        prefetch: &[Key],
+        preview: Option<FrameRange>,
+    ) -> (Evidence, bool) {
+        let mut unavailable_samples = 0;
         let engine: Vec<_> = keys
             .iter()
             .filter_map(|key| {
-                Some(store::Key {
-                    source: self.register(&key.source)?,
-                    request: key.request,
-                })
+                let registered = self.engine_key(key);
+                if registered.is_none() && matches!(key.request, Request::Samples(_)) {
+                    unavailable_samples += 1;
+                }
+                registered
             })
             .collect();
-        let changed = self.evidence.set_view(store::ViewId(id), engine.clone());
-        let mut evidence = self.evidence.evidence(&engine, preview);
+        let ahead: Vec<_> = prefetch
+            .iter()
+            .filter_map(|key| self.engine_key(key))
+            .collect();
+        let (mut evidence, changed) =
+            self.evidence
+                .request(store::ViewId(id), &engine, &ahead, preview);
         evidence.coverage.unavailable += keys.len() - engine.len();
+        evidence.coverage.missing_samples += unavailable_samples;
         self.collect_sources();
         (evidence, changed)
     }
@@ -259,14 +280,26 @@ impl View {
         Self { id, shared, wake }
     }
 
+    #[cfg(test)]
     pub fn tiles(&self, revision: u64, keys: Vec<Key>, preview: Option<Range<usize>>) -> Evidence {
+        self.tiles_ahead(revision, keys, vec![], preview)
+    }
+
+    /// `prefetch` is decoded ahead of need and is not part of the coverage.
+    pub fn tiles_ahead(
+        &self,
+        revision: u64,
+        keys: Vec<Key>,
+        prefetch: Vec<Key>,
+        preview: Option<Range<usize>>,
+    ) -> Evidence {
         let mut store = self.shared.lock().unwrap();
         if store.revision != revision {
             return Evidence::default();
         }
         let preview =
             preview.and_then(|range| FrameRange::new(range.start as u64, range.end as u64).ok());
-        let (evidence, changed) = store.set_view(self.id, &keys, preview);
+        let (evidence, changed) = store.set_view(self.id, &keys, &prefetch, preview);
         if changed {
             let _ = self.wake.try_send(());
         }
@@ -274,7 +307,13 @@ impl View {
     }
 
     pub fn clear(&self) {
-        if self.shared.lock().unwrap().set_view(self.id, &[], None).1 {
+        if self
+            .shared
+            .lock()
+            .unwrap()
+            .set_view(self.id, &[], &[], None)
+            .1
+        {
             let _ = self.wake.try_send(());
         }
     }
@@ -334,7 +373,11 @@ mod tests {
             assert!(store.publish(0, unrelated, measured(0)));
             key
         };
-        left.tiles(0, Key::samples(&original, 0..16_384), None);
+        let ahead = Key::samples(&original, 8192..16_384);
+        let coverage = left.tiles_ahead(0, first.clone(), ahead, None).coverage;
+        assert!(coverage.complete());
+        assert_eq!(coverage.exact, 1);
+        assert_eq!(coverage.missing_samples, 0);
         let late = store.lock().unwrap().next(0).unwrap();
         assert_eq!(late.reservation.key().source, retired);
         assert_eq!(store.lock().unwrap().evidence.reserved_bytes(), 65_536);
@@ -355,7 +398,10 @@ mod tests {
             assert!(store.publish(0, fresh, measured(0)));
         }
         assert_eq!(right.tiles(0, second, None).coverage.exact, 1);
-        assert_eq!(left.tiles(0, first, None).coverage.unavailable, 1);
+        let rejected_ahead = Key::samples(&original, 8192..16_384);
+        let coverage = left.tiles_ahead(0, first, rejected_ahead, None).coverage;
+        assert_eq!(coverage.unavailable, 1);
+        assert_eq!(coverage.missing_samples, 1);
         assert_eq!(left.tiles(0, wanted, None).coverage.exact, 1);
         drop(original);
         assert!(weak.upgrade().is_none());

@@ -175,6 +175,7 @@ struct DeckPosition {
     seconds: f64,
     inspecting: Option<f64>,
     viewport: Viewport,
+    velocity: waveform::planning::ViewVelocity,
 }
 
 impl Default for DeckPosition {
@@ -185,6 +186,7 @@ impl Default for DeckPosition {
             seconds: 8.,
             inspecting: None,
             viewport: Viewport::fit(0),
+            velocity: Default::default(),
         }
     }
 }
@@ -230,6 +232,7 @@ impl DeckPosition {
             },
             (self.seconds * rate).clamp(32., DETAIL_SECONDS * rate),
         );
+        self.velocity.observe(at, self.viewport.frame_at(0.5));
         if let Some(at) = crate::diagnostics::begin_stage() {
             crate::diagnostics::stage(
                 Some(at),
@@ -397,9 +400,21 @@ impl Waveform {
         };
         let physical = view.required_range();
         let width = view.width as f64;
+        let mut prefetch = vec![];
         let mut keys = if viewport.span < width * 3. && viewport.span < 40_960. {
             let first = (viewport.first.floor() as usize).saturating_sub(4);
             let end = (viewport.frame_at(1.).ceil() as usize + 5).min(track.source.frames);
+            let velocity = self.position.velocity.current();
+            if let Ok(visible) = waveform::FrameRange::new(first.min(end) as u64, end as u64) {
+                for block in waveform::planning::sample_prefetch(
+                    track.source.frames as u64,
+                    visible,
+                    velocity,
+                ) {
+                    let range = block.start as usize..block.end as usize;
+                    prefetch.extend(Key::samples(&track.source, range));
+                }
+            }
             Key::samples(&track.source, first..end)
         } else {
             vec![]
@@ -413,7 +428,9 @@ impl Waveform {
         ));
         let preview = (!track.overview.facts().is_empty())
             .then(|| track.range.start..track.range.start + track.overview.frame_count());
-        let loaded = self.detail.tiles(track.generation, keys, preview);
+        let loaded = self
+            .detail
+            .tiles_ahead(track.generation, keys, prefetch, preview);
         evidence.pages = loaded.pages;
         evidence.samples = loaded.samples;
         (surface, evidence, loaded.coverage)
