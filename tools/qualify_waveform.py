@@ -488,12 +488,13 @@ def qualify_deck_lifecycle(args):
             user32.SendMessageW(hwnd, message, key, position)
         click("Close Tab")
 
-    def quiet_decks():
+    def inactive_stages():
         # Allow a previously queued frame, then observe the inactive interval.
         time.sleep(0.4)
         since = performance_counter()
         time.sleep(0.65)
-        return len(matching(since, "wave_request", "wave_playhead", "wave_deck_paint"))
+        return matching(since, "wave_request", "wave_request_to_dispatch", "wave_compact_cursor",
+                        "wave_playhead", "wave_deck_paint")
 
     hwnd = None
     with (output / "player.log").open("x", encoding="utf-8") as log:
@@ -525,7 +526,7 @@ def qualify_deck_lifecycle(args):
             wait_for(lambda: matching(resumed, "wave_playhead"), "resumed deck motion")
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
             wait_for(lambda: user32.IsIconic(hwnd), "minimization")
-            minimized_frames = quiet_decks()
+            minimized_frames = len(inactive_stages())
             assert minimized_frames == 0, "Minimized deck still painted"
             restored = performance_counter()
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -549,8 +550,14 @@ def qualify_deck_lifecycle(args):
                      "second deck paint")
             close_tab("First deck")
             close_tab("Second deck")
-            closed_frames = quiet_decks()
-            assert closed_frames == 0, "Closed deck still painted"
+            inactive = inactive_stages()
+            # The shared frame pump keeps moving the visible compact cursor.
+            # Its dispatch count is the number of detailed deck clients.
+            closed_frames = sum(row["stage"] in ("wave_playhead", "wave_deck_paint") for row in inactive)
+            deck_dispatches = sum(int(row["value"]) for row in inactive if row["stage"] == "wave_request_to_dispatch")
+            compact_draws = sum(row["stage"] == "wave_compact_cursor" for row in inactive)
+            assert closed_frames == 0 and deck_dispatches == 0, "Closed deck still received frames"
+            assert compact_draws > 0, "Visible compact cursor stopped with the last deck"
             previous = int(rows(trace)[-1]["ms"])
             wait_for(lambda: any(int(row["ms"]) > previous and int(row["callbacks"]) > 0
                                  for row in rows(trace)), "playback callbacks after deck closure")
@@ -559,7 +566,8 @@ def qualify_deck_lifecycle(args):
                       for name in ("decode_errors", "device_errors", "wave_gpu_errors")}
             assert errors == dict(decode_errors=0, device_errors=0, wave_gpu_errors=1), errors
             report = dict(paused_recovery_ms=round(recovery_ms, 2), minimized_frames=minimized_frames,
-                          frames_after_close=closed_frames, closed_tabs=2, synthetic_dpi=[96, 192, 144],
+                          frames_after_close=closed_frames, deck_dispatches_after_close=deck_dispatches,
+                          compact_draws_after_close=compact_draws, closed_tabs=2, synthetic_dpi=[96, 192, 144],
                           playback_after_close=True, **errors)
             (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         finally:
