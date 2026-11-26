@@ -926,6 +926,10 @@ impl Tree {
         }
         self.reveal = None;
         query.clone_into(&mut self.query);
+        self.invalidate_filtered_spans();
+    }
+
+    fn invalidate_filtered_spans(&mut self) {
         for page in self.branches.values_mut().flat_map(|b| &mut b.pages) {
             page.matched_rows = None;
         }
@@ -1717,6 +1721,7 @@ impl Browser {
                     return;
                 }
                 b.tree.update(cx, |table, cx| {
+                    table.delegate_mut().tree.invalidate_filtered_spans();
                     table.delegate_mut().descendants =
                         Some(Arc::new(Descendants::new(query, folders, truncated)));
                     TreeTable::project(table, cx);
