@@ -318,6 +318,7 @@ struct Waveform {
     coverage: Option<&'static str>,
     presented: bool,
     texture: Texture,
+    channel_widths: Rc<RefCell<inspection::ChannelWidths>>,
     input_at: Option<Instant>,
     zoom_label: Option<Task<()>>,
     zoom_focus: FocusHandle,
@@ -377,6 +378,7 @@ impl Waveform {
             coverage: None,
             presented: false,
             texture: Default::default(),
+            channel_widths: Default::default(),
             input_at: None,
             zoom_label: None,
             zoom_focus: cx.focus_handle().tab_stop(true),
@@ -744,6 +746,7 @@ impl Render for Waveform {
             .show_sample_points
             .then(|| Rc::new(RefCell::new(None::<inspection::Reading>)));
         let measurement = inspector.clone();
+        let channel_widths = self.channel_widths.clone();
         let inspection_player = self.player.clone();
         let settings = self.settings;
         let menu_panel = cx.weak_entity();
@@ -916,10 +919,20 @@ impl Render for Waveform {
                                         let chapter = inspection_player
                                             .read(cx)
                                             .inspection_chapter(&track, hit.frame as usize);
+                                        let mut ticks = waveform::inspection::ruler_ticks(
+                                            &view,
+                                            surface.viewport.first,
+                                            0.,
+                                        );
+                                        let first = ticks.next().map_or(hit.frame, |t| t.frame);
+                                        let last = ticks.last().map_or(first, |t| t.frame);
                                         *measurement.borrow_mut() = Some(inspection::Reading {
                                             hit,
                                             chapter,
-                                            source_frames: track.source.frames,
+                                            channel_widths,
+                                            samples: evidence.samples,
+                                            first_frame: first,
+                                            last_frame: last.max(hit.frame),
                                         });
                                     }
                                 }

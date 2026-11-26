@@ -1,5 +1,6 @@
 //! Transient header measurements and a sample ruler for the displayed native surface.
 use super::*;
+use gpui_kit::component::ActiveTheme;
 use waveform::inspection::SampleHit;
 
 /// Movement only schedules a scene update. The paint callback independently
@@ -156,34 +157,84 @@ fn centered_label(x: Pixels, width: Pixels, start: Pixels, end: Pixels) -> Optio
     (left >= start && left + width <= end).then_some(left)
 }
 
+/// Size the two channel fields from the visible PCM once per stationary view.
+/// Weak identities invalidate these text metrics on replacement without pinning audio.
+#[derive(Default)]
+pub(super) struct ChannelWidths {
+    range: Option<std::ops::RangeInclusive<u64>>,
+    blocks: Vec<std::sync::Weak<waveform::SampleBlock>>,
+    widths: [Pixels; 2],
+    glyphs: [Pixels; 4],
+}
+
+impl ChannelWidths {
+    pub(super) fn for_range(
+        &mut self,
+        range: std::ops::RangeInclusive<u64>,
+        blocks: &[Arc<waveform::SampleBlock>],
+        glyphs: [Pixels; 4],
+    ) -> [Pixels; 2] {
+        if self.glyphs != glyphs
+            || self.range.as_ref() != Some(&range)
+            || self.blocks.len() != blocks.len()
+            || !self
+                .blocks
+                .iter()
+                .zip(blocks)
+                .all(|(old, new)| old.as_ptr() == Arc::as_ptr(new))
+        {
+            self.widths = [px(0.); 2];
+            self.glyphs = glyphs;
+            for block in blocks {
+                let start = (*range.start()).max(block.first());
+                let end = range.end().saturating_add(1).min(block.interval().end);
+                if start < end {
+                    for frame in &block.frames()
+                        [(start - block.first()) as usize..(end - block.first()) as usize]
+                    {
+                        for (width, sample) in self.widths.iter_mut().zip(frame) {
+                            let advance = amplitude(*sample)
+                                .bytes()
+                                .map(|byte| match byte {
+                                    b'.' => glyphs[1],
+                                    b'-' => glyphs[2],
+                                    b'e' => glyphs[3],
+                                    _ => glyphs[0],
+                                })
+                                .fold(px(0.), |sum, glyph| sum + glyph);
+                            *width = (*width).max(advance);
+                        }
+                    }
+                }
+            }
+            self.range = Some(range);
+            self.blocks = blocks.iter().map(Arc::downgrade).collect();
+        }
+        self.widths
+    }
+}
+
 pub(super) struct Reading {
     pub hit: SampleHit,
     pub chapter: Option<(u8, f64, f64)>,
-    pub source_frames: usize,
+    pub channel_widths: Rc<RefCell<ChannelWidths>>,
+    pub samples: Vec<Arc<waveform::SampleBlock>>,
+    pub first_frame: u64,
+    pub last_frame: u64,
 }
 
-/// Fixed field widths keep adjacent labels still as values change. Use the
-/// second line of the existing header only when the primary group needs it.
-/// Omit whole lower-priority fields at widths that cannot fit them.
-fn field_positions(width: f32, fields: &[f32], primary: usize) -> Vec<(f32, usize)> {
-    let gap = 10.;
-    let required = fields[..primary].iter().sum::<f32>() + gap * primary.saturating_sub(1) as f32;
-    let wrap = required > width;
-    let mut x = 0.;
-    let mut row = 0;
-    let mut positions = Vec::new();
-    for &field in fields {
-        if x + field > width {
-            if !wrap || row == 1 || field > width {
-                break;
-            }
-            x = 0.;
-            row = 1;
+// Keep complete fields on a single baseline. At the minimum panel width
+// keep the highest-priority fields and anchor the group to the trailing edge.
+fn row_start(available: f32, widths: &[f32], gap: f32) -> (usize, f32) {
+    let mut used = 0.;
+    for (i, width) in widths.iter().enumerate() {
+        let next = used + if i == 0 { 0. } else { gap } + width;
+        if next > available {
+            return (i, available - used);
         }
-        positions.push((x, row));
-        x += field + gap;
+        used = next;
     }
-    positions
+    (widths.len(), available - used)
 }
 
 impl Reading {
@@ -200,83 +251,84 @@ impl Reading {
             (u64::from(left.to_bits()) << 32) | u64::from(right.to_bits()),
         );
         let m = *materials(cx);
-        let digits = self.source_frames.to_string().len();
-        let time_digits = (self.source_frames as u64 / u64::from(rate))
-            .to_string()
-            .len()
-            + 15;
-        let cue = self.chapter.filter(|_| window.modifiers().shift);
-        let mut fields = Vec::new();
-        let primary = if let Some((number, track, program)) = cue {
-            fields.push((
-                format!("Track {number}"),
-                format!("{track:.12} s"),
-                time_digits,
-            ));
-            fields.push((
-                "Program".into(),
-                format!("{program:.12} s"),
-                time_digits.max(20),
-            ));
-            fields.push(("Frame".into(), frame.to_string(), digits));
-            2
-        } else {
-            fields.push(("Frame".into(), frame.to_string(), digits));
-            fields.push(("L".into(), amplitude(left), 15));
-            fields.push(("R".into(), amplitude(right), 15));
-            fields.push((
-                "Source".into(),
-                format!("{} s", source_seconds(frame, rate)),
-                time_digits,
-            ));
-            fields.push((
-                "Rate".into(),
-                format!("{rate} Hz"),
-                rate.to_string().len() + 3,
-            ));
-            if self.chapter.is_some() {
-                fields.push(("Shift for CUE times".into(), String::new(), 0));
-            }
-            3
-        };
-        let numeric = |text: String| {
+        let mut font = window.text_style().font();
+        font.family = cx.theme().font_family.clone();
+        let features = Arc::make_mut(&mut font.features.0);
+        features.retain(|(tag, _)| tag != "tnum");
+        features.push(("tnum".into(), 1));
+        let shape = |text: String, color| {
             let run = TextRun {
                 len: text.len(),
-                font: font("Consolas"),
-                color: m.text,
+                font: font.clone(),
+                color,
                 background_color: None,
                 underline: None,
                 strikethrough: None,
             };
             window
                 .text_system()
-                .shape_line(text.into(), px(12.), &[run], None)
+                .shape_line(text.into(), px(10.5), &[run], None)
         };
-        let digit = numeric("0".into()).width;
-        let mut widths = Vec::new();
-        let mut lines = Vec::new();
-        for (key, text, reserve) in fields {
-            let label = line(window, key, 11., m.text_muted, FontWeight::NORMAL);
-            let value = numeric(text);
-            let width = label.width + px(4.) + value.width.max(digit * reserve as f32);
-            widths.push(f32::from(width));
-            lines.push((label, value));
+        let digit = shape("0".into(), m.text_muted).width;
+        let mut fields = Vec::with_capacity(4);
+        if window.modifiers().shift {
+            fields.push((
+                "Source".into(),
+                format!("{} s", source_seconds(frame, rate)),
+                px(0.),
+            ));
+            fields.push((String::new(), format!("{rate} Hz"), px(0.)));
+            if let Some((number, track, program)) = self.chapter {
+                fields.push((format!("Track {number}"), format!("{track:.12} s"), px(0.)));
+                fields.push(("Program".into(), format!("{program:.12} s"), px(0.)));
+            }
+        } else {
+            let glyphs = [
+                digit,
+                shape(".".into(), m.text_muted).width,
+                shape("-".into(), m.text_muted).width,
+                shape("e".into(), m.text_muted).width,
+            ];
+            let widths = self.channel_widths.borrow_mut().for_range(
+                self.first_frame..=self.last_frame,
+                &self.samples,
+                glyphs,
+            );
+            fields.push((
+                "Frame".into(),
+                frame.to_string(),
+                digit * (self.last_frame.checked_ilog10().unwrap_or(0) + 1) as f32,
+            ));
+            fields.push(("L".into(), amplitude(left), widths[0]));
+            fields.push(("R".into(), amplitude(right), widths[1]));
         }
-        let positions = field_positions(bounds.size.width.into(), &widths, primary);
-        let wrapped = positions.last().is_some_and(|(_, row)| *row == 1);
-        let line_height = px(14.);
-        let top = bounds.center().y - line_height * if wrapped { 1. } else { 0.5 };
-        for ((x, row), (label, value)) in positions.into_iter().zip(lines) {
-            let at = point(bounds.left() + px(x), top + line_height * row as f32);
-            let _ = label.paint(at, line_height, TextAlign::Left, None, window, cx);
+        let mut lines = Vec::new();
+        let mut widths = Vec::new();
+        for (key, text, reserve) in fields {
+            let gap = if key.is_empty() { px(0.) } else { px(3.) };
+            let label = shape(key, m.text_faint);
+            let value = shape(text, m.text_muted);
+            let width = label.width + gap + value.width.max(reserve);
+            widths.push(f32::from(width));
+            lines.push((label, gap, value));
+        }
+        let gap = 7.;
+        let (count, start) = row_start(bounds.size.width.into(), &widths, gap);
+        let mut x = bounds.left() + px(start);
+        let height = px(14.);
+        let y = bounds.center().y - height * 0.5;
+        for ((label, key_gap, value), width) in lines.into_iter().zip(widths).take(count) {
+            let _ = label.paint(point(x, y), height, TextAlign::Left, None, window, cx);
+            let end = x + px(width);
             let _ = value.paint(
-                at + point(label.width + px(4.), px(0.)),
-                line_height,
+                point(x + label.width + key_gap, y),
+                height,
                 TextAlign::Left,
                 None,
                 window,
                 cx,
             );
+            x = end + px(gap);
         }
     }
 }
@@ -300,7 +352,7 @@ fn amplitude(value: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{amplitude, centered_label, field_positions, px, source_seconds, tick_coverage};
+    use super::{amplitude, centered_label, px, row_start, source_seconds, tick_coverage};
 
     #[test]
     fn fractional_ticks_conserve_coverage_and_edge_labels_keep_their_centers() {
@@ -324,18 +376,33 @@ mod tests {
     }
 
     #[test]
-    fn inline_fields_wrap_primary_measurements_and_drop_optional_whole_fields() {
-        let fields = [60., 90., 90., 140., 85.];
-        assert_eq!(field_positions(505., &fields, 3).len(), 5);
-        assert_eq!(
-            field_positions(280., &fields, 3),
-            [(0., 0), (70., 0), (170., 0)]
+    fn header_keeps_complete_fields_on_one_right_aligned_row() {
+        let widths = [36., 45., 60.];
+        assert_eq!(row_start(200., &widths, 7.), (3, 45.));
+        assert_eq!(row_start(155., &widths, 7.), (3, 0.));
+        assert_eq!(row_start(154., &widths, 7.), (2, 66.));
+        assert_eq!(row_start(20., &widths, 7.), (0, 20.));
+    }
+
+    #[test]
+    fn compact_channel_slots_follow_visible_frames_and_replaced_pcm() {
+        use super::{Arc, ChannelWidths};
+        use waveform::SampleBlock;
+        let block = Arc::new(
+            SampleBlock::new(50, vec![[0.12345678, 1.], [-1.25, 0.], [0., -2.5]]).unwrap(),
         );
+        let mut widths = ChannelWidths::default();
+        let glyphs = [px(5.), px(2.), px(3.), px(5.)];
         assert_eq!(
-            field_positions(180., &fields, 3),
-            [(0., 0), (70., 0), (0., 1)]
+            widths.for_range(51..=52, &[block], glyphs),
+            [px(20.), px(15.)]
         );
-        assert_eq!(field_positions(40., &fields, 3), []);
+        let replacement = Arc::new(SampleBlock::new(51, vec![[0., 0.]]).unwrap());
+        assert_eq!(
+            widths.for_range(51..=52, &[replacement], glyphs),
+            [px(5.), px(5.)]
+        );
+        assert_eq!(widths.for_range(51..=52, &[], glyphs), [px(0.), px(0.)]);
     }
 
     #[test]

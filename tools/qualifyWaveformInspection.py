@@ -5,6 +5,7 @@ captures its own fixture window, without system-wide keyboard or mouse input.
 """
 import argparse
 import csv
+import ctypes
 import struct
 import json
 import math
@@ -95,7 +96,8 @@ def measure(exe, folder, band, control_wav):
                             assert measured == tuple(v / 32768 for v in stereo)
 
                         time.sleep(0.2)
-                        screenshot(find_window(player.pid), path)
+                        handle = find_window(player.pid)
+                        screenshot(handle, path)
                         if name in ("sample-inspector", "cue-times"):
                             baseline = "sample-points" if name == "sample-inspector" else "sample-inspector"
                             with Image.open(folder / (baseline + ".png")) as before, Image.open(path) as after:
@@ -104,6 +106,14 @@ def measure(exe, folder, band, control_wav):
                                 # changes measurements with the same sample still selected.
                                 header = diff.crop((0, 0, diff.width, round(diff.height * 0.09)))
                                 assert sum(header.histogram()[12:]) > 200, f"{name} header did not change"
+                                scale = ctypes.windll.user32.GetDpiForWindow(handle) / 96
+                                right_half = header.crop((header.width // 2, 0, header.width, header.height))
+                                ink = right_half.point(lambda value: 255 if value >= 12 else 0).getbbox()
+                                assert ink is not None, f"{name} missing from the right side of the header"
+                                assert right_half.width - ink[2] <= 30 * scale, f"{name} lost its right anchor"
+                                assert ink[3] - ink[1] <= 14 * scale, f"{name} spans multiple lines"
+                                if name == "sample-inspector":
+                                    assert ink[2] - ink[0] <= 270 * scale, "Frame and amplitudes exceed their compact footprint"
                                 if name == "cue-times":
                                     body = diff.crop((diff.width // 2, round(diff.height * 0.11),
                                                       diff.width, round(diff.height * 0.82)))
