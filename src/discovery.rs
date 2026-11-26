@@ -366,9 +366,10 @@ pub(crate) fn tree_folder(
     folder: &Path,
     after: Option<&library::ListingCursor>,
     limit: usize,
+    group_limit: usize,
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<FolderBranch> {
-    let listing = library::list_page(folder, after, limit, true, alive)?;
+    let listing = library::list_page(folder, after, limit, Some(group_limit), alive)?;
     let mut next = listing.next_dir.map(library::ListingCursor::Dirs);
     let Some(files) = listing.files else {
         return Ok(FolderBranch {

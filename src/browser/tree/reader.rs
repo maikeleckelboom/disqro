@@ -39,6 +39,7 @@ impl Reader {
                     Some(Cursor::Offset(offset)) => offset,
                     _ => 0,
                 },
+                PAGE,
             )),
             (Source::Offline, _) => Err(anyhow::anyhow!("This collection is unavailable.")),
             (

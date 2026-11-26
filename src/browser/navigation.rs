@@ -599,7 +599,8 @@ impl Browser {
         self.history.limit_selections();
     }
 
-    pub(super) fn cancel_pending(&mut self) {
+    pub(super) fn cancel_pending(&mut self, cx: &mut App) {
+        self.cancel_tree_reveal(cx);
         self.intent.next();
         self.navigation += 1;
         self.pending = None;
@@ -609,9 +610,11 @@ impl Browser {
     /// bookmark still belongs to its visit when focus moves to another control.
     pub fn begin_navigation(&mut self, cx: &mut Context<Self>) -> u64 {
         let revision = self.intent.next();
-        if self.pending.as_ref().is_some_and(|p| {
-            p.recording || matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..)))
-        }) {
+        if self.cancel_tree_reveal(cx)
+            || self.pending.as_ref().is_some_and(|p| {
+                p.recording || matches!(p.target, Some(RowKey::Key(_) | RowKey::Track(..)))
+            })
+        {
             self.navigation += 1;
             self.pending = None;
             cx.notify();
@@ -620,12 +623,11 @@ impl Browser {
     }
 
     pub(crate) fn cancel_context_for_input(&mut self, cx: &mut Context<Self>) {
-        if self.waiting_for_context() {
-            self.cancel_pending();
+        self.intent.next();
+        self.navigation += 1;
+        if self.cancel_tree_reveal(cx) || self.waiting_for_context() {
+            self.pending = None;
             cx.notify();
-        } else {
-            self.intent.next();
-            self.navigation += 1;
         }
     }
 
@@ -772,7 +774,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         let had_list_focus = self.list_focus(cx).is_focused(window);
-        self.cancel_pending();
+        self.cancel_pending(cx);
         self.page = visit
             .route
             .page
@@ -1026,21 +1028,34 @@ impl Browser {
 
     pub(super) fn finish_listing(&mut self, cx: &mut Context<Self>) {
         if self.listing_tree() {
-            if let Some(pending) = self.pending.take() {
-                let center = pending.target.is_some();
-                let selected = pending.target.or(pending.bookmark.selected);
-                match selected {
-                    Some(key) if let Some(target) = tree::recording_identity(&key) => {
-                        self.finish_tree_reveal(target, key, pending.bookmark.viewport, center, cx);
-                    }
-                    selected => self.tree.update(cx, |t, cx| {
+            if !self.tree.read(cx).delegate().ready_for_arrival() {
+                return;
+            }
+            if let Some(pending) = &self.pending {
+                let selected = pending
+                    .target
+                    .as_ref()
+                    .or(pending.bookmark.selected.as_ref());
+                if let Some(key) = selected
+                    && let Some(target) = tree::recording_identity(key)
+                {
+                    self.finish_tree_reveal(
+                        target,
+                        key.clone(),
+                        pending.bookmark.viewport.clone(),
+                        pending.target.is_some(),
+                        cx,
+                    );
+                } else {
+                    self.tree.update(cx, |t, cx| {
                         TreeTable::restore_bookmark(
                             t,
-                            selected.as_ref(),
-                            pending.bookmark.viewport,
+                            selected,
+                            pending.bookmark.viewport.clone(),
                             cx,
                         )
-                    }),
+                    });
+                    self.pending = None;
                 }
             }
             return;
@@ -1518,7 +1533,7 @@ impl Browser {
     ) {
         if self.route().same(&route) {
             self.history.record(self.saved_visit(cx));
-            self.cancel_pending();
+            self.cancel_pending(cx);
             self.pending = Some(Pending {
                 bookmark: Bookmark::default(),
                 target: Some(key),

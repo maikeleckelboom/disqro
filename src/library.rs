@@ -553,7 +553,7 @@ pub fn list_page(
     path: &Path,
     after: Option<&ListingCursor>,
     limit: usize,
-    files_wanted: bool,
+    group_limit: Option<usize>,
     current: impl Fn() -> bool,
 ) -> Result<FolderListing> {
     let (dirs_after, files_after) = match after {
@@ -606,7 +606,7 @@ pub fn list_page(
             }
             continue;
         }
-        if !kind.is_file() || !files_wanted {
+        if !kind.is_file() || group_limit.is_none() {
             continue;
         }
         if is_sheet(&p) || is_audio(&p) {
@@ -616,7 +616,7 @@ pub fn list_page(
                 p.clone(),
             );
             if let Some(list) = &mut all_files {
-                if list.len() < GROUPED_FILES {
+                if list.len() < group_limit.unwrap_or_default() {
                     list.push(p);
                 } else {
                     all_files = None;
@@ -634,7 +634,7 @@ pub fn list_page(
     anyhow::ensure!(current(), crate::store::Canceled);
     let (dirs, more_dirs) = dirs.finish();
     let next_dir = more_dirs.then(|| dirs.last().map(|(key, _)| key.as_str().to_owned()));
-    let files = (!more_dirs && files_wanted).then(|| match all_files {
+    let files = (!more_dirs && group_limit.is_some()).then(|| match all_files {
         Some(all) if files_after.is_none() || files.inclusive => {
             let (sheets, audio) = all.into_iter().partition(|p| is_sheet(p));
             ListedFiles::All { audio, sheets }

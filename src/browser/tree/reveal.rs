@@ -128,6 +128,7 @@ fn physical_path(
     base: &Path,
     target: &TreeId,
     extent: Option<&crate::library::DiscTrack>,
+    group_limit: usize,
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<Vec<Node>> {
     let TreeId::File { source, chapter } = target else {
@@ -144,7 +145,7 @@ fn physical_path(
         return Ok(Vec::new());
     };
     let cursor = crate::library::ListingCursor::AtFile(name.to_string_lossy().into_owned());
-    let page = physical_page(home, Some(&cursor), 32, alive)?;
+    let page = physical_page(home, Some(&cursor), 32, group_limit, alive)?;
     let matches = |t: &Track| {
         TreeId::track(t) == *target
             && extent.is_none_or(|d| t.disc.as_ref().is_some_and(|chapter| chapter.end == d.end))
@@ -272,7 +273,9 @@ impl Slot {
         Self {
             start,
             len,
+            slice: None,
             nodes: None,
+            children: Vec::new(),
             rows: len,
             matched_rows: None,
             used: 0,
@@ -281,35 +284,60 @@ impl Slot {
 }
 
 impl Tree {
-    fn open_lineage(&mut self, path: Vec<Located>) {
+    fn open_lineage(&mut self, path: Vec<Located>, lens: Option<&Lens>) {
         let mut parent = None;
         let mut deep = self.deep.contains(&None);
+        let budget = self.node_limit() / 2;
+        let path_nodes: usize = path.iter().map(|p| p.branch.resident()).sum();
+        let width = if path_nodes > budget {
+            (budget / path.len()).max(1)
+        } else {
+            usize::MAX
+        };
+        let mut touched = Vec::new();
+        self.selected = path.last().map(|member| member.id.clone());
         for Located { id, mut branch } in path {
             self.pending.remove(&parent);
-            let target_page = branch.pages.len() - 1;
-            if let Some(mut resident) = self.branches.remove(&parent) {
-                // Preserve already loaded siblings and subtrees of the same generation.
-                for (old, incoming) in resident
-                    .pages
-                    .iter_mut()
-                    .zip(&mut branch.pages[..target_page])
-                {
-                    if old.start == incoming.start && old.len == incoming.len {
-                        std::mem::swap(old, incoming);
+            let mut target = branch.pages.pop().expect("located page");
+            let mut pages = Vec::new();
+            if let Some(resident) = self.branches.remove(&parent) {
+                // Reuse ordinary or subdivided source batches before the target.
+                let mut old = resident.pages.into_iter().peekable();
+                for prefix in branch.pages {
+                    if old.peek().is_some_and(|p| p.start == prefix.start) {
+                        let start = pages.len();
+                        while old.peek().is_some_and(|p| p.start == prefix.start) {
+                            pages.push(old.next().unwrap());
+                        }
+                        if pages[start..].iter().map(|slot| slot.len).sum::<usize>() != prefix.len {
+                            pages.truncate(start);
+                            pages.push(prefix);
+                        }
+                    } else {
+                        pages.push(prefix);
                     }
                 }
-                if resident
-                    .pages
-                    .get(target_page + 1)
-                    .is_some_and(|next| next.start == branch.more)
-                {
-                    branch.pages.extend(resident.pages.drain(target_page + 1..));
-                    branch.more = resident.more;
+                while old.peek().is_some_and(|p| p.start == target.start) {
+                    target.children.append(&mut old.next().unwrap().children);
                 }
+                branch.pages = pages;
+                pages = if old.peek().is_some_and(|p| p.start == branch.more) {
+                    branch.more = resident.more;
+                    old.collect()
+                } else {
+                    Vec::new()
+                };
             }
-            branch.pages[target_page].used = self.clock + 1;
+            let target_page = branch.pages.len();
+            target.used = self.clock;
+            branch.pages.push(target);
+            branch.pages.append(&mut pages);
             branch.deep = deep;
             self.branches.insert(parent.clone(), branch);
+            self.restore_children(&parent, target_page);
+            // Leave room for an ordinary incoming batch during subsequent prefetch.
+            let index = self.bound_lineage_page(&parent, target_page, &id, width, lens);
+            touched.push((parent.clone(), index));
             if !matches!(id, TreeId::IndexedTrack(_) | TreeId::File { .. }) {
                 self.links.insert(id.clone(), parent.clone());
                 self.closed.remove(&id);
@@ -324,22 +352,56 @@ impl Tree {
             parent = Some(id);
         }
         self.reconcile();
-        // Make the loaded page of each ancestor recent before applying the
-        // normal eviction budget, just as if the viewport had reached it.
-        let touched: Vec<_> = self
-            .branches
-            .iter()
-            .filter_map(|(id, branch)| {
-                branch
-                    .pages
-                    .iter()
-                    .position(|p| p.used > self.clock)
-                    .map(|i| (id.clone(), i))
-            })
-            .collect();
-        for (id, i) in touched {
-            self.settle(&id, i, false, None);
+        for (owner, index) in touched {
+            self.settle(&owner, index, lens);
         }
+    }
+
+    /// Keep a contiguous window around the lineage member. Both sides use
+    /// the same source cursor and reload their own slice of that batch.
+    fn bound_lineage_page(
+        &mut self,
+        owner: &Option<TreeId>,
+        index: usize,
+        id: &TreeId,
+        width: usize,
+        lens: Option<&Lens>,
+    ) -> usize {
+        let pages = &mut self.branches.get_mut(owner).unwrap().pages;
+        let slot = &mut pages[index];
+        if slot.len <= width {
+            return index;
+        }
+        let mut nodes = slot.nodes.take().unwrap();
+        let at = nodes
+            .iter()
+            .position(|node| &node.id == id)
+            .expect("located member");
+        let begin = at.saturating_sub(width / 2).min(nodes.len() - width);
+        let end = begin + width;
+        let after = nodes.split_off(end);
+        let middle = nodes.split_off(begin);
+        let start = slot.start.clone();
+        let used = slot.used;
+        let mut segments = Vec::new();
+        for (offset, nodes) in [(0, nodes), (begin, middle), (end, after)] {
+            if nodes.is_empty() {
+                continue;
+            }
+            let mut part = Slot::new(start.clone(), nodes);
+            part.slice = Some(offset..offset + part.len);
+            part.used = used;
+            segments.push(part);
+        }
+        let count = segments.len();
+        pages.splice(index..=index, segments);
+        let keep = index + usize::from(begin > 0);
+        for i in index..index + count {
+            if i != keep {
+                self.unload_page(owner, i, lens);
+            }
+        }
+        keep
     }
 }
 
@@ -353,6 +415,7 @@ impl Browser {
         cx: &mut Context<Self>,
     ) {
         if self.tree.read(cx).delegate().position(&target).is_some() {
+            self.pending = None;
             self.tree.update(cx, |table, cx| {
                 TreeTable::land(table, target, viewport, center, cx);
             });
@@ -381,6 +444,7 @@ impl Browser {
             .tree
             .read(cx)
             .delegate()
+            .tree
             .descendants
             .clone()
             .filter(|d| d.query == self.query);
@@ -411,7 +475,7 @@ impl Browser {
                             RowKey::Track(_, extent) => extent.as_ref(),
                             _ => None,
                         };
-                        physical_path(&base, &id, extent, &alive)
+                        physical_path(&base, &id, extent, crate::library::GROUPED_FILES, &alive)
                     })
                     .await
                 }
@@ -451,17 +515,24 @@ impl Browser {
             let _ = cx.update(|cx| {
                 window.update(cx, |_, w, cx| {
                     let _ = browser.update(cx, |b, cx| {
-                        if !b.navigation_is_current(revision)
+                        if !ticket.is_current(generation)
+                            || !b.navigation_is_current(revision)
                             || !b.listing_tree()
                             || b.tree.read(cx).delegate().tree.sort != order
                         {
                             return;
                         }
+                        b.cancel_tree_reveal(cx);
+                        b.pending = None;
                         if let Ok(nodes) = result
                             && !nodes.is_empty()
                         {
                             b.tree.update(cx, |table, cx| {
-                                table.delegate_mut().tree.open_lineage(nodes);
+                                let d = table.delegate_mut();
+                                let index = d.tree.descendants.clone();
+                                let marks = |track: &Track| b.catalog.read(cx).mark_of(track);
+                                let lens = Lens::new(&d.filter, index.as_deref(), &marks);
+                                d.tree.open_lineage(nodes, lens.as_ref());
                                 TreeTable::project(table, cx);
                             });
                             if center
@@ -498,7 +569,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("Deep Set");
         std::fs::create_dir(&home).unwrap();
-        for i in 0..=crate::library::GROUPED_FILES {
+        for i in 0..3 {
             std::fs::write(home.join(format!("File {i:05}.wav")), []).unwrap();
         }
         let sheet = home.join("Last CUE.cue");
@@ -508,7 +579,7 @@ mod tests {
         let targets = crate::cue::read(&sheet).unwrap();
         let track = &targets[1];
         let id = TreeId::track(track);
-        let path = physical_path(dir.path(), &id, track.disc.as_ref(), &|| true).unwrap();
+        let path = physical_path(dir.path(), &id, track.disc.as_ref(), 2, &|| true).unwrap();
         assert_eq!(path.len(), 3);
         assert_eq!(path.last().unwrap().id, id);
         assert!(path[0].expandable());
@@ -541,9 +612,77 @@ mod tests {
         assert_eq!(path[3].id, TreeId::IndexedTrack(target.id));
     }
     #[::core::prelude::v1::test]
+    fn deep_selection_survives_ancestor_pressure_and_sibling_reloads() {
+        let levels: Vec<Vec<Node>> = (0..3)
+            .map(|depth| {
+                (0..8)
+                    .map(|i| {
+                        let path = PathBuf::from(format!("fixture/level-{depth}/item-{i}"));
+                        if depth == 2 {
+                            Node::track(Arc::new(Track::file(path)), None)
+                        } else {
+                            Node::folder(None, path)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let target = &levels[2][4].id;
+        let mut tree = Tree {
+            node_limit: Some(20),
+            ..Default::default()
+        };
+        let locate = || {
+            levels
+                .iter()
+                .map(|nodes| Located {
+                    id: nodes[4].id.clone(),
+                    branch: Branch::page(nodes.clone(), None),
+                })
+                .collect()
+        };
+        let verify = |tree: &Tree| {
+            let projection = tree.project(None);
+            let mut rank = 0;
+            let found = projection.rows.iter().find(|row| {
+                if row.node().is_some_and(|n| &n.id == target) {
+                    true
+                } else {
+                    rank += row.span();
+                    false
+                }
+            });
+            assert!(found.is_some());
+            assert_eq!(rank, 14);
+            assert_eq!(projection.len, 24);
+            assert_eq!(tree.selected.as_ref(), Some(target));
+            assert!(tree.loaded() <= tree.node_limit());
+        };
+        tree.open_lineage(locate(), None);
+        verify(&tree);
+        // Force overlap between late sibling reads in different ancestors.
+        let mut parent = None;
+        for nodes in &levels {
+            for page in [2, 0] {
+                assert!(tree.receive(
+                    &parent,
+                    &Fetch::Page(page, None),
+                    Branch::page(nodes.clone(), None),
+                    None
+                ));
+                verify(&tree);
+            }
+            parent = Some(nodes[4].id.clone());
+        }
+        tree.open_lineage(locate(), None);
+        verify(&tree);
+    }
+
+    #[::core::prelude::v1::test]
     fn revealed_recording_keeps_its_rank_and_siblings_during_prefetch_and_backward_paging() {
+        const BATCH: usize = 4;
         let source = |offset: usize| {
-            (offset..offset + PAGE)
+            (offset..offset + BATCH)
                 .map(|i| {
                     Node::track(
                         Arc::new(Track::file(format!("fixture/{i:06}.wav").into())),
@@ -552,28 +691,31 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let offset = 6 * PAGE;
+        let offset = 6 * BATCH;
         let nodes = source(offset);
-        let target = nodes[PAGE - 2].id.clone();
-        let mut branch = Branch::page(nodes, Some(Cursor::Offset(offset + PAGE)));
+        let target = nodes[BATCH - 2].id.clone();
+        let mut branch = Branch::page(nodes, Some(Cursor::Offset(offset + BATCH)));
         branch.pages[0].start = Some(Cursor::Offset(offset));
         let mut pages = (0..offset)
-            .step_by(PAGE)
-            .map(|at| Slot::unloaded((at > 0).then_some(Cursor::Offset(at)), PAGE))
+            .step_by(BATCH)
+            .map(|at| Slot::unloaded((at > 0).then_some(Cursor::Offset(at)), BATCH))
             .collect::<Vec<_>>();
         pages.append(&mut branch.pages);
         branch.pages = pages;
         let mut tree = Tree::default();
-        tree.open_lineage(vec![Located {
-            id: target.clone(),
-            branch,
-        }]);
+        tree.open_lineage(
+            vec![Located {
+                id: target.clone(),
+                branch,
+            }],
+            None,
+        );
         let verify = |tree: &Tree| {
             let projection = tree.project(None);
             let mut rank = 0;
             for row in projection.rows {
                 if row.node().is_some_and(|n| n.id == target) {
-                    assert_eq!(rank, offset + PAGE - 2);
+                    assert_eq!(rank, offset + BATCH - 2);
                     return;
                 }
                 rank += row.span();
@@ -583,22 +725,22 @@ mod tests {
         verify(&tree);
         tree.receive(
             &None,
-            &Fetch::Next(Cursor::Offset(offset + PAGE)),
-            Branch::page(source(offset + PAGE), None),
+            &Fetch::Next(Cursor::Offset(offset + BATCH)),
+            Branch::page(source(offset + BATCH), None),
             None,
         );
         verify(&tree);
         tree.receive(
             &None,
             &Fetch::Page(0, None),
-            Branch::page(source(0), Some(Cursor::Offset(PAGE))),
+            Branch::page(source(0), Some(Cursor::Offset(BATCH))),
             None,
         );
         verify(&tree);
-        let sibling = &tree.branches[&None].pages[6].nodes.as_ref().unwrap()[PAGE - 1];
+        let sibling = &tree.branches[&None].pages[6].nodes.as_ref().unwrap()[BATCH - 1];
         assert_eq!(
             sibling.value(Field::Title),
-            format!("{:06}", offset + PAGE - 1)
+            format!("{:06}", offset + BATCH - 1)
         );
     }
 }

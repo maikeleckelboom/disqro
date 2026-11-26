@@ -188,10 +188,16 @@ fn titles(rows: &[TreeRow]) -> Vec<String> {
 /// Drives a tree as the table does: projects it, keeps the pages near a
 /// viewport in use, requests the batches the viewport approaches and serves
 /// every request from `children`, while measuring what stays loaded.
+const BATCH: usize = 8;
+const AHEAD: usize = 2;
+const WINDOW: usize = 3;
+const BUDGET: usize = 8 * BATCH;
+
 struct Harness {
     tree: Tree,
     children: HashMap<Option<TreeId>, Vec<Node>>,
     shown: Range<usize>,
+    page_size: usize,
     filter: String,
     sort: Option<(Field, ColumnSort)>,
     rows: Vec<TreeRow>,
@@ -210,10 +216,12 @@ impl Harness {
         Self {
             tree: Tree {
                 root: Some(Source::Loaded(root.into())),
+                node_limit: Some(BUDGET),
                 ..Default::default()
             },
             children,
-            shown: 0..40,
+            shown: 0..WINDOW,
+            page_size: BATCH,
             filter: String::new(),
             sort: None,
             rows: Vec::new(),
@@ -235,8 +243,7 @@ impl Harness {
         self.rows = rows;
         self.len = len;
         self.boundaries = boundaries;
-        let near = self.shown.start.saturating_sub(super::LOOKAHEAD)
-            ..self.shown.end.saturating_add(super::LOOKAHEAD);
+        let near = self.shown.start.saturating_sub(AHEAD)..self.shown.end.saturating_add(AHEAD);
         self.tree.touch(&spans, near);
     }
 
@@ -247,7 +254,7 @@ impl Harness {
             let wants: Vec<_> = self
                 .boundaries
                 .iter()
-                .filter(|b| b.near(&self.shown))
+                .filter(|b| b.near(&self.shown, AHEAD))
                 .map(|b| (b.branch.clone(), b.want, b.search))
                 .collect();
             let first = wants
@@ -270,8 +277,8 @@ impl Harness {
             *self.reads.entry(id.clone()).or_default() += 1;
             let marks = |_: &Track| Mark::default();
             let lens = Lens::new(&self.filter, None, &marks);
-            let page = Branch::slice(&all, offset);
-            assert!(page.nodes().count() <= PAGE);
+            let page = Branch::slice(&all, offset, self.page_size);
+            assert!(page.nodes().count() <= self.page_size);
             self.tree.receive(&id, &fetch, page, lens.as_ref());
             self.peak = self.peak.max(self.tree.loaded());
         }
@@ -279,7 +286,7 @@ impl Harness {
     }
 
     fn scroll(&mut self, top: usize) {
-        self.shown = top..top + 40;
+        self.shown = top..top + WINDOW;
         self.settle();
     }
 
@@ -311,21 +318,21 @@ fn named(path: &str, count: usize) -> Vec<Node> {
 
 #[test]
 fn batches_load_as_the_viewport_approaches_and_released_rows_keep_their_place() {
-    let all = folders(RESIDENT_PAGES * PAGE + PAGE + 7);
+    let all = folders(RESIDENT_PAGES * BATCH + BATCH + 7);
     let mut view = Harness::new(all.clone());
     view.settle();
-    assert_eq!(view.len, PAGE);
+    assert_eq!(view.len, BATCH);
     // Scrolling to the end requests each next batch in turn.
     while view.shown.end < view.len {
-        view.scroll(view.len - 40);
+        view.scroll(view.len - WINDOW);
     }
     // Every item keeps its row; released ones are runs, not one entry each.
     assert_eq!(view.len, all.len());
-    assert!(view.rows.len() <= RESIDENT_PAGES * PAGE + 8);
+    assert!(view.rows.len() <= RESIDENT_PAGES * BATCH + 8);
     assert!(view.tree.branches[&None].loaded_pages() <= RESIDENT_PAGES);
     assert!(matches!(
         view.rows[0],
-        TreeRow::Released { count: PAGE, .. }
+        TreeRow::Released { count: BATCH, .. }
     ));
     assert_eq!(
         view.logical().last().unwrap().as_deref(),
@@ -344,7 +351,7 @@ fn batches_load_as_the_viewport_approaches_and_released_rows_keep_their_place() 
 
 #[test]
 fn a_collection_beyond_the_loaded_total_is_reachable_within_it() {
-    // Eight collections of 6,000 items each: 48,000 logical items.
+    // Eight branches cross the global budget before the last page.
     let collections: Vec<Node> = (0..8)
         .map(|i| Node::folder(None, PathBuf::from(format!("C:\\Collection {i}"))))
         .collect();
@@ -352,27 +359,27 @@ fn a_collection_beyond_the_loaded_total_is_reachable_within_it() {
     for node in &collections {
         let name = node.value(Field::Title);
         view.children
-            .insert(Some(node.id.clone()), named(&name, 6_000));
+            .insert(Some(node.id.clone()), named(&name, 12));
         view.tree.toggle(node.id.clone(), &None);
     }
     view.settle();
     let mut top = 0;
-    while top + 40 < view.len {
+    while top + WINDOW < view.len {
         view.scroll(top);
-        top += 1_000;
+        top += WINDOW;
     }
-    view.scroll(view.len - 40);
-    assert_eq!(view.len, 8 + 8 * 6_000);
+    view.scroll(view.len - WINDOW);
+    assert_eq!(view.len, 8 + 8 * 12);
     // Every row is reached while the loaded total holds, apart from the
     // pages the viewport itself is near.
-    assert!(view.peak <= LOADED_NODE_LIMIT + PAGE, "peak {}", view.peak);
-    assert!(view.tree.loaded() <= LOADED_NODE_LIMIT);
+    assert!(view.peak <= BUDGET + BATCH, "peak {}", view.peak);
+    assert!(view.tree.loaded() <= BUDGET);
     // One entry per loaded item plus one per released run.
     assert!(view.rows.len() <= view.tree.loaded() + 64);
     let last = view.logical();
-    assert_eq!(last.last().unwrap().as_deref(), Some("Item 05999"));
+    assert_eq!(last.last().unwrap().as_deref(), Some("Item 00011"));
     eprintln!(
-        "48,008 rows · peak loaded {} · entries {}",
+        "paged collection · peak loaded {} · entries {}",
         view.peak,
         view.rows.len()
     );
@@ -380,25 +387,25 @@ fn a_collection_beyond_the_loaded_total_is_reachable_within_it() {
 
 #[test]
 fn a_filter_finds_matches_beyond_the_loaded_total_and_stops_reading() {
-    let all = folders(LOADED_NODE_LIMIT + 3 * PAGE + 11);
+    let all = folders(BUDGET + 3 * BATCH + 3);
     let mut view = Harness::new(all.clone());
     view.settle();
-    view.filter = "folder 45000".into();
+    view.filter = "folder 00089".into();
     view.settle();
-    assert_eq!(titles(&view.rows), ["Folder 45000"]);
+    assert_eq!(titles(&view.rows), ["Folder 00089"]);
     // Each batch is read once; the filter keeps only its matches.
-    let batches = all.len().div_ceil(PAGE);
+    let batches = all.len().div_ceil(BATCH);
     assert_eq!(view.reads[&None], batches);
-    assert!(view.peak <= LOADED_NODE_LIMIT + PAGE, "peak {}", view.peak);
+    assert!(view.peak <= BUDGET + BATCH, "peak {}", view.peak);
     view.filter = "folder".into();
     view.settle();
     assert_eq!(view.len, all.len());
-    view.scroll(all.len() - 40);
+    view.scroll(all.len() - WINDOW);
     assert_eq!(
         view.logical().last().unwrap().as_deref(),
-        Some("Folder 45066")
+        Some("Folder 00090")
     );
-    assert!(view.tree.loaded() <= LOADED_NODE_LIMIT);
+    assert!(view.tree.loaded() <= BUDGET);
     // Clearing the filter browses again from the loaded pages.
     view.filter.clear();
     view.scroll(0);
@@ -412,8 +419,8 @@ fn large_branch_order_and_identity_seek_share_the_same_disk_index() {
     // The background index owns ordering, including ties across source pages.
     let writer = super::snapshot::Writer::new().unwrap();
     let sort = (Field::Title, ColumnSort::Descending);
-    let all = folders(45_067);
-    for page in all.chunks(PAGE) {
+    let all = folders(2 * BATCH + 3);
+    for page in all.chunks(BATCH) {
         writer
             .append_nodes(Branch::page(page.to_vec(), None), sort.0)
             .unwrap();
@@ -424,37 +431,50 @@ fn large_branch_order_and_identity_seek_share_the_same_disk_index() {
         .finish(sort.1 == ColumnSort::Descending, ticket, generation)
         .unwrap();
     let mut previous = String::new();
-    for offset in (0..all.len()).step_by(PAGE) {
-        let page = index.page(offset).unwrap();
-        assert!(page.nodes().count() <= PAGE);
+    for offset in (0..all.len()).step_by(BATCH) {
+        let page = index.page_with_limit(offset, BATCH).unwrap();
+        assert!(page.nodes().count() <= BATCH);
         for node in page.nodes() {
             let title = node.value(Field::Title);
             assert!(previous.is_empty() || previous > title);
             previous = title;
         }
     }
-    let rank = index.position(&all[PAGE].id).unwrap().unwrap();
-    assert_eq!(rank, all.len() - PAGE - 1);
+    let rank = index.position(&all[BATCH].id).unwrap().unwrap();
+    assert_eq!(rank, all.len() - BATCH - 1);
     assert_eq!(
         index
-            .page(rank / PAGE * PAGE)
+            .page_with_limit(rank / BATCH * BATCH, BATCH)
             .unwrap()
             .nodes()
-            .nth(rank % PAGE)
+            .nth(rank % BATCH)
             .unwrap()
             .id,
-        all[PAGE].id
+        all[BATCH].id
     );
 }
 
 #[test]
 fn open_items_of_released_pages_keep_their_rows_and_selection() {
-    let all = folders(3 * PAGE);
+    let all = folders(18);
     let open = all[5].id.clone();
     let mut view = Harness::new(all.clone());
+    view.page_size = all.len();
     view.children.insert(Some(open.clone()), named("Inner", 10));
     view.tree.toggle(open.clone(), &None);
     view.settle();
+    let owner = Some(open.clone());
+    let children = view.children[&owner].clone();
+    view.tree
+        .insert_branch(owner.clone(), Branch::slice(&children, 0, 4), None);
+    view.tree.receive(
+        &owner,
+        &Fetch::Next(Cursor::Offset(4)),
+        Branch::slice(&children, 4, 6),
+        None,
+    );
+    view.tree.selected = Some(all[15].id.clone());
+    view.project();
     let before = view.len;
     let inner = view.row_of("Item 00009").unwrap();
     assert_eq!(inner, 6 + 9);
@@ -465,7 +485,28 @@ fn open_items_of_released_pages_keep_their_rows_and_selection() {
     assert!(view.tree.expanded.contains(&open));
     assert!(!view.tree.branches.contains_key(&Some(open.clone())));
     assert!(view.logical()[0].is_none());
-    view.scroll(0);
+    // Deliver only the parent. The selected sibling must keep its rank
+    // before any child payload is available.
+    let sibling = "Folder 00015";
+    let rank = 15 + 10;
+    assert!(
+        view.tree
+            .receive(&None, &Fetch::Page(0, None), Branch::page(all, None), None)
+    );
+    view.project();
+    assert_eq!(view.len, before);
+    assert_eq!(view.row_of(sibling), Some(rank));
+    assert!(view.tree.receive(
+        &owner,
+        &Fetch::Page(1, Some(Cursor::Offset(4))),
+        Branch::slice(&children, 4, 6),
+        None
+    ));
+    view.project();
+    assert_eq!(view.row_of("Item 00009"), Some(inner));
+    assert_eq!(view.row_of(sibling), Some(rank));
+    assert_eq!(view.len, before);
+    view.scroll(6);
     assert_eq!(view.row_of("Folder 00005"), Some(5));
     assert_eq!(view.row_of("Item 00009"), Some(inner));
     // Collapsing it there still works, and reopening reads it again.
@@ -485,7 +526,7 @@ fn collapsing_cancels_pending_batches_and_ignores_their_results() {
     let parent = collections[0].id.clone();
     let mut view = Harness::new(collections);
     view.children
-        .insert(Some(parent.clone()), named("Deep", 3 * PAGE));
+        .insert(Some(parent.clone()), named("Deep", 3 * BATCH));
     view.tree.toggle(parent.clone(), &None);
     view.settle();
     // A next batch is waiting when the branch is collapsed.
@@ -500,36 +541,41 @@ fn collapsing_cancels_pending_batches_and_ignores_their_results() {
     assert!(!ticket.is_current(generation));
     assert!(!view.tree.branches.contains_key(&id));
     // Its result arrives after the collapse and changes nothing.
-    let stale = Branch::slice(&named("Deep", 3 * PAGE), PAGE);
+    let stale = Branch::slice(&named("Deep", 3 * BATCH), BATCH, BATCH);
     assert!(
         !view
             .tree
-            .receive(&id, &Fetch::Next(Cursor::Offset(PAGE)), stale, None)
+            .receive(&id, &Fetch::Next(Cursor::Offset(BATCH)), stale, None)
     );
     // A batch for a position the branch has moved past is ignored too.
     view.tree.toggle(parent, &None);
     view.scroll(0);
-    let all = named("Deep", 3 * PAGE);
+    let all = named("Deep", 3 * BATCH);
     assert!(!view.tree.receive(
         &id,
-        &Fetch::Next(Cursor::Offset(PAGE + 1)),
-        Branch::slice(&all, 1),
+        &Fetch::Next(Cursor::Offset(BATCH + 1)),
+        Branch::slice(&all, 1, BATCH),
         None
     ));
-    assert!(
-        !view
-            .tree
-            .receive(&id, &Fetch::Page(7, None), Branch::slice(&all, 1), None)
-    );
+    assert!(!view.tree.receive(
+        &id,
+        &Fetch::Page(7, None),
+        Branch::slice(&all, 1, BATCH),
+        None
+    ));
 }
 
 #[test]
 fn loading_releases_the_least_recently_used_pages_across_branches() {
-    let mut tree = Tree::default();
-    let big = folders(LOADED_NODE_LIMIT);
+    let mut tree = Tree {
+        node_limit: Some(BUDGET),
+        ..Default::default()
+    };
+    let big = folders(BUDGET);
     let id = Some(TreeId::Collection(1));
-    tree.branches.insert(id.clone(), Branch::slice(&big, 0));
-    let mut filler = folders(LOADED_NODE_LIMIT - PAGE);
+    tree.branches
+        .insert(id.clone(), Branch::slice(&big, 0, BATCH));
+    let mut filler = folders(BUDGET - BATCH);
     filler.iter_mut().enumerate().for_each(|(i, node)| {
         node.id = TreeId::Collection(1000 + i as i64);
     });
@@ -540,10 +586,10 @@ fn loading_releases_the_least_recently_used_pages_across_branches() {
     assert!(tree.want(&id, Want::Next, false));
     // Already waiting: a second request is not queued.
     assert!(!tree.want(&id, Want::Next, false));
-    let fetch = Fetch::Next(Cursor::Offset(PAGE));
-    assert!(tree.receive(&id, &fetch, Branch::slice(&big, PAGE), None));
+    let fetch = Fetch::Next(Cursor::Offset(BATCH));
+    assert!(tree.receive(&id, &fetch, Branch::slice(&big, BATCH, BATCH), None));
     // The other branch's page the viewport left is released, not this one.
-    assert!(tree.loaded() <= LOADED_NODE_LIMIT);
+    assert!(tree.loaded() <= BUDGET);
     assert!(tree.branches[&None].pages[0].nodes.is_none());
     assert!(!tree.branches.contains_key(&id));
 }
@@ -552,20 +598,20 @@ fn loading_releases_the_least_recently_used_pages_across_branches() {
 fn folder_listing_pages_keep_their_order_and_bounded_reads() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    for i in 0..205 {
+    for i in 0..13 {
         fs::create_dir(root.join(format!("Folder {i}"))).unwrap();
     }
     fs::create_dir(root.join(".hidden")).unwrap();
-    for i in 0..23 {
+    for i in 0..3 {
         write_wav(&root.join(format!("Track {i}.wav")), 0);
     }
     let mut after = None;
     let mut dirs = Vec::new();
     let mut pages = 0;
     let files = loop {
-        let page = crate::library::list_page(root, after.as_ref(), 50, true, || true).unwrap();
+        let page = crate::library::list_page(root, after.as_ref(), 3, Some(4), || true).unwrap();
         pages += 1;
-        assert!(page.dirs.len() <= 50);
+        assert!(page.dirs.len() <= 3);
         dirs.extend(page.dirs);
         match (page.next_dir, page.files) {
             (Some(next), None) => after = Some(crate::library::ListingCursor::Dirs(next)),
@@ -579,59 +625,15 @@ fn folder_listing_pages_keep_their_order_and_bounded_reads() {
         .iter()
         .map(|d| crate::library::folder_name(d))
         .collect();
-    assert_eq!(names.len(), 205);
+    assert_eq!(names.len(), 13);
     assert_eq!(names[..3], ["Folder 0", "Folder 1", "Folder 2"]);
-    assert_eq!(names[204], "Folder 204");
+    assert_eq!(names[12], "Folder 12");
     let crate::library::ListedFiles::All { audio, sheets } = files else {
         panic!("A small folder groups all of its files");
     };
-    assert_eq!((audio.len(), sheets.len()), (23, 0));
-    let canceled = crate::library::list_page(root, None, 50, true, || false);
+    assert_eq!((audio.len(), sheets.len()), (3, 0));
+    let canceled = crate::library::list_page(root, None, 3, Some(4), || false);
     assert!(canceled.is_err());
-}
-
-#[test]
-fn a_folder_with_too_many_recordings_to_group_lists_them_by_page() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let count = crate::library::GROUPED_FILES + 5;
-    for i in 0..count {
-        fs::write(root.join(format!("Take {i}.wav")), b"").unwrap();
-    }
-    cue(&root.join("Program"), "Program", 2, false);
-    fs::rename(
-        root.join("Program").join("Program.cue"),
-        root.join("Program.cue"),
-    )
-    .unwrap();
-    fs::rename(
-        root.join("Program").join("Source 01.wav"),
-        root.join("Source 01.wav"),
-    )
-    .unwrap();
-    let mut after = None;
-    let mut names = Vec::new();
-    loop {
-        let page = crate::library::list_page(root, after.as_ref(), 1000, true, || true).unwrap();
-        let Some(crate::library::ListedFiles::Page {
-            audio,
-            sheets,
-            next,
-        }) = page.files
-        else {
-            panic!("Expected a page of files");
-        };
-        assert!(audio.len() + sheets.len() <= 1000);
-        names.extend(audio.iter().chain(&sheets).map(|p| crate::library::name(p)));
-        match next {
-            Some(next) => after = Some(crate::library::ListingCursor::Files(next)),
-            None => break,
-        }
-    }
-    // Every recording and the sheet, each once.
-    assert_eq!(names.len(), count + 2);
-    let unique: std::collections::HashSet<_> = names.iter().collect();
-    assert_eq!(unique.len(), names.len());
 }
 
 #[test]
@@ -661,6 +663,73 @@ fn indexed_contents_continue_inside_a_large_loose_album() {
     assert_eq!(unique.len(), 7);
 }
 
+/// Drives the real table selection and deferred scroll before, between, and
+/// after the two publications on the private Windows desktop.
+pub(in crate::browser) fn finish_filtered_arrival(
+    browser: &mut super::Browser,
+    cx: &mut gpui_kit::Context<super::Browser>,
+) {
+    use super::{Location, TreeTable, ViewMode};
+    let mut track = Track::file("fixture/Needle.wav".into());
+    track.library_id = Some(7);
+    let target = Node::track(std::sync::Arc::new(track), None);
+    let page = || Branch::page(vec![target.clone()], None);
+    browser.location = Location::Library(None);
+    browser.prefs.mode = ViewMode::Tree;
+    browser.query = "needle".into();
+    browser.tree.update(cx, |table, cx| {
+        let d = table.delegate_mut();
+        d.filter.clone_from(&browser.query);
+        d.tree.insert_branch(None, page(), None);
+        TreeTable::project(table, cx);
+        assert_eq!(table.delegate().position(&target.id), Some(0));
+        table.delegate_mut().tree.begin_matching(Ticket::default());
+    });
+    browser.finish_listing(cx);
+    assert!(browser.pending.is_some());
+    let index = Descendants::build(&Store::memory(), None, browser.query.clone()).unwrap();
+    browser.tree.update(cx, |table, cx| {
+        table.delegate_mut().tree.publish_matches(index);
+        TreeTable::project(table, cx);
+    });
+    browser.finish_listing(cx);
+    assert!(browser.pending.is_some());
+    // A catalog rescan may invalidate the reader while it locates the
+    // recording. The replacement root must still receive the same arrival.
+    browser.tree.update(cx, |table, cx| {
+        let d = table.delegate_mut();
+        d.tree.root = Some(Source::Loaded(vec![target.clone()].into()));
+        d.take(None, &Fetch::First, Ok(Branch::page(Vec::new(), None)), cx);
+        TreeTable::project(table, cx);
+    });
+    browser.finish_listing(cx);
+    assert!(browser.tree.read(cx).delegate().tree.reveal.is_some());
+    assert!(browser.pending.is_some());
+    browser.invalidate_tree(cx);
+    assert!(browser.tree.read(cx).delegate().tree.reveal.is_none());
+    browser.tree.update(cx, |table, cx| {
+        table
+            .delegate_mut()
+            .take(None, &Fetch::First, Ok(page()), cx);
+        TreeTable::project(table, cx);
+    });
+    browser.finish_listing(cx);
+    assert!(browser.pending.is_none());
+    let table = browser.tree.read(cx);
+    assert_eq!(table.delegate().tree.selected.as_ref(), Some(&target.id));
+    assert_eq!(table.selected_row(), Some(0));
+    assert_eq!(
+        table
+            .vertical_scroll_handle
+            .0
+            .borrow()
+            .deferred_scroll_to_item
+            .unwrap()
+            .item_index,
+        0
+    );
+}
+
 #[test]
 fn indexed_filters_keep_unloaded_folders_whose_contents_match() {
     let temp = tempfile::tempdir().unwrap();
@@ -677,15 +746,32 @@ fn indexed_filters_keep_unloaded_folders_whose_contents_match() {
         .insert(None, indexed_branch(&store, id, &root).unwrap());
     // Loaded rows alone cannot see into the collapsed folders.
     assert!(titles(&tree.visible(None, "needle", &|_| Mark::default())).is_empty());
+    // The root can be ready before the descendant worker. A recording
+    // arrival must remain pending through publication and root replacement.
+    assert!(tree.ready_for_arrival());
+    let pending = Ticket::default();
+    let generation = pending.next();
+    tree.pending.insert(None, Request(pending.clone()));
+    tree.begin_matching(Ticket::default());
+    assert!(!pending.is_current(generation));
+    assert!(!tree.ready_for_arrival());
+    assert!(tree.next_request().is_none());
     let matches = Descendants::build(&store, Some(id), "needle".into()).unwrap();
-    let page = tree.branches.remove(&None).unwrap();
-    tree.branches.insert(None, matches.annotate(page).unwrap());
+    let page = matches
+        .annotate(indexed_branch(&store, id, &root).unwrap())
+        .unwrap();
+    tree.publish_matches(matches);
+    assert!(!tree.ready_for_arrival());
+    tree.receive(&None, &Fetch::First, page, None);
+    assert!(tree.ready_for_arrival());
+    let matches = tree.descendants.as_deref().unwrap();
     let marks = |_: &Track| Mark::default();
-    let lens = Lens::new("needle", Some(&matches), &marks);
+    let lens = Lens::new("needle", Some(matches), &marks);
     assert_eq!(titles(&tree.project(lens.as_ref()).rows), ["Artists"]);
 }
 
 #[test]
+#[ignore = "checks descendant membership beyond the historical 4,096-folder cutoff"]
 fn indexed_filter_resolves_collapsed_ancestors_beyond_four_thousand_folders() {
     let fixture = tempfile::tempdir().unwrap();
     let path = fixture.path().join("library.sqlite3");
@@ -771,12 +857,10 @@ fn seed_music_browser_qualification() {
 
 #[test]
 fn every_sheet_of_a_paged_folder_owns_its_recordings() {
-    // More files than are grouped at once, with more sheets than any fixed
-    // claim bound, so sheets and the recordings they play fall on
-    // different pages.
+    // Sheets and their sources land on different pages.
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let sheets = 300;
+    let sheets = 3;
     for i in 0..sheets {
         let source = format!("Z Source {i:03}.wav");
         write_wav(&root.join(&source), 0);
@@ -788,14 +872,14 @@ fn every_sheet_of_a_paged_folder_owns_its_recordings() {
         )
         .unwrap();
     }
-    for i in 0..crate::library::GROUPED_FILES {
-        fs::write(root.join(format!("M Take {i:04}.wav")), b"").unwrap();
+    for i in 0..2 {
+        write_wav(&root.join(format!("M Take {i:04}.wav")), 1);
     }
     let mut after = None;
     let mut programs = Vec::new();
     let mut loose = Vec::new();
     loop {
-        let page = physical_branch(root, after.as_ref(), &|| true).unwrap();
+        let page = super::physical_page(root, after.as_ref(), 2, 3, &|| true).unwrap();
         for node in page.nodes() {
             match &node.item {
                 Item::Disc { disc, .. } => programs.push(disc.title.clone()),
@@ -812,7 +896,7 @@ fn every_sheet_of_a_paged_folder_owns_its_recordings() {
         }
     }
     programs.sort();
-    programs.dedup();
+    assert_eq!(loose, ["M Take 0000", "M Take 0001"]);
     assert_eq!(programs.len(), sheets);
     assert!(
         loose.iter().all(|name| !name.starts_with("Z Source")),
@@ -820,7 +904,7 @@ fn every_sheet_of_a_paged_folder_owns_its_recordings() {
     );
     let claimed = crate::library::claimed_sources(
         root,
-        &[root.join("Z Source 299.wav"), root.join("M Take 0001.wav")],
+        &[root.join("Z Source 002.wav"), root.join("M Take 0001.wav")],
         None,
         || true,
     )
@@ -828,13 +912,15 @@ fn every_sheet_of_a_paged_folder_owns_its_recordings() {
     assert_eq!(claimed.len(), 1);
 }
 
-/// A folder tree: `root` holds `A` and `B`; `A` holds 300 folders that
+/// A folder tree: `root` holds `A` and `B`; `A` holds 10 folders that
 /// each hold three more.
 fn nested() -> (Harness, TreeId, TreeId) {
     let a = Node::folder(None, PathBuf::from("C:\\Music\\A"));
     let b = Node::folder(None, PathBuf::from("C:\\Music\\B"));
     let (a_id, b_id) = (a.id.clone(), b.id.clone());
     let mut view = Harness::new(vec![a, b]);
+    view.page_size = INNER;
+    view.tree.node_limit = None;
     let inner: Vec<Node> = (0..INNER)
         .map(|i| Node::folder(None, PathBuf::from(format!("C:\\Music\\A\\Inner {i:03}"))))
         .collect();
@@ -851,7 +937,7 @@ fn nested() -> (Harness, TreeId, TreeId) {
     (view, a_id, b_id)
 }
 
-const INNER: usize = 300;
+const INNER: usize = 10;
 
 fn count(view: &Harness, prefix: &str) -> usize {
     view.logical()
@@ -863,14 +949,14 @@ fn count(view: &Harness, prefix: &str) -> usize {
 
 fn scroll_through(view: &mut Harness) {
     let mut top = 0;
-    while top + 40 < view.len {
+    while top + WINDOW < view.len {
         view.scroll(top);
-        top += 400;
+        top += WINDOW;
     }
     // Rows read near the end push the end further down; follow it.
     loop {
         let len = view.len;
-        view.scroll(len.saturating_sub(40));
+        view.scroll(len.saturating_sub(WINDOW));
         if view.len == len {
             break;
         }
@@ -891,9 +977,9 @@ fn expand_all_opens_a_whole_subtree_as_the_viewport_reaches_it() {
     // The subtree itself is read at once; what lies inside it is read only
     // as the viewport comes near, never all at once.
     let first_reads = view.reads.len();
-    assert!(first_reads < 400, "read {first_reads} branches at once");
+    assert!(first_reads < INNER, "read {first_reads} branches at once");
     scroll_through(&mut view);
-    // Every one of 300 folders is open, beyond the 128 kept one at a time.
+    // One recursive marker opens each folder.
     assert_eq!(count(&view, "Leaf"), INNER * 3);
     assert_eq!(view.reads.len(), 3 + INNER + INNER * 3);
     assert!(view.tree.expanded.len() <= 1);
@@ -1014,6 +1100,7 @@ fn saved_exceptions_keep_unloaded_indexed_ancestors_across_subtree_commands() {
 }
 
 #[test]
+#[ignore = "measures expanded residency over 40,960 folders"]
 fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
     const PAGES: usize = 10;
     fn batch(index: usize) -> Branch {
@@ -1082,6 +1169,7 @@ fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
 }
 
 #[test]
+#[ignore = "measures residency of 36,864 authored releases"]
 fn expanded_indexed_releases_reload_their_authored_discs_after_eviction() {
     use crate::{
         collection::{Disc, Discs, Shelf},

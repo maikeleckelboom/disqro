@@ -344,7 +344,7 @@ impl Browser {
                 if s.query == query {
                     return;
                 }
-                s.cancel_pending();
+                s.cancel_pending(cx);
                 s.query = query;
                 s.filter(cx);
                 cx.notify();
@@ -811,7 +811,7 @@ impl Browser {
         } else if self.page.is_some() {
             self.up_to_collection(self.location.clone(), mode, window, cx);
         } else {
-            self.cancel_pending();
+            self.cancel_pending(cx);
             self.prefs.mode = mode;
             if self.listing_tree() && self.location.is_folder() && self.busy {
                 self.generation += 1;
@@ -1543,7 +1543,7 @@ impl Browser {
                             && b.reveal(request, window, cx)
                         {
                             reveal = None;
-                            b.cancel_pending();
+                            b.cancel_pending(cx);
                         }
                         cx.notify();
                     })

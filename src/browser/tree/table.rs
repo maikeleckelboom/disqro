@@ -43,11 +43,6 @@ pub(crate) struct TreeTable {
     /// The rows the table last showed.
     shown: Range<usize>,
     pub(super) filter: String,
-    /// Catalog folders holding matches for `filter`, in an indexed tree.
-    pub(super) descendants: Option<Arc<Descendants>>,
-    /// Supersedes a catalog match query when the filter changes again.
-    pub(super) matching: Ticket,
-    pub(super) selected: Option<TreeId>,
     pub(super) restore: Option<(Option<TreeId>, Viewport)>,
     pub(super) workers: Arc<async_lock::Semaphore>,
     pub(crate) layout: Layout,
@@ -77,9 +72,6 @@ impl TreeTable {
             spans: Vec::new(),
             shown: 0..0,
             filter: String::new(),
-            descendants: None,
-            matching: Ticket::default(),
-            selected: None,
             restore: None,
             workers: Arc::new(async_lock::Semaphore::new(2)),
             sort: None,
@@ -91,6 +83,10 @@ impl TreeTable {
             player,
             router: None,
         }
+    }
+
+    pub(in crate::browser) fn ready_for_arrival(&self) -> bool {
+        self.tree.ready_for_arrival()
     }
 
     pub(super) fn position(&self, id: &TreeId) -> Option<usize> {
@@ -107,9 +103,6 @@ impl TreeTable {
         self.spans.clear();
         self.len = 0;
         self.shown = 0..0;
-        self.matching.next();
-        self.descendants = None;
-        self.selected = None;
         self.restore = None;
     }
 
@@ -136,7 +129,8 @@ impl TreeTable {
     ) {
         let catalog = self.catalog.read(cx);
         let marks = |track: &Track| catalog.mark_of(track);
-        let lens = Lens::new(&self.filter, self.descendants.as_deref(), &marks);
+        let descendants = self.tree.descendants.clone();
+        let lens = Lens::new(&self.filter, descendants.as_deref(), &marks);
         let tree = &mut self.tree;
         tree.pending.remove(&id);
         match (fetch, result) {
@@ -168,7 +162,7 @@ impl TreeTable {
     }
 
     pub(crate) fn selected_key(&self) -> Option<RowKey> {
-        self.selected.clone().map(RowKey::Tree)
+        self.tree.selected.clone().map(RowKey::Tree)
     }
 
     pub(crate) fn on_selection(&mut self, index: usize) {
@@ -176,14 +170,14 @@ impl TreeTable {
             .row(index)
             .and_then(TreeRow::node)
             .map(|node| node.id.clone());
-        if id != self.selected {
+        if id != self.tree.selected {
             self.restore = None;
-            self.selected = id;
+            self.tree.selected = id;
         }
     }
 
     pub(crate) fn clear_selection(&mut self) {
-        self.selected = None;
+        self.tree.selected = None;
         self.restore = None;
     }
 
@@ -232,7 +226,7 @@ impl TreeTable {
             Some(RowKey::Key(id)) => Some(TreeId::IndexedTrack(*id)),
             _ => None,
         };
-        table.delegate_mut().selected = id.clone();
+        table.delegate_mut().tree.selected = id.clone();
         table.delegate_mut().restore = Some((id, viewport));
         Self::restore_view(table, cx);
     }
@@ -245,7 +239,7 @@ impl TreeTable {
         cx: &mut Context<TableState<Self>>,
     ) {
         let row = table.delegate().position(&target);
-        table.delegate_mut().selected = Some(target);
+        table.delegate_mut().tree.selected = Some(target);
         table.delegate_mut().restore = None;
         reselect(table, row, cx);
         if let Some(row) = row.filter(|_| center) {
@@ -277,7 +271,7 @@ impl TreeTable {
         d.tree.set_sort(d.sort);
         d.tree.set_query(&d.filter);
         let marks = |track: &Track| catalog.read(cx).mark_of(track);
-        let lens = Lens::new(&d.filter, d.descendants.as_deref(), &marks);
+        let lens = Lens::new(&d.filter, d.tree.descendants.as_deref(), &marks);
         let Projection {
             rows,
             len,
@@ -302,7 +296,7 @@ impl TreeTable {
         d.len = len;
         d.touch();
         let d = table.delegate();
-        let position = d.selected.as_ref().and_then(|id| d.position(id));
+        let position = d.tree.selected.as_ref().and_then(|id| d.position(id));
         reselect(table, position, cx);
         view.restore(table, height, |key| table.delegate().row_position(key));
         if let Some((key, mut scroll)) = deferred
@@ -325,7 +319,7 @@ impl TreeTable {
         let wants: Vec<_> = self
             .boundaries
             .iter()
-            .filter(|boundary| boundary.near(&self.shown))
+            .filter(|boundary| boundary.near(&self.shown, LOOKAHEAD))
             .map(|boundary| (boundary.branch.clone(), boundary.want, boundary.search))
             .collect();
         if wants.is_empty()

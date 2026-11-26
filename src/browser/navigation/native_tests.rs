@@ -173,6 +173,18 @@ fn delayed_ranked_reveal_respects_browser_navigation_and_lifetime() {
                         assert_eq!(reveals.get(), 1);
                     })
                     .unwrap();
+                window
+                    .update(cx, |_, _, cx| {
+                        b.update(cx, |browser, cx| {
+                            browser.pending = Some(Pending {
+                                bookmark: Bookmark::default(),
+                                target: Some(RowKey::Key(7)),
+                                recording: true,
+                            });
+                            tree::tests::finish_filtered_arrival(browser, cx);
+                        });
+                    })
+                    .unwrap();
                 finished.set(true);
                 cx.update(|cx| cx.quit());
             })

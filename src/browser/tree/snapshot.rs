@@ -12,7 +12,15 @@ impl Writer {
 
 impl Snapshot {
     pub(super) fn page(self: &Arc<Self>, offset: usize) -> anyhow::Result<Branch> {
-        let mut nodes = self.rows::<Node>(offset, PAGE)?;
+        self.page_with_limit(offset, PAGE)
+    }
+
+    pub(super) fn page_with_limit(
+        self: &Arc<Self>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Branch> {
+        let mut nodes = self.rows::<Node>(offset, limit)?;
         for node in &mut nodes {
             // A queue persists only recording locators. A catalog result also owns
             // its database-local ID, which the node stores alongside the payload.

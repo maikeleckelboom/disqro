@@ -22,6 +22,7 @@ use std::{
 mod descendants;
 use descendants::Descendants;
 mod reader;
+mod residency;
 mod reveal;
 mod snapshot;
 mod table;
@@ -376,8 +377,12 @@ enum IndexedCursor {
 struct Slot {
     start: Option<Cursor>,
     len: usize,
+    /// A subrange of the source batch when a deep reveal shares its node budget.
+    slice: Option<std::ops::Range<usize>>,
     nodes: Option<Vec<Node>>,
-    /// Logical spans survive eviction without owning any child branches.
+    /// Paging descriptors of expanded children, without their node payloads.
+    children: Vec<(TreeId, Branch)>,
+    /// Logical spans while this page is released.
     rows: usize,
     matched_rows: Option<usize>,
     /// When the viewport was last near the page.
@@ -389,7 +394,9 @@ impl Slot {
         Self {
             start,
             len: nodes.len(),
+            slice: None,
             nodes: Some(nodes),
+            children: Vec::new(),
             rows: 0,
             matched_rows: None,
             used: 0,
@@ -460,8 +467,8 @@ impl Branch {
     }
 
     /// One page of a list known in full.
-    fn slice(nodes: &[Node], offset: usize) -> Self {
-        let end = nodes.len().min(offset.saturating_add(PAGE));
+    fn slice(nodes: &[Node], offset: usize, limit: usize) -> Self {
+        let end = nodes.len().min(offset.saturating_add(limit));
         Self::page(
             nodes.get(offset..end).unwrap_or_default().to_vec(),
             (end < nodes.len()).then_some(Cursor::Offset(end)),
@@ -486,16 +493,6 @@ impl Branch {
             .filter(|page| page.nodes.is_some())
             .count()
     }
-
-    /// The least recently used page. Break ties by distance from `keep`.
-    fn least_recent(&self, keep: usize) -> Option<usize> {
-        self.pages
-            .iter()
-            .enumerate()
-            .filter(|(index, page)| *index != keep && page.nodes.is_some())
-            .min_by_key(|(index, page)| (page.used, std::cmp::Reverse(index.abs_diff(keep))))
-            .map(|(index, _)| index)
-    }
 }
 
 /// Rows whose batch loads once the viewport comes within `LOOKAHEAD` of them.
@@ -509,9 +506,9 @@ pub(super) struct Boundary {
 }
 
 impl Boundary {
-    pub(super) fn near(&self, visible: &std::ops::Range<usize>) -> bool {
-        self.rows.start < visible.end.saturating_add(LOOKAHEAD)
-            && self.rows.end.saturating_add(LOOKAHEAD) > visible.start
+    pub(super) fn near(&self, visible: &std::ops::Range<usize>, lookahead: usize) -> bool {
+        self.rows.start < visible.end.saturating_add(lookahead)
+            && self.rows.end.saturating_add(lookahead) > visible.start
     }
 }
 
@@ -570,6 +567,12 @@ struct Tree {
     branches: HashMap<Option<TreeId>, Branch>,
     pending: HashMap<Option<TreeId>, Request>,
     reveal: Option<Request>,
+    /// Indexed pages and recording navigation share this filter prerequisite.
+    matching: Option<Request>,
+    descendants: Option<Arc<Descendants>>,
+    selected: Option<TreeId>,
+    #[cfg(test)]
+    node_limit: Option<usize>,
     root: Option<Source>,
     sort: Option<(Field, ColumnSort)>,
     /// The filter whose matches released pages keep.
@@ -731,6 +734,7 @@ impl Tree {
             self.deep.clear();
             self.closed.clear();
             for page in self.branches.values_mut().flat_map(|b| &mut b.pages) {
+                page.children.clear();
                 page.rows = page.len;
                 page.matched_rows = None;
             }
@@ -869,6 +873,14 @@ impl Tree {
         self.first = first;
     }
 
+    fn node_limit(&self) -> usize {
+        #[cfg(test)]
+        if let Some(limit) = self.node_limit {
+            return limit;
+        }
+        LOADED_NODE_LIMIT
+    }
+
     fn loaded(&self) -> usize {
         self.branches.values().map(Branch::resident).sum::<usize>()
     }
@@ -892,14 +904,22 @@ impl Tree {
             return;
         }
         self.reveal = None;
+        self.matching = None;
+        self.descendants = None;
         query.clone_into(&mut self.query);
         self.invalidate_filtered_spans();
     }
 
     fn invalidate_filtered_spans(&mut self) {
-        for page in self.branches.values_mut().flat_map(|b| &mut b.pages) {
-            page.matched_rows = None;
+        fn invalidate(branch: &mut Branch) {
+            for page in &mut branch.pages {
+                page.matched_rows = None;
+                for (_, child) in &mut page.children {
+                    invalidate(child);
+                }
+            }
         }
+        self.branches.values_mut().for_each(invalidate);
     }
 
     fn set_sort(&mut self, sort: Option<(Field, ColumnSort)>) {
@@ -937,7 +957,7 @@ impl Tree {
         }
         self.branches.insert(id.clone(), branch);
         self.reconcile();
-        self.settle(&id, 0, false, lens);
+        self.settle(&id, 0, lens);
     }
 
     /// Asks for the first pages of the open branches inside expanded
@@ -1020,6 +1040,10 @@ impl Tree {
                     .flat_map(|(_, page)| page.nodes.iter().flatten())
                     .map(|node| node.id.clone())
                     .collect();
+                if let Some(range) = &branch.pages[*index].slice {
+                    nodes.truncate(range.end);
+                    nodes.drain(..range.start.min(nodes.len()));
+                }
                 nodes.retain(|n| !others.contains(&n.id));
                 branch.pages[*index].load(nodes);
                 *index
@@ -1028,64 +1052,9 @@ impl Tree {
         };
         branch.pages[keep].used = if search { 0 } else { clock };
         branch.notice = page.notice;
-        self.settle(id, keep, search, lens);
+        self.restore_children(id, keep);
+        self.settle(id, keep, lens);
         true
-    }
-
-    /// A released page owns only a cursor and logical row counts. Any child
-    /// branches reachable only through its payload leave the resident tree.
-    fn release_page(&mut self, owner: &Option<TreeId>, index: usize, lens: Option<&Lens>) {
-        let branch = &self.branches[owner];
-        let nodes = branch.pages[index].nodes.as_deref().expect("resident page");
-        let rows = |filter: Option<&Lens>| {
-            let mut view = Projection::new(self, filter);
-            for node in nodes {
-                view.node(
-                    node,
-                    owner,
-                    0,
-                    branch.deep,
-                    filter.is_none_or(|l| l.matches(node)),
-                );
-            }
-            view.len
-        };
-        let visible = rows(None);
-        let matched = lens.map(|l| rows(Some(l)));
-        let page = &mut self.branches.get_mut(owner).unwrap().pages[index];
-        page.rows = visible;
-        page.matched_rows = matched;
-        page.nodes = None;
-        self.reconcile();
-    }
-
-    fn settle(&mut self, id: &Option<TreeId>, keep: usize, _: bool, lens: Option<&Lens>) {
-        while let Some(index) = self.branches.get(id).and_then(|b| {
-            (b.loaded_pages() > RESIDENT_PAGES)
-                .then(|| b.least_recent(keep))
-                .flatten()
-        }) {
-            self.release_page(id, index, lens);
-        }
-        while self.loaded() > LOADED_NODE_LIMIT {
-            let victim = self
-                .branches
-                .iter()
-                .flat_map(|(owner, branch)| {
-                    branch
-                        .pages
-                        .iter()
-                        .enumerate()
-                        .map(move |(i, page)| (owner, i, page))
-                })
-                .filter(|(owner, i, p)| p.resident() > 0 && !(*owner == id && *i == keep))
-                .min_by_key(|(_, _, p)| p.used)
-                .map(|(owner, i, _)| (owner.clone(), i));
-            let Some((owner, i)) = victim else {
-                break;
-            };
-            self.release_page(&owner, i, lens);
-        }
     }
 
     /// Whether the first page of open item `id` is read without waiting for
@@ -1099,6 +1068,23 @@ impl Tree {
     /// its first page is read wherever the viewport is.
     fn reads_eagerly(&self, id: &TreeId) -> bool {
         self.expanded.contains(id) || self.deep.contains(&Some(id.clone()))
+    }
+
+    fn begin_matching(&mut self, ticket: Ticket) {
+        self.pending.clear();
+        self.matching = Some(Request(ticket));
+    }
+
+    fn publish_matches(&mut self, index: Descendants) {
+        self.matching = None;
+        self.branches.clear();
+        self.descendants = Some(Arc::new(index));
+    }
+
+    /// Consume navigation only after the current filter and its root page
+    /// have published. A pending arrival still belongs to the browser.
+    fn ready_for_arrival(&self) -> bool {
+        self.matching.is_none() && self.reveal.is_none() && self.branches.contains_key(&None)
     }
 
     fn next_request(&self) -> Option<(Option<TreeId>, Source, Fetch)> {
@@ -1149,7 +1135,7 @@ impl Tree {
                 None
             }
         }
-        if self.pending.len() >= PARALLEL_BRANCHES {
+        if self.matching.is_some() || self.pending.len() >= PARALLEL_BRANCHES {
             return None;
         }
         find(self, None, None)
@@ -1391,13 +1377,14 @@ fn physical_branch(
     after: Option<&crate::library::ListingCursor>,
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<Branch> {
-    physical_page(path, after, PAGE, alive)
+    physical_page(path, after, PAGE, crate::library::GROUPED_FILES, alive)
 }
 
 fn physical_page(
     path: &Path,
     after: Option<&crate::library::ListingCursor>,
     limit: usize,
+    group_limit: usize,
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<Branch> {
     let crate::discovery::FolderBranch {
@@ -1407,7 +1394,7 @@ fn physical_page(
         next,
         paged,
         notice,
-    } = crate::discovery::tree_folder(path, after, limit, alive)?;
+    } = crate::discovery::tree_folder(path, after, limit, group_limit, alive)?;
     let mut nodes = dirs
         .into_iter()
         .map(|dir| Node::folder(None, dir))
@@ -1457,7 +1444,7 @@ fn indexed_dirs(
     alive: &dyn Fn() -> bool,
 ) -> anyhow::Result<(Vec<Node>, Option<Cursor>)> {
     let after = after.map(|name| crate::library::ListingCursor::Dirs(name.to_owned()));
-    let listing = crate::library::list_page(path, after.as_ref(), PAGE, false, alive)?;
+    let listing = crate::library::list_page(path, after.as_ref(), PAGE, None, alive)?;
     Ok((
         listing
             .dirs
@@ -1571,10 +1558,17 @@ impl Browser {
         });
     }
 
+    pub(super) fn cancel_tree_reveal(&mut self, cx: &mut App) -> bool {
+        self.tree.update(cx, |table, _| {
+            table.delegate_mut().tree.reveal.take().is_some()
+        })
+    }
+
     pub(crate) fn stop_tree_jobs(&mut self, cx: &mut App) {
         self.tree.update(cx, |table, _| {
             let tree = &mut table.delegate_mut().tree;
             tree.pending.clear();
+            tree.matching = None;
             tree.reveal = None;
         });
     }
@@ -1582,8 +1576,8 @@ impl Browser {
     pub(crate) fn invalidate_tree(&mut self, cx: &mut Context<Self>) {
         self.tree.update(cx, |table, _| {
             let delegate = table.delegate_mut();
-            delegate.matching.next();
-            delegate.descendants = None;
+            delegate.tree.matching = None;
+            delegate.tree.descendants = None;
             let state = &mut delegate.tree;
             state.reveal = None;
             state.root = None;
@@ -1642,10 +1636,6 @@ impl Browser {
             if delegate.tree.root.is_none() {
                 delegate.tree.root = Some(source);
             }
-            if delegate.filter != self.query {
-                delegate.matching.next();
-                delegate.descendants = None;
-            }
             delegate.filter.clone_from(&self.query);
             TreeTable::project(table, cx);
         });
@@ -1662,14 +1652,16 @@ impl Browser {
             Location::Library(root) => *root,
             _ => {
                 self.tree
-                    .update(cx, |table, _| table.delegate_mut().descendants = None);
+                    .update(cx, |table, _| table.delegate_mut().tree.descendants = None);
                 return;
             }
         };
         let query = self.query.clone();
         let table = self.tree.read(cx).delegate();
-        if query.trim().is_empty()
+        if table.tree.matching.is_some()
+            || query.trim().is_empty()
             || table
+                .tree
                 .descendants
                 .as_ref()
                 .is_some_and(|matches| matches.query == query)
@@ -1679,8 +1671,11 @@ impl Browser {
         let Some(store) = self.catalog.read(cx).handle() else {
             return;
         };
-        let ticket = table.matching.clone();
+        let ticket = Ticket::default();
         let generation = ticket.next();
+        self.tree.update(cx, |table, _| {
+            table.delegate_mut().tree.begin_matching(ticket.clone())
+        });
         let watch = ticket.clone();
         let reader = store.query(&ticket, generation, move |s| s.reader(watch, generation));
         cx.spawn(async move |browser, cx| {
@@ -1697,15 +1692,17 @@ impl Browser {
                 }
                 match result {
                     Ok(index) => b.tree.update(cx, |table, cx| {
-                        let d = table.delegate_mut();
-                        d.descendants = Some(Arc::new(index));
-                        d.tree.pending.clear();
-                        d.tree.branches.clear();
+                        table.delegate_mut().tree.publish_matches(index);
                         TreeTable::project(table, cx);
                     }),
-                    Err(err) => b.notice = Some(format!("Unable to filter folders: {err:#}")),
+                    Err(err) => {
+                        b.tree
+                            .update(cx, |table, _| table.delegate_mut().tree.matching = None);
+                        b.notice = Some(format!("Unable to filter folders: {err:#}"));
+                    }
                 }
                 b.pump_tree(cx);
+                b.finish_listing(cx);
                 cx.emit(ViewChanged);
                 cx.notify();
             });
@@ -1735,6 +1732,7 @@ impl Browser {
                 .tree
                 .read(cx)
                 .delegate()
+                .tree
                 .descendants
                 .clone()
                 .filter(|d| d.query == self.query);
@@ -1989,10 +1987,10 @@ impl Browser {
         parent: Option<TreeId>,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_context_for_input(cx);
         self.tree.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             let tree = &mut delegate.tree;
-            tree.reveal = None;
             match (action, id.clone()) {
                 (ExpandAction::Toggle, Some(item)) => tree.toggle(item, &parent),
                 (ExpandAction::Toggle, None) => return,
@@ -2002,7 +2000,8 @@ impl Browser {
             TreeTable::project(table, cx);
             let d = table.delegate();
             if action != ExpandAction::ExpandAll
-                && d.selected
+                && d.tree
+                    .selected
                     .as_ref()
                     .is_some_and(|key| d.position(key).is_none())
                 && let Some(row) = id.as_ref().and_then(|key| d.position(key))
@@ -2091,4 +2090,4 @@ impl Browser {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
