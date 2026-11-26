@@ -1,6 +1,6 @@
 //! The detail deck follows a physical source at a fixed centre. Each instance
 //! owns its zoom and may hold a separate position for inspection.
-use super::{Home, Instances, PaneContent, PanelType, Services};
+use super::{Home, Instances, Pane, PaneContent, PaneEvent, PanelType, Services};
 use crate::{
     audio::{PlaybackIdentity, WaveSeekAnchor},
     overview::{self, Surface, Texture, Viewport},
@@ -16,7 +16,9 @@ use gpui_kit::{
     component::{
         Sizable,
         button::{Button, ButtonVariants},
-        h_flex, v_flex,
+        h_flex,
+        menu::{ContextMenuExt, PopupMenuItem},
+        v_flex,
     },
     prelude::*,
     *,
@@ -40,7 +42,9 @@ pub static TYPE: PanelType = PanelType {
     icon: IconName::AudioLines,
     instances: Instances::Multiple,
     home: Home::Main,
-    build: |services, _, window, cx| Rc::new(cx.new(|cx| Waveform::new(services, window, cx))),
+    build: |services, record, window, cx| {
+        Rc::new(cx.new(|cx| Waveform::new(services, record.state(), window, cx)))
+    },
 };
 
 /// The instant a frame's waveform motion shows: the compositor tick that
@@ -249,7 +253,28 @@ impl DeckPosition {
     }
 }
 
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct Settings {
+    show_sample_points: bool,
+}
+
+impl Settings {
+    fn points(self, playing: bool, scrubbing: bool) -> waveform::inspection::SamplePoints {
+        use waveform::inspection::SamplePoints;
+        if self.show_sample_points && !playing && !scrubbing {
+            SamplePoints::Visible
+        } else {
+            SamplePoints::Hidden
+        }
+    }
+}
+
+struct SettingsChanged;
+impl EventEmitter<SettingsChanged> for Waveform {}
+
 struct Waveform {
+    settings: Settings,
     player: Entity<Player>,
     detail: View,
     motion: Motion,
@@ -269,7 +294,12 @@ struct Waveform {
 }
 
 impl Waveform {
-    fn new(services: &Services, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        services: &Services,
+        settings: Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe_window_activation(window, |panel, window, cx| {
             if !window.is_window_active() {
                 panel.cancel_press(window, cx);
@@ -298,6 +328,7 @@ impl Waveform {
         )
         .detach();
         Self {
+            settings,
             player: services.player.clone(),
             detail: services.player.read(cx).wave_view(),
             motion: services.wave_motion.clone(),
@@ -379,6 +410,15 @@ impl Waveform {
             cx.notify();
         }
         self.motion.request(cx.weak_entity(), window);
+    }
+
+    fn points(&self, track: &WaveTrack, cx: &App) -> waveform::inspection::SamplePoints {
+        self.settings.points(
+            track.playing
+                || (self.settings.show_sample_points
+                    && track.position(Instant::now()).is_some_and(|p| p.advancing)),
+            self.player.read(cx).waveform_grabbed(),
+        )
     }
 
     fn prepare(
@@ -513,6 +553,7 @@ impl Waveform {
         };
         #[cfg(windows)]
         {
+            self.texture.set_sample_points(self.points(&track, cx));
             let ready = self
                 .texture
                 .repaint(window, cx, view, &evidence, surface.viewport.first);
@@ -586,6 +627,14 @@ impl PaneContent for Entity<Waveform> {
     fn title(&self, _: &App) -> SharedString {
         "Waveform".into()
     }
+    fn save(&self, cx: &App) -> serde_json::Value {
+        serde_json::to_value(self.read(cx).settings).unwrap_or_default()
+    }
+    fn watch(&self, cx: &mut Context<Pane>) -> Vec<Subscription> {
+        vec![cx.subscribe(self, |_, _, _: &SettingsChanged, cx| {
+            cx.emit(PaneEvent::Changed)
+        })]
+    }
     fn set_presented(&self, presented: bool, cx: &mut App) {
         self.update(cx, |panel, cx| {
             panel.presented = presented;
@@ -647,6 +696,9 @@ impl Render for Waveform {
         let displayed = self.displayed.clone();
         let panel = cx.weak_entity();
         let texture = self.texture.clone();
+        let points = self.points(&track, cx);
+        let shown = self.settings.show_sample_points;
+        let menu_panel = cx.weak_entity();
         let input = self.input_at.take();
         let inspecting = self.position.inspecting.is_some() && !grabbed;
         layout
@@ -717,6 +769,7 @@ impl Render for Waveform {
                                     return;
                                 };
                                 let start = crate::diagnostics::begin_stage();
+                                texture.set_sample_points(points);
                                 #[cfg(windows)]
                                 let ready = texture.paint(
                                     window,
@@ -788,7 +841,54 @@ impl Render for Waveform {
                             }),
                     )
                     .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down)),
+                    .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down))
+                    .context_menu(move |menu, _, _| {
+                        let panel = menu_panel.clone();
+                        menu.item(
+                            PopupMenuItem::new("Show Sample Points")
+                                .checked(shown)
+                                .on_click(move |_, _, cx| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.settings.show_sample_points =
+                                            !panel.settings.show_sample_points;
+                                        cx.emit(SettingsChanged);
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    }),
             )
+    }
+}
+
+#[cfg(test)]
+mod point_tests {
+    use super::Settings;
+    use waveform::inspection::SamplePoints::{Hidden, Visible};
+
+    #[test]
+    fn settings_restore_per_panel_and_gate_transport_transitions() {
+        let other = Settings::default();
+        let restored: Settings =
+            serde_json::from_value(serde_json::json!({"showSamplePoints": true})).unwrap();
+        for (playing, scrubbing, points) in [
+            (false, false, Visible),
+            (true, false, Hidden),
+            (false, true, Hidden),
+            (true, true, Hidden),
+            (false, false, Visible),
+        ] {
+            assert_eq!(restored.points(playing, scrubbing), points);
+            assert_eq!(other.points(playing, scrubbing), Hidden);
+        }
+        assert_eq!(
+            serde_json::to_value(restored).unwrap()["showSamplePoints"],
+            true
+        );
+        assert!(
+            !serde_json::from_str::<Settings>("{}")
+                .unwrap()
+                .show_sample_points
+        );
     }
 }

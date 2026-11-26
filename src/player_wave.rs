@@ -170,7 +170,10 @@ impl Player {
             .transport
             .send(Command::BeginWaveScrub(gesture.clone()), self.status.entry)
         {
-            Ok(()) => self.waveform_scrub = Some(gesture.clone()),
+            Ok(()) => {
+                self.waveform_scrub = Some(gesture.clone());
+                cx.emit(PlayerEvent::WaveChanged);
+            }
             Err(error) => {
                 cx.emit(PlayerEvent::Notice(error.to_string()));
                 return None;
