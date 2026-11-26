@@ -112,6 +112,9 @@ pub(crate) struct Gesture {
     control: Arc<Control>,
     end: AtomicU8,
     closed: AtomicU8,
+    /// The frame the transport stopped at when it took the gesture, as
+    /// `f64` bits, or `u64::MAX` until then.
+    held: std::sync::atomic::AtomicU64,
 }
 
 impl Gesture {
@@ -132,7 +135,25 @@ impl Gesture {
             control,
             end: AtomicU8::new(0),
             closed: AtomicU8::new(0),
+            held: std::sync::atomic::AtomicU64::new(u64::MAX),
         }
+    }
+
+    /// Where the transport holds the recording: the gesture's grip. The
+    /// waveform moves relative to it, so the first movement continues from
+    /// the frame that stopped rather than the one shown at the press.
+    pub(crate) fn held(&self) -> Option<f64> {
+        let bits = self.held.load(Acquire);
+        (bits != u64::MAX).then(|| f64::from_bits(bits))
+    }
+
+    pub(super) fn hold_at(&self, frame: f64) {
+        self.held.store(frame.to_bits(), Release);
+    }
+
+    /// Whether the pointer has moved the recording since the press.
+    pub(crate) fn moved(&self) -> bool {
+        self.frame().is_some()
     }
 
     /// Navigates the program's chapters regardless of the queue sequence.

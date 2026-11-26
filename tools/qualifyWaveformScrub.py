@@ -1,4 +1,8 @@
-"""Exercise waveform grabs with a synthetic CUE on a muted private desktop."""
+"""Exercise waveform grabs with a synthetic CUE on a muted private desktop.
+
+A press on the detailed waveform holds the recording at once, wherever it
+lands, and moving the pointer turns it relative to that grip. A press that
+does not move never seeks, and releasing it continues the paused voice."""
 import argparse
 from array import array
 import csv
@@ -107,13 +111,17 @@ def measure(args):
             click("Pause")
             control_centers(hwnd, ["Play"])
 
-            # Stationary click uses the displayed transform. It never opens an audition.
+            # A stationary press holds at the playhead and never seeks to the
+            # position under the pointer.
             before_click = source_frame(stage("wave_playhead")[-1])
             stationary = performance_counter()
             mouse(0x201, 0.72, down=True)
+            time.sleep(0.25)
             mouse(0x202, 0.72)
-            wait_for(lambda: stage("wave_deck_paint", stationary), "the paused deck to repaint")
-            assert not stage("wave_scrub_begin", stationary), "Stationary click started an audition"
+            still_origin, still_end = finish(stationary)
+            assert abs(still_origin - before_click) <= 1, (before_click, still_origin)
+            assert abs(still_origin - still_end) <= 0.5, (still_origin, still_end)
+            assert abs(source_frame(stage("wave_playhead")[-1]) - before_click) <= 1, "A stationary press moved the recording"
 
             paused = performance_counter()
             mouse(0x201, 0.79, down=True)
@@ -123,7 +131,7 @@ def measure(args):
             time.sleep(0.10)
             mouse(0x202, 0.21)
             paused_origin, paused_end = finish(paused)
-            assert paused_origin > before_click + 4_800, (before_click, paused_origin)
+            assert abs(paused_origin - before_click) <= 1, (before_click, paused_origin)
             assert paused_origin < boundary <= paused_end, (paused_origin, boundary, paused_end)
             control_centers(hwnd, ["Play"])
 
@@ -139,6 +147,7 @@ def measure(args):
             canceled_origin, canceled_end = finish(escaped)
             mouse(0x202, 0.72)
             assert abs(canceled_origin - canceled_end) <= 0.5, (canceled_origin, canceled_end)
+            assert stage("wave_scrub_resume", escaped), "Escape reopened the transport"
             control_centers(hwnd, ["Pause"])
 
             playing = performance_counter()
@@ -147,6 +156,19 @@ def measure(args):
             mouse(0x202, 0.82)
             playing_origin, playing_end = finish(playing)
             assert playing_end < playing_origin, (playing_origin, playing_end)
+            control_centers(hwnd, ["Pause"])
+
+            # Holding still stops the recording; releasing continues the same
+            # voice from where it stopped.
+            held = performance_counter()
+            mouse(0x201, 0.60, down=True)
+            time.sleep(0.4)
+            mouse(0x202, 0.60)
+            held_origin, held_end = finish(held)
+            assert abs(held_origin - held_end) <= 0.5, (held_origin, held_end)
+            assert stage("wave_scrub_resume", held), "A stationary hold reopened the transport"
+            time.sleep(0.3)
+            assert source_frame(stage("wave_playhead")[-1]) > held_end, "Playback did not continue after the hold"
             control_centers(hwnd, ["Pause"])
 
             click("Pause")
@@ -218,9 +240,13 @@ def measure(args):
             assert total("scrub_rendered_movements") > 100, "Too few PCM movements rendered"
             assert analysis_pages > 0, "No waveform analysis completed in an audio render interval"
             assert all(total(field) == 0 for field in ("decode_errors", "device_errors", "wave_gpu_errors"))
-            assert total("opens") == total("voices") == 4, "Unexpected normal voice reopen during a gesture"
+            # The first play, Play after the paused release, and the moved
+            # release while playing. Holds that never moved reopened nothing.
+            assert total("opens") == total("voices") == 3, "Unexpected normal voice reopen during a gesture"
             assert total("scrub_decoder_opens") == 1, "Scrubbing reopened the physical source"
-            report = dict(paused_cue_crossing=[paused_origin, paused_end],
+            report = dict(stationary_paused=[still_origin, still_end],
+                          stationary_playing=[held_origin, held_end],
+                          paused_cue_crossing=[paused_origin, paused_end],
                           escape_restored=[canceled_origin, canceled_end],
                           playing_reverse_release=[playing_origin, playing_end],
                           sample_zoom=[deep_origin, deep_end], visual_inputs=len(inputs),

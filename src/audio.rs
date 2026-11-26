@@ -184,10 +184,6 @@ pub enum Command {
     Seek(f64),
     /// Seek to a time in seconds within the current track.
     SeekTo(f64),
-    SeekWave {
-        anchor: WaveSeekAnchor,
-        frame: usize,
-    },
     BeginWaveScrub(Arc<scrub::Gesture>),
     SeekProgram(Box<ProgramSeek>),
     Step(i8),
@@ -251,9 +247,6 @@ impl Pending {
                     Command::Seek(_) | Command::SeekTo(_)
                 )
         ) || matches!((&self.command, &old.command), (
-            Command::SeekWave { anchor, .. }, Command::SeekWave { anchor: previous, .. }
-        ) if anchor == previous)
-            || matches!((&self.command, &old.command), (
             Command::SeekProgram(seek), Command::SeekProgram(previous)
         ) if seek.origin == previous.origin && seek.program == previous.program);
         replace && self.entry == old.entry
@@ -261,10 +254,7 @@ impl Pending {
     fn applies_to(&self, entry: Option<u64>) -> bool {
         !matches!(
             self.command,
-            Command::Seek(_)
-                | Command::SeekTo(_)
-                | Command::SeekProgram(_)
-                | Command::SeekWave { .. }
+            Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_)
         ) || self.entry == entry
     }
 }
@@ -1518,10 +1508,7 @@ impl Engine {
                     self.status.playing = on;
                     return Ok(());
                 }
-                Command::Seek(_)
-                | Command::SeekTo(_)
-                | Command::SeekProgram(_)
-                | Command::SeekWave { .. } => return Ok(()),
+                Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_) => return Ok(()),
                 _ => {}
             }
         }
@@ -1530,10 +1517,7 @@ impl Engine {
             && self.voice.is_some()
             && !matches!(
                 &c,
-                Command::Seek(_)
-                    | Command::SeekTo(_)
-                    | Command::SeekProgram(_)
-                    | Command::SeekWave { .. }
+                Command::Seek(_) | Command::SeekTo(_) | Command::SeekProgram(_)
             )
         {
             let position = self.credit_output();
@@ -1639,29 +1623,6 @@ impl Engine {
                 self.seek_to(position)?;
             }
             Command::SeekTo(position) => self.seek_to(position)?,
-            Command::SeekWave { anchor, frame } => {
-                if self.accepts_wave_seek(&anchor, frame) {
-                    // The backend may already have reached the next chapter
-                    // while the transport or the file checks were pending.
-                    let at_end = if self.voice.is_some() {
-                        let position = self.credit_output();
-                        self.update_position(position.min(self.limit));
-                        self.status.playing && position >= self.limit
-                    } else {
-                        false
-                    };
-                    if !at_end
-                        && self.status.playback_identity() == Some(anchor.identity)
-                        && self.queue.revision == anchor.identity.queue
-                    {
-                        let rate = f64::from(anchor.source.rate);
-                        if !self.status.playing {
-                            self.status.duration = anchor.playable.len() as f64 / rate;
-                        }
-                        self.seek_position((frame - anchor.playable.start) as f64 / rate)?;
-                    }
-                }
-            }
             Command::SeekProgram(seek) => self.seek_program(&seek)?,
             Command::PlayNext(tracks) => {
                 self.queue.play_next(&tracks);
@@ -1868,6 +1829,14 @@ impl Engine {
             return Ok(());
         }
         self.pause();
+        let held = (gesture.anchor.playable.start as f64
+            + (self.status.position * f64::from(gesture.anchor.source.rate)).round())
+        .clamp(gesture.bounds.start as f64, (gesture.bounds.end - 1) as f64);
+        gesture.hold_at(if self.voice.is_some() {
+            held
+        } else {
+            gesture.origin
+        });
         if let Some(output) = &mut self.scrub_output {
             output.start(&gesture, self.volume);
         }
@@ -1879,7 +1848,7 @@ impl Engine {
         crate::diagnostics::stage(
             crate::diagnostics::begin_stage(),
             "wave_scrub_begin",
-            gesture.origin.to_bits(),
+            gesture.held().unwrap_or(gesture.origin).to_bits(),
             gesture.id,
         );
         self.scrubbing = Some(ActiveScrub {
@@ -1937,7 +1906,22 @@ impl Engine {
                 }
                 return Ok(());
             }
-            if ending == Some(scrub::End::Release) && !failed {
+            // A hold the pointer never moved, or one that was canceled,
+            // continues the voice it paused: no seek and no new voice.
+            let moved = gesture.moved() && ending == Some(scrub::End::Release) && !failed;
+            if !moved && gesture.was_playing && self.voice.is_some() {
+                self.resume()?;
+                let held = gesture.held().unwrap_or(gesture.origin);
+                crate::diagnostics::stage(
+                    crate::diagnostics::begin_stage(),
+                    "wave_scrub_resume",
+                    held.to_bits(),
+                    gesture.id,
+                );
+                Self::trace_scrub_end(&gesture, held.round() as usize);
+                return Ok(());
+            }
+            if moved {
                 return self.finish_wave_scrub(&gesture, frame);
             }
             if gesture.was_playing {

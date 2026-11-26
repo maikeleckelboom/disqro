@@ -157,6 +157,14 @@ pub struct Player {
     drawn_position: f64,
     /// Whether the compact waveform moves its playhead by itself.
     cursor_retained: Rc<Cell<bool>>,
+    /// The reachable frames of the shown chapter, by what they depend on.
+    #[allow(clippy::type_complexity)]
+    navigable: std::cell::RefCell<
+        Option<(
+            (usize, usize, bool, u64, Option<usize>),
+            std::ops::Range<usize>,
+        )>,
+    >,
     /// Whether the trailing sidebar, home of Queue and History, is shown.
     /// The workspace keeps it current for the player's Queue button.
     pub queue_shown: bool,
@@ -229,6 +237,7 @@ impl Player {
             visible: true,
             drawn_position: 0.,
             cursor_retained,
+            navigable: Default::default(),
             queue_shown: true,
         }
     }

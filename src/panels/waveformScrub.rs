@@ -2,17 +2,18 @@
 use super::*;
 use crate::audio::scrub::{End as ScrubEnd, Gesture};
 
-const DRAG_THRESHOLD_PX: f64 = 4.;
-
+/// A press on the detailed waveform: a grip on the recording itself. It
+/// holds playback at once, wherever the waveform is grabbed, and moving the
+/// pointer turns the recording relative to that grip. It never seeks to the
+/// position under the pointer.
 pub(super) struct Press {
-    anchor: WaveSeekAnchor,
-    origin: f64,
-    was_playing: bool,
     scale: f32,
     down: Point<Pixels>,
+    /// The frame the grip holds, which the pointer's travel moves from.
     centre: f64,
+    /// Whether `centre` is the frame the transport actually stopped at.
+    gripped: bool,
     frames_per_pixel: f64,
-    click: Option<usize>,
     previous: f64,
     at: Instant,
     gesture: Option<Arc<Gesture>>,
@@ -21,12 +22,8 @@ pub(super) struct Press {
 }
 
 impl Press {
-    fn delta(&self, position: Pixels, origin: Pixels) -> f64 {
-        f64::from(f32::from(position - origin)) * f64::from(self.scale)
-    }
-
     fn travel(&self, position: Point<Pixels>) -> f64 {
-        self.delta(position.x, self.down.x)
+        f64::from(f32::from(position.x - self.down.x)) * f64::from(self.scale)
     }
 }
 
@@ -104,22 +101,31 @@ impl Waveform {
             let width = f64::from(f32::from(shown.layout.bounds.size.width) * scale)
                 .round()
                 .max(1.);
-            let centre = shown.viewport.frame_at(0.5);
+            let (anchor, was_playing) = (shown.anchor.clone(), track.playing);
+            let frames_per_pixel = shown.viewport.span / width;
+            // Hold at once, anchored to the playing frame rather than the
+            // one under the pointer.
+            let Some(gesture) = self.player.update(cx, |player, cx| {
+                player.begin_waveform_scrub(anchor, origin, was_playing, cx)
+            }) else {
+                return;
+            };
             self.press = Some(Press {
-                anchor: shown.anchor.clone(),
-                origin,
-                was_playing: track.playing,
                 scale,
                 down: event.position,
-                centre,
-                frames_per_pixel: shown.viewport.span / width,
-                click: shown.seek(event.position.x).map(|(_, frame)| frame),
-                previous: centre,
+                centre: origin,
+                gripped: false,
+                frames_per_pixel,
+                previous: origin,
                 at,
-                gesture: None,
+                gesture: Some(gesture),
                 #[cfg(windows)]
                 _hover_pause: gpui_windows_gpu::pause_hover_during_capture(window),
             });
+            if self.position.inspecting.is_some() {
+                cx.notify();
+            }
+            self.motion.request(cx.weak_entity(), window);
         }
         self.focus.focus(window, cx);
         cx.stop_propagation();
@@ -168,36 +174,23 @@ impl Waveform {
             return;
         }
         let travel = press.travel(position);
-        if travel.hypot(press.delta(position.y, press.down.y)) >= DRAG_THRESHOLD_PX {
-            press.click = None;
+        let Some(gesture) = press.gesture.clone() else {
+            self.cancel_press(window, cx);
+            return;
+        };
+        // Turn from the frame the transport stopped at once it is known, so
+        // the first movement never jumps back to the frame shown at the press.
+        let starting = !press.gripped;
+        if starting && let Some(held) = gesture.held() {
+            press.centre = held;
+            press.previous = held;
+            press.gripped = true;
         }
-        let starting = press.gesture.is_none();
-        if starting {
-            if travel.abs() < DRAG_THRESHOLD_PX {
-                return;
-            }
-            press.gesture = self.player.update(cx, |player, cx| {
-                player.begin_waveform_scrub(
-                    press.anchor.clone(),
-                    press.origin,
-                    press.was_playing,
-                    cx,
-                )
-            });
-            if press.gesture.is_none() {
-                self.cancel_press(window, cx);
-                return;
-            }
-            if self.position.inspecting.is_some() {
-                cx.notify();
-            }
-        }
-        let gesture = press.gesture.as_ref().unwrap();
         let clamp =
             |frame: f64| frame.clamp(gesture.bounds.start as f64, (gesture.bounds.end - 1) as f64);
         let target = clamp(press.centre - travel * press.frames_per_pixel);
         let previous = clamp(press.previous);
-        if target == previous && !starting {
+        if target == previous {
             return;
         }
         let now = Instant::now();
@@ -220,15 +213,10 @@ impl Waveform {
             return;
         };
         self.capture_watch = None;
+        // Releasing resumes playback when it was playing and leaves it paused
+        // otherwise. A press that never moved continues where it held.
         if let Some(gesture) = &press.gesture {
             gesture.finish(ScrubEnd::Release);
-            self.position.inspecting = None;
-            cx.notify();
-        } else if let Some(frame) = press.click
-            && self.player.update(cx, |player, cx| {
-                player.seek_wave_track(press.anchor.clone(), frame, cx)
-            })
-        {
             self.position.inspecting = None;
             cx.notify();
         }

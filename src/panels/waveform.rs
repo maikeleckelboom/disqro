@@ -240,19 +240,8 @@ impl Layout {
 
 struct Displayed {
     anchor: WaveSeekAnchor,
-    navigable: std::ops::Range<usize>,
     viewport: Viewport,
     layout: Layout,
-}
-
-impl Displayed {
-    fn seek(&self, x: Pixels) -> Option<(WaveSeekAnchor, usize)> {
-        let frame = self.viewport.frame_at(self.layout.fraction(x)).round();
-        if frame < 0. || !self.navigable.contains(&(frame as usize)) {
-            return None;
-        }
-        Some((self.anchor.clone(), frame as usize))
-    }
 }
 
 struct DeckPosition {
@@ -534,12 +523,20 @@ impl Waveform {
         )
     }
 
+    /// What the deck draws: only the frames a playhead can reach, so audio
+    /// of the source beyond them is never shown as if it played next. The
+    /// surface's viewport counts from their start.
     fn surface(&self, track: &WaveTrack) -> Surface {
+        let reach = track.navigable.clone();
+        let viewport = self.position.viewport;
         Surface {
             role: Role::Detail,
             rate: track.source.rate,
-            playable: 0..track.source.frames,
-            viewport: self.position.viewport,
+            viewport: waveform::Viewport {
+                first: viewport.first - reach.start as f64,
+                ..viewport
+            },
+            playable: reach,
         }
     }
 
@@ -549,10 +546,13 @@ impl Waveform {
         surface: &Surface,
         view: Option<&waveform::View>,
     ) -> (overview::Evidence, Coverage) {
-        let viewport = surface.viewport;
+        // Evidence is read for the reachable frames only, counted from their
+        // start, as the surface draws them.
+        let reach = surface.playable.clone();
+        let viewport = self.position.viewport;
         let mut evidence = overview::Evidence {
             overview: Some(track.overview.clone()),
-            overview_start: track.range.start,
+            overview_start: track.range.start.saturating_sub(reach.start),
             ..Default::default()
         };
         let Some(view) = view else {
@@ -576,8 +576,8 @@ impl Waveform {
                 waveform::planning::residency(
                     rate,
                     waveform::FrameRange {
-                        start: 0,
-                        end: track.source.frames as u64,
+                        start: reach.start as u64,
+                        end: reach.end as u64,
                     },
                     view.required_range(),
                     viewport,
@@ -686,8 +686,8 @@ impl Waveform {
                 crate::diagnostics::stage(
                     crate::diagnostics::begin_stage(),
                     "wave_playhead",
-                    surface.viewport.frame_at(0.5).to_bits(),
-                    surface.viewport.span.to_bits(),
+                    self.position.viewport.frame_at(0.5).to_bits(),
+                    self.position.viewport.span.to_bits(),
                 );
                 // The continuous device origin this retained draw shows.
                 crate::diagnostics::stage(
@@ -700,14 +700,13 @@ impl Waveform {
                     crate::diagnostics::stage(
                         crate::diagnostics::begin_stage(),
                         "wave_scrub_draw",
-                        surface.viewport.frame_at(0.5).to_bits(),
+                        self.position.viewport.frame_at(0.5).to_bits(),
                         cx.entity_id().as_u64(),
                     );
                 }
                 *self.displayed.borrow_mut() = track.seek.map(|anchor| Displayed {
                     anchor,
-                    navigable: track.navigable.clone(),
-                    viewport: surface.viewport,
+                    viewport: self.position.viewport,
                     layout: Layout { bounds, ..layout },
                 });
             }
@@ -796,6 +795,7 @@ impl Render for Waveform {
             .update(&track, frame_time(Instant::now()), grabbed);
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let surface = self.surface(&track);
+        let shown = self.position.viewport;
         let target = self
             .layout
             .get()
@@ -1003,8 +1003,8 @@ impl Render for Waveform {
                                         crate::diagnostics::stage(
                                             start,
                                             "wave_scene_playhead",
-                                            surface.viewport.frame_at(0.5).to_bits(),
-                                            surface.viewport.span.to_bits(),
+                                            shown.frame_at(0.5).to_bits(),
+                                            shown.span.to_bits(),
                                         );
                                         if start.is_some() {
                                             // Client coordinates of the zoom control for private qualification.
@@ -1058,8 +1058,7 @@ impl Render for Waveform {
                                 *displayed.borrow_mut() = if ready {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
-                                        navigable: track.navigable.clone(),
-                                        viewport: surface.viewport,
+                                        viewport: shown,
                                         layout: Layout {
                                             bounds: target,
                                             scale,

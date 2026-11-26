@@ -1729,22 +1729,19 @@ fn waveform_seek_rejects_rapid_obsolete_gestures_and_file_replacements() {
             sheet: program.sheet.clone(),
         }
     };
-    let command = |anchor, frame| Command::SeekWave { anchor, frame };
     let initial = anchor(&engine, 0);
-    engine.command(command(initial.clone(), 24_000)).unwrap();
+    release_hold(&mut engine, initial.clone(), 24_000);
     assert_eq!(engine.status.position, 0.5);
-    engine.command(command(initial, 12_000)).unwrap();
+    release_hold(&mut engine, initial, 12_000);
     assert_eq!(engine.status.position, 0.5);
     let before_edit = anchor(&engine, 0);
     engine.queue.clear_upcoming();
-    engine
-        .command(command(before_edit.clone(), 12_000))
-        .unwrap();
+    release_hold(&mut engine, before_edit.clone(), 12_000);
     assert_eq!(engine.status.position, 0.5);
     engine.queue.replace(tracks.into(), 1);
     engine.select(Some(1), 0.);
     engine.refresh_flags();
-    engine.command(command(before_edit, 12_000)).unwrap();
+    release_hold(&mut engine, before_edit, 12_000);
     let next = anchor(&engine, 1);
     let start = next.playable.start;
     assert!(engine.accepts_wave_seek(&next, start));
@@ -1766,8 +1763,137 @@ fn waveform_seek_rejects_rapid_obsolete_gestures_and_file_replacements() {
     replaced.sheet = crate::cache::Revision::read(&sheet).map(|revision| (sheet, revision));
     assert!(engine.accepts_wave_seek(&replaced, start));
     fixture(&path, 48_000, 96_003);
-    engine.command(command(replaced, start + 4_800)).unwrap();
+    release_hold(&mut engine, replaced, start + 4_800);
     assert_eq!(engine.status.position, 0.0);
+}
+
+/// Grips the waveform at the start of `anchor`'s chapter, moves the
+/// recording to `frame` and releases, as a press on the detailed waveform
+/// does. The transport checks the gesture before it moves anything.
+fn release_hold(engine: &mut Engine, anchor: WaveSeekAnchor, frame: usize) {
+    let bounds = scrub_run(&engine.queue, &anchor.source)
+        .map_or_else(|| anchor.playable.clone(), |(_, bounds)| bounds);
+    let origin = anchor.playable.start as f64;
+    let gesture = Arc::new(scrub::Gesture::new(
+        engine.scrub_control.clone(),
+        anchor,
+        origin,
+        engine.status.playing,
+        bounds,
+    ));
+    gesture.move_to(frame as f64, origin, 1., Instant::now());
+    gesture.finish(scrub::End::Release);
+    engine
+        .command(Command::BeginWaveScrub(gesture.clone()))
+        .unwrap();
+    assert!(gesture.closed());
+}
+
+#[test]
+fn a_stationary_hold_resumes_the_voice_it_paused_without_a_seek() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("disc.wav");
+    let sheet = dir.path().join("disc.cue");
+    fixture(&path, 48_000, 96_000);
+    std::fs::write(
+        &sheet,
+        "FILE disc.wav WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 00:01:00",
+    )
+    .unwrap();
+    let tracks: crate::library::TrackList = crate::cue::read(&sheet)
+        .unwrap()
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    let program =
+        crate::timeline::Program::resolve(&tracks[0], DiscContext::Selected, None).unwrap();
+    let mut engine = Engine::default();
+    engine.queue.replace(tracks.into(), 0);
+    engine.select(Some(0), 0.);
+    engine.refresh_flags();
+    engine.status.playing = true;
+    engine.status.duration = 1.;
+    engine.group = vec![
+        Chapter {
+            id: engine.queue.entries[0].id,
+            offset: 0.,
+        },
+        Chapter {
+            id: engine.queue.entries[1].id,
+            offset: 1.,
+        },
+    ];
+    engine.limit = 2.;
+    let state = Arc::new(OutputState {
+        cursor: AtomicUsize::new(12_000),
+        state: AtomicU8::new(PlaybackState::Playing as u8),
+        ..OutputState::default()
+    });
+    engine.voice = Some(OutputVoice {
+        state: state.clone(),
+        rate: 48_000.,
+        clock: Arc::new(clock::Clock::new(0)),
+        #[cfg(all(windows, feature = "qualification"))]
+        trace: None,
+    });
+    let segment = &program.segments[0];
+    let grip = |engine: &Engine, origin: f64, playing: bool| {
+        let (_, bounds) = scrub_run(&engine.queue, &segment.source).unwrap();
+        Arc::new(scrub::Gesture::new(
+            engine.scrub_control.clone(),
+            WaveSeekAnchor {
+                identity: engine.status.playback_identity().unwrap(),
+                source: segment.source.clone(),
+                playable: segment.frames.clone(),
+                sheet: program.sheet.clone(),
+            },
+            origin,
+            playing,
+            bounds,
+        ))
+    };
+    let (seeks, entry) = (engine.status.seek_revision, engine.status.entry);
+
+    // Pressed and released without moving: the paused voice continues.
+    let still = grip(&engine, 11_990., true);
+    still.finish(scrub::End::Release);
+    engine
+        .command(Command::BeginWaveScrub(still.clone()))
+        .unwrap();
+    assert!(still.closed());
+    // The grip is the frame the transport stopped at, not the one shown.
+    assert_eq!(still.held(), Some(12_000.));
+    assert!(engine.status.playing);
+    assert!(Arc::ptr_eq(&engine.voice.as_ref().unwrap().state, &state));
+    assert_eq!(state.command.load(Ordering::Acquire), RESUME);
+    assert_eq!(
+        (engine.status.seek_revision, engine.status.entry),
+        (seeks, entry)
+    );
+
+    // Escape during a hold also continues the same voice.
+    let canceled = grip(&engine, 12_000., true);
+    canceled.move_to(30_000., 12_000., 1_000., Instant::now());
+    canceled.finish(scrub::End::Cancel);
+    engine
+        .command(Command::BeginWaveScrub(canceled.clone()))
+        .unwrap();
+    assert!(canceled.closed() && engine.status.playing);
+    assert!(Arc::ptr_eq(&engine.voice.as_ref().unwrap().state, &state));
+    assert_eq!(engine.status.seek_revision, seeks);
+
+    // Paused, a stationary hold changes nothing at all.
+    engine.command(Command::SetPlaying(false)).unwrap();
+    engine.refresh_flags();
+    let position = engine.status.position;
+    let paused = grip(&engine, 12_000., false);
+    paused.finish(scrub::End::Release);
+    engine
+        .command(Command::BeginWaveScrub(paused.clone()))
+        .unwrap();
+    assert!(paused.closed() && !engine.status.playing);
+    assert_eq!(engine.status.position, position);
+    assert_eq!(engine.status.seek_revision, seeks);
 }
 
 #[test]
@@ -1821,12 +1947,8 @@ fn guarded_seek_checks_the_rendered_cue_boundary_before_the_next_transport_tick(
         playable: program.segments[0].frames.clone(),
         sheet: program.sheet.clone(),
     };
-    engine
-        .command(Command::SeekWave {
-            anchor,
-            frame: 12_000,
-        })
-        .unwrap();
+    // The voice already reached the next chapter: the hold is refused.
+    release_hold(&mut engine, anchor, 12_000);
     assert_eq!(engine.status.entry, Some(engine.queue.entries[1].id));
     assert!((engine.status.position - 0.01).abs() < 1e-9);
     assert!(engine.voice.is_some() && engine.device.is_none());
