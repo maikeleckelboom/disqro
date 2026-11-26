@@ -50,6 +50,8 @@ origin, paces frames on the Windows 11 compositor clock, and no longer draws
 44.1 kHz display cells without source frames as silence.
 [Continuous waveform motion](waveform-continuous-motion.md)
 
+[Playback presentation timing and foreground capture](playback-presentation.md)
+
 ## Derived data
 
 Encoded evidence moved from `wave_evidence_v3` to `wave_evidence_v4`. The
