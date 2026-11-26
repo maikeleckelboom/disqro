@@ -381,7 +381,7 @@ impl LibraryPanel {
             location.as_ref(),
             (
                 "Add Music Folder…",
-                IconName::FolderPlus,
+                IconName::Plus,
                 crate::workspace::AddMusicFolder,
             ),
             cx,
