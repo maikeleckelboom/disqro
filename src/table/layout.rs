@@ -7,6 +7,7 @@ pub enum ContextKind {
     Mixed,
     Playlist,
     Shelf,
+    Tree,
 }
 
 pub(crate) const SHELF_FIELDS: &[Field] = &[
@@ -15,6 +16,19 @@ pub(crate) const SHELF_FIELDS: &[Field] = &[
     Field::Count,
     Field::Length,
     Field::Format,
+    Field::Path,
+];
+
+pub(crate) const TREE_FIELDS: &[Field] = &[
+    Field::Title,
+    Field::Number,
+    Field::Artist,
+    Field::Album,
+    Field::Length,
+    Field::Format,
+    Field::Year,
+    Field::Disc,
+    Field::Count,
     Field::Path,
 ];
 
@@ -70,9 +84,13 @@ impl Layout {
         let fields: &[Field] = match context {
             ContextKind::Disc => &[Number, Title, Artist, Length, Favorite],
             ContextKind::Shelf => SHELF_FIELDS,
+            ContextKind::Tree => &[Title, Artist, Count, Length, Format],
             _ => &[Cover, Title, Artist, Album, Length, Favorite],
         };
         let mut layout = Self::for_fields(fields);
+        if context == ContextKind::Tree {
+            layout.columns[0].width = 300.;
+        }
         if context == ContextKind::Shelf {
             layout.columns[0].width = 290.;
             layout.columns[5].width = 230.;
@@ -340,11 +358,17 @@ pub struct Layouts {
     playlist: Layout,
     #[serde(default = "shelf_layout")]
     pub(crate) shelf: Layout,
+    #[serde(default = "tree_layout")]
+    pub(crate) tree: Layout,
 }
 
 fn shelf_layout() -> Layout {
     Layout::new(ContextKind::Shelf)
 }
+fn tree_layout() -> Layout {
+    Layout::new(ContextKind::Tree)
+}
+
 impl Default for Layouts {
     fn default() -> Self {
         Self {
@@ -353,6 +377,7 @@ impl Default for Layouts {
             mixed: Layout::new(ContextKind::Mixed),
             playlist: Layout::new(ContextKind::Playlist),
             shelf: shelf_layout(),
+            tree: tree_layout(),
         }
     }
 }
@@ -363,6 +388,7 @@ impl Layouts {
             ContextKind::Mixed => &self.mixed,
             ContextKind::Playlist => &self.playlist,
             ContextKind::Shelf => &self.shelf,
+            ContextKind::Tree => &self.tree,
         }
     }
     pub(super) fn get_mut(&mut self, context: ContextKind) -> &mut Layout {
@@ -371,6 +397,7 @@ impl Layouts {
             ContextKind::Mixed => &mut self.mixed,
             ContextKind::Playlist => &mut self.playlist,
             ContextKind::Shelf => &mut self.shelf,
+            ContextKind::Tree => &mut self.tree,
         }
     }
 
@@ -381,14 +408,15 @@ impl Layouts {
             ContextKind::Mixed,
             ContextKind::Playlist,
             ContextKind::Shelf,
+            ContextKind::Tree,
         ] {
             let layout = self.get_mut(context);
             let mut seen = Vec::new();
             let mut valid = |c: &mut LayoutColumn| {
-                let allowed = if context == ContextKind::Shelf {
-                    SHELF_FIELDS
-                } else {
-                    &Field::ALL
+                let allowed = match context {
+                    ContextKind::Shelf => SHELF_FIELDS,
+                    ContextKind::Tree => TREE_FIELDS,
+                    _ => &Field::ALL,
                 };
                 if !allowed.contains(&c.field) || seen.contains(&c.field) {
                     return false;
@@ -413,7 +441,10 @@ impl Layouts {
             if let Some(artwork) = layout.artwork.take() {
                 layout.show_cover(artwork);
             }
-            if context != ContextKind::Shelf && version == 0 && !seen.contains(&Field::Favorite) {
+            if !matches!(context, ContextKind::Shelf | ContextKind::Tree)
+                && version == 0
+                && !seen.contains(&Field::Favorite)
+            {
                 layout.columns.push(LayoutColumn::new(Field::Favorite));
             }
             layout.normalize();

@@ -515,6 +515,32 @@ impl Discs {
             .collect()
     }
 }
+/// Reconcile releases from indexed candidates belonging to this branch.
+pub(crate) fn tree_releases(discs: &mut [Arc<Disc>]) {
+    let candidates = discs
+        .iter()
+        .map(|d| crate::release::Candidate {
+            folder: &d.folder,
+            title: &d.title,
+            number: d.number,
+        })
+        .collect::<Vec<_>>();
+    let releases = crate::release::releases(&candidates);
+    for release in releases {
+        let key = discs[release.discs[0]].id.clone();
+        for (i, (at, subtitle)) in release.discs.into_iter().zip(release.subtitles).enumerate() {
+            Arc::get_mut(&mut discs[at])
+                .expect("fresh projection")
+                .release = Some(Arc::new(Membership {
+                key: key.clone(),
+                title: release.title.clone(),
+                number: i as u32 + 1,
+                subtitle,
+            }));
+        }
+    }
+}
+
 impl Disc {
     fn add(&mut self, t: &Arc<Track>) {
         self.tracks.push(t.clone());
@@ -701,7 +727,7 @@ impl Disc {
     pub fn duration(&self) -> f64 {
         self.duration
     }
-    fn label(&self, field: Field) -> String {
+    pub(crate) fn label(&self, field: Field) -> String {
         let member = self.member_label();
         match field {
             Field::Title => match &member {
@@ -725,7 +751,7 @@ impl Disc {
     }
 }
 impl Release {
-    fn label(&self, field: Field) -> String {
+    pub(crate) fn label(&self, field: Field) -> String {
         match field {
             Field::Title => self.title.clone(),
             Field::Year => self.year.map(|v| v.to_string()).unwrap_or_default(),
@@ -738,7 +764,7 @@ impl Release {
     }
 }
 impl Shelf {
-    fn label(&self, field: Field) -> String {
+    pub(crate) fn label(&self, field: Field) -> String {
         match self {
             Self::Disc(d) => d.label(field),
             Self::Release(r) => r.label(field),

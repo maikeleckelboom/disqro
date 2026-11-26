@@ -331,6 +331,48 @@ fn scan_into(
     }
 }
 
+pub(crate) struct FolderBranch {
+    pub dirs: Vec<PathBuf>,
+    pub programs: Vec<Arc<crate::collection::Disc>>,
+    pub unreadable: HashSet<PathBuf>,
+}
+
+pub(crate) fn tree_folder(folder: &Path, alive: &dyn Fn() -> bool) -> anyhow::Result<FolderBranch> {
+    let cache =
+        crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
+    let mut dirs = None;
+    let mut notice = None;
+    let mut rows = Vec::new();
+    let mut covers = HashMap::new();
+    let mut unreadable = HashSet::new();
+    scan_into(folder, false, cache.as_ref(), alive, &mut |batch| {
+        if let Some(root) = batch.root {
+            dirs = Some(root.dirs);
+        }
+        notice = notice.take().or(batch.notice);
+        covers.extend(batch.covers);
+        unreadable.extend(batch.unreadable);
+        for (index, track) in batch.rows {
+            if index == rows.len() {
+                rows.push(track);
+            } else {
+                rows[index] = track;
+            }
+        }
+        alive()
+    });
+    anyhow::ensure!(alive(), crate::store::Cancelled);
+    let dirs = dirs.ok_or_else(|| {
+        anyhow::anyhow!(notice.unwrap_or_else(|| "The folder is unavailable.".into()))
+    })?;
+    let programs = crate::collection::Discs::group(rows.iter().flatten(), &covers, folder);
+    Ok(FolderBranch {
+        dirs,
+        programs,
+        unreadable,
+    })
+}
+
 pub fn folder_tracks(
     folder: &Path,
     recursive: bool,

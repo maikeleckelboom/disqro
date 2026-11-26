@@ -9,7 +9,11 @@ use super::{AlbumId, PlaylistId, RootId, Row, Store, TrackId};
 use crate::library::{DiscTrack, Track};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, ToSql, params, params_from_iter};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
@@ -174,6 +178,7 @@ pub struct AlbumRow {
     pub year: Option<u32>,
     pub disc_number: Option<u32>,
     /// The folder, relative to its collection.
+    pub authored: bool,
     pub folder: PathBuf,
     pub cover: Option<PathBuf>,
     /// A CUE program whose chapters all use the same audio image.
@@ -204,12 +209,19 @@ pub struct AlbumStructure {
     pub release: Option<AlbumRelease>,
 }
 
+pub(crate) struct IndexedBranch {
+    pub dirs: Vec<PathBuf>,
+    pub programs: Vec<AlbumRow>,
+    pub loose: Vec<Arc<Track>>,
+}
+
 /// Which discs an album query reads.
 #[derive(Clone)]
 enum Albums<'a> {
     Disc(AlbumId),
     Root(Option<RootId>),
     CollectionFolder(RootId),
+    TreeFolders(RootId, &'a [PathBuf]),
     Release(&'a ReleaseContents),
 }
 
@@ -829,6 +841,90 @@ impl Store {
         Ok(out)
     }
 
+    /// Only the immediate indexed children and the musical programs owned by
+    /// this directory. Named CD siblings can form a release when the catalog
+    /// confirms they account for every program under the directory.
+    pub(crate) fn tree_folder(
+        &self,
+        root: RootId,
+        path: &Path,
+        limit: usize,
+    ) -> Result<IndexedBranch> {
+        let snapshot = self.db.unchecked_transaction()?;
+        let sep = std::path::MAIN_SEPARATOR;
+        let prefix = format!("{}{sep}", super::path_key(path).trim_end_matches(sep));
+        let next = char::from_u32(u32::from(sep) + 1).expect("path separator");
+        let upper = format!("{}{next}", prefix.trim_end_matches(sep));
+        let mut statement = self.db.prepare_cached(
+            "SELECT DISTINCT substr(al.folder, length(?2) + 1,
+                        instr(substr(al.folder, length(?2) + 1) || ?4, ?4) - 1) AS child
+             FROM albums al WHERE al.root_id = ?1 AND al.sort_key >= ?2 AND al.sort_key < ?3
+               AND child <> '' AND EXISTS(SELECT 1 FROM tracks t
+                   WHERE t.album_id = al.id AND t.root_id = al.root_id AND t.present)
+             ORDER BY child COLLATE NOCASE LIMIT ?5",
+        )?;
+        let dirs: Vec<PathBuf> = statement
+            .query_map(
+                params![root, prefix, upper, sep.to_string(), limit as i64],
+                |r| Ok(path.join(r.get::<_, String>(0)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let cd_candidates = dirs.len() >= 2
+            && dirs.len() <= 32
+            && dirs.iter().all(|dir| {
+                dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(crate::release::disc_folder)
+                    .is_some()
+            });
+        let mut folders = vec![path.to_owned()];
+        let mut albums = self.album_rows(Albums::TreeFolders(root, &folders), "")?;
+        if cd_candidates && albums.is_empty() {
+            let count: i64 = self.db.query_row(
+                "SELECT count(*) FROM albums al
+                 WHERE al.root_id = ?1 AND al.sort_key >= ?2 AND al.sort_key < ?3
+                   AND EXISTS(SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.root_id = al.root_id AND t.present)",
+                params![root, prefix, upper], |r| r.get(0)
+            )?;
+            if count == dirs.len() as i64 {
+                folders = dirs.clone();
+                albums = self.album_rows(Albums::TreeFolders(root, &folders), "")?;
+            }
+        }
+        let mut programs = Vec::new();
+        let mut loose = Vec::new();
+        for album in albums.into_iter().take(limit) {
+            if album.authored
+                || album
+                    .folder
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::release::disc_folder)
+                    .is_some()
+            {
+                programs.push(album);
+            } else {
+                let scope = Scope::Album(album.id);
+                let keys = self.disc_keys(scope)?;
+                loose.extend(
+                    self.rows(
+                        scope,
+                        &keys[..keys.len().min(limit.saturating_sub(loose.len()))],
+                    )?
+                    .into_iter()
+                    .filter(|row| row.available)
+                    .map(|row| row.track),
+                );
+            }
+        }
+        snapshot.commit()?;
+        Ok(IndexedBranch {
+            dirs,
+            programs,
+            loose,
+        })
+    }
+
     fn album_rows(&self, albums: Albums, search: &str) -> Result<Vec<AlbumRow>> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let mut filter = vec![match &albums {
@@ -844,6 +940,21 @@ impl Store {
             Albums::CollectionFolder(root) => {
                 args.push(Box::new(*root));
                 COLLECTION_FOLDER.into()
+            }
+            Albums::TreeFolders(root, folders) => {
+                args.push(Box::new(*root));
+                let values = folders
+                    .iter()
+                    .map(|path| {
+                        args.push(Box::new(super::path_key(path)));
+                        format!("?{}", args.len())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "t.root_id = ?1 AND t.present = 1 AND
+                    substr(al.sort_key, 1, instr(al.sort_key, char(1)) - 1) IN ({values})"
+                )
             }
             Albums::Release(release) => format!(
                 "t.album_id IN ({}) AND t.present = 1",
@@ -867,7 +978,8 @@ impl Store {
                     SELECT CASE WHEN min(ch.source) = max(ch.source) THEN min(audio.path) END
                     FROM tracks ch JOIN files audio ON audio.id = ch.source
                     WHERE ch.album_id = al.id AND ch.present = 1
-                ) END
+                ) END,
+                al.key LIKE 'sheet:%' OR max(trim(t.album) <> '') OR max(coalesce(t.disc_number,0)) > 0
              FROM tracks t JOIN albums al ON al.id = t.album_id
              JOIN files s ON s.id = t.source
              LEFT JOIN roots ro ON ro.id = t.root_id
@@ -882,6 +994,7 @@ impl Store {
             let folder = PathBuf::from(r.get::<_, String>(3)?);
             let root: Option<String> = r.get(9)?;
             let folder = root
+                .filter(|_| !matches!(albums, Albums::TreeFolders(..)))
                 .and_then(|root| folder.strip_prefix(root).ok().map(PathBuf::from))
                 .unwrap_or(folder);
             Ok(AlbumRow {
@@ -890,6 +1003,7 @@ impl Store {
                 title: r.get(1)?,
                 year: r.get(2)?,
                 folder,
+                authored: r.get(13)?,
                 disc_number: r.get(10)?,
                 cover: r.get::<_, Option<String>>(4)?.map(PathBuf::from),
                 cue_image: r.get::<_, Option<String>>(12)?.map(PathBuf::from),
@@ -905,6 +1019,7 @@ impl Store {
             Albums::Disc(id) => self.releases(self.album_root(id)?)?,
             Albums::Root(root) => self.releases(root)?,
             Albums::CollectionFolder(root) => self.releases(Some(root))?,
+            Albums::TreeFolders(..) => HashMap::new(),
             Albums::Release(release) => {
                 let order: HashMap<AlbumId, usize> = release
                     .discs

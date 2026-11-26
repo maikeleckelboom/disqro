@@ -438,6 +438,10 @@ pub enum Destination {
         path: PathBuf,
         root: Option<PathBuf>,
     },
+    FolderPage {
+        path: PathBuf,
+        page: crate::collection::Page,
+    },
     View(Location),
 }
 impl Destination {
@@ -463,6 +467,7 @@ impl Destination {
                 root: Some(root),
             } => browser.open_in(path, root, window, cx),
             Self::Folder { path, root: None } => browser.open(path, window, cx),
+            Self::FolderPage { path, page } => browser.open_folder_page(path, page, window, cx),
             Self::View(location) => browser.show(location, window, cx),
         }
     }

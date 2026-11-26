@@ -151,8 +151,11 @@ impl BrowserPane {
         });
         // Each browser edits its own path, in its own header.
         let address = cx.new(|cx| crate::location::LocationBar::new(browser.clone(), window, cx));
-        browser.update(cx, |b, _| {
+        browser.update(cx, |b, cx| {
             b.address = Some(address.downgrade());
+            b.tree.update(cx, |t, _| {
+                t.delegate_mut().router = Some(services.router.clone())
+            });
         });
         Self {
             browser,
@@ -214,6 +217,7 @@ impl BrowserPane {
 fn browser_layouts(browser: &Browser, cx: &App) -> Layouts {
     let mut layouts = browser.table.read(cx).delegate().layouts.clone();
     layouts.shelf = browser.discs.read(cx).delegate().shelf_layout.clone();
+    layouts.tree = browser.tree.read(cx).delegate().layout.clone();
     layouts
 }
 
@@ -239,6 +243,45 @@ fn browser_menu(
         .any(|c| b.path.starts_with(&c.root.path));
     if compact {
         menu = compact_header_menu(b, browser, menu, cx);
+    }
+    if b.listing_tree() {
+        let targets = b.tree_visible_tracks(cx);
+        let empty = targets.is_empty();
+        for (label, icon, shuffle) in [
+            ("Play Visible Tracks", IconName::Play, false),
+            ("Shuffle Visible Tracks", IconName::Shuffle, true),
+        ] {
+            let (targets, catalog, player) = (targets.clone(), catalog.clone(), player.clone());
+            menu = menu.item(
+                PopupMenuItem::new(label)
+                    .icon(icon)
+                    .disabled(empty)
+                    .on_click(move |_, _, cx| {
+                        queue_targets(
+                            &catalog,
+                            &player,
+                            targets.clone(),
+                            move |selection| Command::PlayList(selection, shuffle),
+                            cx,
+                        );
+                    }),
+            );
+        }
+        let (catalog, player) = (catalog.clone(), player.clone());
+        menu = menu.item(
+            PopupMenuItem::new("Add Visible Tracks to Queue")
+                .icon(IconName::ListPlus)
+                .disabled(empty)
+                .on_click(move |_, _, cx| {
+                    queue_targets(&catalog, &player, targets.clone(), Command::Enqueue, cx)
+                }),
+        );
+        let refresh = browser.clone();
+        return menu.separator().item(
+            PopupMenuItem::new("Refresh")
+                .icon(IconName::RefreshCw)
+                .on_click(move |_, w, cx| refresh.update(cx, |b, cx| b.reload(w, cx))),
+        );
     }
     let axis = b.sequence_kind();
     let extra_axis = axis
@@ -508,9 +551,10 @@ const ICON_BUTTON: f32 = 28.;
 const SCOPE_GAP: f32 = 3.;
 const FILTER_COMPACT: f32 = 100.;
 const FILTER_FULL: f32 = 175.;
-const VIEW_CHOICES: [(ViewMode, &str, IconName); 2] = [
+const VIEW_CHOICES: [(ViewMode, &str, IconName); 3] = [
     (ViewMode::Tracks, "All Tracks", IconName::ListMusic),
     (ViewMode::Albums, "Albums / CDs", IconName::Disc3),
+    (ViewMode::Tree, "Tree", IconName::Layers),
 ];
 const VIEW_LABEL_SIZE: f32 = 12.;
 const VIEW_LABEL_CHROME: f32 = 39.;
@@ -626,22 +670,36 @@ impl BrowserViews {
 struct ViewFocus {
     tracks: FocusHandle,
     albums: FocusHandle,
+    tree: FocusHandle,
     folders: FocusHandle,
     filter: FocusHandle,
+    back: FocusHandle,
+    forward: FocusHandle,
+    up: FocusHandle,
 }
 
 impl ViewFocus {
     fn choice(&self, mode: ViewMode) -> &FocusHandle {
         match mode {
-            ViewMode::Tracks | ViewMode::Tree => &self.tracks,
+            ViewMode::Tracks => &self.tracks,
+            ViewMode::Tree => &self.tree,
             ViewMode::Albums => &self.albums,
         }
     }
 
     fn focused(&self, window: &Window) -> Option<&FocusHandle> {
-        [&self.tracks, &self.albums, &self.folders, &self.filter]
-            .into_iter()
-            .find(|handle| handle.is_focused(window))
+        [
+            &self.tracks,
+            &self.albums,
+            &self.tree,
+            &self.folders,
+            &self.filter,
+            &self.back,
+            &self.forward,
+            &self.up,
+        ]
+        .into_iter()
+        .find(|handle| handle.is_focused(window))
     }
 }
 
@@ -655,8 +713,12 @@ impl Browser {
             .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
                 tracks: cx.focus_handle(),
                 albums: cx.focus_handle(),
+                tree: cx.focus_handle(),
                 folders: cx.focus_handle(),
                 filter: cx.focus_handle(),
+                back: cx.focus_handle(),
+                forward: cx.focus_handle(),
+                up: cx.focus_handle(),
             })
             .read(cx)
             .clone();
@@ -724,7 +786,7 @@ impl Browser {
                     .h(px(1.))
                     .bg(m.line),
             )
-            .when(!compact, |bar| bar.child(self.history(cx)))
+            .when(!compact, |bar| bar.child(self.history(&focus, cx)))
             .child(
                 h_flex()
                     .w(identity)
@@ -796,6 +858,7 @@ impl Browser {
                     .w(px(ICON_BUTTON))
                     .icon(IconName::Ellipsis)
                     .accessibility_label("Panel menu")
+                    .tab_stop(true)
                     .when_some(
                         compact.then(|| focus.focused(window)).flatten(),
                         |button, handle| button.track_focus(handle).tab_stop(true),
@@ -821,7 +884,7 @@ impl Browser {
             .into_any_element()
     }
 
-    fn history(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn history(&self, focus: &ViewFocus, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let button = |id: &'static str,
                       icon: IconName,
@@ -858,6 +921,7 @@ impl Browser {
                     "Alt+Left",
                     self.history_label(false, cx),
                 )
+                .track_focus(&focus.back)
                 .on_click(cx.listener(|b, _, w, cx| b.back(w, cx))),
             )
             .child(
@@ -868,11 +932,13 @@ impl Browser {
                     "Alt+Right",
                     self.history_label(true, cx),
                 )
+                .track_focus(&focus.forward)
                 .on_click(cx.listener(|b, _, w, cx| b.forward(w, cx))),
             )
             .when(self.up_in_toolbar(), |bar| {
                 bar.child(
                     button("up", IconName::ArrowUp, "Up", "Alt+Up", self.up_label(cx))
+                        .track_focus(&focus.up)
                         .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
                 )
             })
@@ -1105,7 +1171,7 @@ fn view_menu(
         let (_, name, icon) = VIEW_CHOICES
             .into_iter()
             .find(|(choice, _, _)| *choice == mode)
-            .unwrap_or_else(|| VIEW_CHOICES[0].clone());
+            .unwrap_or(VIEW_CHOICES[0]);
         (
             "browser-view-menu",
             icon,
@@ -1201,6 +1267,35 @@ impl Render for Browser {
         }
         if self.waiting_for_context() {
             return view;
+        }
+        if self.listing_tree() {
+            let table = self.tree.clone();
+            let focused = keyboard_focus(table.read(cx).focus_handle(cx), window);
+            return view.child(
+                div()
+                    .id("tree-viewport")
+                    .relative()
+                    .mx(px(4.))
+                    .flex_1()
+                    .min_h_0()
+                    .on_prepaint(move |bounds, w, cx| {
+                        crate::table::fit_columns(
+                            &table,
+                            f32::from(bounds.size.width).floor(),
+                            w,
+                            cx,
+                        );
+                    })
+                    .capture_key_down(
+                        cx.listener(|b, e: &KeyDownEvent, w, cx| b.tree_key_down(e, w, cx)),
+                    )
+                    .child(crate::table::browser_table(
+                        &self.tree,
+                        crate::table::ROW_HEIGHT,
+                        "Music tree",
+                    ))
+                    .children(focus_outline(focused, &m)),
+            );
         }
         if self.listing_shelf() {
             let table = self.discs.clone();

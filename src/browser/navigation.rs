@@ -228,6 +228,12 @@ pub(crate) struct SavedVisit {
     pub bookmark: Bookmark,
     #[serde(
         default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_or_default"
+    )]
+    tree_expanded: Vec<TreeId>,
+    #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "read_or_default"
     )]
@@ -245,6 +251,7 @@ impl SavedVisit {
             subfolders: None,
             sort: None,
             bookmark: Bookmark::default(),
+            tree_expanded: Vec::new(),
             reveal: None,
         }
     }
@@ -414,6 +421,16 @@ impl Browser {
         if let Some(pending) = &self.pending {
             return pending.bookmark.clone();
         }
+        if self.listing_tree() {
+            let tree = self.tree.read(cx);
+            return Bookmark {
+                selected: tree.delegate().selected_key(),
+                marked: None,
+                viewport: Viewport::capture(tree, crate::table::ROW_HEIGHT, |index| {
+                    tree.delegate().row_key(index)
+                }),
+            };
+        }
         if self.listing_shelf() {
             let table = self.discs.read(cx);
             let key = |i| table.delegate().rows.get(i).map(Shelf::key);
@@ -447,13 +464,16 @@ impl Browser {
             subfolders: self
                 .folder_scope()
                 .or_else(|| self.location.is_folder().then_some(self.subfolders)),
-            sort: if self.listing_shelf() {
+            sort: if self.listing_tree() {
+                self.tree.read(cx).delegate().sort
+            } else if self.listing_shelf() {
                 self.discs.read(cx).delegate().sort
             } else {
                 table.delegate().sort
             }
             .map(|(f, d)| (f, d == ColumnSort::Descending)),
             bookmark: self.bookmark(cx),
+            tree_expanded: self.tree_expansion(cx),
             reveal: self.pending.as_ref().and_then(|p| p.target.clone()),
         }
     }
@@ -519,9 +539,11 @@ impl Browser {
     }
 
     pub(crate) fn waiting_for_context(&self) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|p| p.target.is_some() || p.bookmark.has_context())
+        !self.listing_tree()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.target.is_some() || p.bookmark.has_context())
     }
 
     pub(super) fn move_to(
@@ -587,6 +609,11 @@ impl Browser {
             }
             Arrival::Regular => (None, None),
         };
+        if visit.mode == ViewMode::Tree
+            && (file.is_some() || matches!(target, Some(RowKey::Track(..) | RowKey::Key(_))))
+        {
+            visit.mode = ViewMode::Tracks;
+        }
         self.apply_visit(visit, TreeReveal::Ancestors, (file, target), window, cx);
     }
 
@@ -645,7 +672,11 @@ impl Browser {
             .route
             .page
             .filter(|_| visit.route.location.is_folder());
-        self.prefs.mode = visit.mode;
+        self.prefs.mode = if visit.mode == ViewMode::Tree && file.is_some() {
+            ViewMode::Tracks
+        } else {
+            visit.mode
+        };
         self.folder_child = visit.child.take();
         let search = if file.is_some() {
             String::new()
@@ -656,6 +687,7 @@ impl Browser {
         self.search
             .update(cx, |s, cx| s.set_value(search, window, cx));
         self.reset_table(cx);
+        self.reset_tree(std::mem::take(&mut visit.tree_expanded), cx);
         let sort = visit.sort.map(|(field, descending)| {
             (
                 field,
@@ -672,7 +704,15 @@ impl Browser {
                 visit.route.location,
                 Location::Folder(_) | Location::Library(_)
             );
-        if shelf {
+        if visit.mode == ViewMode::Tree
+            && self.page.is_none()
+            && matches!(
+                visit.route.location,
+                Location::Folder(_) | Location::Library(_)
+            )
+        {
+            self.tree.update(cx, |t, _| t.delegate_mut().sort = sort);
+        } else if shelf {
             self.discs.update(cx, |t, _| t.delegate_mut().sort = sort);
         } else {
             self.table.update(cx, |t, _| t.delegate_mut().sort = sort);
@@ -892,6 +932,18 @@ impl Browser {
 
     pub(super) fn finish_listing(&mut self, cx: &mut Context<Self>) {
         self.resume_playing_reveal(cx);
+        if self.listing_tree() {
+            if let Some(pending) = self.pending.take() {
+                let selected = pending
+                    .target
+                    .as_ref()
+                    .or(pending.bookmark.selected.as_ref());
+                self.tree.update(cx, |t, cx| {
+                    TreeTable::restore_bookmark(t, selected, pending.bookmark.viewport, cx)
+                });
+            }
+            return;
+        }
         let Some(pending) = self.pending.take() else {
             return;
         };

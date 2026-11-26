@@ -36,7 +36,7 @@ use gpui_kit::{
     *,
 };
 pub use layout::{ContextKind, Layouts, LegacyColumn};
-pub(crate) use layout::{Layout, SHELF_FIELDS};
+pub(crate) use layout::{Layout, SHELF_FIELDS, TREE_FIELDS};
 pub(crate) use playback::{ScanningFolder, play_library};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -245,7 +245,7 @@ impl Field {
             Self::Number | Self::Count | Self::Length | Self::Plays | Self::ListeningTime
         )
     }
-    fn value(self, t: &Track, mark: Mark) -> String {
+    pub(crate) fn value(self, t: &Track, mark: Mark) -> String {
         match self {
             Self::Number => t
                 .display_number()
@@ -332,6 +332,7 @@ pub(crate) enum RowKey {
     Release(DiscId),
     Link(crate::collection::ShelfLink),
     Track(PathBuf, Option<DiscTrack>),
+    Tree(crate::browser::TreeId),
     Key(i64),
 }
 pub(crate) fn key(t: &Track) -> RowKey {

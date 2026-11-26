@@ -1,6 +1,7 @@
 mod breadcrumb;
 mod navigation;
 mod sequential;
+mod tree;
 use crate::{
     catalog::{Catalog, CatalogEvent},
     collection::{Disc, DiscId, Discs, Membership, Page, Shelf, ShelfLink, ViewMode, ViewPrefs},
@@ -34,6 +35,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+pub(crate) use tree::TreeId;
+use tree::TreeTable;
 
 /// A folder that has not listed anything by then says it is opening, rather
 /// than flashing that message for every folder.
@@ -148,6 +151,7 @@ pub struct Browser {
     raw: Vec<Option<Arc<Track>>>,
     pub prefs: ViewPrefs,
     pub discs: Entity<TableState<Discs>>,
+    pub(crate) tree: Entity<TableState<TreeTable>>,
     /// A CD or release page of the open folder's collection.
     pub page: Option<Page>,
     /// The release of the CD page shown, folder or indexed.
@@ -211,6 +215,7 @@ impl Browser {
     ) -> Self {
         let this = cx.weak_entity();
         let shelf_layout = columns.shelf.clone();
+        let tree_layout = columns.tree.clone();
         let table = cx.new(|cx| {
             let mut table = crate::table::managed_table(
                 MusicTable::new(player.clone(), catalog.clone(), columns, this.clone()),
@@ -237,10 +242,41 @@ impl Browser {
             },
         )
         .detach();
+        let tree = cx.new(|cx| {
+            crate::table::managed_table(
+                TreeTable::new(this.clone(), catalog.clone(), player.clone(), tree_layout),
+                window,
+                cx,
+            )
+        });
+        cx.subscribe_in(&tree, window, |b: &mut Self, _, event, w, cx| match event {
+            TableEvent::SelectRow(row) => {
+                b.tree.update(cx, |t, _| {
+                    if t.selected_row() == Some(*row) {
+                        t.delegate_mut().on_selection(*row);
+                    }
+                });
+                cx.emit(ViewChanged);
+            }
+            TableEvent::DoubleClickedRow(row) => b.activate_tree(*row, w, cx),
+            TableEvent::MoveColumn(_, _) => cx.emit(ViewChanged),
+            _ => {}
+        })
+        .detach();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter"));
         cx.subscribe(&player, |b: &mut Self, _, ev, cx| {
             // Only the active browser starts playback from its selection.
             if matches!(ev, PlayerEvent::PlaySelection) && !b.active {
+                return;
+            }
+            if b.listing_tree() {
+                match ev {
+                    PlayerEvent::PlaySelection => b.play_tree_selection(cx),
+                    PlayerEvent::TrackChanged | PlayerEvent::StateChanged => {
+                        b.tree.update(cx, |_, cx| cx.notify())
+                    }
+                    _ => {}
+                }
                 return;
             }
             if matches!(ev, PlayerEvent::TrackChanged | PlayerEvent::StateChanged)
@@ -332,6 +368,8 @@ impl Browser {
                     b.table.update(cx, |_, cx| cx.notify());
                     if b.listing_discs() {
                         b.discs.update(cx, |_, cx| cx.notify());
+                    } else if b.listing_tree() {
+                        b.tree.update(cx, |_, cx| cx.notify());
                     }
                 }
                 CatalogEvent::Content => b.library_changed(cx),
@@ -351,10 +389,18 @@ impl Browser {
                     }
                 }
                 CatalogEvent::Structure(root) => {
+                    if matches!(b.location, Location::Library(None))
+                        || b.library_root() == Some(*root)
+                    {
+                        b.invalidate_tree(cx);
+                    }
                     b.refresh_indexed_sequence(*root, cx);
                     b.refresh_folder_traversal(cx);
                 }
                 CatalogEvent::Changed => {
+                    if b.listing_tree() && matches!(b.location, Location::Library(_)) {
+                        b.refresh_tree(cx);
+                    }
                     if let Some(notice) = b.location.unavailable(b.catalog.read(cx)) {
                         b.notice = Some(notice.into());
                         b.finish_listing(cx);
@@ -388,6 +434,7 @@ impl Browser {
             raw: vec![],
             prefs,
             discs,
+            tree,
             page: None,
             membership: None,
             membership_pending: false,
@@ -438,7 +485,11 @@ impl Browser {
             return;
         }
         self.sync_tree(cx);
-        let can_start = self.count > 0;
+        let can_start = if self.listing_tree() {
+            self.tree_can_start(cx)
+        } else {
+            self.count > 0
+        };
         self.table
             .read(cx)
             .delegate()
@@ -481,7 +532,9 @@ impl Browser {
         });
     }
     pub fn list_focus(&self, cx: &App) -> FocusHandle {
-        if self.listing_shelf() {
+        if self.listing_tree() {
+            self.tree.read(cx).focus_handle(cx)
+        } else if self.listing_shelf() {
             self.discs.read(cx).focus_handle(cx)
         } else {
             self.table.read(cx).focus_handle(cx)
@@ -671,7 +724,9 @@ impl Browser {
             Location::Folder(path) => {
                 self.prefs.set_subfolders(path, include);
                 self.subfolders = include;
-                self.reload(window, cx);
+                if !self.listing_tree() {
+                    self.reload(window, cx);
+                }
             }
             Location::Library(Some(root)) => {
                 self.prefs.set_collection_subfolders(*root, include);
@@ -684,7 +739,11 @@ impl Browser {
         cx.notify();
     }
     pub fn view(&mut self, mode: ViewMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.prefs.mode == mode {
+            return;
+        }
         let had_list_focus = self.list_focus(cx).is_focused(window);
+        let was_tree = self.listing_tree();
         if let Location::Album { root, .. } | Location::Release { root, .. } = self.location {
             self.up_to_collection(Location::Library(root), mode, window, cx);
         } else if self.page.is_some() {
@@ -692,7 +751,28 @@ impl Browser {
         } else {
             self.cancel_pending();
             self.prefs.mode = mode;
-            self.filter(cx);
+            if self.listing_tree() && self.location.is_folder() && self.busy {
+                self.generation += 1;
+                self.task.take();
+                self.busy = false;
+                self.folder_ready = false;
+            }
+            if was_tree && !self.listing_tree() {
+                self.stop_tree_jobs(cx);
+            }
+            if was_tree && self.location.is_folder() {
+                let path = self.path.clone();
+                self.load_from(
+                    path,
+                    None,
+                    self.tree_root.clone(),
+                    TreeReveal::PreserveExpansion,
+                    window,
+                    cx,
+                );
+            } else {
+                self.filter(cx);
+            }
             self.refresh_folder_traversal(cx);
         }
         cx.emit(ViewChanged);
@@ -703,7 +783,9 @@ impl Browser {
     }
     fn filter(&mut self, cx: &mut Context<Self>) {
         self.albums.next();
-        if self.location.is_directory() {
+        if self.listing_tree() {
+            self.refresh_tree(cx);
+        } else if self.location.is_directory() {
             self.filter_directory(cx);
         } else if let Some(scope) = self.scope() {
             self.filter_library(scope, cx);
@@ -1018,6 +1100,9 @@ impl Browser {
     }
     /// The table finished listing a library view.
     pub fn library_listed(&mut self, count: usize, duration: f64, cx: &mut Context<Self>) {
+        if self.listing_tree() {
+            return;
+        }
         if self.listing_discs() {
             self.resume_playing_reveal(cx);
         }
@@ -1066,7 +1151,7 @@ impl Browser {
     }
     /// Likes, ratings, playlists or an index scan changed library rows.
     fn library_changed(&mut self, cx: &mut Context<Self>) {
-        if self.location.is_directory() {
+        if self.listing_tree() || self.location.is_directory() {
             self.filter(cx);
             return;
         }
@@ -1188,14 +1273,15 @@ impl Browser {
         let file_intent = reveal.as_ref().map(|_| self.intent.next());
         let timing = std::env::var_os("DISQRO_TRACE_DISCOVERY").map(|_| std::time::Instant::now());
         self.task.take();
-        let events = self.scanner.open(path.clone(), self.subfolders);
         self.location = Location::Folder(path.clone());
+        let events =
+            (!self.listing_tree()).then(|| self.scanner.open(path.clone(), self.subfolders));
         cx.emit(ViewChanged);
         self.tree_root = root;
         self.path = path;
         self.sync_tree_with(tree_reveal, cx);
         self.folder_ready = false;
-        self.busy = true;
+        self.busy = events.is_some();
         self.slow = false;
         self.raw.clear();
         self.programs = Arc::default();
@@ -1208,6 +1294,9 @@ impl Browser {
         self.folder_count = 0;
         self.filter(cx);
         cx.notify();
+        let Some(events) = events else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(OPENING_NOTICE).await;
             let _ = this.update(cx, |b, cx| {
