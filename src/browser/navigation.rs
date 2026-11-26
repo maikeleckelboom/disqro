@@ -127,6 +127,17 @@ impl Route {
         None
     }
 
+    fn has_toolbar_parent(&self) -> bool {
+        match (&self.location, &self.page) {
+            (Location::Folder(path), None) => path
+                .parent()
+                .is_some_and(|parent| !parent.as_os_str().is_empty()),
+            (Location::Folder(_), Some(_))
+            | (Location::Album { .. } | Location::Release { .. }, _) => true,
+            _ => false,
+        }
+    }
+
     fn parent(&self, membership: Option<&Membership>) -> Option<(Route, Option<RowKey>)> {
         let (location, page, child) = match (&self.location, &self.page) {
             (location @ Location::Folder(_), Some(Page::Disc(id))) => (
@@ -770,6 +781,10 @@ impl Browser {
                 Page::Disc(id) | Page::Release(id) => self.disc_label(id),
             })
             .unwrap_or_else(|| self.location_label(&route.location, cx))
+    }
+
+    pub(crate) fn up_in_toolbar(&self) -> bool {
+        self.route().has_toolbar_parent()
     }
 
     pub(crate) fn up_label(&self, cx: &App) -> Option<String> {
@@ -1469,6 +1484,39 @@ mod tests {
         history.record(playlist(3));
         assert!(history.destination(true).is_none());
         assert!(History::default().destination(false).is_none());
+    }
+
+    #[test]
+    fn toolbar_up_is_contextual_without_removing_route_parents() {
+        for location in [
+            Location::Liked,
+            Location::RecentlyPlayed,
+            Location::Library(Some(3)),
+            Location::Playlist(8),
+        ] {
+            let route = Route::new(location, None);
+            assert!(!route.has_toolbar_parent());
+            assert!(route.parent(None).is_some());
+        }
+        for location in [
+            Location::Library(None),
+            Location::Collections,
+            Location::Playlists,
+            Location::Folder(PathBuf::from(r"C:\")),
+        ] {
+            let route = Route::new(location, None);
+            assert!(!route.has_toolbar_parent());
+            assert!(route.parent(None).is_none());
+        }
+        let path = PathBuf::from(r"C:\Music");
+        assert!(Route::new(Location::Folder(path.clone()), None).has_toolbar_parent());
+        assert!(
+            Route::new(
+                Location::Folder(path.clone()),
+                Some(Page::Disc(DiscId::Cue(path.join("album.cue"))))
+            )
+            .has_toolbar_parent()
+        );
     }
 
     #[test]

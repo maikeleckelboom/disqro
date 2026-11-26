@@ -1,5 +1,5 @@
-//! Library: personal music organisation. The indexed collections, Liked
-//! Tracks and the playlists, each opened in the active Music Browser.
+//! Library: built-in destinations, indexed collections, and user playlists.
+//! Each opens in the active Music Browser.
 //!
 //! A folder dragged here from Locations is added to the library as a
 //! collection: it is indexed where it is, never moved or copied. Tracks
@@ -253,7 +253,7 @@ impl LibraryPanel {
         })
     }
 
-    /// The collections, Liked Tracks and the playlists.
+    /// Built-in destinations, collections, and playlists, in that order.
     fn render_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let m = *materials(cx);
         let location = self.location(cx);
@@ -289,6 +289,57 @@ impl LibraryPanel {
                 .into_any_element(),
             );
         }
+        let router = self.router.clone();
+        rows.push(
+            Self::opens(
+                nav_row(
+                    "liked".into(),
+                    Icon::default().path(crate::assets::HEART_FILL),
+                    "Liked Tracks".into(),
+                    location == Some(Location::Liked),
+                    &m,
+                ),
+                &self.router,
+                Location::Liked,
+            )
+            .context_menu(move |menu, _, _| {
+                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
+            })
+            .into_any_element(),
+        );
+        let router = self.router.clone();
+        rows.push(
+            Self::opens(
+                nav_row(
+                    "recently-played".into(),
+                    Icon::new(IconName::Clock),
+                    "Recently Played".into(),
+                    location == Some(Location::RecentlyPlayed),
+                    &m,
+                ),
+                &self.router,
+                Location::RecentlyPlayed,
+            )
+            .context_menu(move |menu, _, _| {
+                Self::open_items(
+                    menu,
+                    router.clone(),
+                    Location::RecentlyPlayed,
+                    IconName::Clock,
+                )
+            })
+            .into_any_element(),
+        );
+        rows.push(self.section_header(
+            ("Collections", Location::Collections),
+            location.as_ref(),
+            (
+                "Add Music Folder…",
+                IconName::FolderPlus,
+                crate::workspace::AddMusicFolder,
+            ),
+            cx,
+        ));
         for c in &catalog.collections {
             let id = c.root.id;
             let path = c.root.path.clone();
@@ -371,50 +422,73 @@ impl LibraryPanel {
                 });
             rows.push(row.into_any_element());
         }
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "liked".into(),
-                    Icon::default().path(crate::assets::HEART_FILL),
-                    "Liked Tracks".into(),
-                    location == Some(Location::Liked),
-                    &m,
-                ),
-                &self.router,
-                Location::Liked,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
-            })
-            .into_any_element(),
-        );
-        let router = self.router.clone();
-        rows.push(
-            Self::opens(
-                nav_row(
-                    "recently-played".into(),
-                    Icon::new(IconName::Clock),
-                    "Recently Played".into(),
-                    location == Some(Location::RecentlyPlayed),
-                    &m,
-                ),
-                &self.router,
-                Location::RecentlyPlayed,
-            )
-            .context_menu(move |menu, _, _| {
-                Self::open_items(
-                    menu,
-                    router.clone(),
-                    Location::RecentlyPlayed,
-                    IconName::Clock,
-                )
-            })
-            .into_any_element(),
-        );
         rows.extend(self.render_playlists(location, cx));
         rows
     }
+    fn section_header<A: Action + Clone>(
+        &self,
+        (title, location): (&'static str, Location),
+        current: Option<&Location>,
+        (add_label, add_icon, action): (&'static str, IconName, A),
+        cx: &App,
+    ) -> AnyElement {
+        let selected = current == Some(&location);
+        let m = *materials(cx);
+        let browse = self.router.clone();
+        let menu_action = action.clone();
+        h_flex()
+            .id(title)
+            .h(px(ROW))
+            .mx(px(6.))
+            .pl(px(4.))
+            .pr(px(2.))
+            .gap(px(4.))
+            .flex_shrink_0()
+            .items_center()
+            .mt(px(6.))
+            .child(
+                Button::new("overview")
+                    .ghost()
+                    .xsmall()
+                    .tab_stop(true)
+                    .text_size(px(12.))
+                    .text_color(if selected { m.accent } else { m.text_muted })
+                    .label(title)
+                    .accessibility_label(format!("Browse {title}"))
+                    .on_click(move |e, w, cx| {
+                        Self::open(
+                            &browse,
+                            location.clone(),
+                            e.modifiers().secondary(cx),
+                            w,
+                            cx,
+                        )
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("add")
+                    .ghost()
+                    .xsmall()
+                    .tab_stop(true)
+                    .icon(Icon::new(add_icon).size(px(14.)).text_color(m.text_faint))
+                    .accessibility_label(add_label)
+                    .tooltip(add_label)
+                    .on_click(move |_, w, cx| {
+                        cx.stop_propagation();
+                        w.dispatch_action(Box::new(action.clone()), cx)
+                    }),
+            )
+            .context_menu(move |menu, _, _| {
+                menu.item(
+                    PopupMenuItem::new(add_label)
+                        .icon(add_icon)
+                        .action(Box::new(menu_action.clone())),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_playlists(
         &self,
         location: Option<Location>,
@@ -422,65 +496,16 @@ impl LibraryPanel {
     ) -> Vec<AnyElement> {
         let m = *materials(cx);
         let playlists = self.catalog.read(cx).playlists.clone();
-        let browse = self.router.clone();
-        let header = h_flex()
-            .id("playlists")
-            .h(px(ROW))
-            .mx(px(6.))
-            .pl(px(8.))
-            .pr(px(2.))
-            .gap(px(4.))
-            .flex_shrink_0()
-            .items_center()
-            .mt(px(6.))
-            .text_size(px(12.))
-            .text_color(m.text_muted)
-            .child(
-                div()
-                    .id("browse-playlists")
-                    .role(Role::Button)
-                    .aria_label("Browse playlists")
-                    .tab_index(0)
-                    .cursor_pointer()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if location == Some(Location::Playlists) {
-                        m.accent
-                    } else {
-                        m.text_muted
-                    })
-                    .hover(|d| d.text_color(m.text))
-                    .on_click(move |_, w, cx| {
-                        Self::open(&browse, Location::Playlists, false, w, cx)
-                    })
-                    .child("Playlists"),
-            )
-            .child(
-                Button::new("new-playlist")
-                    .ghost()
-                    .xsmall()
-                    .icon(
-                        Icon::new(IconName::Plus)
-                            .size(px(14.))
-                            .text_color(m.text_faint),
-                    )
-                    .accessibility_label("New Playlist")
-                    .tooltip("New Playlist · Ctrl+N")
-                    .on_click(|_, w, cx| {
-                        cx.stop_propagation();
-                        w.dispatch_action(Box::new(crate::workspace::NewPlaylist), cx)
-                    }),
-            )
-            .context_menu(|menu, _, _| {
-                menu.item(
-                    PopupMenuItem::new("New Playlist")
-                        .icon(IconName::Plus)
-                        .action(Box::new(crate::workspace::NewPlaylist)),
-                )
-            })
-            .into_any_element();
-        let mut rows = vec![header];
+        let mut rows = vec![self.section_header(
+            ("Playlists", Location::Playlists),
+            location.as_ref(),
+            (
+                "New Playlist",
+                IconName::Plus,
+                crate::workspace::NewPlaylist,
+            ),
+            cx,
+        )];
         for p in playlists {
             let id = p.id;
             let selected = location == Some(Location::Playlist(id));

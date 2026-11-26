@@ -455,9 +455,11 @@ fn compact_header_menu(
             Browser::back as fn(&mut Browser, &mut Window, &mut Context<Browser>),
         ),
         ("Forward", browser.history_label(true, cx), Browser::forward),
-        ("Up", browser.up_label(cx), Browser::up),
     ];
-    for (name, target, step) in steps {
+    let up = browser
+        .up_in_toolbar()
+        .then(|| ("Up", browser.up_label(cx), Browser::up as _));
+    for (name, target, step) in steps.into_iter().chain(up) {
         let browser = entity.clone();
         let enabled = target.is_some();
         let label = target.map_or_else(|| name.to_owned(), |target| format!("{name} · {target}"));
@@ -603,7 +605,13 @@ impl Browser {
         let history = if compact {
             0.
         } else {
-            3. * NAV_BUTTON + 2. * NAV_GAP
+            2. * NAV_BUTTON
+                + NAV_GAP
+                + if self.up_in_toolbar() {
+                    NAV_BUTTON + NAV_GAP
+                } else {
+                    0.
+                }
         };
         let fixed = px(history + BAR_INSET + ICON_BUTTON);
         let sequence = self.sequence_kind().filter(|_| {
@@ -784,10 +792,12 @@ impl Browser {
                 )
                 .on_click(cx.listener(|b, _, w, cx| b.forward(w, cx))),
             )
-            .child(
-                button("up", IconName::ArrowUp, "Up", "Alt+Up", self.up_label(cx))
-                    .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
-            )
+            .when(self.up_in_toolbar(), |bar| {
+                bar.child(
+                    button("up", IconName::ArrowUp, "Up", "Alt+Up", self.up_label(cx))
+                        .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
+                )
+            })
             .into_any_element()
     }
 
