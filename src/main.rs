@@ -11,6 +11,7 @@ mod catalog;
 mod collection;
 mod cue;
 mod diagnostics;
+mod disclosure;
 mod discovery;
 mod folders;
 #[path = "levelMeter.rs"]

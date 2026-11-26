@@ -634,7 +634,7 @@ impl Drop for Request {
 
 /// A change to what is expanded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Disclosure {
+pub(super) enum ExpandAction {
     /// One item, leaving what is open inside it as it was.
     Toggle,
     /// An item and everything inside it.
@@ -2219,7 +2219,7 @@ impl Browser {
 
     /// Expands or collapses item `id` of branch `parent` alone.
     fn toggle_tree(&mut self, id: TreeId, parent: Option<TreeId>, cx: &mut Context<Self>) {
-        self.disclose_tree(Disclosure::Toggle, Some(id), parent, cx);
+        self.disclose_tree(ExpandAction::Toggle, Some(id), parent, cx);
     }
 
     /// Changes what is expanded, at item `id` of branch `parent` or across
@@ -2228,7 +2228,7 @@ impl Browser {
     /// item is selected instead.
     pub(super) fn disclose_tree(
         &mut self,
-        action: Disclosure,
+        action: ExpandAction,
         id: Option<TreeId>,
         parent: Option<TreeId>,
         cx: &mut Context<Self>,
@@ -2237,14 +2237,14 @@ impl Browser {
             let delegate = table.delegate_mut();
             let tree = &mut delegate.tree;
             match (action, id.clone()) {
-                (Disclosure::Toggle, Some(item)) => tree.toggle(item, &parent),
-                (Disclosure::Toggle, None) => return,
-                (Disclosure::ExpandAll, id) => tree.expand_all(id, &parent),
-                (Disclosure::CollapseAll, id) => tree.collapse_all(id, &parent),
+                (ExpandAction::Toggle, Some(item)) => tree.toggle(item, &parent),
+                (ExpandAction::Toggle, None) => return,
+                (ExpandAction::ExpandAll, id) => tree.expand_all(id, &parent),
+                (ExpandAction::CollapseAll, id) => tree.collapse_all(id, &parent),
             }
             TreeTable::project(table, cx);
             let d = table.delegate();
-            if action != Disclosure::ExpandAll
+            if action != ExpandAction::ExpandAll
                 && d.selected
                     .as_ref()
                     .is_some_and(|key| d.position(key).is_none())

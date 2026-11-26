@@ -1,7 +1,9 @@
 //! Rows shared by the navigation panels, and what they drag.
-use crate::theme::{Materials, materials};
+use crate::{
+    disclosure::Disclosure,
+    theme::{Materials, materials},
+};
 use gpui_kit::{
-    assets::IconName,
     component::{Icon, h_flex},
     prelude::*,
     *,
@@ -40,29 +42,6 @@ pub fn chip(label: SharedString, cx: &App) -> Div {
         .text_size(px(13.))
         .text_color(m.text)
         .child(label)
-}
-
-/// The disclosure slot used by the Locations tree.
-pub fn disclosure(id: impl Into<ElementId>, open: Option<bool>, m: &Materials) -> Stateful<Div> {
-    div()
-        .id(id)
-        .size(px(20.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .when_some(open, |d, open| {
-            d.hover(|d| d.bg(m.hover)).child(
-                Icon::new(if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(12.))
-                .text_color(m.text_faint),
-            )
-        })
 }
 
 /// The leading icon column every navigation row shares.
@@ -119,9 +98,11 @@ pub fn nav_row(
         .child(div().flex_1().min_w_0().truncate().child(label))
 }
 
-/// A section heading in a navigation list. Its disclosure chevron sits in the
-/// leading icon column and only expands or collapses the section. The rest of
-/// the row opens the section's overview.
+/// A section heading in a navigation list: its label, then its disclosure
+/// chevron, which only expands or collapses the section, then the rest of
+/// the row, which opens the section's overview. The label starts where the
+/// icons of the rows below it do, so the heading leads them without being
+/// indented itself. Callers add trailing actions after it.
 pub fn section_row(
     id: ElementId,
     title: SharedString,
@@ -130,39 +111,25 @@ pub fn section_row(
     m: &Materials,
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let action = if open { "Collapse" } else { "Expand" };
     nav_surface(id, format!("Browse {title}").into(), selected, m)
         .aria_expanded(open)
         .font_weight(FontWeight::MEDIUM)
         .child(
             div()
-                .id("disclosure")
-                .role(Role::Button)
-                .aria_label(format!("{action} {title}"))
-                .aria_expanded(open)
-                .size(px(ICON))
-                .mr(px(ICON_GAP))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.))
-                .hover(|d| d.bg(m.control_hover))
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .size(px(12.))
-                    .text_color(m.text_faint),
-                )
-                // The heading opens its overview on click. The chevron must not.
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    on_toggle(window, cx);
-                }),
+                .flex_shrink(1.)
+                .min_w_0()
+                .truncate()
+                .child(title.clone()),
         )
-        .child(div().flex_1().min_w_0().truncate().child(title))
+        .child(
+            div()
+                .flex_shrink_0()
+                .ml(px(HEADING_DISCLOSURE_GAP))
+                .child(Disclosure::new("disclosure", open, title).on_toggle(on_toggle)),
+        )
+        .child(div().flex_1())
 }
+
+/// The chevron's interactive area pads its glyph, so it overlaps the label
+/// slightly to keep the glyph visibly attached to it.
+const HEADING_DISCLOSURE_GAP: f32 = -5.;

@@ -7,8 +7,9 @@
 //! the active Music Browser whether or not the panel is shown.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, INDENT, ROW, disclosure},
+    nav::{DraggedFolder, INDENT, ROW},
 };
+use crate::disclosure::Disclosure;
 use crate::{
     assets::FileIcon,
     catalog::Catalog,
@@ -448,20 +449,20 @@ impl LocationsPanel {
                 None if temporary => FileIcon::Drive.icon(),
                 None => FileIcon::Folder.icon(),
             };
-            let toggle = folders.clone();
-            let toggle_id = id.clone();
-            let expander = disclosure(
-                ("location-disclosure", ix),
-                entry.is_folder().then(|| entry.is_expanded()),
-                &m,
-            )
-            .when(entry.is_folder(), |d| {
-                d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx));
-                    })
-            });
+            let expander = if entry.is_folder() {
+                let toggle = folders.clone();
+                let toggle_id = id.clone();
+                Disclosure::new(
+                    ("location-disclosure", ix),
+                    entry.is_expanded(),
+                    label.clone(),
+                )
+                .disabled(!available)
+                .on_toggle(move |_, cx| toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx)))
+                .into_any_element()
+            } else {
+                Disclosure::slot().into_any_element()
+            };
             let content = h_flex()
                 .id(("location-row", ix))
                 .size_full()

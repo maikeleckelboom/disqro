@@ -1,4 +1,5 @@
 use super::*;
+use crate::{disclosure::Disclosure, panels::nav::INDENT};
 use crate::{
     panels::Router,
     table::{
@@ -17,6 +18,13 @@ use gpui_kit::{
     prelude::*,
 };
 use std::ops::Range;
+
+/// Space between the disclosure and the icon of a row, as in Locations.
+const TREE_GAP: f32 = 4.;
+/// Space between the icon and the label.
+const LABEL_GAP: f32 = 6.;
+/// A message stands where the icon of an item at its depth would.
+const MESSAGE_INSET: f32 = crate::disclosure::SIZE + TREE_GAP;
 
 pub(crate) struct TreeTable {
     pub(super) tree: Tree,
@@ -282,7 +290,7 @@ impl TreeTable {
         _: &App,
     ) -> PopupMenu {
         let browser = self.browser.clone();
-        let item = |label: &'static str, action: Disclosure, enabled: bool| {
+        let item = |label: &'static str, action: ExpandAction, enabled: bool| {
             let (browser, id, parent) = (browser.clone(), id.clone(), parent.clone());
             PopupMenuItem::new(label)
                 .disabled(!enabled)
@@ -296,7 +304,7 @@ impl TreeTable {
         if id.is_some() {
             menu = menu.item(item(
                 if open { "Collapse" } else { "Expand" },
-                Disclosure::Toggle,
+                ExpandAction::Toggle,
                 true,
             ));
         }
@@ -305,8 +313,8 @@ impl TreeTable {
             None => tree.has_open_inside(&None) || !self.rows.iter().all(|row| !row.open()),
             Some(_) => open || tree.has_open_inside(&id),
         };
-        menu.item(item("Expand All", Disclosure::ExpandAll, !throughout))
-            .item(item("Collapse All", Disclosure::CollapseAll, anything))
+        menu.item(item("Expand All", ExpandAction::ExpandAll, !throughout))
+            .item(item("Collapse All", ExpandAction::CollapseAll, anything))
     }
 
     fn field(&self, index: usize) -> Field {
@@ -454,7 +462,7 @@ impl TableDelegate for TreeTable {
         };
         match row {
             TreeRow::Message { depth, text, .. } => cell
-                .pl(px((*depth).min(10) as f32 * 14. + 22.))
+                .pl(px((*depth).min(10) as f32 * INDENT + MESSAGE_INSET))
                 .text_color(m.text_faint)
                 .when(field == Field::Title, |cell| {
                     cell.child(div().truncate().child(text.clone()))
@@ -487,40 +495,21 @@ impl TableDelegate for TreeTable {
                     let browser = self.browser.clone();
                     let id = node.id.clone();
                     let parent = parent.clone();
-                    let tooltip = if open { "Collapse" } else { "Expand" };
-                    h_flex()
-                        .id(("tree-disclosure", stable_element_key(&id)))
-                        .w(px(18.))
-                        .h(px(22.))
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(3.))
-                        .cursor_pointer()
-                        .hover(|d| d.bg(m.control))
-                        .role(Role::Button)
-                        .aria_expanded(open)
-                        .aria_label(format!("{tooltip} {label}"))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            let _ = browser
-                                .update(cx, |b, cx| b.toggle_tree(id.clone(), parent.clone(), cx));
-                        })
-                        .child(
-                            Icon::new(if open {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .size(px(13.))
-                            .text_color(m.text_muted),
-                        )
-                        .into_any_element()
+                    Disclosure::new(
+                        ("tree-disclosure", stable_element_key(&id)),
+                        open,
+                        label.clone(),
+                    )
+                    .on_toggle(move |_, cx| {
+                        let _ = browser
+                            .update(cx, |b, cx| b.toggle_tree(id.clone(), parent.clone(), cx));
+                    })
+                    .into_any_element()
                 } else {
-                    div().w(px(18.)).flex_shrink_0().into_any_element()
+                    Disclosure::slot().into_any_element()
                 };
-                cell.pl(px((*depth).min(10) as f32 * 14.))
+                cell.pl(px((*depth).min(10) as f32 * INDENT))
+                    .gap(px(TREE_GAP))
                     .when(
                         matches!(node.item, Item::Collection { online: false, .. }),
                         |d| d.opacity(0.5),
@@ -529,6 +518,7 @@ impl TableDelegate for TreeTable {
                     .child(
                         Icon::new(icon)
                             .size(px(14.))
+                            .mr(px(LABEL_GAP - TREE_GAP))
                             .text_color(m.text_faint)
                             .flex_shrink_0(),
                     )
