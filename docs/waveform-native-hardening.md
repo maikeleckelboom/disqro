@@ -38,7 +38,7 @@ running the independent Git fixtures.
 
 | Production Disqro test | Engine test and assertion |
 | --- | --- |
-| `centred_follow_and_pointer_zoom_keep_exact_source_coordinates` | `viewport::tests::centered_follow_and_pointer_zoom_keep_exact_source_coordinates` checks repeated zoom about exact pointers at large source coordinates and centered entry. |
+| `centered_follow_and_pointer_zoom_keep_exact_source_coordinates` | `viewport::tests::centered_follow_and_pointer_zoom_keep_exact_source_coordinates` checks repeated zoom about exact pointers at large source coordinates and centered entry. |
 | `complementary_leaves_distinguish_silence_missing_and_out_of_cell_witnesses` | `presentation::stroke::tests::complementary_leaves_distinguish_silence_missing_and_out_of_cell_witnesses` checks fine/coarse ownership, zero extrema and rejection of witnesses outside their cell. |
 | `every_visible_panel_can_finish_while_another_panel_moves` | `store::tests::every_visible_view_can_finish_while_another_view_moves` checks every stable view receives a scheduling turn while a ninth view changes demand. |
 | `inactive_tiles_are_evicted_without_displacing_a_visible_tile` | `store::tests::inactive_tiles_are_evicted_without_displacing_a_visible_tile` checks retained visible results and bounded idle entries under repeated changes. |
@@ -47,7 +47,7 @@ running the independent Git fixtures.
 | `wide_views_cover_all_supported_rates_and_unaligned_ranges` | `planning::tests::wide_views_cover_all_supported_rates_and_unaligned_ranges` checks 120-second requests across supported rates, widths and segment alignment. |
 | `sample_zoom_keeps_both_decoded_channels_and_clips_at_the_playable_edges` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks distinct stereo traces and empty pixels beyond the segment. |
 | `shader_projection_matches_the_reference_at_device_pixel_edges` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks light/dark overview/detail against the CPU reference within one code. |
-| `silent_stroke_columns_stay_uncoloured_when_sample_inspection_is_absent` | `waveform-d3d11/tests/headless.rs::silent_stroke_columns_stay_uncolored_when_sample_inspection_is_absent` checks that exact silent columns carry no RGB energy. |
+| `silent_stroke_columns_stay_uncolored_when_sample_inspection_is_absent` | `waveform-d3d11/tests/headless.rs::silent_stroke_columns_stay_uncolored_when_sample_inspection_is_absent` checks that exact silent columns carry no RGB energy. |
 | `wide_stroke_keeps_coarse_witnesses_across_the_full_surface_and_new_devices` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks wide-view witness agreement and identical pixels on an independent device. |
 
 ## Quiet-machine gate

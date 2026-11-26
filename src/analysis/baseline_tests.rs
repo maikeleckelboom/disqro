@@ -101,7 +101,7 @@ fn timeline_waveform_baseline() {
             }
         };
         let mut reader = None;
-        analyse(
+        analyze(
             &program,
             active,
             &focus,

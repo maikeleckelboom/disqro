@@ -16,13 +16,13 @@ composite it on GPUI's device.
 
 | Module | Responsibility |
 | --- | --- |
-| `waveform.rs` (`waveform_source`) | Symphonia/Kira decoding through `Recording`, file identity and revision checks, the SQLite table `wave_evidence_v4` and its pruning |
-| `waveformDetail.rs` | Maps validated sources to engine source keys exactly, and fences in-flight work by playback generation |
+| `waveform_source.rs` | Symphonia/Kira decoding through `Recording`, file identity and revision checks, the SQLite table `wave_evidence` and its pruning |
+| `waveform_detail.rs` | Maps validated sources to engine source keys exactly, and fences in-flight work by playback generation |
 | `analysis.rs` | Program resolution, active-chapter focus, overview passes and detail between chunks, updates to the player |
 | `overview.rs` | Disqro's paint helper over the engine surface |
-| `player_wave.rs`, `panels/waveform.rs`, `panels/waveformScrub.rs` | Track and Full CD perspectives, queue-scoped seeks, the dock panel, coordinated motion and its diagnostics, the audible scrub gesture |
-| `audioClock.rs`, `audioScrub.rs`, listening | Renderer clock, audition, Listening Intelligence |
-| `waveformPortQualification.rs` | `--waveform-parity` commands over the engine, presentation traces, device recreation, target-failure injection |
+| `player/wave.rs`, `panels/waveform.rs`, `panels/waveform/scrub.rs` | Track and Full CD perspectives, queue-scoped seeks, the dock panel, coordinated motion and its diagnostics, the audible scrub gesture |
+| `audio/clock.rs`, `audio/scrub.rs`, listening | Renderer clock, audition, Listening Intelligence |
+| `waveform_port_qualification.rs` | `--waveform-parity` commands over the engine, presentation traces, device recreation, target-failure injection |
 
 ## Building
 
@@ -54,9 +54,7 @@ origin, paces frames on the Windows 11 compositor clock, and no longer draws
 
 ## Derived data
 
-Encoded evidence moved from `wave_evidence_v3` to `wave_evidence_v4`. The
-old table held rebuildable measurements only and is dropped on open; the
-library, queue and listening data are untouched.
+Disqro opens the current rebuildable cache in `music-cache-v2.sqlite3`. The database filename versions the complete schema. Older cache files can be removed independently of the library and workspace.
 
 ## Archived extraction qualification
 

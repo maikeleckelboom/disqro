@@ -10,7 +10,7 @@ Go to Playing Track resolves a recording or playlist occurrence against the curr
 
 ## Tree and playback
 
-Tree paging keeps released rows in runs, remembers explicit expansion and subtree intent, and retains filter matches without keeping the full batch. A file continuation uses the complete filename so CUE sheets and audio files with a shared stem do not share a resume key. The configured resident target is 32,768 nodes. The per-branch paging policy, outstanding requests, and compressed page entries are distinct from this count. Whole-branch sorting is offered up to 24,576 rows. Larger branches show their source order and label that state.
+Tree pages retain a resume cursor and projected row counts after eviction. Folder reads resume from the complete filename, including the extension. The resident node target is 32,768. Explicit expansion markers retain their ancestor chains. Multi-page column sorts build a disposable SQLite ordering index on workers, with source order breaking equal keys. Recording reveal loads the sibling page containing each lineage member. Authored disc order remains intact.
 
 The compact cursor and detail deck sample the same presented audio frame. The compact cursor repaints a retained GPU texture and re-creates it if the window renderer's D3D11 device changes. A detail drag publishes displacement from the grip. The transport applies it to the actual held frame even if pointer movement preceded the hold acknowledgment. The frozen rendering comparisons and the reachable-boundary screenshots cover different contracts. [Waveform scrubbing](waveform-scrubbing.md)
 

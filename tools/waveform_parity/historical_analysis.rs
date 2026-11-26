@@ -6,7 +6,7 @@ use std::{
     env, fs::File, io::{BufReader, BufWriter, Read, Seek, SeekFrom},
 };
 
-// The October revision predates octave colour. The runner replaces this
+// The October revision predates octave color. The runner replaces this
 // declaration for #134, which uses the pinned Blackman analyzer below.
 mod octave {
     pub struct Work;

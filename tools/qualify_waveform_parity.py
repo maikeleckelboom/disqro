@@ -528,7 +528,7 @@ def compare(args):
                     or score["geometryMaxPx"] > limits["geometryDevicePixels"]
                     or score["rgbMaxCodes"] > limits["strokeRgbCodes"]
                     or score["analysisRgbMaxCodes"] > limits["strokeRgbCodes"]):
-                problems.append(f"geometry or colour {name}")
+                problems.append(f"geometry or color {name}")
         ref_png, actual_png = (Image.open(p / f"{name}.png").convert("RGB") for p in (reference, candidate))
         a, b = (np.asarray(p, dtype=np.int16) for p in (ref_png, actual_png))
         diff = np.abs(a - b)

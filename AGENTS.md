@@ -5,3 +5,13 @@
 - Preserve stable logical recording identities, independent browser state, and explicit ownership of asynchronous work. Share interface primitives across surfaces with the same interaction.
 - Preserve Favorites, ratings, playlists, listening history, registered collections, and workspace settings. Create disposable profiles directly with the current schema. Refuse incompatible library databases without altering them. Handle actual personal data through an isolated, one-time conversion or export and import with the owner's explicit approval.
 - Qualify Windows changes with isolated profiles, silent audio, and the private native desktop tools. Keep the Waveform Native dependency and Windows presentation patch pinned together.
+
+## Source and interface contracts
+
+- Use snake_case Rust module directories, filenames, functions, bindings, and fields. Use UpperCamelCase for types and variants, SCREAMING_SNAKE_CASE for constants, and kebab-case Cargo package names. Python tools follow snake_case. Keep historical references to external source and serialized identifiers exact.
+- Follow the [GPUI Kit design guide](https://gpui-kit.com/versions/v0.10.0/docs/design-guides/) and [coding guide](https://gpui-kit.com/versions/v0.10.0/docs/coding-guides/). Check signatures and event routing against the locked crate source. Prefer Kit controls and the shared Materials palette, size tokens and disclosures. Keep physical-pixel geometry at native rendering boundaries.
+- Give stateful controls stable domain and instance identities. Check name, role, selected, expanded and disabled states, keyboard focus and activation. Exercise nested controls with Enter and Space while global shortcuts are bound.
+- Keep recurring subscriptions with the entity that needs them. Use weak entity handles in asynchronous UI callbacks. Bound work and payload residency, cancel superseded requests and check the active generation before publishing. Give every cached result an invalidation and release path.
+- Audio rendering must avoid blocking, file I/O, heap allocation and unbounded traversal. Decode and prepare evidence on bounded workers. Keep transport position and waveform presentation on the shared clock.
+- Check changed behavior first, then run the locked suite, formatting, all-target all-feature warnings-denied Clippy, source naming and American English checks. Qualify native behavior on the private desktop with physically silent fixtures. Report the measured DPI, memory, workload, image comparisons and limitations.
+- Review the final diff and commit coherent changes separately. Build production and qualification executables separately. Keep private engine access controlled and report hosted CI failures. Merge and release require explicit authorization.

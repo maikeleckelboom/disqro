@@ -114,7 +114,7 @@ impl Analysis {
                                 .unwrap()
                                 .set_sources(job.id, p.segments.iter().map(|s| &s.source));
                             if send(Update::Program(p.clone())) {
-                                analyse(
+                                analyze(
                                     &p,
                                     start,
                                     &active,
@@ -252,7 +252,7 @@ impl Drop for Analysis {
         self.cancel();
     }
 }
-fn analyse(
+fn analyze(
     program: &Program,
     start: usize,
     focus: &AtomicUsize,

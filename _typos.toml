@@ -1,0 +1,17 @@
+[files]
+extend-exclude = ["/.local/", "/target/", "/docs/evidence/", "Cargo.lock"]
+[default]
+locale = "en-us"
+extend-ignore-re = [
+    'timebase\.numer',                     # Symphonia field
+    'NIN_(KEY)?SELECT',                    # Win32 notification constants
+    'b"trak"',                             # ISO media box
+    'StrokeColourField|waveformStrokeColour', # pinned Electron exports
+    'original\.index\("fn analyse\("\)',   # pinned historical Rust source
+    "Controllin' The Universe|Dominatin",   # published recording titles
+    '\bPNGs\b',
+]
+[default.extend-words]
+lod = "lod"
+cancelled = "canceled"
+cancelling = "canceling"
