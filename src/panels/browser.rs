@@ -1368,6 +1368,18 @@ impl Render for Browser {
                     .capture_key_down(
                         cx.listener(|b, e: &KeyDownEvent, w, cx| b.tree_key_down(e, w, cx)),
                     )
+                    .capture_any_mouse_down({
+                        // A right click below the rows offers the whole tree's
+                        // actions; a row claims the click for itself first.
+                        let table = self.tree.clone();
+                        move |event, _, cx| {
+                            if event.button == MouseButton::Right {
+                                table.update(cx, |t, cx| {
+                                    t.set_right_clicked_row(Some(usize::MAX), cx)
+                                });
+                            }
+                        }
+                    })
                     .child(crate::table::browser_table(
                         &self.tree,
                         crate::table::ROW_HEIGHT,

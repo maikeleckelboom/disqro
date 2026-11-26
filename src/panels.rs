@@ -448,16 +448,23 @@ impl Destination {
     /// The same explicit browser actions for every navigation destination.
     pub fn open_items(self, menu: PopupMenu, router: Entity<Router>) -> PopupMenu {
         use gpui_kit::component::menu::PopupMenuItem;
-        let tab = router.clone();
+        let beside = router.clone();
         let destination = self.clone();
+        self.open_in_new_tab(menu, router)
+            .item(PopupMenuItem::new("Open Beside").on_click(move |_, _, cx| {
+                beside.update(cx, |_, cx| {
+                    cx.emit(RouterEvent::Beside(destination.clone()))
+                });
+            }))
+    }
+
+    pub fn open_in_new_tab(self, menu: PopupMenu, router: Entity<Router>) -> PopupMenu {
+        use gpui_kit::component::menu::PopupMenuItem;
         menu.item(
             PopupMenuItem::new("Open in New Tab").on_click(move |_, _, cx| {
-                tab.update(cx, |_, cx| cx.emit(RouterEvent::Open(destination.clone())));
+                router.update(cx, |_, cx| cx.emit(RouterEvent::Open(self.clone())));
             }),
         )
-        .item(PopupMenuItem::new("Open Beside").on_click(move |_, _, cx| {
-            router.update(cx, |_, cx| cx.emit(RouterEvent::Beside(self.clone())));
-        }))
     }
 
     pub fn apply(self, browser: &mut Browser, window: &mut Window, cx: &mut Context<Browser>) {

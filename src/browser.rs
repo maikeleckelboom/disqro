@@ -35,8 +35,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-pub(crate) use tree::TreeId;
 use tree::TreeTable;
+pub(crate) use tree::{Expansion, TreeId};
 
 /// A folder that has not listed anything by then says it is opening, rather
 /// than flashing that message for every folder.

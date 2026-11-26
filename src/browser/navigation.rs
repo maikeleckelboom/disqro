@@ -232,6 +232,25 @@ pub(crate) struct SavedVisit {
         deserialize_with = "read_or_default"
     )]
     tree_expanded: Vec<TreeId>,
+    /// Subtrees expanded throughout; `null` is the whole tree.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_or_default"
+    )]
+    tree_deep: Vec<Option<TreeId>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_or_default"
+    )]
+    tree_closed: Vec<TreeId>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "read_or_default"
+    )]
+    tree_links: Vec<(TreeId, Option<TreeId>)>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -252,6 +271,9 @@ impl SavedVisit {
             sort: None,
             bookmark: Bookmark::default(),
             tree_expanded: Vec::new(),
+            tree_deep: Vec::new(),
+            tree_closed: Vec::new(),
+            tree_links: Vec::new(),
             reveal: None,
         }
     }
@@ -455,6 +477,7 @@ impl Browser {
 
     pub(crate) fn saved_visit(&self, cx: &App) -> SavedVisit {
         let table = self.table.read(cx);
+        let expansion = self.tree_expansion(cx);
         SavedVisit {
             route: self.route(),
             mode: self.prefs.mode,
@@ -473,7 +496,10 @@ impl Browser {
             }
             .map(|(f, d)| (f, d == ColumnSort::Descending)),
             bookmark: self.bookmark(cx),
-            tree_expanded: self.tree_expansion(cx),
+            tree_expanded: expansion.open,
+            tree_deep: expansion.deep,
+            tree_closed: expansion.closed,
+            tree_links: expansion.links,
             reveal: self.pending.as_ref().and_then(|p| p.target.clone()),
         }
     }
@@ -687,7 +713,13 @@ impl Browser {
         self.search
             .update(cx, |s, cx| s.set_value(search, window, cx));
         self.reset_table(cx);
-        self.reset_tree(std::mem::take(&mut visit.tree_expanded), cx);
+        let expansion = Expansion {
+            open: std::mem::take(&mut visit.tree_expanded),
+            deep: std::mem::take(&mut visit.tree_deep),
+            closed: std::mem::take(&mut visit.tree_closed),
+            links: std::mem::take(&mut visit.tree_links),
+        };
+        self.reset_tree(expansion, cx);
         let sort = visit.sort.map(|(field, descending)| {
             (
                 field,

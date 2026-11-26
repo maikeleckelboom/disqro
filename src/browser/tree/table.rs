@@ -261,13 +261,52 @@ impl TreeTable {
             .filter(|boundary| boundary.near(&self.shown))
             .map(|boundary| (boundary.branch.clone(), boundary.want, boundary.search))
             .collect();
-        if wants.is_empty() {
+        if wants.is_empty() && self.tree.first.is_empty() {
             return;
         }
         let browser = self.browser.clone();
         cx.defer(move |cx| {
             let _ = browser.update(cx, |b, cx| b.load_tree(wants, cx));
         });
+    }
+
+    /// Expand, Collapse, Expand All and Collapse All for item `id` of
+    /// branch `parent`, or Expand All and Collapse All for the whole tree.
+    /// Actions that would change nothing are disabled.
+    fn disclosure_items(
+        &self,
+        mut menu: PopupMenu,
+        id: Option<TreeId>,
+        parent: Option<TreeId>,
+        open: bool,
+        _: &App,
+    ) -> PopupMenu {
+        let browser = self.browser.clone();
+        let item = |label: &'static str, action: Disclosure, enabled: bool| {
+            let (browser, id, parent) = (browser.clone(), id.clone(), parent.clone());
+            PopupMenuItem::new(label)
+                .disabled(!enabled)
+                .on_click(move |_, _, cx| {
+                    let _ = browser.update(cx, |b, cx| {
+                        b.disclose_tree(action, id.clone(), parent.clone(), cx)
+                    });
+                })
+        };
+        let tree = &self.tree;
+        if id.is_some() {
+            menu = menu.item(item(
+                if open { "Collapse" } else { "Expand" },
+                Disclosure::Toggle,
+                true,
+            ));
+        }
+        let throughout = tree.expanded_throughout(&id) && (id.is_none() || open);
+        let anything = match &id {
+            None => tree.has_open_inside(&None) || !self.rows.iter().all(|row| !row.open()),
+            Some(_) => open || tree.has_open_inside(&id),
+        };
+        menu.item(item("Expand All", Disclosure::ExpandAll, !throughout))
+            .item(item("Collapse All", Disclosure::CollapseAll, anything))
     }
 
     fn field(&self, index: usize) -> Field {
@@ -421,7 +460,13 @@ impl TableDelegate for TreeTable {
                     cell.child(div().truncate().child(text.clone()))
                 }),
             TreeRow::Released { .. } => cell,
-            TreeRow::Node { node, depth, .. } => {
+            TreeRow::Node {
+                node,
+                depth,
+                open,
+                parent,
+            } => {
+                let open = *open;
                 let label = node.value(field);
                 if field != Field::Title {
                     return cell
@@ -429,7 +474,6 @@ impl TableDelegate for TreeTable {
                         .text_color(m.text_muted)
                         .child(div().truncate().child(label));
                 }
-                let open = self.tree.expanded.contains(&node.id);
                 let icon = match &node.item {
                     Item::Collection { .. } => IconName::Library,
                     Item::Folder { .. } if open => IconName::FolderOpen,
@@ -442,6 +486,7 @@ impl TableDelegate for TreeTable {
                 let disclosure = if node.expandable() {
                     let browser = self.browser.clone();
                     let id = node.id.clone();
+                    let parent = parent.clone();
                     let tooltip = if open { "Collapse" } else { "Expand" };
                     h_flex()
                         .id(("tree-disclosure", stable_element_key(&id)))
@@ -459,7 +504,8 @@ impl TableDelegate for TreeTable {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
-                            let _ = browser.update(cx, |b, cx| b.toggle_tree(id.clone(), cx));
+                            let _ = browser
+                                .update(cx, |b, cx| b.toggle_tree(id.clone(), parent.clone(), cx));
                         })
                         .child(
                             Icon::new(if open {
@@ -514,8 +560,12 @@ impl TableDelegate for TreeTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let Some(node) = self.row(index).and_then(TreeRow::node).cloned() else {
-            return menu;
+        let Some(TreeRow::Node {
+            node, open, parent, ..
+        }) = self.row(index).cloned()
+        else {
+            // Empty space below the rows: the whole tree.
+            return self.disclosure_items(menu, None, None, false, cx);
         };
         let place = self
             .browser
@@ -523,23 +573,16 @@ impl TableDelegate for TreeTable {
             .and_then(|b| b.read(cx).tree_root.clone());
         let browser = self.browser.clone();
         if let Some(destination) = node.destination(place) {
-            let open = destination.clone();
+            let target = destination.clone();
             let browse = browser.clone();
             menu = menu.item(PopupMenuItem::new("Open").on_click(move |_, w, cx| {
-                let destination = open.clone();
+                let destination = target.clone();
                 let _ = browse.update(cx, |b, cx| destination.apply(b, w, cx));
             }));
             if let Some(router) = &self.router {
-                menu = destination.open_items(menu, router.clone());
+                menu = destination.open_in_new_tab(menu, router.clone());
             }
-            let open = self.tree.expanded.contains(&node.id);
-            let label = if open { "Collapse" } else { "Expand" };
-            let id = node.id;
-            return menu
-                .separator()
-                .item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                    let _ = browser.update(cx, |b, cx| b.toggle_tree(id.clone(), cx));
-                }));
+            return self.disclosure_items(menu.separator(), Some(node.id), parent, open, cx);
         }
         let Item::Track { track, .. } = &node.item else {
             return menu;

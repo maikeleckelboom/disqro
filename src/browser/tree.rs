@@ -23,6 +23,8 @@ mod table;
 pub(crate) use table::TreeTable;
 
 const EXPANSION_LIMIT: usize = 128;
+/// Items collapsed inside expanded subtrees that the tree remembers.
+const CLOSED_LIMIT: usize = 4096;
 /// Items one request lists, reads and materializes for a branch.
 const PAGE: usize = 4096;
 /// Pages one branch keeps loaded while browsing. Loading another releases
@@ -291,6 +293,8 @@ enum TreeRow {
         node: Node,
         parent: Option<TreeId>,
         depth: usize,
+        /// Whether the item is expanded.
+        open: bool,
     },
     Message {
         parent: Option<TreeId>,
@@ -327,6 +331,11 @@ impl TreeRow {
             | Self::Message { parent, .. }
             | Self::Released { parent, .. } => parent.as_ref(),
         }
+    }
+
+    /// Whether the entry is an expanded item.
+    fn open(&self) -> bool {
+        matches!(self, Self::Node { open: true, .. })
     }
 
     /// The rows this entry spans.
@@ -483,6 +492,8 @@ impl Slot {
 /// A batch a branch waits for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Want {
+    /// The first page of an open branch inside an expanded subtree.
+    First,
     Next,
     Page(usize),
 }
@@ -516,6 +527,8 @@ struct Branch {
     wanted: Option<(Want, bool)>,
     /// Too large to sort as a whole, so shown in the order it is read.
     unsorted: bool,
+    /// Its items are open unless collapsed, inside an expanded subtree.
+    deep: bool,
 }
 
 impl Branch {
@@ -619,9 +632,42 @@ impl Drop for Request {
     }
 }
 
+/// A change to what is expanded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Disclosure {
+    /// One item, leaving what is open inside it as it was.
+    Toggle,
+    /// An item and everything inside it.
+    ExpandAll,
+    /// An item, forgetting everything open inside it.
+    CollapseAll,
+}
+
+/// What is expanded in a tree. Expand All marks a subtree rather than
+/// listing its items, so items nobody has read yet open as they load.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Expansion {
+    /// Items opened one at a time, oldest first.
+    pub(crate) open: Vec<TreeId>,
+    /// Subtrees whose items are all open; `None` is the whole tree.
+    pub(crate) deep: Vec<Option<TreeId>>,
+    /// Items collapsed inside an expanded subtree.
+    pub(crate) closed: Vec<TreeId>,
+    /// The parent of each item above, so a subtree can forget what is open
+    /// inside it before it is read.
+    pub(crate) links: Vec<(TreeId, Option<TreeId>)>,
+}
+
 #[derive(Default)]
 struct Tree {
     expanded: Vec<TreeId>,
+    deep: HashSet<Option<TreeId>>,
+    closed: HashSet<TreeId>,
+    /// The parent of every open item and loaded branch.
+    links: HashMap<TreeId, Option<TreeId>>,
+    /// Open branches inside expanded subtrees that the viewport has asked
+    /// to read. The rest wait until it comes near.
+    first: HashSet<TreeId>,
     branches: HashMap<Option<TreeId>, Branch>,
     pending: HashMap<Option<TreeId>, Request>,
     root: Option<Source>,
@@ -635,49 +681,268 @@ struct Tree {
 }
 
 impl Tree {
-    fn set_expanded(&mut self, list: Vec<TreeId>) {
+    fn set_expansion(&mut self, expansion: Expansion) {
         let mut seen = HashSet::new();
-        self.expanded = list
+        self.expanded = expansion
+            .open
             .into_iter()
             .filter(|key| seen.insert(key.clone()))
             .take(EXPANSION_LIMIT)
             .collect();
+        self.deep = expansion.deep.into_iter().take(EXPANSION_LIMIT).collect();
+        self.closed = expansion.closed.into_iter().take(CLOSED_LIMIT).collect();
+        self.links = expansion.links.into_iter().collect();
+        self.first.clear();
     }
 
-    fn is_open(&self, id: &TreeId) -> bool {
-        self.expanded.contains(id)
-    }
-
-    fn toggle(&mut self, id: TreeId) {
-        if let Some(index) = self.expanded.iter().position(|key| *key == id) {
-            self.expanded.remove(index);
-        } else {
-            if self.expanded.len() == EXPANSION_LIMIT {
-                self.expanded.remove(0);
-            }
-            self.expanded.push(id);
+    fn expansion(&self) -> Expansion {
+        let mut deep: Vec<_> = self.deep.iter().cloned().collect();
+        deep.sort_by_key(|id| id.is_some());
+        let closed: Vec<_> = self.closed.iter().cloned().collect();
+        let links = self
+            .expanded
+            .iter()
+            .chain(deep.iter().flatten())
+            .chain(&closed)
+            .filter_map(|id| Some((id.clone(), self.links.get(id)?.clone())))
+            .collect();
+        Expansion {
+            open: self.expanded.clone(),
+            deep,
+            closed,
+            links,
         }
-        self.prune();
     }
 
-    /// Drops the branches no open item reaches, which cancels their requests.
-    fn prune(&mut self) {
-        fn visit(tree: &Tree, key: Option<TreeId>, reachable: &mut HashSet<Option<TreeId>>) {
-            if !reachable.insert(key.clone()) {
+    /// Whether an item inside a subtree that is expanded throughout (`deep`)
+    /// opens unless collapsed.
+    fn opens_by_default(&self, id: &TreeId, deep: bool) -> bool {
+        deep || self.deep.contains(&Some(id.clone()))
+    }
+
+    /// Whether item `id` of a branch is open. `deep` tells whether that
+    /// branch lies inside an expanded subtree.
+    fn is_open(&self, id: &TreeId, deep: bool) -> bool {
+        !self.closed.contains(id) && (self.expanded.contains(id) || self.opens_by_default(id, deep))
+    }
+
+    /// Whether the items of branch `id` open unless collapsed.
+    fn branch_deep(&self, id: &Option<TreeId>) -> bool {
+        self.deep.contains(id) || self.branches.get(id).is_some_and(|branch| branch.deep)
+    }
+
+    /// Expands or collapses one item of branch `parent`, leaving what is
+    /// open inside it as it was.
+    fn toggle(&mut self, id: TreeId, parent: &Option<TreeId>) {
+        let deep = self.branch_deep(parent);
+        self.links.insert(id.clone(), parent.clone());
+        if self.is_open(&id, deep) {
+            self.expanded.retain(|key| *key != id);
+            if self.opens_by_default(&id, deep) && self.closed.len() < CLOSED_LIMIT {
+                self.closed.insert(id);
+            }
+        } else {
+            self.closed.remove(&id);
+            if !self.opens_by_default(&id, deep) {
+                if self.expanded.len() == EXPANSION_LIMIT {
+                    self.expanded.remove(0);
+                }
+                self.expanded.push(id);
+            }
+        }
+        self.reconcile();
+    }
+
+    /// Whether `id` lies inside item `ancestor`, by the parents the tree has
+    /// seen, or for folders by their paths.
+    fn descends(&self, id: &TreeId, ancestor: &TreeId) -> bool {
+        let mut current = id;
+        for _ in 0..256 {
+            match self.links.get(current) {
+                Some(Some(parent)) if parent == ancestor => return true,
+                Some(Some(parent)) => current = parent,
+                _ => break,
+            }
+        }
+        match (id, ancestor) {
+            (TreeId::Folder(_, path), TreeId::Folder(_, above)) => path
+                .strip_prefix(above.as_str())
+                .is_some_and(|rest| rest.starts_with(['\\', '/'])),
+            _ => false,
+        }
+    }
+
+    /// Expands `id` and everything inside it, or the whole tree for `None`.
+    /// Nothing is read until the viewport comes near it.
+    fn expand_all(&mut self, id: Option<TreeId>, parent: &Option<TreeId>) {
+        match &id {
+            None => {
+                self.closed.clear();
+            }
+            Some(item) => {
+                self.links.insert(item.clone(), parent.clone());
+                self.closed.remove(item);
+                let inside: Vec<_> = self
+                    .closed
+                    .iter()
+                    .filter(|key| self.descends(key, item))
+                    .cloned()
+                    .collect();
+                for key in inside {
+                    self.closed.remove(&key);
+                }
+            }
+        }
+        if self.deep.len() < EXPANSION_LIMIT || id.is_none() {
+            if id.is_none() {
+                self.deep.clear();
+            }
+            self.deep.insert(id);
+        }
+        self.reconcile();
+    }
+
+    /// Collapses `id` and forgets everything open inside it, read or not,
+    /// or collapses the whole tree for `None`.
+    fn collapse_all(&mut self, id: Option<TreeId>, parent: &Option<TreeId>) {
+        let Some(item) = id else {
+            self.expanded.clear();
+            self.deep.clear();
+            self.closed.clear();
+            self.first.clear();
+            self.reconcile();
+            return;
+        };
+        let inside = |tree: &Tree, key: &TreeId| tree.descends(key, &item);
+        let expanded: Vec<_> = self
+            .expanded
+            .iter()
+            .filter(|key| !inside(self, key) && **key != item)
+            .cloned()
+            .collect();
+        let deep: HashSet<_> = self
+            .deep
+            .iter()
+            .filter(|key| {
+                key.as_ref()
+                    .is_none_or(|key| !inside(self, key) && *key != item)
+            })
+            .cloned()
+            .collect();
+        let closed: HashSet<_> = self
+            .closed
+            .iter()
+            .filter(|key| !inside(self, key))
+            .cloned()
+            .collect();
+        (self.expanded, self.deep, self.closed) = (expanded, deep, closed);
+        let first: HashSet<_> = self
+            .first
+            .iter()
+            .filter(|key| !inside(self, key))
+            .cloned()
+            .collect();
+        self.first = first;
+        self.links.insert(item.clone(), parent.clone());
+        if self.opens_by_default(&item, self.branch_deep(parent)) {
+            self.closed.insert(item);
+        }
+        self.reconcile();
+    }
+
+    /// Whether anything inside `id` (the whole tree for `None`) is open.
+    fn has_open_inside(&self, id: &Option<TreeId>) -> bool {
+        match id {
+            None => !self.expanded.is_empty() || !self.deep.is_empty(),
+            Some(item) => {
+                self.deep.contains(id)
+                    || self.expanded.iter().any(|key| self.descends(key, item))
+                    || self
+                        .deep
+                        .iter()
+                        .flatten()
+                        .any(|key| self.descends(key, item))
+            }
+        }
+    }
+
+    /// Whether `id` (the whole tree for `None`) is expanded throughout.
+    fn expanded_throughout(&self, id: &Option<TreeId>) -> bool {
+        let deep = self.deep.contains(&None)
+            || self.deep.contains(id)
+            || id.as_ref().is_some_and(|item| {
+                self.links
+                    .get(item)
+                    .is_some_and(|parent| self.branch_deep(parent))
+            });
+        deep && match id {
+            None => self.closed.is_empty(),
+            Some(item) => {
+                !self.closed.contains(item)
+                    && !self.closed.iter().any(|key| self.descends(key, item))
+            }
+        }
+    }
+
+    /// Drops the branches no open item reaches, which cancels their requests,
+    /// and records which branches lie inside expanded subtrees.
+    fn reconcile(&mut self) {
+        fn visit(
+            tree: &Tree,
+            key: Option<TreeId>,
+            deep: bool,
+            reachable: &mut HashMap<Option<TreeId>, bool>,
+            links: &mut Vec<(TreeId, Option<TreeId>)>,
+        ) {
+            if reachable.contains_key(&key) {
                 return;
             }
+            reachable.insert(key.clone(), deep);
             if let Some(branch) = tree.branches.get(&key) {
                 for node in branch.reachable() {
-                    if tree.is_open(&node.id) {
-                        visit(tree, Some(node.id.clone()), reachable);
+                    if tree.is_open(&node.id, deep) {
+                        links.push((node.id.clone(), key.clone()));
+                        let inner = tree.opens_by_default(&node.id, deep);
+                        visit(tree, Some(node.id.clone()), inner, reachable, links);
                     }
                 }
             }
         }
-        let mut reachable = HashSet::new();
-        visit(self, None, &mut reachable);
-        self.branches.retain(|key, _| reachable.contains(key));
-        self.pending.retain(|key, _| reachable.contains(key));
+        let mut reachable = HashMap::new();
+        let mut links = Vec::new();
+        visit(
+            self,
+            None,
+            self.deep.contains(&None),
+            &mut reachable,
+            &mut links,
+        );
+        self.branches.retain(|key, _| reachable.contains_key(key));
+        for (key, branch) in &mut self.branches {
+            branch.deep = reachable[key];
+        }
+        self.pending.retain(|key, _| reachable.contains_key(key));
+        let awaiting: HashSet<TreeId> = links.iter().map(|(id, _)| id.clone()).collect();
+        self.links.extend(links);
+        let kept: HashSet<&TreeId> = self
+            .branches
+            .keys()
+            .flatten()
+            .chain(&awaiting)
+            .chain(&self.expanded)
+            .chain(self.deep.iter().flatten())
+            .chain(&self.closed)
+            .collect();
+        let keep: HashSet<TreeId> = kept.into_iter().cloned().collect();
+        self.links.retain(|key, _| keep.contains(key));
+        let open: HashSet<&TreeId> = self.links.keys().collect();
+        let first: HashSet<TreeId> = self
+            .first
+            .iter()
+            .filter(|key| open.contains(key) && !self.branches.contains_key(&Some((*key).clone())))
+            .cloned()
+            .collect();
+        self.first = first;
     }
 
     fn loaded(&self) -> usize {
@@ -733,8 +998,28 @@ impl Tree {
     /// Takes the first page of a branch. Every open branch reads its first
     /// page, so it counts as unused until the viewport comes near it.
     fn insert_branch(&mut self, id: Option<TreeId>, branch: Branch, lens: Option<&Lens>) {
+        if let Some(key) = &id {
+            self.first.remove(key);
+        }
         self.branches.insert(id.clone(), branch);
+        self.reconcile();
         self.settle(&id, 0, false, lens);
+    }
+
+    /// Asks for the first pages of the open branches inside expanded
+    /// subtrees that the viewport is near, and no others: one it has moved
+    /// away from before its turn waits again. Returns whether any is new.
+    fn want_first(&mut self, ids: HashSet<TreeId>) -> bool {
+        let wanted: HashSet<TreeId> = ids
+            .into_iter()
+            .filter(|key| {
+                let id = Some(key.clone());
+                !self.branches.contains_key(&id) && !self.pending.contains_key(&id)
+            })
+            .collect();
+        let new = wanted.iter().any(|key| !self.first.contains(key));
+        self.first = wanted;
+        new
     }
 
     /// Asks for a batch of a branch. Returns whether it is wanted now.
@@ -745,6 +1030,7 @@ impl Tree {
             return false;
         };
         let valid = match want {
+            Want::First => false,
             Want::Next => branch.more.is_some(),
             Want::Page(index) => branch
                 .pages
@@ -822,8 +1108,18 @@ impl Tree {
     /// once even those fill the total, the filter reads no further.
     fn settle(&mut self, id: &Option<TreeId>, keep: usize, search: bool, lens: Option<&Lens>) {
         let sorts = self.sorts(id);
-        let expanded = &self.expanded;
-        let open = |id: &TreeId| expanded.contains(id);
+        let deep = self.branch_deep(id);
+        let tree = &*self;
+        let open = |key: &TreeId| tree.is_open(key, deep);
+        let anchors = |branch: &Branch| -> HashSet<TreeId> {
+            branch
+                .nodes()
+                .map(|n| n.id.clone())
+                .filter(|key| open(key))
+                .collect()
+        };
+        let opened = self.branches.get(id).map(anchors).unwrap_or_default();
+        let open = |key: &TreeId| opened.contains(key);
         if let Some(branch) = self.branches.get_mut(id) {
             if sorts && !branch.unsorted && branch.len() > SORTED_BRANCH_LIMIT {
                 branch.unsorted = true;
@@ -853,8 +1149,20 @@ impl Tree {
                 })
                 .min_by_key(|(_, _, page)| page.used)
                 .map(|(key, index, _)| (key.clone(), index));
-            let expanded = &self.expanded;
-            let open = |id: &TreeId| expanded.contains(id);
+            let owner = least.as_ref().map_or(id, |(key, _)| key);
+            let deep = self.branch_deep(owner);
+            let opened: HashSet<TreeId> = self
+                .branches
+                .get(owner)
+                .map(|branch| {
+                    branch
+                        .nodes()
+                        .filter(|n| self.is_open(&n.id, deep))
+                        .map(|n| n.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let open = |key: &TreeId| opened.contains(key);
             let page = match least {
                 Some((key, index)) => self.branches.get_mut(&key).map(|b| &mut b.pages[index]),
                 None if search && lens.is_some() => self
@@ -874,6 +1182,19 @@ impl Tree {
         }
     }
 
+    /// Whether the first page of open item `id` is read without waiting for
+    /// the viewport: it was opened by itself, Expand All was chosen on it,
+    /// or the viewport asked for it.
+    fn reads_first(&self, id: &TreeId) -> bool {
+        self.reads_eagerly(id) || self.first.contains(id)
+    }
+
+    /// Whether open item `id` was opened by itself or with Expand All, so
+    /// its first page is read wherever the viewport is.
+    fn reads_eagerly(&self, id: &TreeId) -> bool {
+        self.expanded.contains(id) || self.deep.contains(&Some(id.clone()))
+    }
+
     fn next_request(&self) -> Option<(Option<TreeId>, Source, Fetch)> {
         fn find(
             tree: &Tree,
@@ -887,19 +1208,19 @@ impl Tree {
             if let Some(branch) = tree.branches.get(&id) {
                 if !tree.pending.contains_key(&id) {
                     let fetch = match branch.wanted {
+                        Some((Want::First, _)) | None => None,
                         Some((Want::Next, _)) => branch.more.clone().map(Fetch::Next),
                         Some((Want::Page(index), _)) => branch
                             .pages
                             .get(index)
                             .map(|page| Fetch::Page(index, page.start.clone())),
-                        None => None,
                     };
                     if let Some(fetch) = fetch {
                         return Some((id, source()?, fetch));
                     }
                 }
                 for node in branch.reachable() {
-                    if tree.is_open(&node.id)
+                    if tree.is_open(&node.id, branch.deep)
                         && let Some(next) = find(tree, Some(node.id.clone()), Some(node))
                     {
                         return Some(next);
@@ -908,8 +1229,10 @@ impl Tree {
                 None
             } else if tree.pending.contains_key(&id) {
                 None
-            } else {
+            } else if id.as_ref().is_none_or(|key| tree.reads_first(key)) {
                 Some((id, source()?, Fetch::First))
+            } else {
+                None
             }
         }
         if self.pending.len() >= PARALLEL_BRANCHES {
@@ -990,6 +1313,12 @@ impl Projection<'_> {
         let tree = self.tree;
         let Some(branch) = tree.branches.get(&parent) else {
             if inherited || self.lens.is_none() {
+                let row = self.len;
+                if let Some(key) = &parent
+                    && !tree.reads_eagerly(key)
+                {
+                    self.boundary(row..row + 1, &parent, Want::First, false);
+                }
                 self.push(TreeRow::Message {
                     parent,
                     depth,
@@ -1036,7 +1365,7 @@ impl Projection<'_> {
                 let mut nodes: Vec<&Node> = branch.nodes().collect();
                 sort_nodes(&mut nodes, self.tree.sort);
                 for node in nodes {
-                    self.node(node, parent, depth, true);
+                    self.node(node, parent, depth, branch.deep, true);
                 }
             } else {
                 // A sorted branch is shown once all of it is read, never in
@@ -1077,7 +1406,7 @@ impl Projection<'_> {
             match &page.nodes {
                 Some(nodes) => {
                     for node in nodes {
-                        self.node(node, parent, depth, true);
+                        self.node(node, parent, depth, branch.deep, true);
                     }
                 }
                 None => {
@@ -1089,7 +1418,7 @@ impl Projection<'_> {
                                 count: offset - at,
                             });
                         }
-                        self.node(node, parent, depth, true);
+                        self.node(node, parent, depth, branch.deep, true);
                         at = offset + 1;
                     }
                     if page.len > at {
@@ -1143,7 +1472,7 @@ impl Projection<'_> {
             let mut nodes: Vec<&Node> = found.iter().map(|(_, node)| *node).collect();
             sort_nodes(&mut nodes, self.tree.sort);
             for node in nodes {
-                self.node(node, parent, depth, lens.matches(node));
+                self.node(node, parent, depth, branch.deep, lens.matches(node));
             }
             for (index, _) in &found {
                 spans[*index] = Some(start..self.len);
@@ -1151,7 +1480,7 @@ impl Projection<'_> {
         } else {
             for (index, node) in found {
                 let at = self.len;
-                self.node(node, parent, depth, lens.matches(node));
+                self.node(node, parent, depth, branch.deep, lens.matches(node));
                 let span = spans[index].get_or_insert(at..at);
                 span.end = self.len;
             }
@@ -1176,15 +1505,24 @@ impl Projection<'_> {
 
     /// One item and, when it is open, its branch. A filter drops an item
     /// that neither matches nor leads to a match.
-    fn node(&mut self, node: &Node, parent: &Option<TreeId>, depth: usize, matched: bool) {
+    fn node(
+        &mut self,
+        node: &Node,
+        parent: &Option<TreeId>,
+        depth: usize,
+        deep: bool,
+        matched: bool,
+    ) {
         let holds = !matched && self.lens.is_some_and(|lens| lens.holds(node));
         let (row, len) = (self.rows.len(), self.len);
+        let open = node.expandable() && self.tree.is_open(&node.id, deep);
         self.push(TreeRow::Node {
             node: node.clone(),
             parent: parent.clone(),
             depth,
+            open,
         });
-        if self.tree.is_open(&node.id) {
+        if open {
             self.visit(Some(node.id.clone()), depth + 1, matched);
         }
         if !matched && !holds && self.rows.len() == row + 1 {
@@ -1383,15 +1721,15 @@ impl Browser {
         self.prefs.mode == ViewMode::Tree && self.has_presentations()
     }
 
-    pub(crate) fn tree_expansion(&self, cx: &App) -> Vec<TreeId> {
-        self.tree.read(cx).delegate().tree.expanded.clone()
+    pub(crate) fn tree_expansion(&self, cx: &App) -> Expansion {
+        self.tree.read(cx).delegate().tree.expansion()
     }
 
-    pub(crate) fn reset_tree(&mut self, expanded: Vec<TreeId>, cx: &mut App) {
+    pub(crate) fn reset_tree(&mut self, expansion: Expansion, cx: &mut App) {
         self.tree.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.tree = Tree::default();
-            delegate.tree.set_expanded(expanded);
+            delegate.tree.set_expansion(expansion);
             delegate.rows.clear();
             delegate.selected = None;
             delegate.restore = None;
@@ -1691,6 +2029,12 @@ impl Browser {
         let mut any = false;
         self.tree.update(cx, |table, _| {
             let tree = &mut table.delegate_mut().tree;
+            let first = wants
+                .iter()
+                .filter(|(_, want, _)| *want == Want::First)
+                .filter_map(|(branch, _, _)| branch.clone())
+                .collect();
+            any |= tree.want_first(first);
             for (branch, want, search) in wants {
                 any |= tree.want(&branch, want, search);
             }
@@ -1873,10 +2217,42 @@ impl Browser {
         );
     }
 
-    fn toggle_tree(&mut self, id: TreeId, cx: &mut Context<Self>) {
+    /// Expands or collapses item `id` of branch `parent` alone.
+    fn toggle_tree(&mut self, id: TreeId, parent: Option<TreeId>, cx: &mut Context<Self>) {
+        self.disclose_tree(Disclosure::Toggle, Some(id), parent, cx);
+    }
+
+    /// Changes what is expanded, at item `id` of branch `parent` or across
+    /// the whole tree for `None`. Selection, playback and the location stay
+    /// as they are; when a collapse hides the selected item, the collapsed
+    /// item is selected instead.
+    pub(super) fn disclose_tree(
+        &mut self,
+        action: Disclosure,
+        id: Option<TreeId>,
+        parent: Option<TreeId>,
+        cx: &mut Context<Self>,
+    ) {
         self.tree.update(cx, |table, cx| {
-            table.delegate_mut().tree.toggle(id);
+            let delegate = table.delegate_mut();
+            let tree = &mut delegate.tree;
+            match (action, id.clone()) {
+                (Disclosure::Toggle, Some(item)) => tree.toggle(item, &parent),
+                (Disclosure::Toggle, None) => return,
+                (Disclosure::ExpandAll, id) => tree.expand_all(id, &parent),
+                (Disclosure::CollapseAll, id) => tree.collapse_all(id, &parent),
+            }
             TreeTable::project(table, cx);
+            let d = table.delegate();
+            if action != Disclosure::ExpandAll
+                && d.selected
+                    .as_ref()
+                    .is_some_and(|key| d.position(key).is_none())
+                && let Some(row) = id.as_ref().and_then(|key| d.position(key))
+            {
+                table.delegate_mut().on_selection(row);
+                table.set_selected_row(row, cx);
+            }
         });
         self.pump_tree(cx);
         self.update_tree_playable(cx);
@@ -1916,20 +2292,21 @@ impl Browser {
         };
         let selected = row.node();
         let branch = selected.filter(|node| node.expandable());
-        let expanded = branch.is_some_and(|node| tree.tree.expanded.contains(&node.id));
+        let expanded = row.open();
+        let parent = row.parent().cloned();
         match key {
             "enter" => self.activate_tree(index, window, cx),
             "right"
                 if let Some(branch) = branch
                     && !expanded =>
             {
-                self.toggle_tree(branch.id.clone(), cx)
+                self.toggle_tree(branch.id.clone(), parent, cx)
             }
             "left"
                 if let Some(branch) = branch
                     && expanded =>
             {
-                self.toggle_tree(branch.id.clone(), cx)
+                self.toggle_tree(branch.id.clone(), parent, cx)
             }
             "right"
                 if let Some(node) = selected

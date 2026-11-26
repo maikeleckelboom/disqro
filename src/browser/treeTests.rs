@@ -64,12 +64,12 @@ fn physical_tree_loads_only_expanded_branches_and_keeps_all_authored_chapters() 
     let mut tree = Tree::default();
     tree.branches.insert(None, start);
     assert!(tree.next_request().is_none());
-    tree.toggle(parent_id.clone());
+    tree.toggle(parent_id.clone(), &None);
     assert_eq!(tree.next_request().unwrap().0, Some(parent_id.clone()));
     let nested = physical_branch(&root.join("Nested"), None, &|| true).unwrap();
     let folder = nested.nodes().next().unwrap().id.clone();
     tree.branches.insert(Some(parent_id.clone()), nested);
-    tree.toggle(folder.clone());
+    tree.toggle(folder.clone(), &Some(parent_id.clone()));
     let branch = physical_branch(&deep, None, &|| true).unwrap();
     assert_eq!(branch.nodes().count(), 1);
     let disc = branch.nodes().next().unwrap().clone();
@@ -78,8 +78,8 @@ fn physical_tree_loads_only_expanded_branches_and_keeps_all_authored_chapters() 
     };
     assert_eq!(children.len(), 20);
     let key = children[19].id.clone();
-    tree.branches.insert(Some(folder), branch);
-    tree.toggle(disc.id.clone());
+    tree.branches.insert(Some(folder.clone()), branch);
+    tree.toggle(disc.id.clone(), &Some(folder.clone()));
     tree.branches
         .insert(Some(disc.id.clone()), Branch::page(children, None));
     let descending = tree.visible(Some((Field::Title, ColumnSort::Descending)), "", &|_| {
@@ -105,7 +105,7 @@ fn physical_tree_loads_only_expanded_branches_and_keeps_all_authored_chapters() 
     let ticket = Ticket::default();
     let generation = ticket.next();
     tree.pending.insert(Some(disc.id), Request(ticket.clone()));
-    tree.toggle(parent_id);
+    tree.toggle(parent_id, &None);
     assert!(!ticket.is_current(generation));
     assert_eq!(tree.branches.len(), 1);
     let multi = physical_branch(&root.join("Multipart"), None, &|| true).unwrap();
@@ -163,10 +163,13 @@ fn expansion_bookmarks_are_bounded_and_never_reuse_a_pending_generation() {
     let mut tree = Tree::default();
     let ids = (0..300).map(TreeId::Collection).collect::<Vec<_>>();
     let saved = serde_json::to_vec(&ids).unwrap();
-    tree.set_expanded(serde_json::from_slice(&saved).unwrap());
+    tree.set_expansion(super::Expansion {
+        open: serde_json::from_slice(&saved).unwrap(),
+        ..Default::default()
+    });
     assert_eq!(tree.expanded.len(), EXPANSION_LIMIT);
     assert!(tree.expanded.contains(&TreeId::Collection(0)));
-    tree.toggle(TreeId::Collection(500));
+    tree.toggle(TreeId::Collection(500), &None);
     assert!(!tree.expanded.contains(&TreeId::Collection(0)));
     assert_eq!(tree.expanded.len(), EXPANSION_LIMIT);
 }
@@ -249,6 +252,12 @@ impl Harness {
                 .filter(|b| b.near(&self.shown))
                 .map(|b| (b.branch.clone(), b.want, b.search))
                 .collect();
+            let first = wants
+                .iter()
+                .filter(|(_, want, _)| *want == Want::First)
+                .filter_map(|(branch, _, _)| branch.clone())
+                .collect();
+            self.tree.want_first(first);
             for (branch, want, search) in wants {
                 self.tree.want(&branch, want, search);
             }
@@ -346,7 +355,7 @@ fn a_collection_beyond_the_loaded_total_is_reachable_within_it() {
         let name = node.value(Field::Title);
         view.children
             .insert(Some(node.id.clone()), named(&name, 6_000));
-        view.tree.toggle(node.id.clone());
+        view.tree.toggle(node.id.clone(), &None);
     }
     view.settle();
     let mut top = 0;
@@ -460,7 +469,7 @@ fn open_items_of_released_pages_keep_their_rows_and_selection() {
     let open = all[5].id.clone();
     let mut view = Harness::new(all.clone());
     view.children.insert(Some(open.clone()), named("Inner", 10));
-    view.tree.toggle(open.clone());
+    view.tree.toggle(open.clone(), &None);
     view.settle();
     let before = view.len;
     let inner = view.row_of("Item 00009").unwrap();
@@ -474,11 +483,11 @@ fn open_items_of_released_pages_keep_their_rows_and_selection() {
     assert_eq!(view.row_of("Item 00009"), Some(inner));
     assert!(view.logical()[0].is_none());
     // Collapsing it there still works, and reopening reads it again.
-    view.tree.toggle(open.clone());
+    view.tree.toggle(open.clone(), &None);
     view.project();
     assert_eq!(view.len, before - 10);
     assert!(!view.tree.branches.contains_key(&Some(open.clone())));
-    view.tree.toggle(open);
+    view.tree.toggle(open, &None);
     view.scroll(0);
     assert_eq!(view.len, before);
     assert_eq!(view.row_of("Item 00009"), Some(inner));
@@ -491,7 +500,7 @@ fn collapsing_cancels_pending_batches_and_ignores_their_results() {
     let mut view = Harness::new(collections);
     view.children
         .insert(Some(parent.clone()), named("Deep", 3 * PAGE));
-    view.tree.toggle(parent.clone());
+    view.tree.toggle(parent.clone(), &None);
     view.settle();
     // A next batch is waiting when the branch is collapsed.
     let id = Some(parent.clone());
@@ -501,7 +510,7 @@ fn collapsing_cancels_pending_batches_and_ignores_their_results() {
     view.tree
         .pending
         .insert(id.clone(), Request(ticket.clone()));
-    view.tree.toggle(parent.clone());
+    view.tree.toggle(parent.clone(), &None);
     assert!(!ticket.is_current(generation));
     assert!(!view.tree.branches.contains_key(&id));
     // Its result arrives after the collapse and changes nothing.
@@ -512,7 +521,7 @@ fn collapsing_cancels_pending_batches_and_ignores_their_results() {
             .receive(&id, &Fetch::Next(Cursor::Offset(PAGE)), stale, None)
     );
     // A batch for a position the branch has moved past is ignored too.
-    view.tree.toggle(parent);
+    view.tree.toggle(parent, &None);
     view.scroll(0);
     let all = named("Deep", 3 * PAGE);
     assert!(!view.tree.receive(
@@ -533,7 +542,7 @@ fn loading_releases_the_least_recently_used_pages_across_branches() {
     let mut tree = Tree::default();
     let big = folders(LOADED_NODE_LIMIT);
     let id = Some(TreeId::Collection(1));
-    tree.insert_branch(id.clone(), Branch::slice(&big, 0), None);
+    tree.branches.insert(id.clone(), Branch::slice(&big, 0));
     let mut filler = folders(LOADED_NODE_LIMIT - PAGE);
     filler.iter_mut().enumerate().for_each(|(i, node)| {
         node.id = TreeId::Collection(1000 + i as i64);
@@ -797,4 +806,161 @@ fn every_sheet_of_a_paged_folder_owns_its_recordings() {
     )
     .unwrap();
     assert_eq!(claimed.len(), 1);
+}
+
+/// A folder tree: `root` holds `A` and `B`; `A` holds 300 folders that
+/// each hold three more.
+fn nested() -> (Harness, TreeId, TreeId) {
+    let a = Node::folder(None, PathBuf::from("C:\\Music\\A"));
+    let b = Node::folder(None, PathBuf::from("C:\\Music\\B"));
+    let (a_id, b_id) = (a.id.clone(), b.id.clone());
+    let mut view = Harness::new(vec![a, b]);
+    let inner: Vec<Node> = (0..INNER)
+        .map(|i| Node::folder(None, PathBuf::from(format!("C:\\Music\\A\\Inner {i:03}"))))
+        .collect();
+    for node in &inner {
+        let path = format!("C:\\Music\\A\\{}", node.value(Field::Title));
+        let leaves = (0..3)
+            .map(|j| Node::folder(None, PathBuf::from(format!("{path}\\Leaf {j}"))))
+            .collect();
+        view.children.insert(Some(node.id.clone()), leaves);
+    }
+    view.children.insert(Some(a_id.clone()), inner);
+    view.children
+        .insert(Some(b_id.clone()), named("Music\\B", 2));
+    (view, a_id, b_id)
+}
+
+const INNER: usize = 300;
+
+fn count(view: &Harness, prefix: &str) -> usize {
+    view.logical()
+        .iter()
+        .flatten()
+        .filter(|title| title.starts_with(prefix))
+        .count()
+}
+
+fn scroll_through(view: &mut Harness) {
+    let mut top = 0;
+    while top + 40 < view.len {
+        view.scroll(top);
+        top += 400;
+    }
+    // Rows read near the end push the end further down; follow it.
+    loop {
+        let len = view.len;
+        view.scroll(len.saturating_sub(40));
+        if view.len == len {
+            break;
+        }
+    }
+}
+
+fn inner(i: usize) -> TreeId {
+    Node::folder(None, PathBuf::from(format!("C:\\Music\\A\\Inner {i:03}"))).id
+}
+
+#[test]
+fn expand_all_opens_a_whole_subtree_as_the_viewport_reaches_it() {
+    let (mut view, a, b) = nested();
+    view.settle();
+    view.tree.toggle(b.clone(), &None);
+    view.tree.expand_all(Some(a.clone()), &None);
+    view.settle();
+    // The subtree itself is read at once; what lies inside it is read only
+    // as the viewport comes near, never all at once.
+    let first_reads = view.reads.len();
+    assert!(first_reads < 400, "read {first_reads} branches at once");
+    scroll_through(&mut view);
+    // Every one of 300 folders is open, beyond the 128 kept one at a time.
+    assert_eq!(count(&view, "Leaf"), INNER * 3);
+    assert_eq!(view.reads.len(), 3 + INNER + INNER * 3);
+    assert!(view.tree.expanded.len() <= 1);
+    assert!(view.tree.expanded_throughout(&Some(a.clone())));
+    // Unrelated branches stay as they were.
+    assert!(view.row_of("Item 00001").is_some());
+
+    // Collapsing one folder inside keeps the rest open; Expand All again
+    // reopens it.
+    let before = view.len;
+    view.tree.toggle(inner(7), &Some(a.clone()));
+    view.project();
+    // Its three folders and their three empty-folder notes leave.
+    assert_eq!(view.len, before - 6);
+    assert_eq!(count(&view, "Leaf"), (INNER - 1) * 3);
+    assert!(!view.tree.expanded_throughout(&Some(a.clone())));
+    view.tree.expand_all(Some(a.clone()), &None);
+    view.scroll(0);
+    assert!(view.tree.closed.is_empty());
+    assert!(view.tree.expanded_throughout(&Some(a)));
+}
+
+#[test]
+fn collapse_all_forgets_what_is_open_inside_even_when_unloaded() {
+    let (mut view, a, b) = nested();
+    view.settle();
+    view.tree.toggle(b.clone(), &None);
+    view.tree.toggle(a.clone(), &None);
+    view.settle();
+    // Two folders inside A open one at a time, one inside the other.
+    view.tree.toggle(inner(3), &Some(a.clone()));
+    view.settle();
+    let leaf = view.children[&Some(inner(3))][1].id.clone();
+    view.tree.toggle(leaf.clone(), &Some(inner(3)));
+    view.tree.toggle(inner(4), &Some(a.clone()));
+    view.settle();
+    // A deeper folder of a branch never read, from a saved workspace.
+    let saved = Node::folder(None, PathBuf::from("C:\\Music\\A\\Inner 250\\Leaf 2")).id;
+    view.tree.expanded.push(saved.clone());
+    view.tree.collapse_all(Some(a.clone()), &None);
+    view.project();
+    for gone in [&inner(3), &inner(4), &leaf, &saved, &a] {
+        assert!(!view.tree.expanded.contains(gone), "{gone:?} stayed open");
+    }
+    assert!(view.tree.expanded.contains(&b));
+    // Reopening A shows its folders collapsed.
+    view.tree.toggle(a.clone(), &None);
+    view.settle();
+    assert_eq!(view.len, 2 + INNER + 2);
+    // Collapse All across the whole tree, then Expand All for all of it.
+    view.tree.collapse_all(None, &None);
+    view.project();
+    assert_eq!(view.len, 2);
+    view.tree.expand_all(None, &None);
+    scroll_through(&mut view);
+    assert!(view.row_of("Inner 000").is_some());
+    let tail: Vec<_> = view.logical().into_iter().rev().take(6).collect();
+    assert!(view.row_of("Item 00001").is_some(), "{tail:?}");
+    assert!(view.tree.expanded_throughout(&None));
+}
+
+#[test]
+fn expansion_survives_a_restart_and_stale_results_never_reopen() {
+    let (mut view, a, _) = nested();
+    view.settle();
+    view.tree.expand_all(Some(a.clone()), &None);
+    view.settle();
+    view.tree.toggle(inner(0), &Some(a.clone()));
+    let saved = view.tree.expansion();
+    assert_eq!(saved.deep, vec![Some(a.clone())]);
+    assert_eq!(saved.closed, vec![inner(0)]);
+    assert!(saved.links.contains(&(inner(0), Some(a.clone()))));
+    let mut restored = Tree::default();
+    restored.set_expansion(saved.clone());
+    assert_eq!(restored.expansion(), saved);
+    // A branch collapsed while its first page is read ignores the result.
+    let ticket = Ticket::default();
+    let generation = ticket.next();
+    let pending = Some(inner(1));
+    view.tree
+        .pending
+        .insert(pending.clone(), Request(ticket.clone()));
+    view.tree.collapse_all(Some(a.clone()), &None);
+    assert!(!ticket.is_current(generation));
+    let leaves = Branch::page(view.children[&pending].clone(), None);
+    view.tree.receive(&pending, &Fetch::First, leaves, None);
+    view.project();
+    assert!(!view.tree.branches.contains_key(&pending) || !view.tree.has_open_inside(&Some(a)));
+    assert_eq!(view.len, 2);
 }
