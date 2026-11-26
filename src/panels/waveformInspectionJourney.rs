@@ -236,7 +236,7 @@ impl Journey {
                 let gesture = p.player.update(cx, |player, cx| {
                     player.begin_waveform_scrub(track.seek?, from, false, cx)
                 })?;
-                gesture.move_to(from + 4., from, 480., Instant::now());
+                gesture.turn_by(4., 0., 480., Instant::now());
                 Some(gesture)
             })
             .await?;

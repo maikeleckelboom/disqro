@@ -1790,6 +1790,38 @@ fn release_hold(engine: &mut Engine, anchor: WaveSeekAnchor, frame: usize) {
 }
 
 #[test]
+fn pointer_displacement_before_the_hold_uses_the_actual_held_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("hold.wav");
+    fixture(&file, 48_000, 48_000);
+    let track = Arc::new(crate::library::Track::file(file));
+    let program = crate::timeline::Program::resolve(&track, DiscContext::Inferred, None).unwrap();
+    let mut engine = Engine::default();
+    engine
+        .queue
+        .replace(crate::library::TrackList::from(vec![track]).into(), 0);
+    engine.select(Some(0), 0.);
+    let segment = &program.segments[0];
+    let gesture = scrub::Gesture::new(
+        engine.scrub_control.clone(),
+        WaveSeekAnchor {
+            identity: engine.status.playback_identity().unwrap(),
+            source: segment.source.clone(),
+            playable: segment.frames.clone(),
+            sheet: None,
+        },
+        100.,
+        true,
+        segment.frames.clone(),
+    );
+    gesture.turn_by(80., 0., 480., Instant::now());
+    gesture.hold_at(120.);
+    assert_eq!(gesture.frame(), Some(200.));
+    gesture.turn_by(0., 80., -480., Instant::now());
+    assert!(!gesture.moved());
+}
+
+#[test]
 fn a_stationary_hold_resumes_the_voice_it_paused_without_a_seek() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("disc.wav");

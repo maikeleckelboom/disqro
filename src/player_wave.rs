@@ -127,7 +127,7 @@ impl Player {
                 .waveform_scrub
                 .as_ref()
                 .filter(|gesture| !gesture.closed() && gesture.anchor.identity == identity)
-                .and_then(|gesture| gesture.frame()),
+                .and_then(|gesture| gesture.frame().or_else(|| gesture.held())),
         })
     }
 

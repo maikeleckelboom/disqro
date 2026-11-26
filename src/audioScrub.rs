@@ -35,6 +35,16 @@ pub(super) struct Motion {
     at: u64,
 }
 
+impl Motion {
+    fn anchored(mut self, origin: f64, bounds: &Range<usize>) -> Self {
+        let position =
+            |offset: f64| (origin + offset).clamp(bounds.start as f64, (bounds.end - 1) as f64);
+        self.frame = position(self.frame);
+        self.previous = position(self.previous);
+        self
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Control {
     epoch: Instant,
@@ -162,20 +172,29 @@ impl Gesture {
         self
     }
 
-    pub(crate) fn move_to(&self, frame: f64, previous: f64, velocity: f64, at: Instant) {
+    pub(crate) fn turn_by(&self, offset: f64, previous: f64, velocity: f64, at: Instant) {
         if !self.closed() && self.ending().is_none() {
-            let clamp =
-                |frame: f64| frame.clamp(self.bounds.start as f64, (self.bounds.end - 1) as f64);
-            self.control
-                .write(self.id, clamp(frame), clamp(previous), velocity, at);
+            self.control.write(self.id, offset, previous, velocity, at);
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn move_to(&self, frame: f64, previous: f64, velocity: f64, at: Instant) {
+        let origin = self.grip();
+        self.turn_by(frame - origin, previous - origin, velocity, at);
+    }
+
+    fn grip(&self) -> f64 {
+        self.held().unwrap_or(self.origin)
+    }
+
     pub(crate) fn frame(&self) -> Option<f64> {
+        let origin = self.grip();
         self.control
             .read()
             .filter(|m| m.id == self.id)
-            .map(|m| m.frame)
+            .map(|m| m.anchored(origin, &self.bounds).frame)
+            .filter(|frame| *frame != origin)
     }
 
     pub(crate) fn finish(&self, end: End) {
@@ -205,6 +224,7 @@ struct Config {
     source: AtomicU64,
     start: AtomicUsize,
     end: AtomicUsize,
+    origin: AtomicU64,
     rate: AtomicU32,
     volume: AtomicU32,
     failed: AtomicU64,
@@ -215,6 +235,8 @@ struct Plan {
     id: u64,
     generation: u64,
     source: Arc<Source>,
+    origin: f64,
+    bounds: Range<usize>,
 }
 
 struct Page {
@@ -303,11 +325,14 @@ impl Output {
             id: gesture.id,
             generation: self.generation,
             source: source.clone(),
+            origin: gesture.grip(),
+            bounds: gesture.bounds.clone(),
         });
         self.set_volume(volume);
         self.config.source.store(self.generation, SeqCst);
         self.config.start.store(gesture.bounds.start, SeqCst);
         self.config.end.store(gesture.bounds.end, SeqCst);
+        self.config.origin.store(gesture.grip().to_bits(), SeqCst);
         self.config.rate.store(source.rate, SeqCst);
         self.config.id.store(gesture.id, SeqCst);
         let _ = self.wake.try_send(());
@@ -370,7 +395,7 @@ impl Decoder {
         let Some(motion) = self.control.read().filter(|m| m.id == plan.id) else {
             return false;
         };
-        let center = motion.frame as usize / PAGE;
+        let center = motion.anchored(plan.origin, &plan.bounds).frame as usize / PAGE;
         let direction = if motion.velocity < 0. { -1 } else { 1 };
         let needed = [0, -direction, direction, -2 * direction, 2 * direction];
         let Some(number) = needed
@@ -538,13 +563,14 @@ impl Sound for Audition {
         let id = self.config.id.load(SeqCst);
         let generation = self.config.source.load(SeqCst);
         let bounds = self.config.start.load(SeqCst)..self.config.end.load(SeqCst);
+        let origin = f64::from_bits(self.config.origin.load(SeqCst));
         let rate = f64::from(self.config.rate.load(SeqCst));
         let volume = f32::from_bits(self.config.volume.load(Relaxed));
         if id != 0
             && self.config.id.load(SeqCst) == id
             && let Some(motion) = self.control.read().filter(|motion| motion.id == id)
         {
-            self.cursor.aim(motion, rate);
+            self.cursor.aim(motion.anchored(origin, &bounds), rate);
         }
         let now = self.control.nanos(Instant::now());
         let active = id != 0

@@ -9,14 +9,10 @@ use crate::audio::scrub::{End as ScrubEnd, Gesture};
 pub(super) struct Press {
     scale: f32,
     down: Point<Pixels>,
-    /// The frame the grip holds, which the pointer's travel moves from.
-    centre: f64,
-    /// Whether `centre` is the frame the transport actually stopped at.
-    gripped: bool,
     frames_per_pixel: f64,
     previous: f64,
     at: Instant,
-    gesture: Option<Arc<Gesture>>,
+    gesture: Arc<Gesture>,
     #[cfg(windows)]
     _hover_pause: Option<gpui_windows_gpu::CaptureHoverPause>,
 }
@@ -29,9 +25,7 @@ impl Press {
 
 impl Drop for Press {
     fn drop(&mut self) {
-        if let Some(gesture) = &self.gesture {
-            gesture.finish(ScrubEnd::Cancel);
-        }
+        self.gesture.finish(ScrubEnd::Cancel);
     }
 }
 
@@ -52,8 +46,7 @@ impl Waveform {
     pub(super) fn grabbed(&self) -> bool {
         self.press
             .as_ref()
-            .and_then(|press| press.gesture.as_ref())
-            .is_some_and(|gesture| !gesture.closed())
+            .is_some_and(|press| !press.gesture.closed())
     }
 
     pub(super) fn mouse_down(
@@ -113,12 +106,10 @@ impl Waveform {
             self.press = Some(Press {
                 scale,
                 down: event.position,
-                centre: origin,
-                gripped: false,
                 frames_per_pixel,
-                previous: origin,
+                previous: 0.,
                 at,
-                gesture: Some(gesture),
+                gesture,
                 #[cfg(windows)]
                 _hover_pause: gpui_windows_gpu::pause_hover_during_capture(window),
             });
@@ -163,34 +154,12 @@ impl Waveform {
 
     fn move_press(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(press) = &mut self.press else { return };
-        if !self.presented
-            || press.scale != window.scale_factor()
-            || press
-                .gesture
-                .as_ref()
-                .is_some_and(|gesture| gesture.closed())
-        {
+        if !self.presented || press.scale != window.scale_factor() || press.gesture.closed() {
             self.cancel_press(window, cx);
             return;
         }
-        let travel = press.travel(position);
-        let Some(gesture) = press.gesture.clone() else {
-            self.cancel_press(window, cx);
-            return;
-        };
-        // Turn from the frame the transport stopped at once it is known, so
-        // the first movement never jumps back to the frame shown at the press.
-        let starting = !press.gripped;
-        if starting && let Some(held) = gesture.held() {
-            press.centre = held;
-            press.previous = held;
-            press.gripped = true;
-        }
-        let clamp =
-            |frame: f64| frame.clamp(gesture.bounds.start as f64, (gesture.bounds.end - 1) as f64);
-        let target = clamp(press.centre - travel * press.frames_per_pixel);
-        let previous = clamp(press.previous);
-        if target == previous {
+        let offset = -press.travel(position) * press.frames_per_pixel;
+        if offset == press.previous {
             return;
         }
         let now = Instant::now();
@@ -198,12 +167,18 @@ impl Waveform {
             .duration_since(press.at)
             .as_secs_f64()
             .clamp(0.001, 0.05);
-        let velocity = (target - previous) / seconds;
+        let velocity = (offset - press.previous) / seconds;
         let start = crate::diagnostics::begin_stage();
-        gesture.move_to(target, previous, velocity, now);
-        press.previous = target;
+        press.gesture.turn_by(offset, press.previous, velocity, now);
+        let target = press
+            .gesture
+            .frame()
+            .or_else(|| press.gesture.held())
+            .unwrap_or(press.gesture.origin);
+        let gesture = press.gesture.id;
+        press.previous = offset;
         press.at = now;
-        crate::diagnostics::stage(start, "wave_scrub_input", target.to_bits(), gesture.id);
+        crate::diagnostics::stage(start, "wave_scrub_input", target.to_bits(), gesture);
         self.motion.follow_scrub(cx.entity_id(), window, cx);
     }
 
@@ -215,11 +190,9 @@ impl Waveform {
         self.capture_watch = None;
         // Releasing resumes playback when it was playing and leaves it paused
         // otherwise. A press that never moved continues where it held.
-        if let Some(gesture) = &press.gesture {
-            gesture.finish(ScrubEnd::Release);
-            self.position.inspecting = None;
-            cx.notify();
-        }
+        press.gesture.finish(ScrubEnd::Release);
+        self.position.inspecting = None;
+        cx.notify();
     }
 
     pub(super) fn cancel_press(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -235,8 +208,7 @@ impl Waveform {
     pub(super) fn scrub_ended(&self) -> bool {
         self.press
             .as_ref()
-            .and_then(|press| press.gesture.as_ref())
-            .is_some_and(|gesture| gesture.closed())
+            .is_some_and(|press| press.gesture.closed())
     }
 
     pub(super) fn listen_for_scrub(panel: &WeakEntity<Waveform>, window: &mut Window) {
