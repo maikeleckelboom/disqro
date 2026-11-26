@@ -1803,14 +1803,12 @@ impl Engine {
                 return Ok(());
             }
         }
-        if gesture.ending().is_none() {
+        if gesture.ending().is_none() && self.scrub_output.is_none() {
             let ready = self.ensure_output().and_then(|()| {
-                if self.scrub_output.is_none() {
-                    self.scrub_output = Some(scrub::Output::install(
-                        self.device.as_mut().unwrap(),
-                        self.scrub_control.clone(),
-                    )?);
-                }
+                self.scrub_output = Some(scrub::Output::install(
+                    self.device.as_mut().unwrap(),
+                    self.scrub_control.clone(),
+                )?);
                 Ok(())
             });
             if let Err(error) = ready {

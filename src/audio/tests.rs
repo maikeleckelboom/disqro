@@ -354,6 +354,9 @@ fn full_cd_scrub_reaches_unqueued_chapters_and_reconciles_only_on_release() {
         listening: Some(writer.clone()),
         ..Engine::default()
     };
+    let mut device = AudioManager::<Capture>::new(AudioManagerSettings::default()).unwrap();
+    engine.scrub_output =
+        Some(scrub::Output::install(&mut device, engine.scrub_control.clone()).unwrap());
     // Play Only This Track, then something unrelated was queued after it.
     let unrelated = Arc::new(Track::file(dir.path().join("another.wav")));
     engine
