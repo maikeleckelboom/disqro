@@ -264,7 +264,7 @@ impl Shelf {
     }
 }
 
-/// The discs of one release as the Albums / CDs list shows them.
+/// The discs of one release as the Releases list shows them.
 pub struct Release {
     pub key: DiscId,
     pub title: String,

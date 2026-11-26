@@ -553,7 +553,7 @@ const FILTER_COMPACT: f32 = 100.;
 const FILTER_FULL: f32 = 175.;
 const VIEW_CHOICES: [(ViewMode, &str, IconName); 3] = [
     (ViewMode::Tracks, "All Tracks", IconName::ListMusic),
-    (ViewMode::Albums, "Albums / CDs", IconName::Disc3),
+    (ViewMode::Albums, "Releases", IconName::Disc3),
     (ViewMode::Tree, "Tree", IconName::Layers),
 ];
 const VIEW_LABEL_SIZE: f32 = 12.;
@@ -1300,7 +1300,7 @@ impl Render for Browser {
         if self.listing_shelf() {
             let table = self.discs.clone();
             let state = table.read(cx);
-            let label = state.delegate().directory_label.unwrap_or("Albums and CDs");
+            let label = state.delegate().directory_label.unwrap_or("Releases");
             let height = state.delegate().row_height();
             let focused = keyboard_focus(state.focus_handle(cx), window);
             return view.child(

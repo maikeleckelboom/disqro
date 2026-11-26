@@ -540,7 +540,7 @@ impl Browser {
             self.table.read(cx).focus_handle(cx)
         }
     }
-    /// Albums / CDs applies to collections: a folder shown with its
+    /// Releases applies to collections: a folder shown with its
     /// subfolders, or a library collection. A folder on its own lists its
     /// recordings.
     pub fn can_list_discs(&self) -> bool {
@@ -915,8 +915,8 @@ impl Browser {
                 (Some("Collection"), false) => "No matching collections",
                 (Some(_), true) => "No playlists",
                 (Some(_), false) => "No matching playlists",
-                (None, true) => "No albums or CDs",
-                (None, false) => "No matching albums or CDs",
+                (None, true) => "No releases",
+                (None, false) => "No matching releases",
             }
         };
         self.discs.update(cx, |table, cx| {

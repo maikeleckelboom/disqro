@@ -15,7 +15,7 @@
 //! better than a wrong one.
 use std::{collections::HashMap, hash::Hash, path::Path};
 
-/// The Albums / CDs order projected from an already ordered collection.
+/// The Releases order projected from an already ordered collection.
 /// A release occupies the position of its first authored disc. Its other
 /// discs are moved beneath it in authored order, regardless of their sort keys.
 pub enum Ordered {

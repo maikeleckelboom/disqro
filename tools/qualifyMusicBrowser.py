@@ -101,10 +101,10 @@ def journey(exe, test_exe, output):
         wait_for(process, "All Tracks")
         screenshot(hwnd, output / "library-sidebar.png")
 
-        click(process, "Albums / CDs")
-        wait_for(process, "Albums and CDs")
+        click(process, "Releases")
+        wait_for(process, "Album / Disc")
         time.sleep(0.25)
-        screenshot(hwnd, output / "albums-and-cds.png")
+        screenshot(hwnd, output / "releases.png")
 
         click(process, "Tree")
         click(process, "Expand Live Set")
@@ -148,17 +148,17 @@ def journey(exe, test_exe, output):
         click_control(hwnd, chapter)
         click_control(hwnd, chapter)
         wait_for(process, "Pause")
-        click(process, "Albums / CDs")
-        wait_for(process, "Albums and CDs")
+        click(process, "Releases")
+        wait_for(process, "Album / Disc")
         wait_for(process, "Pause")
     finally:
         close(process)
 
     for name, width, label, query in [
-        ("wide", 760, "Albums / CDs", ""),
-        ("medium", 505, "Albums / CDs", ""),
-        ("narrow", 375, "Choose view · Albums / CDs", ""),
-        ("filtered-narrow", 418, "Choose view · Albums / CDs", "Chapter 02"),
+        ("wide", 760, "Releases", ""),
+        ("medium", 505, "Releases", ""),
+        ("narrow", 375, "Choose view · Releases", ""),
+        ("filtered-narrow", 418, "Choose view · Releases", "Chapter 02"),
         ("extreme", 240, "Panel menu", "Chapter 02"),
     ]:
         process = launch(exe, output, profile(root, width, "albums", query))

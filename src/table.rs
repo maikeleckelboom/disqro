@@ -328,7 +328,7 @@ pub const NO_MATCHES: &str = "No matching tracks";
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum RowKey {
     Disc(DiscId),
-    /// A release in the Albums / CDs list, by its first disc.
+    /// A release in the Releases list, by its first disc.
     Release(DiscId),
     Link(crate::collection::ShelfLink),
     Track(PathBuf, Option<DiscTrack>),
