@@ -181,7 +181,23 @@ pub(crate) fn walk(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) -> Option<Sources> {
+    walk_bounded(root, recursive, None, cache, alive, publish)
+}
+
+/// Keep the interactive scan bounded even when a drive root was explicitly
+/// set to include subfolders. Indexing uses its own full walk.
+const BROWSER_FOLDER_LIMIT: usize = 16_384;
+
+fn walk_bounded(
+    root: &Path,
+    recursive: bool,
+    limit: Option<usize>,
+    cache: Option<&Cache>,
+    alive: &dyn Fn() -> bool,
+    publish: &mut dyn FnMut(Batch) -> bool,
+) -> Option<Sources> {
     let mut todo = vec![root.to_owned()];
+    let mut visited = 0;
     let mut sources = Sources::default();
     let mut batch = Batch::default();
     let mut first = true;
@@ -190,6 +206,14 @@ pub(crate) fn walk(
         if !alive() {
             return None;
         }
+        if limit.is_some_and(|limit| visited == limit) {
+            batch.notice.get_or_insert_with(|| {
+                "Folder scan reached its limit. Open a subfolder to browse more.".into()
+            });
+            batch.incomplete.push(root.to_owned());
+            break;
+        }
+        visited += 1;
         match library::browse_while(&path, cache, alive) {
             Ok(folder) => {
                 if path == root {
@@ -247,7 +271,8 @@ fn scan_into(
     alive: &dyn Fn() -> bool,
     publish: &mut dyn FnMut(Batch) -> bool,
 ) {
-    let Some(sources) = walk(root, recursive, cache, alive, publish) else {
+    let limit = recursive.then_some(BROWSER_FOLDER_LIMIT);
+    let Some(sources) = walk_bounded(root, recursive, limit, cache, alive, publish) else {
         return;
     };
     let mut batch = Batch::default();

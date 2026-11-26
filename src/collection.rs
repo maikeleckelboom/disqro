@@ -23,19 +23,43 @@ use std::{
     sync::Arc,
 };
 
-/// How collections are presented, and which folders are browsed as
-/// collections.
-///
-/// A folder normally shows the recordings it holds. Including subfolders
-/// turns it into a collection view of everything beneath it. The choice is
-/// remembered for that folder and holds inside it, but never for its parent
-/// or its neighbours. The global `recursive` switch of earlier versions is
-/// ignored when read, since it was on for every folder by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    #[default]
+    Tracks,
+    Albums,
+    Tree,
+}
+
+impl From<bool> for ViewMode {
+    fn from(albums: bool) -> Self {
+        if albums { Self::Albums } else { Self::Tracks }
+    }
+}
+
+pub(crate) fn read_view_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ViewMode, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SavedMode {
+        Current(ViewMode),
+        Legacy(bool),
+    }
+    Ok(match SavedMode::deserialize(d) {
+        Ok(SavedMode::Current(mode)) => mode,
+        Ok(SavedMode::Legacy(albums)) => albums.into(),
+        Err(_) => ViewMode::default(),
+    })
+}
+
+/// How collections are presented and which physical folders include descendants.
+/// Earlier versions' global recursive switch is ignored.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewPrefs {
-    /// Collections show Albums / CDs rather than All Tracks.
-    pub albums: bool,
+    #[serde(alias = "albums", deserialize_with = "read_view_mode")]
+    pub mode: ViewMode,
+    pub local_collections: Vec<RootId>,
     pub subfolders: Vec<SubfolderRule>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +70,19 @@ pub struct SubfolderRule {
 /// Remembered folder choices beyond this many forget the oldest.
 const RULES: usize = 256;
 impl ViewPrefs {
+    pub fn collection_includes_subfolders(&self, root: RootId) -> bool {
+        !self.local_collections.contains(&root)
+    }
+
+    pub fn set_collection_subfolders(&mut self, root: RootId, include: bool) {
+        self.local_collections.retain(|&id| id != root);
+        if !include {
+            self.local_collections.push(root);
+            let excess = self.local_collections.len().saturating_sub(RULES);
+            self.local_collections.drain(..excess);
+        }
+    }
+
     /// Whether `folder` is browsed with its subfolders: the choice made for
     /// it or its nearest ancestor, or not.
     pub fn includes_subfolders(&self, folder: &Path) -> bool {
@@ -874,11 +911,12 @@ mod tests {
     #[test]
     fn earlier_global_subfolder_switch_is_not_carried_over() {
         let prefs: ViewPrefs = serde_json::from_str(r#"{"recursive":true,"albums":true}"#).unwrap();
-        assert!(prefs.albums);
+        assert_eq!(prefs.mode, super::ViewMode::Albums);
         assert!(!prefs.includes_subfolders(Path::new(r"C:\Users\Me\Music")));
         let again: ViewPrefs =
             serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
-        assert!(again.albums && again.subfolders.is_empty());
+        assert_eq!(again.mode, super::ViewMode::Albums);
+        assert!(again.subfolders.is_empty());
     }
 }
 

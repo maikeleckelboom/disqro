@@ -15,6 +15,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 pub enum Scope {
     /// One registered collection, or all of them.
     Library(Option<RootId>),
+    CollectionFolder(RootId),
     Album(AlbumId),
     /// Every disc of the release whose first disc this is, in disc order.
     Release(AlbumId),
@@ -208,6 +209,7 @@ pub struct AlbumStructure {
 enum Albums<'a> {
     Disc(AlbumId),
     Root(Option<RootId>),
+    CollectionFolder(RootId),
     Release(&'a ReleaseContents),
 }
 
@@ -256,7 +258,12 @@ impl Store {
 
     /// Follow the same structural order as the collection shelf, retaining
     /// its search and including loose recordings in authored collection play.
-    pub fn collection_keys(&self, root: Option<RootId>, search: String) -> Result<Vec<i64>> {
+    pub fn collection_keys(&self, scope: Scope, search: String) -> Result<Vec<i64>> {
+        let root = match scope {
+            Scope::Library(root) => root,
+            Scope::CollectionFolder(root) => Some(root),
+            _ => anyhow::bail!("Expected a collection scope"),
+        };
         let snapshot = self.db.unchecked_transaction()?;
         let albums = self.album_structure(root)?;
         let mut ranks = HashMap::with_capacity(albums.len());
@@ -279,7 +286,7 @@ impl Store {
         let keys = self
             .listing_in_order(
                 &Query {
-                    scope: Scope::Library(root),
+                    scope,
                     search,
                     order: None,
                 },
@@ -349,6 +356,15 @@ impl Store {
                 }],
                 "coalesce(al.year, 4294967295), al.sort_key, al.id, t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
             ),
+            Scope::CollectionFolder(root) => {
+                args.push(Box::new(root));
+                (
+                    "t.id",
+                    "tracks t JOIN albums al ON al.id = t.album_id",
+                    vec![COLLECTION_FOLDER.into()],
+                    "al.sort_key, al.id, t.ordinal, coalesce(t.number, 4294967295), s.path_key, t.id",
+                )
+            }
             Scope::Album(album) => {
                 args.push(Box::new(album));
                 (
@@ -443,9 +459,10 @@ impl Store {
     ) -> Result<(Listing, Vec<AlbumRow>)> {
         let snapshot = self.db.unchecked_transaction()?;
         let (listing, sections) = match query.scope {
-            Scope::Library(root) if grouped => {
-                (self.listing(query)?, self.albums(root, &query.search)?)
-            }
+            scope @ (Scope::Library(_) | Scope::CollectionFolder(_)) if grouped => (
+                self.listing(query)?,
+                self.collection_albums(scope, &query.search)?,
+            ),
             Scope::Release(first) if grouped => {
                 let release = self.release_contents(first)?;
                 (
@@ -594,6 +611,16 @@ impl Store {
     /// The discs of a collection view that hold matching tracks.
     pub fn albums(&self, root: Option<RootId>, search: &str) -> Result<Vec<AlbumRow>> {
         self.album_rows(Albums::Root(root), search)
+    }
+
+    pub fn collection_albums(&self, scope: Scope, search: &str) -> Result<Vec<AlbumRow>> {
+        match scope {
+            Scope::Library(root) => self.albums(root, search),
+            Scope::CollectionFolder(root) => {
+                self.album_rows(Albums::CollectionFolder(root), search)
+            }
+            _ => anyhow::bail!("Expected a collection scope"),
+        }
     }
 
     /// Whether an indexed disc belongs to a release of several discs.
@@ -814,6 +841,10 @@ impl Store {
                 format!("t.root_id = ?{} AND t.present = 1", args.len())
             }
             Albums::Root(None) => "t.root_id IS NOT NULL AND t.present = 1".into(),
+            Albums::CollectionFolder(root) => {
+                args.push(Box::new(*root));
+                COLLECTION_FOLDER.into()
+            }
             Albums::Release(release) => format!(
                 "t.album_id IN ({}) AND t.present = 1",
                 release
@@ -873,6 +904,7 @@ impl Store {
         let mut releases = match albums {
             Albums::Disc(id) => self.releases(self.album_root(id)?)?,
             Albums::Root(root) => self.releases(root)?,
+            Albums::CollectionFolder(root) => self.releases(Some(root))?,
             Albums::Release(release) => {
                 let order: HashMap<AlbumId, usize> = release
                     .discs
@@ -900,6 +932,12 @@ impl Store {
             .flatten())
     }
 }
+
+// The album directory belongs to the logical program's anchor, which can
+// differ from the source directory for a multi-file CUE.
+const COLLECTION_FOLDER: &str = "t.root_id = ?1 AND t.present = 1
+    AND substr(al.sort_key, 1, instr(al.sort_key, char(1)) - 1)
+        = (SELECT path_key FROM roots WHERE id = ?1)";
 
 fn where_clause(filter: &[String]) -> String {
     if filter.is_empty() {

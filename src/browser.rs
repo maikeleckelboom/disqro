@@ -3,7 +3,7 @@ mod navigation;
 mod sequential;
 use crate::{
     catalog::{Catalog, CatalogEvent},
-    collection::{Disc, DiscId, Discs, Membership, Page, Shelf, ShelfLink, ViewPrefs},
+    collection::{Disc, DiscId, Discs, Membership, Page, Shelf, ShelfLink, ViewMode, ViewPrefs},
     discovery::Scanner,
     folders::{Folders, TreeReveal},
     library::{self, Track, TrackList},
@@ -500,8 +500,21 @@ impl Browser {
             _ => false,
         }
     }
+    pub fn has_presentations(&self) -> bool {
+        self.page.is_none() && matches!(self.location, Location::Folder(_) | Location::Library(_))
+    }
+
     pub fn listing_discs(&self) -> bool {
-        self.prefs.albums && self.page.is_none() && self.can_list_discs()
+        self.prefs.mode == ViewMode::Albums && self.has_presentations()
+    }
+
+    pub(crate) fn folder_scope(&self) -> Option<bool> {
+        (self.page.is_none()
+            && matches!(
+                self.location,
+                Location::Folder(_) | Location::Library(Some(_))
+            ))
+        .then_some(self.subfolders)
     }
     pub fn listing_shelf(&self) -> bool {
         self.listing_discs() || self.location.is_directory()
@@ -510,6 +523,7 @@ impl Browser {
     fn scope(&self) -> Option<Scope> {
         Some(match &self.location {
             Location::Folder(_) | Location::Collections | Location::Playlists => return None,
+            Location::Library(Some(root)) if !self.subfolders => Scope::CollectionFolder(*root),
             Location::Library(root) => Scope::Library(*root),
             Location::Album { id, .. } => Scope::Album(*id),
             Location::Release { id, .. } => Scope::Release(*id),
@@ -651,22 +665,34 @@ impl Browser {
     /// Shows the open folder with or without its subfolders, and remembers
     /// the choice for it and the folders inside it.
     pub fn set_subfolders(&mut self, include: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Location::Folder(path) = &self.location {
-            self.prefs.set_subfolders(path, include);
-            self.subfolders = include;
-            cx.emit(ViewChanged);
-            self.reload(window, cx);
+        if self.folder_scope() == Some(include) {
+            return;
         }
+        match &self.location {
+            Location::Folder(path) => {
+                self.prefs.set_subfolders(path, include);
+                self.subfolders = include;
+                self.reload(window, cx);
+            }
+            Location::Library(Some(root)) => {
+                self.prefs.set_collection_subfolders(*root, include);
+                self.subfolders = include;
+                self.filter(cx);
+            }
+            _ => return,
+        }
+        cx.emit(ViewChanged);
+        cx.notify();
     }
-    pub fn view(&mut self, albums: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn view(&mut self, mode: ViewMode, window: &mut Window, cx: &mut Context<Self>) {
         let had_list_focus = self.list_focus(cx).is_focused(window);
         if let Location::Album { root, .. } | Location::Release { root, .. } = self.location {
-            self.up_to_collection(Location::Library(root), albums, window, cx);
+            self.up_to_collection(Location::Library(root), mode, window, cx);
         } else if self.page.is_some() {
-            self.up_to_collection(self.location.clone(), albums, window, cx);
+            self.up_to_collection(self.location.clone(), mode, window, cx);
         } else {
             self.cancel_pending();
-            self.prefs.albums = albums;
+            self.prefs.mode = mode;
             self.filter(cx);
             self.refresh_folder_traversal(cx);
         }
@@ -697,18 +723,20 @@ impl Browser {
             // A disc page is one group, headed once by its artwork.
             Some(Page::Release(_) | Page::Disc(_)) => true,
         };
+        let shelf = self.listing_discs();
         let mut groups = Vec::new();
         let mut rows = Vec::new();
         let matches =
             |t: &&Arc<Track>| crate::collection::matches(t, &terms, || catalog.mark_of(t));
-        let discs = crate::collection::folder_discs(&self.programs, self.page.as_ref(), grouped);
-        if !grouped && !single_disc && self.page.is_none() {
+        let discs =
+            crate::collection::folder_discs(&self.programs, self.page.as_ref(), grouped || shelf);
+        if !grouped && !shelf && !single_disc && self.page.is_none() {
             rows.extend(self.raw.iter().flatten().filter(matches).cloned());
         } else {
             for disc in &discs {
                 let start = rows.len();
                 rows.extend(disc.tracks.iter().filter(matches).cloned());
-                if grouped && rows.len() > start {
+                if (grouped || shelf) && rows.len() > start {
                     groups.push((disc.clone(), rows.len() - start));
                 }
             }
@@ -720,7 +748,7 @@ impl Browser {
             Some(Page::Disc(_)) => discs.first().and_then(|d| d.release.clone()),
             _ => None,
         };
-        if self.listing_discs() {
+        if shelf {
             self.set_discs(groups.iter().map(|(d, _)| d.clone()).collect(), cx);
         }
         let sections = Sections::new(groups);
@@ -910,12 +938,18 @@ impl Browser {
         }
         let grouped = matches!(
             scope,
-            Scope::Library(Some(_)) | Scope::Release(_) | Scope::Album(_)
+            Scope::Library(Some(_))
+                | Scope::CollectionFolder(_)
+                | Scope::Release(_)
+                | Scope::Album(_)
         ) && !self.listing_discs();
         self.table.update(cx, |t, cx| {
             let context = match scope {
                 Scope::Playlist(_) => ContextKind::Playlist,
-                Scope::Album(_) | Scope::Release(_) | Scope::Library(Some(_)) => ContextKind::Disc,
+                Scope::Album(_)
+                | Scope::Release(_)
+                | Scope::Library(Some(_))
+                | Scope::CollectionFolder(_) => ContextKind::Disc,
                 _ => ContextKind::Mixed,
             };
             MusicTable::set_context(t, context, cx);
@@ -935,8 +969,11 @@ impl Browser {
             return;
         };
         let search = self.query.clone();
+        let scope = self.scope().expect("library shelf has a scope");
         let generation = self.albums.next();
-        let albums = store.query(&self.albums, generation, move |s| s.albums(root, &search));
+        let albums = store.query(&self.albums, generation, move |s| {
+            s.collection_albums(scope, &search)
+        });
         let ticket = self.albums.clone();
         cx.spawn(async move |this, cx| {
             let result = match albums.await {
@@ -1318,7 +1355,7 @@ impl Browser {
             })
             .cloned();
         let Some(item) = item else { return false };
-        if self.prefs.albums && self.can_list_discs() {
+        if self.listing_discs() {
             let list_had_focus = self.list_focus(cx).is_focused(window);
             self.page = Some(Page::Disc(DiscId::of(&item)));
             self.filter(cx);

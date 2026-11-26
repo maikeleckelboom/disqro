@@ -960,7 +960,9 @@ fn collection_playback_keeps_release_discs_together_even_when_their_years_differ
         "UPDATE albums SET year = CASE title WHEN 'Vol I (CD1)' THEN 1980 WHEN 'Vol I (CD2)' THEN 2010 ELSE 1995 END",
         [],
     ).unwrap();
-    let keys = s.collection_keys(Some(root), "two".into()).unwrap();
+    let keys = s
+        .collection_keys(Scope::Library(Some(root)), "two".into())
+        .unwrap();
     let titles: Vec<_> = s
         .rows(Scope::Library(Some(root)), &keys)
         .unwrap()
@@ -1070,5 +1072,29 @@ fn six_figure_listening_snapshot() {
     eprintln!(
         "100,001 sorted recordings resolved in {:?}",
         start.elapsed()
+    );
+}
+
+#[test]
+fn collection_folder_scope_uses_indexed_anchors_and_keeps_playback_in_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let music = temp.path().join("Music");
+    collection(&music);
+    fs::write(music.join("root.wav"), b"loose recording").unwrap();
+    let mut store = Store::open(&temp.path().join("library.sqlite3")).unwrap();
+    let root = store.add_root(&music).unwrap();
+    index(&mut store, root);
+
+    let direct = Scope::CollectionFolder(root);
+    let rows = all(&store, direct);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].track.title, "root");
+    assert_eq!(all(&store, Scope::Library(Some(root))).len(), 9);
+    let shelf = store.collection_albums(direct, "").unwrap();
+    assert_eq!(shelf.len(), 1);
+    assert_eq!(shelf[0].count, 1);
+    assert_eq!(
+        store.collection_keys(direct, String::new()).unwrap(),
+        [rows[0].key]
     );
 }

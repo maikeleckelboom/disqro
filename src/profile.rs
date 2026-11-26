@@ -244,7 +244,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.volume, 0.3);
-        assert!(p.collection.albums);
+        assert_eq!(p.collection.mode, crate::collection::ViewMode::Albums);
         assert_eq!(
             p.legacy_navigation.folder.as_deref(),
             Some(Path::new("C:/Music"))

@@ -56,7 +56,7 @@ impl Targets {
 pub enum ListeningList {
     Displayed(Scope, Arc<[i64]>),
     Disc(Scope),
-    Collection(Option<RootId>, String),
+    Collection(Scope, String),
     Playlist(PlaylistId),
     Search(String),
 }
@@ -127,7 +127,7 @@ impl ListeningList {
     fn source(&self, catalog: &Catalog) -> Option<String> {
         let scope = match self {
             Self::Displayed(scope, _) | Self::Disc(scope) => *scope,
-            Self::Collection(root, _) => Scope::Library(*root),
+            Self::Collection(scope, _) => *scope,
             Self::Playlist(id) => Scope::Playlist(*id),
             Self::Search(query) => return Some(format!("search for “{query}”")),
         };
@@ -140,7 +140,7 @@ impl ListeningList {
                 .find(|p| p.id == id)
                 .map(|p| p.name.clone()),
             Scope::Library(None) => Some("All Music".into()),
-            Scope::Library(Some(id)) => catalog
+            Scope::Library(Some(id)) | Scope::CollectionFolder(id) => catalog
                 .collections
                 .iter()
                 .find(|c| c.root.id == id)
@@ -153,10 +153,9 @@ impl ListeningList {
         Ok(match self {
             Self::Displayed(scope, keys) => (scope, keys),
             Self::Disc(scope) => (scope, store.disc_keys(scope)?.into()),
-            Self::Collection(root, search) => (
-                Scope::Library(root),
-                store.collection_keys(root, search)?.into(),
-            ),
+            Self::Collection(scope, search) => {
+                (scope, store.collection_keys(scope, search)?.into())
+            }
             Self::Playlist(id) => (
                 Scope::Playlist(id),
                 store

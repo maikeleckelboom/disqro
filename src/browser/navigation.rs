@@ -200,8 +200,12 @@ impl Route {
 pub(crate) struct SavedVisit {
     #[serde(flatten)]
     pub route: Route,
-    #[serde(default)]
-    pub albums: bool,
+    #[serde(
+        default,
+        alias = "albums",
+        deserialize_with = "crate::collection::read_view_mode"
+    )]
+    pub mode: ViewMode,
     #[serde(default)]
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,10 +235,10 @@ pub(crate) struct SavedVisit {
 }
 
 impl SavedVisit {
-    pub fn new(route: Route, albums: bool) -> Self {
+    pub fn new(route: Route, mode: ViewMode) -> Self {
         Self {
             route,
-            albums,
+            mode,
             query: String::new(),
             root: None,
             child: None,
@@ -438,11 +442,13 @@ impl Browser {
         let table = self.table.read(cx);
         SavedVisit {
             route: self.route(),
-            albums: self.prefs.albums,
+            mode: self.prefs.mode,
             query: self.search.read(cx).value().to_string(),
             root: self.tree_root.clone(),
             child: self.folder_child.clone(),
-            subfolders: self.location.is_folder().then_some(self.subfolders),
+            subfolders: self
+                .folder_scope()
+                .or_else(|| self.location.is_folder().then_some(self.subfolders)),
             sort: table
                 .delegate()
                 .sort
@@ -543,7 +549,7 @@ impl Browser {
             current
         } else {
             self.history.find(&route).unwrap_or_else(|| {
-                let mut visit = SavedVisit::new(route.clone(), self.prefs.albums);
+                let mut visit = SavedVisit::new(route.clone(), self.prefs.mode);
                 visit.root = place;
                 if matches!(&route.location, Location::Folder(path)
                     if self.location.is_folder() && crate::places::same_path(path, &self.path))
@@ -587,7 +593,7 @@ impl Browser {
     pub(super) fn up_to_collection(
         &mut self,
         location: Location,
-        albums: bool,
+        mode: ViewMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -598,9 +604,9 @@ impl Browser {
         let mut visit = self
             .history
             .find(&route)
-            .unwrap_or_else(|| SavedVisit::new(route, albums));
-        if visit.albums != albums {
-            visit.albums = albums;
+            .unwrap_or_else(|| SavedVisit::new(route, mode));
+        if visit.mode != mode {
+            visit.mode = mode;
             visit.bookmark = Bookmark::default();
         }
         let target = match current_route.arrival_at(&visit.route, self.membership.as_deref()) {
@@ -639,7 +645,7 @@ impl Browser {
             .route
             .page
             .filter(|_| visit.route.location.is_folder());
-        self.prefs.albums = visit.albums;
+        self.prefs.mode = visit.mode;
         self.folder_child = visit.child.take();
         let search = if file.is_some() {
             String::new()
@@ -702,6 +708,11 @@ impl Browser {
                 self.load_from(path, file, visit.root, tree_reveal, window, cx);
             }
         } else {
+            if let Location::Library(Some(root)) = location {
+                self.subfolders = visit
+                    .subfolders
+                    .unwrap_or_else(|| self.prefs.collection_includes_subfolders(root));
+            }
             self.folder_traversal = Default::default();
             self.generation += 1;
             if self.busy {
@@ -927,7 +938,7 @@ impl Browser {
                                 b.clear_search(window, cx);
                             }
                             if show_tracks {
-                                b.prefs.albums = false;
+                                b.prefs.mode = ViewMode::Tracks;
                             }
                             b.filter(cx);
                             if b.location.is_folder() && !b.busy {
@@ -1032,7 +1043,8 @@ impl Browser {
     pub fn show_search_artist(&mut self, name: String, w: &mut Window, cx: &mut Context<Self>) {
         let current = self.saved_visit(cx);
         self.history.record(current);
-        let mut visit = SavedVisit::new(Route::new(Location::Library(None), None), false);
+        let mut visit =
+            SavedVisit::new(Route::new(Location::Library(None), None), ViewMode::Tracks);
         visit.query = format!("artist:={name}");
         self.filter_open = true;
         self.restore_visit(visit, w, cx);
@@ -1430,11 +1442,12 @@ mod tests {
         Arrival, Destination, DiscId, Field, HISTORY, History, Location, Membership, Page, PathBuf,
         PlaylistId, Route, RowKey, SavedVisit, ShelfLink,
     };
+    use crate::collection::ViewMode;
     use crate::library::DiscTrack;
     use crate::queue::PlaylistOccurrence;
 
     fn playlist(id: PlaylistId) -> SavedVisit {
-        SavedVisit::new(Route::new(Location::Playlist(id), None), false)
+        SavedVisit::new(Route::new(Location::Playlist(id), None), ViewMode::Tracks)
     }
 
     #[test]
@@ -1603,7 +1616,7 @@ mod tests {
                 Location::Folder(directory),
                 Some(Page::Disc(DiscId::Cue(sheet.clone()))),
             ),
-            true,
+            ViewMode::Albums,
         );
         visit.bookmark.selected = Some(key(32, 1860));
         visit.subfolders = Some(true);
