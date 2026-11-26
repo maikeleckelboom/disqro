@@ -78,10 +78,16 @@ impl RenderOnce for Disclosure {
             .border_1()
             .border_color(transparent_black())
             .when(interactive, |d| {
-                d.cursor_pointer()
+                d.tab_index(0)
+                    .cursor_pointer()
                     .hover(|d| d.bg(m.control))
                     .active(|d| d.bg(m.control_hover))
                     .focus_visible(|d| d.border_color(m.focus_line()))
+                    .on_key_down(|event, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            cx.stop_propagation();
+                        }
+                    })
             })
             .child(
                 svg()
