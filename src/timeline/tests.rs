@@ -354,7 +354,7 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
         (id, store.marks_for(&ids).unwrap(), totals)
     };
     fs::create_dir(&cache_path).unwrap();
-    let database = cache_path.join(crate::cache::DATABASE);
+    let database = cache_path.join("music-cache-v1.sqlite3");
     {
         let db = rusqlite::Connection::open(&database).unwrap();
         db.execute_batch("CREATE TABLE wave_evidence_v3(path BLOB, requested BLOB, size INTEGER,
@@ -426,11 +426,14 @@ fn waveform_cache_transition_rebuilds_only_measurements_and_reuses_valid_records
         record
     );
     assert_eq!(
-        cache
-            .0
-            .query_row("SELECT data FROM tags WHERE path=x'41'", [], |r| r
-                .get::<_, Vec<u8>>(0))
-            .unwrap(),
+        rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        )
+        .unwrap()
+        .query_row("SELECT data FROM tags WHERE path=x'41'", [], |r| r
+            .get::<_, Vec<u8>>(0))
+        .unwrap(),
         b"B"
     );
 
