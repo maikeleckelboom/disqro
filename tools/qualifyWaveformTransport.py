@@ -301,7 +301,10 @@ def measure(exe, output, case):
                         for field in ("device_errors", "decode_errors", "wave_gpu_errors"))
     saved = json.loads(profile.read_text(encoding="utf-8"))["queue"]["queue"]
     entries = [entry["id"] for entry in saved["entries"]]
-    assert entries == ([1, 2, 3] if case in ("single", "multiple") else [1]), entries
+    # Play Only This Track reached three more chapters, each inserted after
+    # the active entry: Alpha, Charlie, then Bravo again.
+    expected = {"single": [1, 2, 3], "multiple": [1, 2, 3], "only": [1, 2, 3, 4]}.get(case, [1])
+    assert entries == expected, entries
     report["queue_ids"] = entries
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
