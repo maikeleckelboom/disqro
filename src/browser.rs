@@ -210,30 +210,29 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> Self {
         let this = cx.weak_entity();
+        let shelf_layout = columns.shelf.clone();
         let table = cx.new(|cx| {
-            let mut table = TableState::new(
+            let mut table = crate::table::managed_table(
                 MusicTable::new(player.clone(), catalog.clone(), columns, this.clone()),
                 window,
                 cx,
             )
-            .select_on_modifier_click(false)
-            .col_selectable(false)
-            // The heading resizes its own columns, refitting them live.
-            .col_resizable(false)
-            .sortable(false);
+            .select_on_modifier_click(false);
             MusicTable::bind_focus(&mut table, window, cx);
             table
         });
         let discs = cx.new(|cx| {
-            let discs = Discs::new(this.clone(), table.downgrade());
-            TableState::new(discs, window, cx).col_selectable(false)
+            let discs = Discs::new(this.clone(), table.downgrade(), shelf_layout);
+            crate::table::managed_table(discs, window, cx)
         });
         cx.subscribe_in(
             &discs,
             window,
             |b: &mut Self, _, event, window, cx| match event {
                 TableEvent::DoubleClickedRow(i) => b.show_disc(*i, window, cx),
-                TableEvent::SelectRow(_) => cx.emit(ViewChanged),
+                TableEvent::SelectRow(_)
+                | TableEvent::ClearSelection
+                | TableEvent::MoveColumn(_, _) => cx.emit(ViewChanged),
                 _ => {}
             },
         )
@@ -658,7 +657,7 @@ impl Browser {
         });
         self.discs.update(cx, |t, cx| {
             t.clear_selection(cx);
-            t.delegate_mut().rows.clear();
+            t.delegate_mut().set_rows(Vec::new());
             scroll_to_top(t);
         });
     }
@@ -839,23 +838,24 @@ impl Browser {
             }
         };
         self.discs.update(cx, |table, cx| {
+            let height = table.delegate().row_height();
             let selected = table
                 .selected_row()
                 .and_then(|i| table.delegate().rows.get(i))
                 .map(Shelf::key);
-            let viewport =
-                crate::table::Viewport::capture(table, navigation::SHELF_ROW_HEIGHT, |i| {
-                    table.delegate().rows.get(i).map(Shelf::key)
-                });
-            table.delegate_mut().rows = rows;
+            let viewport = crate::table::Viewport::capture(table, height, |i| {
+                table.delegate().rows.get(i).map(Shelf::key)
+            });
             table.delegate_mut().empty = empty.into();
             if table.delegate().directory_label != label {
                 table.delegate_mut().directory_label = label;
                 table.refresh(cx);
             }
+            table.delegate_mut().set_rows(rows);
+            let height = table.delegate().row_height();
             let ix = selected.and_then(|k| table.delegate().rows.iter().position(|r| r.key() == k));
             reselect(table, ix, cx);
-            viewport.restore(table, navigation::SHELF_ROW_HEIGHT, |key| {
+            viewport.restore(table, height, |key| {
                 table
                     .delegate()
                     .rows

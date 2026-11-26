@@ -401,8 +401,6 @@ impl Destination {
     }
 }
 
-pub(super) const SHELF_ROW_HEIGHT: f32 = 42.;
-
 impl Browser {
     pub(crate) fn route(&self) -> Route {
         Route::new(self.location.clone(), self.page.clone())
@@ -422,7 +420,7 @@ impl Browser {
             Bookmark {
                 selected: table.selected_row().and_then(key),
                 marked: None,
-                viewport: Viewport::capture(table, SHELF_ROW_HEIGHT, key),
+                viewport: Viewport::capture(table, table.delegate().row_height(), key),
             }
         } else {
             let table = self.table.read(cx);
@@ -449,10 +447,12 @@ impl Browser {
             subfolders: self
                 .folder_scope()
                 .or_else(|| self.location.is_folder().then_some(self.subfolders)),
-            sort: table
-                .delegate()
-                .sort
-                .map(|(f, d)| (f, d == ColumnSort::Descending)),
+            sort: if self.listing_shelf() {
+                self.discs.read(cx).delegate().sort
+            } else {
+                table.delegate().sort
+            }
+            .map(|(f, d)| (f, d == ColumnSort::Descending)),
             bookmark: self.bookmark(cx),
             reveal: self.pending.as_ref().and_then(|p| p.target.clone()),
         }
@@ -656,18 +656,27 @@ impl Browser {
         self.search
             .update(cx, |s, cx| s.set_value(search, window, cx));
         self.reset_table(cx);
-        self.table.update(cx, |t, _| {
-            t.delegate_mut().sort = visit.sort.map(|(field, descending)| {
-                (
-                    field,
-                    if descending {
-                        ColumnSort::Descending
-                    } else {
-                        ColumnSort::Ascending
-                    },
-                )
-            });
+        let sort = visit.sort.map(|(field, descending)| {
+            (
+                field,
+                if descending {
+                    ColumnSort::Descending
+                } else {
+                    ColumnSort::Ascending
+                },
+            )
         });
+        let shelf = visit.mode == ViewMode::Albums
+            && self.page.is_none()
+            && matches!(
+                visit.route.location,
+                Location::Folder(_) | Location::Library(_)
+            );
+        if shelf {
+            self.discs.update(cx, |t, _| t.delegate_mut().sort = sort);
+        } else {
+            self.table.update(cx, |t, _| t.delegate_mut().sort = sort);
+        }
         let target = target.or_else(|| if file.is_none() { visit.reveal } else { None });
         self.pending = Some(Pending {
             bookmark: if target.is_some() {
@@ -970,8 +979,9 @@ impl Browser {
                 });
                 reselect(t, selected, cx);
                 if pending.target.is_none() {
-                    mark.viewport
-                        .restore(t, SHELF_ROW_HEIGHT, |key| shelf_position(t.delegate(), key));
+                    mark.viewport.restore(t, t.delegate().row_height(), |key| {
+                        shelf_position(t.delegate(), key)
+                    });
                 }
                 if let Some(row) = target {
                     reveal(&t.vertical_scroll_handle, row);

@@ -6,7 +6,17 @@ pub enum ContextKind {
     Disc,
     Mixed,
     Playlist,
+    Shelf,
 }
+
+pub(crate) const SHELF_FIELDS: &[Field] = &[
+    Field::Title,
+    Field::Year,
+    Field::Count,
+    Field::Length,
+    Field::Format,
+    Field::Path,
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Pin {
@@ -55,12 +65,22 @@ fn adaptive() -> bool {
 
 impl Layout {
     /// CD headers carry their own cover, so disc tables leave Cover out.
-    pub(super) fn new(context: ContextKind) -> Self {
+    pub(crate) fn new(context: ContextKind) -> Self {
         use Field::*;
         let fields: &[Field] = match context {
             ContextKind::Disc => &[Number, Title, Artist, Length, Favorite],
+            ContextKind::Shelf => SHELF_FIELDS,
             _ => &[Cover, Title, Artist, Album, Length, Favorite],
         };
+        let mut layout = Self::for_fields(fields);
+        if context == ContextKind::Shelf {
+            layout.columns[0].width = 290.;
+            layout.columns[5].width = 230.;
+        }
+        layout
+    }
+
+    pub(crate) fn for_fields(fields: &[Field]) -> Self {
         Self {
             columns: fields.iter().copied().map(LayoutColumn::new).collect(),
             adaptive: true,
@@ -68,6 +88,10 @@ impl Layout {
             artwork: None,
             holding: None,
         }
+    }
+
+    pub(crate) fn fields(&self) -> impl ExactSizeIterator<Item = Field> + '_ {
+        self.columns.iter().map(|c| c.field)
     }
 
     /// Keeps every column at the width it is shown at, so resizing one
@@ -82,7 +106,7 @@ impl Layout {
         self.adaptive = false;
     }
 
-    pub(super) fn has(&self, field: Field) -> bool {
+    pub(crate) fn has(&self, field: Field) -> bool {
         self.columns.iter().any(|c| c.field == field)
     }
 
@@ -314,6 +338,12 @@ pub struct Layouts {
     disc: Layout,
     mixed: Layout,
     playlist: Layout,
+    #[serde(default = "shelf_layout")]
+    pub(crate) shelf: Layout,
+}
+
+fn shelf_layout() -> Layout {
+    Layout::new(ContextKind::Shelf)
 }
 impl Default for Layouts {
     fn default() -> Self {
@@ -322,6 +352,7 @@ impl Default for Layouts {
             disc: Layout::new(ContextKind::Disc),
             mixed: Layout::new(ContextKind::Mixed),
             playlist: Layout::new(ContextKind::Playlist),
+            shelf: shelf_layout(),
         }
     }
 }
@@ -331,6 +362,7 @@ impl Layouts {
             ContextKind::Disc => &self.disc,
             ContextKind::Mixed => &self.mixed,
             ContextKind::Playlist => &self.playlist,
+            ContextKind::Shelf => &self.shelf,
         }
     }
     pub(super) fn get_mut(&mut self, context: ContextKind) -> &mut Layout {
@@ -338,16 +370,27 @@ impl Layouts {
             ContextKind::Disc => &mut self.disc,
             ContextKind::Mixed => &mut self.mixed,
             ContextKind::Playlist => &mut self.playlist,
+            ContextKind::Shelf => &mut self.shelf,
         }
     }
 
     pub fn validate(mut self) -> Self {
         let version = self.version;
-        for context in [ContextKind::Disc, ContextKind::Mixed, ContextKind::Playlist] {
+        for context in [
+            ContextKind::Disc,
+            ContextKind::Mixed,
+            ContextKind::Playlist,
+            ContextKind::Shelf,
+        ] {
             let layout = self.get_mut(context);
             let mut seen = Vec::new();
             let mut valid = |c: &mut LayoutColumn| {
-                if seen.contains(&c.field) {
+                let allowed = if context == ContextKind::Shelf {
+                    SHELF_FIELDS
+                } else {
+                    &Field::ALL
+                };
+                if !allowed.contains(&c.field) || seen.contains(&c.field) {
                     return false;
                 }
                 seen.push(c.field);
@@ -370,7 +413,7 @@ impl Layouts {
             if let Some(artwork) = layout.artwork.take() {
                 layout.show_cover(artwork);
             }
-            if version == 0 && !seen.contains(&Field::Favorite) {
+            if context != ContextKind::Shelf && version == 0 && !seen.contains(&Field::Favorite) {
                 layout.columns.push(LayoutColumn::new(Field::Favorite));
             }
             layout.normalize();
@@ -447,6 +490,27 @@ mod tests {
     fn fields(layout: &Layout) -> Vec<Field> {
         layout.columns.iter().map(|c| c.field).collect()
     }
+    #[test]
+    fn old_layouts_gain_a_shelf_and_save_its_columns_independently() {
+        use Field::*;
+        let mut layouts = Layouts::default();
+        layouts.mixed.toggle(Artist);
+        let mut old = serde_json::to_value(&layouts).unwrap();
+        old.as_object_mut().unwrap().remove("shelf");
+        let mut restored = serde_json::from_value::<Layouts>(old).unwrap().validate();
+        assert_eq!(fields(&restored.shelf), SHELF_FIELDS);
+        assert!(!restored.mixed.has(Artist));
+        restored.shelf.set_pin(Path, Pin::Right);
+        restored.shelf.toggle(Format);
+        assert!(restored.shelf.move_column(1, 0));
+        assert_eq!(fields(&restored.shelf)[0], Year);
+        let edited = serde_json::to_vec(&restored).unwrap();
+        let again: Layouts = serde_json::from_slice(&edited).unwrap();
+        assert!(!again.shelf.has(Format));
+        assert_eq!(again.shelf.columns.last().unwrap().pin, Pin::Right);
+        assert_eq!(fields(&again.mixed), fields(&layouts.mixed));
+    }
+
     #[test]
     fn migration_distributes_old_widths_and_preserves_custom_fields() {
         let legacy = saved(&[

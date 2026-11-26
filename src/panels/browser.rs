@@ -18,12 +18,11 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, ElementExt, FocusableExt as _, Icon, Selectable, Sizable,
+        Disableable, ElementExt, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
         menu::{DropdownMenu, PopupMenu, PopupMenuItem},
-        table::DataTable,
         v_flex,
     },
     prelude::*,
@@ -189,7 +188,7 @@ impl BrowserPane {
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
             prefs: Some(browser.prefs.clone()),
-            layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
+            layouts: Some(browser_layouts(browser, cx)),
             filter_open: browser.filter_open,
             ..Default::default()
         }
@@ -206,10 +205,16 @@ impl BrowserPane {
             folder: (!browser.path.as_os_str().is_empty()).then(|| browser.path.clone()),
             root: browser.tree_root.clone(),
             prefs: Some(browser.prefs.clone()),
-            layouts: Some(browser.table.read(cx).delegate().layouts.clone()),
+            layouts: Some(browser_layouts(browser, cx)),
             ..Default::default()
         }
     }
+}
+
+fn browser_layouts(browser: &Browser, cx: &App) -> Layouts {
+    let mut layouts = browser.table.read(cx).delegate().layouts.clone();
+    layouts.shelf = browser.discs.read(cx).delegate().shelf_layout.clone();
+    layouts
 }
 
 /// The panel menu: play or queue what the browser shows, and act on its view.
@@ -1198,21 +1203,38 @@ impl Render for Browser {
             return view;
         }
         if self.listing_shelf() {
+            let table = self.discs.clone();
+            let state = table.read(cx);
+            let label = state.delegate().directory_label.unwrap_or("Albums and CDs");
+            let height = state.delegate().row_height();
+            let focused = keyboard_focus(state.focus_handle(cx), window);
             return view.child(
-                div().flex_1().min_h_0().child(
-                    DataTable::new(&self.discs)
-                        .accessibility_label(
-                            self.discs
-                                .read(cx)
-                                .delegate()
-                                .directory_label
-                                .unwrap_or("Albums and CDs"),
-                        )
-                        .bordered(false)
-                        .stripe(false)
-                        .header_row_height(px(30.))
-                        .with_size(gpui_kit::component::Size::Size(px(42.))),
-                ),
+                div()
+                    .id("albums-viewport")
+                    .relative()
+                    .mx(px(4.))
+                    .flex_1()
+                    .min_h_0()
+                    .on_prepaint(move |bounds, w, cx| {
+                        crate::table::fit_columns(
+                            &table,
+                            f32::from(bounds.size.width).floor(),
+                            w,
+                            cx,
+                        );
+                    })
+                    .on_key_down(cx.listener(|b, e: &KeyDownEvent, w, cx| {
+                        if e.keystroke.key == "enter"
+                            && !e.keystroke.modifiers.modified()
+                            && let Some(row) = b.discs.read(cx).selected_row()
+                        {
+                            b.show_disc(row, w, cx);
+                            w.prevent_default();
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(crate::table::browser_table(&self.discs, height, label))
+                    .children(focus_outline(focused, &m)),
             );
         }
         let fit = table.clone();
@@ -1247,35 +1269,17 @@ impl Render for Browser {
                         d.browser_prepaints
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    let width = f32::from(bounds.size.width).floor();
-                    let changed =
-                        fit.update(cx, |t, cx| crate::table::MusicTable::fit(t, width, cx));
-                    // Text columns follow the width, so headings laid out
-                    // before it was known are drawn again on the next frame.
-                    if changed {
-                        let fit = fit.clone();
-                        w.on_next_frame(move |_, cx| {
-                            fit.update(cx, |t, cx| {
-                                t.refresh(cx);
-                                cx.notify();
-                            })
-                        });
-                    }
+                    crate::table::fit_columns(&fit, f32::from(bounds.size.width).floor(), w, cx);
                 })
                 .key_context("MusicTracks")
                 .flex_1()
                 .min_h_0()
                 .text_size(px(13.))
-                .child(
-                    DataTable::new(&self.table)
-                        .accessibility_label("Recordings")
-                        .focus_ring(false)
-                        .fixed_cols_border(false)
-                        .bordered(false)
-                        .stripe(false)
-                        .header_row_height(px(size::HEADER))
-                        .with_size(gpui_kit::component::Size::Size(px(row_height))),
-                )
+                .child(crate::table::browser_table(
+                    &self.table,
+                    row_height,
+                    "Recordings",
+                ))
                 .children(focus_outline(focused, &m)),
         )
     }

@@ -4,13 +4,17 @@ use crate::{
     artwork::{CoverFile, CoverThumbnail, TrackCover},
     library::{self, Track},
     store::{AlbumId, AlbumRow, Mark, PlaylistId, RootId, Term},
+    table::{
+        ColumnInteraction, ContextKind, Field, Layout, SHELF_FIELDS, TableColumns, Viewport,
+        reselect,
+    },
     theme::materials,
 };
 use gpui_kit::{
     assets::IconName,
     component::{
         Icon, h_flex,
-        table::{Column, TableDelegate, TableState},
+        table::{Column, ColumnSort, TableDelegate, TableState},
     },
     prelude::*,
     *,
@@ -274,9 +278,13 @@ pub struct Release {
     complete: bool,
 }
 
-#[derive(Default)]
 pub struct Discs {
     pub rows: Vec<Shelf>,
+    original: Arc<[Shelf]>,
+    pub(crate) shelf_layout: Layout,
+    directory_layout: Layout,
+    columns: ColumnInteraction,
+    pub(crate) sort: Option<(Field, ColumnSort)>,
     pub directory_label: Option<&'static str>,
     pub empty: SharedString,
     /// Where the commands of the rows' menus go.
@@ -287,13 +295,72 @@ impl Discs {
     pub fn new(
         browser: WeakEntity<crate::browser::Browser>,
         tracks: WeakEntity<TableState<crate::table::MusicTable>>,
+        shelf_layout: Layout,
     ) -> Self {
         Self {
             browser: Some(browser),
             tracks: Some(tracks),
-            ..Default::default()
+            rows: Vec::new(),
+            original: Arc::default(),
+            shelf_layout,
+            directory_layout: Layout::for_fields(&[Field::Title]),
+            columns: ColumnInteraction::default(),
+            sort: None,
+            directory_label: None,
+            empty: SharedString::default(),
         }
     }
+
+    pub(crate) fn row_height(&self) -> f32 {
+        if self.directory_label.is_some() {
+            crate::table::ROW_HEIGHT
+        } else {
+            crate::table::artwork_row_height(SHELF_COVER)
+        }
+    }
+
+    pub(crate) fn set_rows(&mut self, rows: Vec<Shelf>) {
+        self.original = rows.into();
+        self.project();
+    }
+
+    fn project(&mut self) {
+        self.rows.clear();
+        let Some((field, direction)) = self.sort() else {
+            self.rows.extend(self.original.iter().cloned());
+            return;
+        };
+        ordered_shelf(&self.original, field, direction, &mut self.rows);
+    }
+
+    fn column_field(&self, col: usize) -> Field {
+        self.layout().fields().nth(col).unwrap_or(Field::Title)
+    }
+
+    fn update_order(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
+        let row_height = table.delegate().row_height();
+        let key = |index| table.delegate().rows.get(index).map(Shelf::key);
+        let selected = table.selected_row().and_then(key);
+        let viewport = Viewport::capture(table, row_height, key);
+        table.delegate_mut().project();
+        let position = |key: &_| {
+            table
+                .delegate()
+                .rows
+                .iter()
+                .position(|row| row.key() == *key)
+        };
+        let row = selected.as_ref().and_then(position);
+        reselect(table, row, cx);
+        viewport.restore(table, row_height, |key| {
+            table
+                .delegate()
+                .rows
+                .iter()
+                .position(|row| row.key() == *key)
+        });
+    }
+
     fn row_playing(&self, row: &Shelf, cx: &App) -> bool {
         let Some(table) = self.tracks.as_ref().and_then(WeakEntity::upgrade) else {
             return false;
@@ -634,76 +701,198 @@ impl Disc {
     pub fn duration(&self) -> f64 {
         self.duration
     }
-    fn label(&self, col: usize) -> String {
+    fn label(&self, field: Field) -> String {
         let member = self.member_label();
-        match col {
-            0 => match &member {
+        match field {
+            Field::Title => match &member {
                 Some((number, sub)) if !sub.is_empty() => format!("{number} · {sub}"),
                 Some((number, _)) => number.clone(),
                 None => self.title.clone(),
             },
             // A release names its year once, above its discs.
-            1 if member.is_none() => self.year.map(|v| v.to_string()).unwrap_or_default(),
-            2 => self.count.to_string(),
-            3 if self.complete => library::clock(self.duration),
-            4 => self.format.clone(),
-            5 if member.is_some() => self
+            Field::Year if member.is_none() => self.year.map(|v| v.to_string()).unwrap_or_default(),
+            Field::Count => self.count.to_string(),
+            Field::Length if self.complete => library::clock(self.duration),
+            Field::Format => self.format.clone(),
+            Field::Path if member.is_some() => self
                 .folder
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            5 => self.folder.display().to_string(),
+            Field::Path => self.folder.display().to_string(),
             _ => String::new(),
         }
     }
 }
 impl Release {
-    fn label(&self, col: usize) -> String {
-        match col {
-            0 => self.title.clone(),
-            1 => self.year.map(|v| v.to_string()).unwrap_or_default(),
-            2 => self.count.to_string(),
-            3 if self.complete => library::clock(self.duration),
-            4 => self.format.clone(),
-            5 => self.folder.display().to_string(),
+    fn label(&self, field: Field) -> String {
+        match field {
+            Field::Title => self.title.clone(),
+            Field::Year => self.year.map(|v| v.to_string()).unwrap_or_default(),
+            Field::Count => self.count.to_string(),
+            Field::Length if self.complete => library::clock(self.duration),
+            Field::Format => self.format.clone(),
+            Field::Path => self.folder.display().to_string(),
             _ => String::new(),
         }
     }
 }
 impl Shelf {
-    fn label(&self, col: usize) -> String {
+    fn label(&self, field: Field) -> String {
         match self {
-            Self::Disc(d) => d.label(col),
-            Self::Release(r) => r.label(col),
+            Self::Disc(d) => d.label(field),
+            Self::Release(r) => r.label(field),
             Self::Link(_, title) => title.clone(),
         }
     }
 }
+const SHELF_COVER: f32 = 32.;
+
+fn ordered_shelf(source: &[Shelf], field: Field, direction: ColumnSort, output: &mut Vec<Shelf>) {
+    let mut families = Vec::new();
+    let mut start = 0;
+    while let Some(parent) = source.get(start) {
+        let end = match parent {
+            Shelf::Release(release) => start + 1 + release.discs.len(),
+            _ => start + 1,
+        }
+        .min(source.len());
+        families.push(&source[start..end]);
+        start = end;
+    }
+    families.sort_by_cached_key(|family| {
+        let parent = &family[0];
+        match field {
+            Field::Year | Field::Count | Field::Length => {
+                let (year, count, duration) = match parent {
+                    Shelf::Disc(d) => (d.year, d.count, d.duration),
+                    Shelf::Release(r) => (r.year, r.count, r.duration),
+                    Shelf::Link(..) => (None, 0, 0.),
+                };
+                let number = match field {
+                    Field::Year => u64::from(year.unwrap_or(0)),
+                    Field::Count => count as u64,
+                    _ => duration.max(0.).to_bits(),
+                };
+                (number, String::new())
+            }
+            _ => (0, parent.label(field).to_lowercase()),
+        }
+    });
+    if direction == ColumnSort::Descending {
+        families.reverse();
+    }
+    output.extend(families.into_iter().flatten().cloned());
+}
+
+impl TableColumns for Discs {
+    fn layout(&self) -> &Layout {
+        if self.directory_label.is_some() {
+            &self.directory_layout
+        } else {
+            &self.shelf_layout
+        }
+    }
+    fn layout_mut(&mut self) -> &mut Layout {
+        if self.directory_label.is_some() {
+            &mut self.directory_layout
+        } else {
+            &mut self.shelf_layout
+        }
+    }
+    fn interaction(&self) -> &ColumnInteraction {
+        &self.columns
+    }
+    fn interaction_mut(&mut self) -> &mut ColumnInteraction {
+        &mut self.columns
+    }
+    fn browser(&self) -> Option<WeakEntity<crate::browser::Browser>> {
+        self.browser.clone()
+    }
+    fn sort(&self) -> Option<(Field, ColumnSort)> {
+        self.sort
+            .filter(|(field, _)| self.shelf_layout.has(*field) && self.directory_label.is_none())
+    }
+    fn sort_rows(table: &mut TableState<Self>, field: Field, cx: &mut Context<TableState<Self>>) {
+        let next = crate::table::next_sort(table.delegate().sort(), field);
+        table.delegate_mut().sort = next;
+        Self::update_order(table, cx);
+    }
+    fn clear_sort_if_hidden(table: &mut TableState<Self>, cx: &mut Context<TableState<Self>>) {
+        let shelf = table.delegate();
+        if shelf.sort.is_some() && shelf.sort().is_none() && shelf.directory_label.is_none() {
+            table.delegate_mut().sort = None;
+            Self::update_order(table, cx);
+        }
+    }
+    fn default_layout(&self) -> Layout {
+        if self.directory_label.is_some() {
+            Layout::for_fields(&[Field::Title])
+        } else {
+            Layout::new(ContextKind::Shelf)
+        }
+    }
+    fn available_fields(&self) -> &'static [Field] {
+        if self.directory_label.is_some() {
+            &[Field::Title]
+        } else {
+            SHELF_FIELDS
+        }
+    }
+    fn sortable_field(&self, _: Field) -> bool {
+        self.directory_label.is_none()
+    }
+    fn column_label(&self, field: Field) -> &'static str {
+        match field {
+            Field::Title => self.directory_label.unwrap_or("Album / Disc"),
+            Field::Path => "Folder",
+            _ => field.label(),
+        }
+    }
+    fn column_heading(&self, field: Field) -> &'static str {
+        self.column_label(field)
+    }
+}
+
 impl TableDelegate for Discs {
     fn columns_count(&self, _: &App) -> usize {
-        if self.directory_label.is_some() { 1 } else { 6 }
+        self.layout().fields().len()
     }
     fn rows_count(&self, _: &App) -> usize {
         self.rows.len()
     }
     fn column(&self, i: usize, _: &App) -> Column {
-        if let Some(label) = self.directory_label {
-            return Column::new(label, label).width(340.);
-        }
-        let (label, w) = [
-            ("Album / Disc", 340.),
-            ("Year", 56.),
-            ("Tracks", 60.),
-            ("Time", 76.),
-            ("Format", 68.),
-            ("Folder", 300.),
-        ][i];
-        Column::new(label, label).width(w)
+        self.table_column(i)
+    }
+    fn move_column(
+        &mut self,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.move_table_column(from, to, window, cx);
+    }
+    fn render_th(
+        &mut self,
+        ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        self.table_heading(ix, cx)
+    }
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        self.table_tail()
     }
     fn cell_label(&self, r: usize, c: usize, cx: &App) -> Option<SharedString> {
         let row = self.rows.get(r)?;
-        let label = row.label(c);
-        Some(if c == 0 && self.row_playing(row, cx) {
+        let field = self.column_field(c);
+        let label = row.label(field);
+        Some(if field == Field::Title && self.row_playing(row, cx) {
             format!("{label} · Now playing").into()
         } else {
             label.into()
@@ -744,12 +933,18 @@ impl TableDelegate for Discs {
     ) -> impl IntoElement {
         let m = *materials(cx);
         let row = &self.rows[r];
+        let field = self.column_field(c);
         let cell = h_flex()
             .size_full()
             .min_w_0()
             .gap(px(10.))
             .text_size(px(13.))
-            .text_color(if c == 0 { m.text } else { m.text_muted });
+            .when(field.right_aligned(), |d| d.justify_end())
+            .text_color(if field == Field::Title {
+                m.text
+            } else {
+                m.text_muted
+            });
         let (cover, member, discs) = match row {
             Shelf::Disc(d) => (d.cover.as_ref(), d.member_label(), None),
             Shelf::Release(rel) => (rel.cover.as_ref(), None, Some(rel.discs.len())),
@@ -763,8 +958,13 @@ impl TableDelegate for Discs {
                     .child(div().truncate().child(title.clone()));
             }
         };
-        if c != 0 {
-            return cell.child(div().truncate().text_ellipsis_middle().child(row.label(c)));
+        if field != Field::Title {
+            return cell.child(
+                div()
+                    .truncate()
+                    .text_ellipsis_middle()
+                    .child(row.label(field)),
+            );
         }
         // A disc of a release sits beneath the release's cover, without one
         // of its own.
@@ -786,11 +986,12 @@ impl TableDelegate for Discs {
                     )
                 });
         }
-        let cover = cover
-            .and_then(|file| crate::artwork::CoverThumbnail::get(file, 32., window, cx).flatten());
+        let cover = cover.and_then(|file| {
+            crate::artwork::CoverThumbnail::get(file, SHELF_COVER, window, cx).flatten()
+        });
         cell.child(
             div()
-                .size(px(32.))
+                .size(px(SHELF_COVER))
                 .flex_shrink_0()
                 .rounded(px(2.))
                 .overflow_hidden()
@@ -808,9 +1009,9 @@ impl TableDelegate for Discs {
                 }),
         )
         .child({
-            let label = row.label(0);
+            let label = row.label(Field::Title);
             div()
-                .id(("disc-title", r))
+                .id(("disc-title", crate::table::stable_element_key(row.key())))
                 .min_w_0()
                 .truncate()
                 .text_ellipsis_middle()
@@ -955,6 +1156,17 @@ mod release_tests {
             })
             .collect();
         assert_eq!(labels, ["Single", "release Live 2", "CD 1", "CD 2"]);
+        let mut sorted = Vec::new();
+        super::ordered_shelf(
+            &shelf,
+            crate::table::Field::Title,
+            gpui_kit::component::table::ColumnSort::Ascending,
+            &mut sorted,
+        );
+        assert_eq!(
+            sorted.iter().map(Shelf::key).collect::<Vec<_>>(),
+            [1, 2, 3, 0].map(|i| shelf[i].key())
+        );
         let discs = shelf.iter().filter(|r| matches!(r, Shelf::Disc(_))).count();
         assert_eq!(discs, 3);
     }
