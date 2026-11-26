@@ -21,7 +21,7 @@ pub struct DraggedFolder {
     pub path: PathBuf,
     pub label: SharedString,
     /// The Place it is, so Locations can reorder Places by dragging.
-    pub place: Option<usize>,
+    pub place: bool,
 }
 impl Render for DraggedFolder {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

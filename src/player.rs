@@ -682,11 +682,17 @@ impl Render for Player {
             .bg(m.control)
             .text_color(m.text)
             .when(active || self.can_start, |d| {
-                d.cursor_pointer()
+                d.focusable()
+                    .tab_stop(true)
+                    .key_context("TransportControl")
+                    .focus_visible(|d| d.border_1().border_color(m.focus_line()))
                     .hover(|d| d.bg(m.control_hover))
                     .on_click(cx.listener(|p, _, _, cx| p.command(Command::Toggle, cx)))
             })
-            .when(!active && !self.can_start, |d| d.opacity(0.4))
+            .when(!active && !self.can_start, |d| {
+                d.opacity(0.4)
+                    .a11y_synthetic_children(|tree| tree.parent_node().set_disabled())
+            })
             .tooltip(|w, cx| Tooltip::new("Play or pause · Space").build(w, cx))
             .child(
                 Icon::new(if play_will_pause {
