@@ -40,8 +40,8 @@ mod table;
 mod theme;
 mod timeline;
 mod waveform_detail;
-#[cfg(feature = "qualification")]
-mod waveform_port_qualification;
+#[cfg(all(windows, feature = "qualification"))]
+mod waveform_qualification;
 mod waveform_source;
 mod workspace;
 
@@ -50,9 +50,11 @@ use workspace::*;
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut source = args.next();
-    #[cfg(feature = "qualification")]
-    if source.as_deref() == Some(std::ffi::OsStr::new("--waveform-parity")) {
-        std::process::exit(waveform_port_qualification::run(args));
+    if source.as_deref() == Some(std::ffi::OsStr::new("--render-waveform-cases")) {
+        #[cfg(all(windows, feature = "qualification"))]
+        std::process::exit(waveform_qualification::run(args));
+        #[cfg(not(all(windows, feature = "qualification")))]
+        std::process::exit(2);
     }
     if source.as_deref() == Some(std::ffi::OsStr::new("--qualify-silent")) {
         if !cfg!(feature = "qualification") || std::env::var_os("DISQRO_PROFILE_DIR").is_none() {
@@ -64,8 +66,8 @@ fn main() {
     diagnostics::start();
     #[cfg(all(windows, feature = "qualification"))]
     {
-        waveform_port_qualification::start_presentation_trace();
-        waveform_port_qualification::arm_target_failure();
+        waveform_qualification::start_presentation_trace();
+        waveform_qualification::arm_target_failure();
     }
     let arg = source
         .map(std::path::PathBuf::from)
@@ -94,7 +96,7 @@ fn main() {
             gpui_kit::open_window(options, cx, move |window, cx| {
                 window.set_window_title("Disqro");
                 #[cfg(all(windows, feature = "qualification"))]
-                waveform_port_qualification::exercise_device_recreation(window, cx);
+                waveform_qualification::exercise_device_recreation(window, cx);
                 cx.new(|cx| Workspace::new(arg, window, cx))
             })
             .expect("Could not open Disqro");

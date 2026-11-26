@@ -83,7 +83,7 @@ Use `--modes posted default --close-layouts maximized` to compare the delivered 
 
 The delivered build passed local formatting, strict Clippy, 243 Disqro tests, and a fresh-profile startup and shutdown. The engine tests, focused Win32 pacing tests, and D3D11 WARP regression suite passed. The muted two-deck scrub and device-recovery journeys completed. In a quiet private comparison with 469 recorded pointer inputs per build, pointer-to-waveform draw p99 was 4.305 ms for the baseline and 4.400 ms for the delivered build.
 
-The delivered trace build produced 103 frozen native images and geometry files byte-identical to the accepted native baseline. The older Electron-reference gate still reports the same 20 historical differences. The hosted Disqro workflow failed while authenticating to the private Waveform Native dependency. Local locked builds used the verified remote revision.
+The delivered trace build produced 103 frozen native images and geometry files byte-identical to the accepted native baseline. The hosted Disqro workflow failed while authenticating to the private Waveform Native dependency. Local locked builds used the verified remote revision.
 
 ## Build identity
 

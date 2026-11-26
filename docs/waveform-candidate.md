@@ -1,8 +1,8 @@
 # Disqro waveform candidate
 
 This document records the reviewed PR #23 baseline. The
-[Dekzer waveform recovery checkpoint](waveform-visual-recovery.md) describes
-the current implementation and links the reproduced comparison procedure.
+[Native waveform qualification](waveform-visual-recovery.md) describes
+the current rendering gate.
 
 The transport's Track and Full CD/Album perspectives use the same spectral data as the new Waveform dock panel. Add more than one Waveform panel to hold different views of the playing recording. The mouse wheel zooms around the pointer, Shift+wheel or horizontal scroll pans, a click seeks to the corresponding decoded frame, and **Fit** restores the whole recording or active CUE chapter. Each dock instance retains its own style.
 

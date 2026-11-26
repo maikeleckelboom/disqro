@@ -33,6 +33,8 @@ jobs:
           if ((Get-FileHash $archive).Hash -ne 'AB79036832CEA0F2A21AA947731D39512250CC0F7A6A2F6ADD26262738A8CC11') { throw 'Unexpected typos archive' }
           Expand-Archive -LiteralPath $archive -DestinationPath $bin
           & "$bin/typos.exe" .
+      - name: Native output comparator
+        run: python -B -m unittest discover -s tools -p test_waveform_parity.py
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests

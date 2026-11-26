@@ -22,7 +22,7 @@ composite it on GPUI's device.
 | `overview.rs` | Disqro's paint helper over the engine surface |
 | `player/wave.rs`, `panels/waveform.rs`, `panels/waveform/scrub.rs` | Track and Full CD perspectives, queue-scoped seeks, the dock panel, coordinated motion and its diagnostics, the audible scrub gesture |
 | `audio/clock.rs`, `audio/scrub.rs`, listening | Renderer clock, audition, Listening Intelligence |
-| `waveform_port_qualification.rs` | `--waveform-parity` commands over the engine, presentation traces, device recreation, target-failure injection |
+| `waveform_qualification.rs` | `--render-waveform-cases` commands over the engine, presentation traces, device recreation, target-failure injection |
 
 ## Building
 
@@ -60,8 +60,7 @@ Disqro opens the current rebuildable cache in `music-cache-v2.sqlite3`. The data
 
 The original integration's locked suite passed with 210 tests. The
 release build with `qualification`
-passed all 103 frozen Stroke views through `tools/qualify_waveform_parity.py
-checkpoint-gpu`, byte-identical to the previous production build, and the
+passed all 103 frozen Stroke views in the frozen native replay, byte-identical to the previous production build, and the
 overview digests of `timeline_waveform_baseline` are unchanged on all
 fixtures. The private-desktop journeys passed: two decks, deck lifecycle
 with an injected target failure (recovered while paused in 505.5 ms), host

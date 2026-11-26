@@ -1,32 +1,19 @@
-//! Local-only qualification entry points: the frozen waveform parity
-//! commands (served by Waveform Native) and Disqro's presentation traces,
-//! device recreation and target-failure injection.
-use crate::{library::Track, recording::Recording};
-use anyhow::{Context as _, Result, bail, ensure};
+//! Native fixture replay, presentation traces and device recovery probes.
+use anyhow::{Context as _, Result, ensure};
 use gpui_kit::{App, Window};
-use kira::sound::streaming::Decoder;
 use serde::Deserialize;
 use std::{
     ffi::OsString,
     fs::File,
-    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    io::{BufReader, BufWriter},
+    path::Path,
     sync::Arc,
 };
 use waveform::{
-    Analyzer, EvidencePage, EvidenceRequest, FrameRange, Plan, Role, SampleRate, View,
+    EvidencePage, Role, View,
     evidence::{RawEvidencePage, RawLeafEvidence, RawOctaveCells, STROKE_ANALYSIS},
-    presentation::{SUPPORTED_OCTAVE_RATES, render},
+    presentation::SUPPORTED_OCTAVE_RATES,
 };
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Request {
-    rate: u32,
-    origin: usize,
-    frame_count: usize,
-    pages: Vec<Plan>,
-}
 
 #[derive(Deserialize)]
 struct Case {
@@ -41,7 +28,7 @@ struct Replay {
     cases: Vec<Case>,
 }
 
-/// Stored facts, including historical 13-fact rows.
+/// Local frozen inputs include 13-fact rows. This decoder is qualification-only.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredPage {
@@ -123,7 +110,11 @@ impl StoredPage {
 
 pub fn run(mut args: impl Iterator<Item = OsString>) -> i32 {
     let Some(log) = args.next() else { return 2 };
-    match execute(args.collect::<Vec<_>>().as_slice()) {
+    let paths: Vec<_> = args.collect();
+    let [cases, facts, output] = paths.as_slice() else {
+        return 2;
+    };
+    match replay(Path::new(cases), Path::new(facts), Path::new(output)) {
         Ok(()) => 0,
         Err(error) => {
             let _ = std::fs::write(log, format!("{error:#}\n"));
@@ -144,94 +135,20 @@ fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-fn execute(args: &[OsString]) -> Result<()> {
-    match args {
-        [command, file, pcm, meta] if command == "decode" => {
-            let mut decoder = Recording::open(&Track::file(PathBuf::from(file)), None)?;
-            let mut pcm = BufWriter::new(File::create(pcm)?);
-            let count = decoder.num_frames();
-            let mut written = 0;
-            while written < count {
-                let frames = decoder.decode()?;
-                ensure!(!frames.is_empty(), "Unexpected source end");
-                written += frames.len();
-                for frame in frames {
-                    pcm.write_all(&frame.left.to_le_bytes())?;
-                    pcm.write_all(&frame.right.to_le_bytes())?;
-                }
-            }
-            pcm.flush()?;
-            serde_json::to_writer(
-                File::create(meta)?,
-                &serde_json::json!({
-                    "rate": decoder.sample_rate(), "frameCount": written
-                }),
-            )?;
-        }
-        [command, pcm, request, output] if command == "facts" => {
-            let spec: Request = read_json(Path::new(request))?;
-            let rate = SampleRate::new(spec.rate)?;
-            let segment =
-                FrameRange::new(spec.origin as u64, (spec.origin + spec.frame_count) as u64)?;
-            let mut pcm = BufReader::new(File::open(pcm)?);
-            let mut pages = Vec::with_capacity(spec.pages.len());
-            for plan in spec.pages {
-                let mut analyzer = Analyzer::new(rate, &EvidenceRequest::new(segment, plan)?)?;
-                let range = analyzer.decode_range();
-                pcm.seek(SeekFrom::Start(((spec.origin + range.start) * 8) as u64))?;
-                let mut bytes = [0; 65_536];
-                let mut frames = Vec::with_capacity(bytes.len() / 8);
-                let mut at = range.start;
-                while at < range.end {
-                    let size = (range.end - at).min(bytes.len() / 8);
-                    pcm.read_exact(&mut bytes[..size * 8])?;
-                    frames.clear();
-                    for f in bytes[..size * 8].as_chunks::<8>().0 {
-                        frames.push([0, 4].map(|offset| {
-                            f32::from_le_bytes(f[offset..offset + 4].try_into().unwrap())
-                        }));
-                    }
-                    analyzer.push(&frames)?;
-                    at += size;
-                }
-                pages.push(analyzer.finish()?);
-            }
-            write_json(Path::new(output), &pages)?;
-        }
-        [command, cases, facts, output]
-            if command == "render" || command == "render-gpu" || command == "bench-gpu" =>
-        {
-            replay(
-                command.to_str().unwrap_or_default(),
-                Path::new(cases),
-                Path::new(facts),
-                Path::new(output),
-            )?;
-        }
-        _ => bail!(
-            "Expected decode INPUT PCM META, facts PCM REQUEST OUTPUT, or render[-gpu] CASES FACTS OUTPUT"
-        ),
-    }
-    Ok(())
-}
-
-fn replay(command: &str, cases: &Path, facts: &Path, output: &Path) -> Result<()> {
-    let cases: Replay = read_json(cases)?;
-    #[cfg(windows)]
-    let mut gpu = if command == "render" {
-        None
-    } else {
-        use waveform::d3d11::headless::{Driver, HeadlessDevice};
-        let device = HeadlessDevice::new(Driver::Auto)?;
-        let renderer = device.renderer(Default::default())?;
-        write_json(
-            &output.join("adapter.json"),
-            &serde_json::json!({ "adapter": device.adapter, "software": device.software }),
-        )?;
-        Some((device, renderer))
+fn replay(cases: &Path, facts: &Path, output: &Path) -> Result<()> {
+    use waveform::d3d11::{
+        Frame,
+        headless::{Driver, HeadlessDevice},
     };
-    #[cfg(not(windows))]
-    ensure!(command == "render", "GPU commands need Windows");
+    let cases: Replay = read_json(cases)?;
+    let device = HeadlessDevice::new(Driver::Auto)?;
+    let mut renderer = device.renderer(Default::default())?;
+    write_json(
+        &output.join("adapter.json"),
+        &serde_json::json!({
+            "adapter": device.adapter, "software": device.software
+        }),
+    )?;
     for case in cases.cases {
         let view = case.view;
         ensure!(
@@ -246,46 +163,22 @@ fn replay(command: &str, cases: &Path, facts: &Path, output: &Path) -> Result<()
             .into_iter()
             .map(|page| page.into_page(view.rate).map(Arc::new))
             .collect::<Result<Vec<_>>>()?;
-        #[cfg(windows)]
-        if let Some((device, renderer)) = &mut gpu {
-            use waveform::d3d11::Frame;
-            let frame = if view.role == Role::Overview {
-                Frame {
-                    overview: pages.first(),
-                    ..Default::default()
-                }
-            } else {
-                Frame {
-                    pages: &pages,
-                    ..Default::default()
-                }
-            };
-            let frame = Frame {
-                exact_first: view.origin() * f64::from(view.rate) / view.pixels_per_second,
-                ..frame
-            };
-            if command == "bench-gpu" {
-                let timing = device.benchmark(renderer, &frame, &view, 180)?;
-                write_json(&output.join(format!("{}.json", case.id)), &timing)?;
-                continue;
+        let frame = if view.role == Role::Overview {
+            Frame {
+                overview: pages.first(),
+                ..Default::default()
             }
-            let pixels = device.render(renderer, &frame, &view)?;
-            image::save_buffer(
-                output.join(format!("{}.png", case.id)),
-                &pixels,
-                view.width as u32,
-                view.height as u32,
-                image::ColorType::Rgba8,
-            )?;
-            write_json(
-                &output.join(format!("{}.json", case.id)),
-                &device.geometry(renderer, &view)?,
-            )?;
-            renderer.release_unused();
-            continue;
-        }
-        let references: Vec<_> = pages.iter().map(Arc::as_ref).collect();
-        let (pixels, geometry) = render(&references, &view);
+        } else {
+            Frame {
+                pages: &pages,
+                ..Default::default()
+            }
+        };
+        let frame = Frame {
+            exact_first: view.origin() * f64::from(view.rate) / view.pixels_per_second,
+            ..frame
+        };
+        let pixels = device.render(&mut renderer, &frame, &view)?;
         image::save_buffer(
             output.join(format!("{}.png", case.id)),
             &pixels,
@@ -293,7 +186,11 @@ fn replay(command: &str, cases: &Path, facts: &Path, output: &Path) -> Result<()
             view.height as u32,
             image::ColorType::Rgba8,
         )?;
-        write_json(&output.join(format!("{}.json", case.id)), &geometry)?;
+        write_json(
+            &output.join(format!("{}.json", case.id)),
+            &device.geometry(&renderer, &view)?,
+        )?;
+        renderer.release_unused();
     }
     Ok(())
 }

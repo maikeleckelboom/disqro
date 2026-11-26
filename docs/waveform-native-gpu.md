@@ -18,13 +18,13 @@ The worker retains complementary evidence on bounded source tiles, including loa
 
 ## Visual qualification
 
-The recovered CPU renderer remains a frozen oracle in the test and qualification builds. The accepted source comparison at `743ec97bda061a3acacea80a7d0ef925d1b9591e` contains 103 Stroke views and 103 historical layered views. The layered outlier remains recorded in the recovery evidence. Three-band rendering, the separate Precision style, their saved style choices, and the standard-rate layered peak and energy analysis have left the application. For rates outside the supported octave grid, the original Stroke color fallback still uses its band energy measurements. The independent live visualization panels keep their own analysis. [Visual recovery and original tolerances](waveform-visual-recovery.md)
+The accepted Windows GPU baseline records the PNG and geometry JSON for every Stroke case. The qualification executable renders the stored native evidence. [Native rendering qualification](waveform-visual-recovery.md)
 
-All 103 Stroke views met the original limits on a Radeon 780M, including the 44.1 and 48 kHz recordings, CUE segment, and anti-phase control. The same 103 views also passed with fresh evidence from the new analyzer. The replay used 560, 1,200, and 1,920 device-pixel widths and 100%, 150%, and 200% scale. Where the reference exposes detail columns, source boundaries, extrema witnesses, and coverage states matched exactly. Core bounds differed from Rust by at most 0.000016 device pixels. The maximum composed channel difference from Rust was one 8-bit code. The highest active-pixel P99 against Electron was one code. The largest individual composed difference against Electron was 30 codes, inside the Canvas fallback limits.
+All 103 Stroke views met the original limits on a Radeon 780M, including the 44.1 and 48 kHz recordings, CUE segment, and anti-phase control. The same 103 views also passed with fresh evidence from the new analyzer. The replay used 560, 1,200, and 1,920 device-pixel widths and 100%, 150%, and 200% scale. Where the reference exposes detail columns, source boundaries, extrema witnesses, and coverage states matched exactly. Core bounds differed from Rust by at most 0.000016 device pixels. The maximum composed channel difference from Rust was one 8-bit code.
 
-The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agrees pixel-for-pixel with Rust and exceeds the Electron limit along a single scanline. The maximum difference is 63 codes over 728 pixels at 32 kHz and 649 at 96 kHz. At these scales the live deck introduces decoded sample geometry as evidence becomes available. Separate shader checks verify decoded stereo and CUE clipping, along with the spectral fallback at 40,123 Hz in both themes.
+The 32 and 96 kHz anti-phase controls met the frozen limits in the overview and at 8 s and 2 s. At 21 ms with only envelope evidence, each agreed pixel-for-pixel with Rust.
 
-Five openly licensed recordings passed 45 additional views using fresh evidence. Each recording has an overview and 8 s and 2 s detail at all three sizes and scales. Both applications independently decoded the same converted float WAV to identical PCM. The native GPU and Rust differed by at most one code. The highest active-pixel P99 against Electron was one code. The conversion preserved the original sample rates and limited the long recordings to their first 180 s. The Project and Baddadan still need authorized recordings.
+Five openly licensed recordings passed 45 additional views using fresh evidence. Each recording has an overview and 8 s and 2 s detail at all three sizes and scales. Both applications independently decoded the same converted float WAV to identical PCM. The native GPU and Rust differed by at most one code.
 
 | Material | Rate | Detail center | Recording and license |
 | --- | ---: | ---: | --- |
@@ -34,12 +34,7 @@ Five openly licensed recordings passed 45 additional views using fresh evidence.
 | Acoustic guitar | 44.1 kHz | 24 s | RyGuy, [Acoustic Guitar Sample](https://commons.wikimedia.org/wiki/File:AcousticGuitarSample.ogg), public domain |
 | Classical | 48 kHz | 129 s | Czech National Symphony Orchestra via Musopen, [Beethoven's Eroica, II. Marcia funebre](https://commons.wikimedia.org/wiki/File:Beethoven_SymphonyNo.3Eroica_LudwigVanBeethoven-SymphonyNo.3InEFlatMajorEroicaOp.55-02-MarciaFunebreAdagioAssai.ogg), [CC0](https://creativecommons.org/publicdomain/zero/1.0/) |
 
-To replay accepted matches from the local checkpoint against the shader, build with `qualification` and run the following command. The runner compares the GPU's own source witnesses and column data with Rust, and compares pixels with Rust and Electron. The local manifests identify the registered physical extent and source frames of each view.
-
-```powershell
-cargo build --release --locked --features qualification
-python -B tools/qualify_waveform_parity.py --dekzer C:/dev/dekzer --work .local/waveform-parity/oracle checkpoint-gpu --checkpoint .local/waveform-parity/checkpoint --exe target/release/disqro.exe --output .local/waveform-native-gpu/replay
-```
+Use the current native byte-comparison procedure for the accepted GPU outputs. [Native waveform qualification](waveform-visual-recovery.md)
 
 ## Loading and performance protocol
 
