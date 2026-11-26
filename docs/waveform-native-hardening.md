@@ -19,6 +19,7 @@ dependency resolution awaits the owner's distribution decision.
 | The Disqro source-upload counter included descriptor traffic | `wave_source_upload_bytes` counts evidence-arena writes. `wave_total_upload_bytes` includes all draw uploads. Warm redraws increment the total and leave source bytes at zero when evidence is already resident. The observer reports real draws and failures. |
 | Derived records changed from v3 to v4 | An isolated fixture profile goes through the v3 transition, rejects three v4 record defects, rebuilds via the actual decoder, and reopens without opening a decoder again. It verifies the original track identity, ratings, likes, listening totals, duplicate queue occurrences and unrelated cached tags. Other timeline tests cover native file and logical/physical mapping. |
 | Archived summaries could silently omit cases | The parity gate checks the fixed 103- and 148-case manifests, report scores and rendered output files, with bidirectional byte comparisons. The standalone loading tables use the final archived records. |
+| First-party Waveform Native spelling varied | The engine uses American English in code, shaders, examples, and documentation, with a pinned CI spelling check. The audit preserves evidence field names, codec identifiers, and fixture bytes. Disqro consumes the new revision and does not directly name the renamed APIs. |
 
 The prior qualification established 103 frozen Disqro views and 214 identical
 outputs, 210 passing tests with 12 opt-in tests ignored, and successful
@@ -27,17 +28,17 @@ journeys. The engine's prior fresh gate covered all 148 views. These are
 archived results for the original integration revision.
 
 The hardening pin for both the engine and GPUI platform patch is
-`17b0f099ef77100038faf92ba7ff2e1499faa15d`. The engine's private hosted
+`6c638e34e0fa05acd0298fd9a44107b7595cc298`. The engine's private hosted
 checks use the exact revision. For authenticated local consumption outside
 the engine checkout, select `RUSTUP_TOOLCHAIN=1.99.1` explicitly before
 running the independent Git fixtures.
-[Engine CI](https://github.com/maikeleckelboom/waveform-native/actions/runs/45721592541)
+[Engine CI](https://github.com/maikeleckelboom/waveform-native/actions/runs/45727846614)
 
 ## Tests transferred from Disqro
 
 | Production Disqro test | Engine test and assertion |
 | --- | --- |
-| `centred_follow_and_pointer_zoom_keep_exact_source_coordinates` | `viewport::tests::centred_follow_and_pointer_zoom_keep_exact_source_coordinates` checks repeated zoom about exact pointers at large source coordinates and centred entry. |
+| `centred_follow_and_pointer_zoom_keep_exact_source_coordinates` | `viewport::tests::centered_follow_and_pointer_zoom_keep_exact_source_coordinates` checks repeated zoom about exact pointers at large source coordinates and centered entry. |
 | `complementary_leaves_distinguish_silence_missing_and_out_of_cell_witnesses` | `presentation::stroke::tests::complementary_leaves_distinguish_silence_missing_and_out_of_cell_witnesses` checks fine/coarse ownership, zero extrema and rejection of witnesses outside their cell. |
 | `every_visible_panel_can_finish_while_another_panel_moves` | `store::tests::every_visible_view_can_finish_while_another_view_moves` checks every stable view receives a scheduling turn while a ninth view changes demand. |
 | `inactive_tiles_are_evicted_without_displacing_a_visible_tile` | `store::tests::inactive_tiles_are_evicted_without_displacing_a_visible_tile` checks retained visible results and bounded idle entries under repeated changes. |
@@ -46,7 +47,7 @@ running the independent Git fixtures.
 | `wide_views_cover_all_supported_rates_and_unaligned_ranges` | `planning::tests::wide_views_cover_all_supported_rates_and_unaligned_ranges` checks 120-second requests across supported rates, widths and segment alignment. |
 | `sample_zoom_keeps_both_decoded_channels_and_clips_at_the_playable_edges` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks distinct stereo traces and empty pixels beyond the segment. |
 | `shader_projection_matches_the_reference_at_device_pixel_edges` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks light/dark overview/detail against the CPU reference within one code. |
-| `silent_stroke_columns_stay_uncoloured_when_sample_inspection_is_absent` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks exact silent columns carry no RGB energy. |
+| `silent_stroke_columns_stay_uncoloured_when_sample_inspection_is_absent` | `waveform-d3d11/tests/headless.rs::silent_stroke_columns_stay_uncolored_when_sample_inspection_is_absent` checks that exact silent columns carry no RGB energy. |
 | `wide_stroke_keeps_coarse_witnesses_across_the_full_surface_and_new_devices` | `waveform-d3d11/tests/headless.rs` uses the same name. It checks wide-view witness agreement and identical pixels on an independent device. |
 
 ## Quiet-machine gate
@@ -80,18 +81,14 @@ Use the same power and system configuration for both sides.
 
 ```powershell
 $local = 'C:/dev/disqro/.local/waveform-native-hardening'
-$engineRepo = 'C:/dev/waveform-native'
-$candidate = git -C C:/dev/disqro rev-parse HEAD
-$engine = git -C $engineRepo rev-parse HEAD
-python -B C:/dev/disqro/tools/qualifyWaveformLoading.py `
-  --baseline "$local/baseline-tests.exe" --baseline-lock "$local/baseline-src/Cargo.lock" `
-  --baseline-revision 4ed3e3eca87db23e5c5408c819d59a30bb31a98c --baseline-tree 158e53f55f3073a6aa5b3cf25510c15af63f5239 `
-  --candidate "$local/candidate-tests.exe" --candidate-lock C:/dev/disqro/Cargo.lock `
-  --candidate-revision $candidate --candidate-tree (git -C C:/dev/disqro rev-parse 'HEAD^{tree}') `
-  --engine-revision $engine --engine-tree (git -C $engineRepo rev-parse 'HEAD^{tree}') --engine-lock "$engineRepo/Cargo.lock" `
-  --fixtures C:/dev/disqro/.local/waveform-mission/fixtures --output "$local/quiet-window" `
-  --quiet-window '<confirmed local date, start and end, timezone>' --configuration '<power source, OS build and settings>'
+& "$local/en-us/run-quiet.ps1" `
+  -QuietWindow '<confirmed local date, start and end, timezone>' `
+  -Configuration '<power source, OS build and settings>'
 ```
+
+The local wrapper validates the locked executable and fixture hashes in
+`prepared-timing.json` before invoking `tools/qualifyWaveformLoading.py`.
+The runner also accepts these inputs directly for reproduction elsewhere.
 
 Physical audibility, endpoint behavior outside the muted harness, physical
 display cadence, monitor transfer and actual driver resets require their
