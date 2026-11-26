@@ -3,6 +3,7 @@ use super::*;
 use crate::store::Handle;
 
 pub(super) struct Reader {
+    pub(super) descendants: Option<Arc<Descendants>>,
     pub(super) handle: Option<Handle>,
     pub(super) workers: Arc<async_lock::Semaphore>,
     pub(super) ticket: Ticket,
@@ -126,6 +127,21 @@ impl Reader {
         }
     }
     pub(super) async fn read(
+        &self,
+        source: Source,
+        cursor: Option<Cursor>,
+        sort: Option<(Field, ColumnSort)>,
+        cx: &AsyncApp,
+    ) -> anyhow::Result<Branch> {
+        let page = self.ordered(source, cursor, sort, cx).await?;
+        if let Some(index) = self.descendants.clone() {
+            cx.background_spawn(async move { index.annotate(page) })
+                .await
+        } else {
+            Ok(page)
+        }
+    }
+    async fn ordered(
         &self,
         source: Source,
         cursor: Option<Cursor>,

@@ -1126,7 +1126,7 @@ impl Browser {
                 browser.update(cx, |b, cx| b.set_filter_open(true, window, cx));
             });
         }
-        let scope = self.tree_filter_scope(cx);
+        let scope = self.tree_filter_scope();
         h_flex()
             .id("browser-filter")
             .when_some(scope, |d, scope| {

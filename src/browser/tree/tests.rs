@@ -677,16 +677,37 @@ fn indexed_filters_keep_unloaded_folders_whose_contents_match() {
         .insert(None, indexed_branch(&store, id, &root).unwrap());
     // Loaded rows alone cannot see into the collapsed folders.
     assert!(titles(&tree.visible(None, "needle", &|_| Mark::default())).is_empty());
-    let (folders, truncated) = store.tree_matches(Some(id), "needle", 4096).unwrap();
-    assert!(!truncated);
-    let matches = Descendants::new("needle".into(), folders, truncated);
+    let matches = Descendants::build(&store, Some(id), "needle".into()).unwrap();
+    let page = tree.branches.remove(&None).unwrap();
+    tree.branches.insert(None, matches.annotate(page).unwrap());
     let marks = |_: &Track| Mark::default();
     let lens = Lens::new("needle", Some(&matches), &marks);
     assert_eq!(titles(&tree.project(lens.as_ref()).rows), ["Artists"]);
-    let (all, _) = store.tree_matches(None, "needle", 4096).unwrap();
-    assert_eq!(all.len(), 1);
-    let (_, truncated) = store.tree_matches(Some(id), "wav", 1).unwrap();
-    assert!(truncated);
+}
+
+#[test]
+fn indexed_filter_resolves_collapsed_ancestors_beyond_four_thousand_folders() {
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().join("library.sqlite3");
+    let mut store = Store::open(&path).unwrap();
+    let root = store.add_root(fixture.path()).unwrap();
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5000)
+        INSERT INTO files(id,path,path_key,name,kind,root_id,size,modified)
+        SELECT i,printf('folder-%d/song.wav',i),printf('folder-%d/song.wav',i),'song.wav',0,?,2,1 FROM n", [root]).unwrap();
+    db.execute_batch("INSERT INTO albums(id,key,root_id,title,folder,sort_key,is_release)
+        SELECT id,path,root_id,name,printf('folder-%d/disc',id),path,1 FROM files;
+        INSERT INTO tracks(anchor,part,source,root_id,album_id,title,artist,album,format,title_key,artist_key,album_key,search,added_at)
+        SELECT id,0,id,root_id,id,name,'','','WAV',name,'','',name,1 FROM files;").unwrap();
+    let index = Descendants::build(&store, Some(root), "format:wav".into()).unwrap();
+    for i in [5000, 4097, 1, 5001] {
+        let node = Node::folder(Some(root), format!("folder-{i}").into());
+        let batch = index.annotate(Branch::page(vec![node], None)).unwrap();
+        assert_eq!(
+            batch.nodes().next().unwrap().has_matching_descendant,
+            i <= 5000
+        );
+    }
 }
 
 #[test]
@@ -1057,5 +1078,110 @@ fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
         tree.branches[&None].pages.len(),
         tree.expansion().links.len(),
         tree.pending.len()
+    );
+}
+
+#[test]
+fn expanded_indexed_releases_reload_their_authored_discs_after_eviction() {
+    use crate::{
+        collection::{Disc, Discs, Shelf},
+        store::{AlbumRow, query::AlbumRelease},
+    };
+    use std::sync::Arc;
+    fn release(i: usize) -> Node {
+        let first = 2 * i as i64 + 1;
+        let folder = PathBuf::from(format!("fixture/release-{i}"));
+        let discs = (1..=2)
+            .map(|number| {
+                Arc::new(Disc::from_album(AlbumRow {
+                    id: first + i64::from(number) - 1,
+                    root: Some(1),
+                    title: format!("CD {number}"),
+                    album_artist: None,
+                    year: None,
+                    disc_number: Some(number),
+                    authored: true,
+                    folder: folder.join(format!("CD {number}")),
+                    cover: None,
+                    cue_image: None,
+                    count: 0,
+                    duration: 0.,
+                    complete: true,
+                    format: "WAV".into(),
+                    release: Some(AlbumRelease {
+                        first,
+                        title: format!("Release {i}"),
+                        number,
+                        subtitle: String::new(),
+                    }),
+                }))
+            })
+            .collect();
+        let Shelf::Release(group) = Discs::shelve(discs).remove(0) else {
+            panic!("release header");
+        };
+        Node::release(group, folder)
+    }
+    const PAGES: usize = 9;
+    fn batch(i: usize) -> Branch {
+        Branch::page(
+            (i * PAGE..(i + 1) * PAGE).map(release).collect(),
+            (i + 1 < PAGES).then_some(Cursor::Offset((i + 1) * PAGE)),
+        )
+    }
+    let mut tree = Tree::default();
+    tree.expand_all(None, &None);
+    let mut peak_nodes = 0;
+    let mut peak_branches = 0;
+    for i in 0..PAGES {
+        let fetch = if i == 0 {
+            Fetch::First
+        } else {
+            Fetch::Next(Cursor::Offset(i * PAGE))
+        };
+        assert!(tree.receive(&None, &fetch, batch(i), None));
+        // Exercise expanded and hydrated disc branches in each visited window.
+        // Most cohorts remain logically expanded before their first payload arrives.
+        let groups: Vec<_> = tree.branches[&None].pages[i]
+            .nodes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .step_by(16)
+            .map(|node| (node.id.clone(), node.source()))
+            .collect();
+        for (id, group) in groups {
+            let Some(Source::Loaded(discs)) = group else {
+                panic!("authored disc list");
+            };
+            for disc in discs.iter() {
+                tree.branches
+                    .insert(Some(disc.id.clone()), Branch::page(vec![], None));
+            }
+            tree.branches
+                .insert(Some(id), Branch::page(discs.to_vec(), None));
+        }
+        tree.reconcile();
+        peak_nodes = peak_nodes.max(tree.loaded());
+        peak_branches = peak_branches.max(tree.branches.len());
+        assert!(tree.loaded() <= LOADED_NODE_LIMIT);
+    }
+    let first = release(0);
+    assert!(!tree.branches.contains_key(&Some(first.id.clone())));
+    assert!(tree.receive(&None, &Fetch::Page(0, None), batch(0), None));
+    let restored = &tree.branches[&None].pages[0].nodes.as_ref().unwrap()[0];
+    assert_eq!(restored.id, first.id);
+    assert!(tree.is_open(&restored.id, true));
+    let Some(Source::Loaded(discs)) = restored.source() else {
+        panic!("rehydrated release");
+    };
+    assert_eq!(discs.len(), 2);
+    assert!(discs.iter().all(|node| tree.is_open(&node.id, true)));
+    eprintln!(
+        "visited_releases={} peak_nodes={peak_nodes} peak_branches={peak_branches} root_slots={} outstanding={} intent_links={}",
+        PAGES * PAGE,
+        tree.branches[&None].pages.len(),
+        tree.pending.len(),
+        tree.expansion().links.len()
     );
 }

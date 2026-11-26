@@ -59,6 +59,7 @@ fn indexed_path(store: &Store, root: Option<RootId>, id: TrackId) -> anyhow::Res
     let mut lineage = Vec::new();
     if root.is_none() {
         lineage.push(Node {
+            has_matching_descendant: false,
             id: TreeId::Collection(reg.root),
             item: Item::Collection {
                 id: reg.root,
@@ -77,20 +78,30 @@ fn indexed_path(store: &Store, root: Option<RootId>, id: TrackId) -> anyhow::Res
         if let Some(parent) = home.parent().filter(|p| crate::library::within(p, &path)) {
             candidates.push(parent);
         }
-        for folder in candidates {
-            let (nodes, _, _) = indexed_contents(store, reg.root, folder, Default::default())?;
-            if let Some(node) = nodes.into_iter().find(|node| {
-                matches!(&node.item, Item::Release { release, .. } if release.discs.iter().any(|disc| disc.id == id))
-            }) {
-                let Item::Release { release, .. } = &node.item else { unreachable!() };
-                program = release.discs.iter().find(|disc| disc.id == id).cloned();
-                container = folder;
-                let Some(folders) = folder_lineage(&path, container, Some(reg.root)) else {
-                    return Ok(Vec::new());
+        'candidates: for folder in candidates {
+            let mut cursor = Default::default();
+            loop {
+                let (nodes, _, more) = indexed_contents(store, reg.root, folder, cursor)?;
+                for node in nodes {
+                    let Item::Release { release, .. } = &node.item else {
+                        continue;
+                    };
+                    let Some(disc) = release.discs.iter().find(|disc| disc.id == id) else {
+                        continue;
+                    };
+                    program = Some(disc.clone());
+                    container = folder;
+                    let Some(folders) = folder_lineage(&path, container, Some(reg.root)) else {
+                        return Ok(Vec::new());
+                    };
+                    lineage.extend(folders);
+                    lineage.push(node);
+                    break 'candidates;
+                }
+                let Some(Cursor::Indexed(IndexedCursor::Contents(next))) = more else {
+                    break;
                 };
-                lineage.extend(folders);
-                lineage.push(node);
-                break;
+                cursor = next;
             }
         }
     }
@@ -201,12 +212,18 @@ impl reader::Reader {
         let mut cursor = None;
         if let Some(index) = page.snapshot.clone() {
             let id = target.clone();
+            let descendants = self.descendants.clone();
             let (rank, found) = cx
                 .background_spawn(async move {
                     let rank = index
                         .position(&id)?
                         .ok_or_else(|| anyhow::anyhow!("Recording moved"))?;
-                    anyhow::Ok((rank, index.page(rank / PAGE * PAGE)?))
+                    let page = index.page(rank / PAGE * PAGE)?;
+                    let page = match descendants {
+                        Some(index) => index.annotate(page)?,
+                        None => page,
+                    };
+                    anyhow::Ok((rank, page))
                 })
                 .await?;
             for start in (0..rank / PAGE * PAGE).step_by(PAGE) {
@@ -237,7 +254,7 @@ impl reader::Reader {
                     .ok_or_else(|| anyhow::anyhow!("Recording moved"))?;
                 prefix.push(Slot::unloaded(cursor, page.pages[0].len));
                 cursor = Some(next.clone());
-                page = self.raw(source.clone(), Some(next), cx).await?;
+                page = self.read(source.clone(), Some(next), None, cx).await?;
             }
         }
         page.pages[0].start = cursor;
@@ -360,9 +377,17 @@ impl Browser {
         self.tree.update(cx, |table, _| {
             table.delegate_mut().tree.reveal = Some(Request(ticket.clone()))
         });
+        let descendants = self
+            .tree
+            .read(cx)
+            .delegate()
+            .descendants
+            .clone()
+            .filter(|d| d.query == self.query);
         let window = self.window;
         cx.spawn(async move |browser, cx| {
             let reader = reader::Reader {
+                descendants,
                 handle: store.clone(),
                 workers: workers.clone(),
                 ticket: ticket.clone(),

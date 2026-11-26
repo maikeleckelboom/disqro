@@ -19,6 +19,8 @@ use std::{
     sync::Arc,
 };
 
+mod descendants;
+use descendants::Descendants;
 mod reader;
 mod reveal;
 mod snapshot;
@@ -39,47 +41,6 @@ pub(super) const LOOKAHEAD: usize = 512;
 const PARALLEL_BRANCHES: usize = 4;
 /// Resident node payload across the tree. Released pages retain only cursors and spans.
 const LOADED_NODE_LIMIT: usize = 32_768;
-/// Catalog folders with matching recordings that filtering resolves.
-const MATCHED_FOLDERS: usize = 4096;
-
-/// Folders of an indexed tree that hold recordings matching its filter,
-/// with every ancestor, as path keys.
-#[derive(Default)]
-pub(super) struct Descendants {
-    pub(super) query: String,
-    pub(super) folders: HashSet<String>,
-    pub(super) truncated: bool,
-}
-
-impl Descendants {
-    fn new(query: String, matched: Vec<PathBuf>, truncated: bool) -> Self {
-        let mut folders = HashSet::new();
-        for folder in matched {
-            let mut path = Some(folder.as_path());
-            while let Some(current) = path
-                && folders.insert(crate::store::path_key(current))
-            {
-                path = current.parent();
-            }
-        }
-        Self {
-            query,
-            folders,
-            truncated,
-        }
-    }
-
-    fn contains(&self, node: &Node) -> bool {
-        let key = |path: &Path| self.folders.contains(&crate::store::path_key(path));
-        match &node.item {
-            Item::Collection { path, .. } | Item::Folder { path, .. } => key(path),
-            Item::Release { release, .. } => release.discs.iter().any(|d| key(&d.folder)),
-            Item::Disc { disc, .. } => key(&disc.folder),
-            Item::Track { .. } => false,
-        }
-    }
-}
-
 /// What a filter keeps of a branch.
 struct Lens<'a> {
     terms: Vec<crate::store::Term>,
@@ -107,7 +68,7 @@ impl<'a> Lens<'a> {
 
     /// Whether the catalog knows of matches inside an item not yet read.
     fn holds(&self, node: &Node) -> bool {
-        self.descendants.is_some_and(|d| d.contains(node))
+        self.descendants.is_some() && node.has_matching_descendant
     }
 }
 
@@ -167,6 +128,8 @@ enum Item {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Node {
+    #[serde(skip)]
+    has_matching_descendant: bool,
     id: TreeId,
     item: Item,
 }
@@ -174,6 +137,7 @@ struct Node {
 impl Node {
     fn folder(root: Option<RootId>, path: PathBuf) -> Self {
         Self {
+            has_matching_descendant: false,
             id: TreeId::Folder(root, crate::store::path_key(&path)),
             item: Item::Folder { root, path },
         }
@@ -181,6 +145,7 @@ impl Node {
 
     fn track(track: Arc<Track>, disc: Option<Arc<Disc>>) -> Self {
         Self {
+            has_matching_descendant: false,
             id: TreeId::track(&track),
             item: Item::Track { track, disc },
         }
@@ -188,6 +153,7 @@ impl Node {
 
     fn disc(disc: Arc<Disc>, folder: PathBuf) -> Self {
         Self {
+            has_matching_descendant: false,
             id: TreeId::Disc(disc.id.clone()),
             item: Item::Disc { disc, folder },
         }
@@ -195,6 +161,7 @@ impl Node {
 
     fn release(release: Arc<Release>, folder: PathBuf) -> Self {
         Self {
+            has_matching_descendant: false,
             id: TreeId::Release(release.key.clone()),
             item: Item::Release { release, folder },
         }
@@ -1614,7 +1581,10 @@ impl Browser {
 
     pub(crate) fn invalidate_tree(&mut self, cx: &mut Context<Self>) {
         self.tree.update(cx, |table, _| {
-            let state = &mut table.delegate_mut().tree;
+            let delegate = table.delegate_mut();
+            delegate.matching.next();
+            delegate.descendants = None;
+            let state = &mut delegate.tree;
             state.reveal = None;
             state.root = None;
             state.branches.clear();
@@ -1653,6 +1623,7 @@ impl Browser {
                         .collections
                         .iter()
                         .map(|c| Node {
+                            has_matching_descendant: false,
                             id: TreeId::Collection(c.root.id),
                             item: Item::Collection {
                                 id: c.root.id,
@@ -1670,6 +1641,10 @@ impl Browser {
             let delegate = table.delegate_mut();
             if delegate.tree.root.is_none() {
                 delegate.tree.root = Some(source);
+            }
+            if delegate.filter != self.query {
+                delegate.matching.next();
+                delegate.descendants = None;
             }
             delegate.filter.clone_from(&self.query);
             TreeTable::project(table, cx);
@@ -1701,32 +1676,38 @@ impl Browser {
         {
             return;
         }
-        let ticket = table.matching.clone();
-        let generation = ticket.next();
         let Some(store) = self.catalog.read(cx).handle() else {
             return;
         };
+        let ticket = table.matching.clone();
+        let generation = ticket.next();
+        let watch = ticket.clone();
+        let reader = store.query(&ticket, generation, move |s| s.reader(watch, generation));
         cx.spawn(async move |browser, cx| {
-            let text = query.clone();
-            let result = store
-                .query(&ticket, generation, move |s| {
-                    s.tree_matches(root, &text, MATCHED_FOLDERS)
-                })
-                .await;
-            let Ok((folders, truncated)) = result else {
-                return;
-            };
+            let result = async {
+                let store = reader.await?;
+                let text = query.clone();
+                cx.background_spawn(async move { Descendants::build(&store, root, text) })
+                    .await
+            }
+            .await;
             let _ = browser.update(cx, |b, cx| {
-                if !ticket.is_current(generation) {
+                if !ticket.is_current(generation) || b.query != query || !b.listing_tree() {
                     return;
                 }
-                b.tree.update(cx, |table, cx| {
-                    table.delegate_mut().tree.invalidate_filtered_spans();
-                    table.delegate_mut().descendants =
-                        Some(Arc::new(Descendants::new(query, folders, truncated)));
-                    TreeTable::project(table, cx);
-                });
+                match result {
+                    Ok(index) => b.tree.update(cx, |table, cx| {
+                        let d = table.delegate_mut();
+                        d.descendants = Some(Arc::new(index));
+                        d.tree.pending.clear();
+                        d.tree.branches.clear();
+                        TreeTable::project(table, cx);
+                    }),
+                    Err(err) => b.notice = Some(format!("Unable to filter folders: {err:#}")),
+                }
+                b.pump_tree(cx);
                 cx.emit(ViewChanged);
+                cx.notify();
             });
         })
         .detach();
@@ -1750,8 +1731,16 @@ impl Browser {
                 .sort
                 .filter(|_| !matches!(source, Source::Snapshot(_)) && tree.sorts(&id));
             let cursor = fetch.cursor().cloned();
+            let descendants = self
+                .tree
+                .read(cx)
+                .delegate()
+                .descendants
+                .clone()
+                .filter(|d| d.query == self.query);
             cx.spawn(async move |browser, cx| {
                 let reader = reader::Reader {
+                    descendants,
                     handle,
                     workers,
                     ticket: ticket.clone(),
@@ -1778,27 +1767,9 @@ impl Browser {
         }
     }
 
-    /// What the filter searches in Tree view, when that differs from the
-    /// whole view: open folders on disk, or a capped set of catalog folders.
-    pub(crate) fn tree_filter_scope(&self, cx: &App) -> Option<&'static str> {
-        if !self.listing_tree() {
-            return None;
-        }
-        match &self.location {
-            Location::Folder(_) => Some("Filter open folders · Unopened folders are not searched"),
-            Location::Library(_)
-                if self
-                    .tree
-                    .read(cx)
-                    .delegate()
-                    .descendants
-                    .as_ref()
-                    .is_some_and(|matches| matches.truncated && matches.query == self.query) =>
-            {
-                Some("Filter · Showing the first 4,096 folders with matches")
-            }
-            _ => None,
-        }
+    pub(crate) fn tree_filter_scope(&self) -> Option<&'static str> {
+        (self.listing_tree() && matches!(self.location, Location::Folder(_)))
+            .then_some("Filter open folders · Unopened folders are not searched")
     }
 
     /// Requests the batches the viewport approaches. Loading is driven by

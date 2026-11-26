@@ -1134,15 +1134,12 @@ impl Store {
         })
     }
 
-    /// Folders holding present recordings that match `search`, in one
-    /// collection or in every collection. At most `limit` folders are read,
-    /// and the flag says whether more matched.
-    pub(crate) fn tree_matches(
+    pub(crate) fn visit_matching_folders(
         &self,
         root: Option<RootId>,
         search: &str,
-        limit: usize,
-    ) -> Result<(Vec<PathBuf>, bool)> {
+        mut visit: impl FnMut(PathBuf) -> Result<()>,
+    ) -> Result<()> {
         let mut args: Vec<Box<dyn ToSql>> = vec![];
         let mut filter = vec!["t.present = 1".to_owned()];
         match root {
@@ -1154,7 +1151,7 @@ impl Store {
         }
         let terms = Term::parse(search);
         if terms.is_empty() {
-            return Ok((Vec::new(), false));
+            return Ok(());
         }
         filter.extend(terms.iter().map(|t| t.sql(&mut args)));
         let sql = format!(
@@ -1162,20 +1159,15 @@ impl Store {
              JOIN files s ON s.id = t.source
              LEFT JOIN ratings r ON r.track_id = t.id
              LEFT JOIN likes l ON l.track_id = t.id
-             {} LIMIT {}",
-            where_clause(&filter),
-            limit + 1
+             {}",
+            where_clause(&filter)
         );
-        let mut folders: Vec<PathBuf> = self
-            .db
-            .prepare(&sql)?
-            .query_map(params_from_iter(args.iter()), |r| {
-                Ok(PathBuf::from(r.get::<_, String>(0)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let more = folders.len() > limit;
-        folders.truncate(limit);
-        Ok((folders, more))
+        let mut stmt = self.db.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(args.iter()))?;
+        while let Some(row) = rows.next()? {
+            visit(PathBuf::from(row.get::<_, String>(0)?))?;
+        }
+        Ok(())
     }
 
     /// Named CD folders directly below `path` that hold every indexed
