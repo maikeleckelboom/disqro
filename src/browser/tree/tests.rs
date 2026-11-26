@@ -392,20 +392,15 @@ fn a_filter_finds_matches_beyond_the_loaded_total_and_stops_reading() {
     let batches = all.len().div_ceil(PAGE);
     assert_eq!(view.reads[&None], batches);
     assert!(view.peak <= LOADED_NODE_LIMIT + PAGE, "peak {}", view.peak);
-    assert!(!view.tree.saturated);
-    // A filter matching everything stops once its matches fill the total,
-    // and says so instead of reading the same batch again.
     view.filter = "folder".into();
     view.settle();
-    assert!(view.tree.saturated);
-    assert!(view.tree.loaded() <= LOADED_NODE_LIMIT + PAGE);
-    assert!(
-        view.logical()
-            .last()
-            .unwrap()
-            .as_deref()
-            .is_some_and(|text| text.contains("Refine the filter"))
+    assert_eq!(view.len, all.len());
+    view.scroll(all.len() - 40);
+    assert_eq!(
+        view.logical().last().unwrap().as_deref(),
+        Some("Folder 45066")
     );
+    assert!(view.tree.loaded() <= LOADED_NODE_LIMIT);
     // Clearing the filter browses again from the loaded pages.
     view.filter.clear();
     view.scroll(0);
@@ -475,13 +470,15 @@ fn open_items_of_released_pages_keep_their_rows_and_selection() {
     let inner = view.row_of("Item 00009").unwrap();
     assert_eq!(inner, 6 + 9);
     // The first page is released, as when the viewport moves far away.
-    view.tree.branches.get_mut(&None).unwrap().pages[0].release(&|id| *id == open, None);
+    view.tree.release_page(&None, 0, None);
     view.project();
-    // The open folder and its items keep their rows while the page is out.
     assert_eq!(view.len, before);
+    assert!(view.tree.expanded.contains(&open));
+    assert!(!view.tree.branches.contains_key(&Some(open.clone())));
+    assert!(view.logical()[0].is_none());
+    view.scroll(0);
     assert_eq!(view.row_of("Folder 00005"), Some(5));
     assert_eq!(view.row_of("Item 00009"), Some(inner));
-    assert!(view.logical()[0].is_none());
     // Collapsing it there still works, and reopening reads it again.
     view.tree.toggle(open.clone(), &None);
     view.project();
@@ -559,7 +556,7 @@ fn loading_releases_the_least_recently_used_pages_across_branches() {
     // The other branch's page the viewport left is released, not this one.
     assert!(tree.loaded() <= LOADED_NODE_LIMIT);
     assert!(tree.branches[&None].pages[0].nodes.is_none());
-    assert_eq!(tree.branches[&id].loaded_pages(), 2);
+    assert!(!tree.branches.contains_key(&id));
 }
 
 #[test]
@@ -1004,4 +1001,72 @@ fn saved_exceptions_keep_unloaded_indexed_ancestors_across_subtree_commands() {
     restored.collapse_all(Some(collection.clone()), &None);
     assert!(restored.closed.contains(&collection));
     assert!(restored.closed.contains(&other));
+}
+
+#[test]
+fn expanded_pages_release_empty_and_nested_branches_and_reload_backward() {
+    const PAGES: usize = 10;
+    fn batch(index: usize) -> Branch {
+        let nodes = (index * PAGE..(index + 1) * PAGE)
+            .map(|i| Node::folder(None, format!(r"C:\fixture\folder-{i}").into()))
+            .collect();
+        Branch::page(
+            nodes,
+            (index + 1 < PAGES).then_some(Cursor::Offset((index + 1) * PAGE)),
+        )
+    }
+    let mut tree = Tree::default();
+    tree.expand_all(None, &None);
+    let mut peak = 0;
+    let mut branches = 0;
+    for index in 0..PAGES {
+        let page = batch(index);
+        let fetch = if index == 0 {
+            Fetch::First
+        } else {
+            Fetch::Next(Cursor::Offset(index * PAGE))
+        };
+        assert!(tree.receive(&None, &fetch, page, None));
+        let ids: Vec<_> = tree.branches[&None].pages[index]
+            .nodes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|node| node.id.clone())
+            .collect();
+        for (offset, id) in ids.into_iter().enumerate() {
+            let children = if offset % 16 == 0 {
+                vec![Node::folder(
+                    None,
+                    format!(r"C:\fixture\folder-{}\child", index * PAGE + offset).into(),
+                )]
+            } else {
+                Vec::new()
+            };
+            tree.branches.insert(Some(id), Branch::page(children, None));
+        }
+        tree.reconcile();
+        peak = peak.max(tree.loaded());
+        branches = branches.max(tree.branches.len());
+        assert!(peak <= LOADED_NODE_LIMIT);
+        assert!(branches <= 1 + RESIDENT_PAGES * PAGE);
+    }
+    let projected = tree.project(None).len;
+    assert!(projected > PAGES * PAGE * 2);
+    assert_eq!(tree.expansion().deep, vec![None]);
+    assert!(tree.expansion().links.is_empty());
+    for index in (0..PAGES - RESIDENT_PAGES).rev() {
+        let cursor = tree.branches[&None].pages[index].start.clone();
+        assert!(tree.receive(&None, &Fetch::Page(index, cursor), batch(index), None));
+        let slot = &tree.branches[&None].pages[index];
+        assert!(tree.is_open(&slot.nodes.as_ref().unwrap()[0].id, true));
+        assert!(tree.loaded() <= LOADED_NODE_LIMIT);
+    }
+    eprintln!(
+        "visited={} peak_nodes={peak} peak_branches={branches} page_descriptors={} persisted_links={} requests={}",
+        PAGES * PAGE,
+        tree.branches[&None].pages.len(),
+        tree.expansion().links.len(),
+        tree.pending.len()
+    );
 }
