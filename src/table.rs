@@ -1,4 +1,4 @@
-//! The track table shared by folder listings, collections, Liked Tracks and
+//! The track table shared by folder listings, collections, Favorites and
 //! playlists. Columns, selection, menus and the like and rating cells are the
 //! same everywhere; only where rows come from differs.
 mod columns;
@@ -58,8 +58,8 @@ const LARGE_THUMBNAIL: f32 = 96.;
 const COVER_Y: f32 = 2.;
 pub(crate) const COVER_WIDTH: f32 = THUMBNAIL + 2. * COVER_X;
 pub(crate) const COVER_MAX_WIDTH: f32 = LARGE_THUMBNAIL + 2. * COVER_X;
-/// The like control is a 14-pixel glyph; its column needs no more than a
-/// comfortable hit target. The heading draws the same glyph.
+/// The width saved for the original heart-only column. The text heading
+/// supplies its own display minimum while older layouts keep this value.
 pub(crate) const FAVORITE_WIDTH: f32 = 36.;
 
 pub(crate) fn cover_edge(width: f32) -> f32 {
@@ -185,7 +185,7 @@ impl Field {
     }
     fn heading(self) -> &'static str {
         match self {
-            Self::Cover | Self::Favorite => "",
+            Self::Cover => "",
             f => f.label(),
         }
     }
@@ -217,7 +217,7 @@ impl Field {
     fn min_width(self) -> f32 {
         match self {
             Self::Cover => self.width(),
-            Self::Favorite => FAVORITE_WIDTH,
+            Self::Favorite => 66.,
             Self::Number => 36.,
             Self::Title => 142.,
             Self::Year | Self::Disc | Self::Count => 48.,
@@ -911,7 +911,9 @@ impl MusicTable {
         cx: &mut Context<TableState<Self>>,
     ) {
         if table.delegate().context != context {
-            table.delegate_mut().context = context;
+            let delegate = table.delegate_mut();
+            delegate.layouts.initialize(context);
+            delegate.context = context;
             table
                 .horizontal_scroll_handle
                 .set_offset(point(px(0.), px(0.)));
@@ -1524,6 +1526,11 @@ impl MusicTable {
             catalog.update(cx, |c, cx| c.set_liked(target.clone(), !liked, cx));
         };
         let toggle_from_key = toggle.clone();
+        let label = if liked {
+            "Remove from Favorites"
+        } else {
+            "Add to Favorites"
+        };
         div()
             .id(("like", self.cell_id(row)))
             .key_context("TrackLike")
@@ -1535,7 +1542,8 @@ impl MusicTable {
             } else {
                 gpui_kit::accesskit::Toggled::False
             })
-            .aria_label(if liked { "Unlike track" } else { "Like track" })
+            .aria_label(label)
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(label).build(w, cx))
             .flex_shrink_0()
             .size_full()
             .flex()
@@ -1668,6 +1676,9 @@ impl TableColumns for MusicTable {
     }
     fn browser(&self) -> Option<WeakEntity<crate::browser::Browser>> {
         Some(self.browser.clone())
+    }
+    fn column_available(&self, field: Field) -> bool {
+        self.context != ContextKind::Favorites || field != Field::Favorite
     }
     fn sort(&self) -> Option<(Field, ColumnSort)> {
         self.sort
@@ -2076,7 +2087,9 @@ impl TableDelegate for MusicTable {
             }
         };
         let plural = |one: &str, many: String| if count > 1 { many } else { one.into() };
-        let liked = if count == 1 {
+        let liked = if matches!(&targets, Targets::Keys(Scope::Liked, _)) {
+            true
+        } else if count == 1 {
             self.mark(ix, cx).liked
         } else {
             catalog.read(cx).all_liked(&targets)
@@ -2202,11 +2215,11 @@ impl TableDelegate for MusicTable {
             let catalog = catalog.clone();
             let toggle = count > 1 && in_playlist.is_some();
             PopupMenuItem::new(if toggle {
-                "Toggle Like"
+                "Toggle Favorites"
             } else if liked {
-                "Unlike"
+                "Remove from Favorites"
             } else {
-                "Like"
+                "Add to Favorites"
             })
             .icon(if liked {
                 IconName::HeartOff

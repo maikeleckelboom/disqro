@@ -1,5 +1,5 @@
 //! The Music Browser: a content panel showing a folder, a collection, a CD
-//! or release, Liked Tracks or a playlist.
+//! or release, Favorites or a playlist.
 //!
 //! Every instance is its own [`Browser`] with its own location, history,
 //! search, selection, scroll position, view mode and column layouts. The
@@ -47,7 +47,7 @@ pub static TYPE: PanelType = PanelType {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserState {
-    /// The view shown: a folder, a collection, Liked Tracks or a playlist.
+    /// The view shown: a folder, a collection, Favorites or a playlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -552,9 +552,9 @@ const SCOPE_GAP: f32 = 3.;
 const FILTER_COMPACT: f32 = 100.;
 const FILTER_FULL: f32 = 175.;
 const VIEW_CHOICES: [(ViewMode, &str, IconName); 3] = [
-    (ViewMode::Tracks, "All Tracks", IconName::ListMusic),
+    (ViewMode::Tracks, "Tracks", IconName::ListMusic),
     (ViewMode::Albums, "Releases", IconName::Disc3),
-    (ViewMode::Tree, "Tree", IconName::Layers),
+    (ViewMode::Tree, "Tree", IconName::ListTree),
 ];
 const VIEW_LABEL_SIZE: f32 = 12.;
 const VIEW_LABEL_CHROME: f32 = 39.;

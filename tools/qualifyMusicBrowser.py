@@ -8,6 +8,7 @@ import ctypes as C
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import time
@@ -89,6 +90,69 @@ def browser_states(profile_path):
     return {panel["id"]: panel["state"] for panel in walk(workspace["layout"]["center"])}
 
 
+def right_click(hwnd, point):
+    C.windll.user32.ScreenToClient(hwnd, C.byref(point))
+    position = (point.y << 16) | (point.x & 0xffff)
+    for message, keys in [(0x200, 0), (0x204, 2), (0x205, 0)]:
+        C.windll.user32.SendMessageW(hwnd, message, keys, position)
+
+
+def favorites_journey(exe, output):
+    workspace_file = output / "workspace-v1.json"
+    settings = profile(None, 1000)
+    pane = settings["layout"]["center"]["children"][1]["children"][0]["info"]["panel"]["state"]
+    title = dict(field="Title", width=405, pin="None")
+    favorite = dict(field="Favorite", width=96, pin="Right")
+    mixed = dict(columns=[title, dict(field="Artist", width=140, pin="None"), favorite], adaptive=False)
+    pane["layouts"] = dict(version=3, disc=dict(columns=[title]), mixed=mixed, playlist=dict(columns=[title]))
+    process = launch(exe, output, settings)
+    try:
+        hwnd, _ = wait_for(process, "Favorite")
+        screenshot(hwnd, output / "favorite-header.png")
+        click(process, "Favorites")
+        wait_for(process, "Opening Notes")
+        screenshot(hwnd, output / "favorites.png")
+    finally:
+        close(process)
+    saved = browser_states(workspace_file)[1]
+    assert saved["current"]["location"] == "Liked", saved["current"]
+    assert saved["layouts"]["mixed"] == mixed, saved["layouts"]["mixed"]
+    assert saved["layouts"]["favorites"]["columns"] == mixed["columns"][:-1]
+    assert not saved["layouts"]["favorites"].get("hidden")
+
+    with sqlite3.connect(output / "library.sqlite3") as db:
+        selected = list(db.execute("SELECT t.id, t.title FROM likes l JOIN tracks t ON t.id = l.track_id ORDER BY t.id"))
+        assert len(selected) == 2, selected
+        ratings = list(db.execute("SELECT track_id, stars FROM ratings"))
+
+    workspace = json.loads(workspace_file.read_text(encoding="utf-8"))
+    def set_selection(node):
+        if node["panel_name"] == "disqro.browser":
+            current = node["info"]["panel"]["state"]["current"]
+            if current["location"] == "Liked":
+                first = dict(Key=selected[0][0])
+                current["bookmark"] = dict(marked=dict(
+                    anchor=first, cursor=first, marked=[dict(Key=key) for key, _ in selected]))
+        for child in node["children"]:
+            set_selection(child)
+    set_selection(workspace["layout"]["center"])
+    process = launch(exe, output, workspace)
+    try:
+        hwnd, point = wait_for(process, selected[0][1])
+        right_click(hwnd, point)
+        click(process, "Remove from Favorites")
+        wait_for(process, "No favorites yet. Add a track from its menu or with Alt+L.")
+        click(process, "All Music")
+        wait_for(process, "Favorite")
+    finally:
+        close(process)
+
+    with sqlite3.connect(output / "library.sqlite3") as db:
+        assert not list(db.execute("SELECT track_id FROM likes"))
+        assert list(db.execute("SELECT track_id, stars FROM ratings")) == ratings
+    assert browser_states(workspace_file)[1]["layouts"]["mixed"] == mixed
+
+
 def journey(exe, test_exe, output):
     output.mkdir(parents=True, exist_ok=False)
     subprocess.run([test_exe, "--ignored", "--exact", "browser::tree::tests::seed_music_browser_qualification"],
@@ -98,7 +162,7 @@ def journey(exe, test_exe, output):
     try:
         hwnd, _ = wait_for(process, "Browse Collections")
         wait_for(process, "Browse Playlists")
-        wait_for(process, "All Tracks")
+        wait_for(process, "Tracks")
         screenshot(hwnd, output / "library-sidebar.png")
 
         click(process, "Releases")
@@ -172,9 +236,11 @@ def journey(exe, test_exe, output):
         assert saved[1]["current"]["query"] == query
         assert saved[4]["current"]["location"] == "Liked"
         assert saved[4]["current"]["mode"] == "tracks"
+    favorites_journey(exe, output)
     (output / "result.json").write_text(json.dumps(dict(expanded_nodes=len(expanded),
         route_preserved=True, restart_restored=True, back_forward_restored=True, playback_continued=True,
-        independent_splits=True, responsive_cases=5), indent=2), encoding="utf-8")
+        independent_splits=True, responsive_cases=5,
+        favorites_column_suppressed=True, multi_remove_preserved_ratings=True), indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

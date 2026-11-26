@@ -200,7 +200,7 @@ impl LibraryPanel {
             alert
                 .title(format!("Remove “{name}” from the library?"))
                 .description(
-                    "Its folder and music files are not changed. Liked tracks, ratings and \
+                    "Music files stay in their current folder. Favorites, ratings, and \
                      playlist entries are kept and reconnect if you add the folder again.",
                 )
                 .show_cancel(true)
@@ -295,7 +295,7 @@ impl LibraryPanel {
                 nav_row(
                     "liked".into(),
                     Icon::default().path(crate::assets::HEART_FILL),
-                    "Liked Tracks".into(),
+                    "Favorites".into(),
                     location == Some(Location::Liked),
                     &m,
                 ),
@@ -303,7 +303,7 @@ impl LibraryPanel {
                 Location::Liked,
             )
             .context_menu(move |menu, _, _| {
-                Self::open_items(menu, router.clone(), Location::Liked, IconName::ListMusic)
+                Self::open_items(menu, router.clone(), Location::Liked, IconName::Heart)
             })
             .into_any_element(),
         );

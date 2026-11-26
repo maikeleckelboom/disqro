@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum ContextKind {
     Disc,
     Mixed,
+    Favorites,
     Playlist,
     Shelf,
     Tree,
@@ -83,6 +84,7 @@ impl Layout {
         use Field::*;
         let fields: &[Field] = match context {
             ContextKind::Disc => &[Number, Title, Artist, Length, Favorite],
+            ContextKind::Favorites => &[Cover, Title, Artist, Album, Length],
             ContextKind::Shelf => SHELF_FIELDS,
             ContextKind::Tree => &[Title, Artist, Count, Length, Format],
             _ => &[Cover, Title, Artist, Album, Length, Favorite],
@@ -355,6 +357,8 @@ pub struct Layouts {
     version: u32,
     disc: Layout,
     mixed: Layout,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    favorites: Option<Layout>,
     playlist: Layout,
     #[serde(default = "shelf_layout")]
     pub(crate) shelf: Layout,
@@ -375,6 +379,7 @@ impl Default for Layouts {
             version: 3,
             disc: Layout::new(ContextKind::Disc),
             mixed: Layout::new(ContextKind::Mixed),
+            favorites: None,
             playlist: Layout::new(ContextKind::Playlist),
             shelf: shelf_layout(),
             tree: tree_layout(),
@@ -386,6 +391,10 @@ impl Layouts {
         match context {
             ContextKind::Disc => &self.disc,
             ContextKind::Mixed => &self.mixed,
+            ContextKind::Favorites => self
+                .favorites
+                .as_ref()
+                .expect("initialized Favorites layout"),
             ContextKind::Playlist => &self.playlist,
             ContextKind::Shelf => &self.shelf,
             ContextKind::Tree => &self.tree,
@@ -395,9 +404,31 @@ impl Layouts {
         match context {
             ContextKind::Disc => &mut self.disc,
             ContextKind::Mixed => &mut self.mixed,
+            ContextKind::Favorites => self
+                .favorites
+                .as_mut()
+                .expect("initialized Favorites layout"),
             ContextKind::Playlist => &mut self.playlist,
             ContextKind::Shelf => &mut self.shelf,
             ContextKind::Tree => &mut self.tree,
+        }
+    }
+
+    /// Start Favorites with the current track layout and give its own
+    /// column edits a separate home in the browser profile.
+    pub(super) fn initialize(&mut self, context: ContextKind) {
+        if context == ContextKind::Favorites {
+            self.favorites.get_or_insert_with(|| {
+                let mut layout = self.mixed.clone();
+                layout
+                    .columns
+                    .retain(|column| column.field != Field::Favorite);
+                layout
+                    .hidden
+                    .retain(|column| column.field != Field::Favorite);
+                layout.holding = None;
+                layout
+            });
         }
     }
 
@@ -406,10 +437,14 @@ impl Layouts {
         for context in [
             ContextKind::Disc,
             ContextKind::Mixed,
+            ContextKind::Favorites,
             ContextKind::Playlist,
             ContextKind::Shelf,
             ContextKind::Tree,
         ] {
+            if context == ContextKind::Favorites && self.favorites.is_none() {
+                continue;
+            }
             let layout = self.get_mut(context);
             let mut seen = Vec::new();
             let mut valid = |c: &mut LayoutColumn| {
@@ -418,7 +453,10 @@ impl Layouts {
                     ContextKind::Tree => TREE_FIELDS,
                     _ => &Field::ALL,
                 };
-                if !allowed.contains(&c.field) || seen.contains(&c.field) {
+                if !allowed.contains(&c.field)
+                    || seen.contains(&c.field)
+                    || (context == ContextKind::Favorites && c.field == Field::Favorite)
+                {
                     return false;
                 }
                 seen.push(c.field);
@@ -441,8 +479,10 @@ impl Layouts {
             if let Some(artwork) = layout.artwork.take() {
                 layout.show_cover(artwork);
             }
-            if !matches!(context, ContextKind::Shelf | ContextKind::Tree)
-                && version == 0
+            if matches!(
+                context,
+                ContextKind::Mixed | ContextKind::Disc | ContextKind::Playlist
+            ) && version == 0
                 && !seen.contains(&Field::Favorite)
             {
                 layout.columns.push(LayoutColumn::new(Field::Favorite));
@@ -521,6 +561,56 @@ mod tests {
     fn fields(layout: &Layout) -> Vec<Field> {
         layout.columns.iter().map(|c| c.field).collect()
     }
+    #[test]
+    fn favorites_inherits_the_tracks_layout_and_keeps_saved_preferences_separate() {
+        use Field::*;
+        for visible in [false, true] {
+            let mut layouts = Layouts::default();
+            layouts.mixed.set_pin(Favorite, Pin::Right);
+            let favorite = layouts
+                .mixed
+                .columns
+                .iter_mut()
+                .find(|column| column.field == Favorite)
+                .unwrap();
+            favorite.width = 123.;
+            if !visible {
+                layouts.mixed.toggle(Favorite);
+            }
+            layouts.mixed.set_pin(Artist, Pin::Left);
+            layouts.mixed.toggle(Album);
+            let mixed = serde_json::to_value(&layouts.mixed).unwrap();
+            let inherited: Vec<_> = layouts
+                .mixed
+                .fields()
+                .filter(|field| *field != Favorite)
+                .collect();
+
+            layouts.initialize(ContextKind::Favorites);
+            let favorites = layouts.get_mut(ContextKind::Favorites);
+            assert_eq!(fields(favorites), inherited);
+            assert_eq!(favorites.columns[0].pin, Pin::Left);
+            assert!(!favorites.has(Favorite));
+            assert!(
+                favorites
+                    .hidden
+                    .iter()
+                    .all(|column| column.field != Favorite)
+            );
+            favorites.toggle(Artist);
+
+            let reread: Layouts =
+                serde_json::from_value(serde_json::to_value(layouts).unwrap()).unwrap();
+            let reread = reread.validate();
+            assert_eq!(
+                serde_json::to_value(reread.get(ContextKind::Mixed)).unwrap(),
+                mixed
+            );
+            assert!(!reread.get(ContextKind::Favorites).has(Artist));
+            assert!(!reread.get(ContextKind::Favorites).has(Favorite));
+        }
+    }
+
     #[test]
     fn old_layouts_gain_a_shelf_and_save_its_columns_independently() {
         use Field::*;
@@ -677,8 +767,9 @@ mod tests {
         let scrolling = |viewport: f32| layout.scrolling(&layout.widths(viewport), viewport);
         // Text columns give way to their minimums first. Then the right pair
         // still fits, and the inner left pin scrolls before the outer one.
-        assert_eq!(scrolling(200.), 0..4);
-        assert_eq!(scrolling(304.), 1..4);
+        assert_eq!(scrolling(200.), 0..5);
+        assert_eq!(scrolling(202.), 0..4);
+        assert_eq!(scrolling(334.), 1..4);
         assert_eq!(scrolling(420.), 2..4);
         assert_eq!(scrolling(1000.), 2..4);
         assert_eq!(layout.widths(200.), layout.widths(420.));

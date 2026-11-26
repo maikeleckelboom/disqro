@@ -19,8 +19,7 @@ impl Target {
         match self {
             Self::Track(_) => "Tracks",
             Self::Artist(_) => "Artists",
-            Self::Album(..) => "Albums and CDs",
-            Self::Release(..) => "Releases",
+            Self::Album(..) | Self::Release(..) => "Releases",
             Self::Playlist(_) => "Playlists",
             Self::Collection(_) => "Collections",
         }

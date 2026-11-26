@@ -216,7 +216,8 @@ fn seed_music_browser_qualification() {
         index_root(&mut store, root, None, &|| true, &mut |_| {}).unwrap();
     }
     let keys = store.disc_keys(Scope::Library(Some(id))).unwrap();
-    store.set_liked(&keys[..1], true).unwrap();
+    store.set_liked(&keys[..2], true).unwrap();
+    store.set_rating(&keys[..1], 4).unwrap();
     store
         .create_playlist("Evening Session", &keys[..3])
         .unwrap();

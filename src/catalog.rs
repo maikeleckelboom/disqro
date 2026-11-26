@@ -132,7 +132,7 @@ impl ListeningList {
             Self::Search(query) => return Some(format!("search for “{query}”")),
         };
         match scope {
-            Scope::Liked => Some("Liked Tracks".into()),
+            Scope::Liked => Some("Favorites".into()),
             Scope::RecentlyPlayed => Some("Recently Played".into()),
             Scope::Playlist(id) => catalog
                 .playlists

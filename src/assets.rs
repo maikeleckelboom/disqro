@@ -19,6 +19,7 @@ gpui_kit::assets::icon_assets!(
         Repeat,
         Repeat1,
         ListMusic,
+        ListTree,
         ListStart,
         ListEnd,
         AudioLines,

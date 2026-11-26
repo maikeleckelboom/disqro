@@ -85,6 +85,9 @@ pub(crate) trait TableColumns: TableDelegate {
     fn available_fields(&self) -> &'static [Field] {
         &Field::ALL
     }
+    fn column_available(&self, _: Field) -> bool {
+        true
+    }
     fn sortable_field(&self, field: Field) -> bool {
         field.sortable()
     }
@@ -180,13 +183,7 @@ pub(crate) trait TableColumns: TableDelegate {
             cx,
         )
         .aria_label(self.column_label(field))
-        .when(field == Field::Favorite, |d| {
-            d.justify_center().child(
-                Icon::new(IconName::Heart)
-                    .size(px(13.))
-                    .text_color(m.text_faint),
-            )
-        })
+        .when(field == Field::Favorite, |d| d.justify_center())
         .children(trailing)
         .children(leading)
         .when(self.sortable_field(field), |d| {
@@ -206,7 +203,12 @@ pub(crate) trait TableColumns: TableDelegate {
         })
         .context_menu({
             let table = cx.entity().downgrade();
-            let fields = self.available_fields();
+            let fields: Vec<_> = self
+                .available_fields()
+                .iter()
+                .copied()
+                .filter(|field| self.column_available(*field))
+                .collect();
             let shown: Vec<Field> = self.layout().columns.iter().map(|c| c.field).collect();
             move |mut menu, _, _| {
                 enum Edit {
@@ -245,7 +247,7 @@ pub(crate) trait TableColumns: TableDelegate {
                     );
                 }
                 menu = menu.separator().label("Columns");
-                for &f in fields {
+                for &f in &fields {
                     menu = menu.item(
                         PopupMenuItem::new(f.menu_label())
                             .checked(shown.contains(&f))

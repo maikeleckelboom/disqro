@@ -994,7 +994,7 @@ impl Browser {
         } else {
             match &self.location {
                 Location::Liked => {
-                    "No liked tracks yet. Like a track from its menu or with Alt+L.".into()
+                    "No favorites yet. Add a track from its menu or with Alt+L.".into()
                 }
                 Location::RecentlyPlayed => "Qualified plays will appear here.".into(),
                 Location::Playlist(_) => {
@@ -1028,6 +1028,7 @@ impl Browser {
         self.table.update(cx, |t, cx| {
             let context = match scope {
                 Scope::Playlist(_) => ContextKind::Playlist,
+                Scope::Liked => ContextKind::Favorites,
                 Scope::Album(_)
                 | Scope::Release(_)
                 | Scope::Library(Some(_))
@@ -1492,7 +1493,7 @@ impl Browser {
                 .collection(*r)
                 .map_or_else(|| "Collection".into(), |c| c.root.name.clone()),
             Location::Album { title, .. } | Location::Release { title, .. } => title.clone(),
-            Location::Liked => "Liked Tracks".into(),
+            Location::Liked => "Favorites".into(),
             Location::RecentlyPlayed => "Recently Played".into(),
             Location::Collections => "Collections".into(),
             Location::Playlists => "Playlists".into(),
