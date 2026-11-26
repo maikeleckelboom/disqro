@@ -25,9 +25,10 @@ from qualifySpectrum import click_control, find_window, screenshot
 user32 = C.windll.user32
 
 
-def control_rects(hwnd, labels, min_y=None):
-    """The bounding rectangle of the first control named each label."""
+def control_rects(hwnd, labels, min_y=None, *, focus=False):
+    """Find the first control named each label and optionally focus it."""
     script = r"""
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]HWND)
@@ -43,6 +44,10 @@ foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
         }
     }
     if ($null -eq $element) { throw "Missing native control $label" }
+    if ($env:DISQRO_CONTROL_FOCUS -eq '1') {
+        if (-not $element.Current.IsKeyboardFocusable) { throw "Cannot focus $label" }
+        $element.SetFocus()
+    }
     $r = $element.Current.BoundingRectangle
     Write-Output ([int]$r.X)
     Write-Output ([int]$r.Y)
@@ -53,7 +58,8 @@ foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
     output = subprocess.check_output(
         ["powershell", "-NoProfile", "-Command", script.replace("HWND", str(hwnd))],
         env=dict(os.environ, DISQRO_CONTROL_LABELS=json.dumps(labels),
-                 DISQRO_CONTROL_MIN_Y="" if min_y is None else str(min_y)),
+                 DISQRO_CONTROL_MIN_Y="" if min_y is None else str(min_y),
+                 DISQRO_CONTROL_FOCUS="1" if focus else "0"),
         creationflags=subprocess.CREATE_NO_WINDOW, timeout=20)
     values = list(map(int, output.split()))
     return [tuple(values[i:i + 4]) for i in range(0, len(values), 4)]
@@ -70,6 +76,21 @@ def hover(hwnd, x, y):
     p = W.POINT(x, y)
     user32.ScreenToClient(hwnd, C.byref(p))
     user32.SendMessageW(hwnd, 0x200, 0, (p.y << 16) | (p.x & 0xffff))
+
+
+def keyboard_disclosures(process, hwnd):
+    """Focused disclosure keys toggle the branch without leaving the Tree view."""
+    for before, after, key in (
+        ("Collapse Collections", "Expand Collections", 0x20),
+        ("Expand Collections", "Collapse Collections", 0x0D),
+        ("Collapse Reference Library", "Expand Reference Library", 0x0D),
+        ("Expand Reference Library", "Collapse Reference Library", 0x20),
+    ):
+        control_rects(hwnd, [before], focus=True)
+        user32.PostMessageW(hwnd, 0x0100, key, 0)
+        user32.PostMessageW(hwnd, 0x0101, key, 0xC0000000)
+        wait_for(process, after)
+        wait_for(process, "Tree")
 
 
 def resize(hwnd, width, height):
@@ -141,6 +162,9 @@ def capture_states(process, output, prefix, results):
             time.sleep(0.3)
             screenshot(hwnd, output / f"{prefix}locations-chevron-hover.png")
     hover(hwnd, 5, 5)
+    if not prefix:
+        keyboard_disclosures(process, hwnd)
+        results["keyboard_disclosures"] = True
     # Collapsed sections.
     for name in ["Collapse Collections", "Collapse Playlists"]:
         rect = try_rect(hwnd, name)

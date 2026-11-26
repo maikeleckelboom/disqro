@@ -112,6 +112,7 @@ pub fn section_row(
     on_toggle: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
     nav_surface(id, format!("Browse {title}").into(), selected, m)
+        .key_context("LibrarySection")
         .aria_expanded(open)
         .font_weight(FontWeight::MEDIUM)
         .child(

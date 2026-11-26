@@ -4,6 +4,16 @@
 //! event handling are the same everywhere.
 use crate::theme::materials;
 use gpui_kit::{IntoElement, assets::IconName, prelude::*, *};
+use std::rc::Rc;
+
+gpui_kit::actions!(disclosure, [ActivateDisclosure]);
+
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("enter", ActivateDisclosure, Some("Disclosure")),
+        KeyBinding::new("space", ActivateDisclosure, Some("Disclosure")),
+    ]);
+}
 
 /// The interactive area, in logical pixels.
 pub const SIZE: f32 = 20.;
@@ -11,7 +21,7 @@ pub const SIZE: f32 = 20.;
 const CHEVRON: f32 = 12.;
 const RADIUS: f32 = 4.;
 
-type Toggle = Box<dyn Fn(&mut Window, &mut App) + 'static>;
+type Toggle = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
 
 /// A chevron that expands or collapses `subject` and does nothing else: its
 /// press never reaches the row around it, so a row that navigates or
@@ -44,7 +54,7 @@ impl Disclosure {
     }
 
     pub fn on_toggle(mut self, toggle: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        self.on_toggle = Some(Box::new(toggle));
+        self.on_toggle = Some(Rc::new(toggle));
         self
     }
 
@@ -67,6 +77,7 @@ impl RenderOnce for Disclosure {
             .role(Role::Button)
             .aria_label(format!("{action} {}", self.subject))
             .aria_expanded(self.open)
+            .when(self.disabled, |d| d.aria_description("Unavailable"))
             .size(px(SIZE))
             .flex_shrink_0()
             .flex()
@@ -78,16 +89,13 @@ impl RenderOnce for Disclosure {
             .border_1()
             .border_color(transparent_black())
             .when(interactive, |d| {
-                d.tab_index(0)
+                d.key_context("Disclosure")
+                    .focusable()
+                    .tab_stop(true)
                     .cursor_pointer()
                     .hover(|d| d.bg(m.control))
                     .active(|d| d.bg(m.control_hover))
                     .focus_visible(|d| d.border_color(m.focus_line()))
-                    .on_key_down(|event, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            cx.stop_propagation();
-                        }
-                    })
             })
             .child(
                 svg()
@@ -108,10 +116,12 @@ impl RenderOnce for Disclosure {
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when_some(self.on_toggle.filter(|_| interactive), |d, toggle| {
-                d.on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    toggle(window, cx);
-                })
+                let click = toggle.clone();
+                d.on_action(move |_: &ActivateDisclosure, window, cx| toggle(window, cx))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        click(window, cx);
+                    })
             })
     }
 }

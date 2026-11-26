@@ -87,6 +87,7 @@ fn main() {
             diagnostics::observe_waveform_surfaces(cx);
             theme::install(theme::Appearance::Dark, cx);
             workspace::bind_keys(cx);
+            disclosure::bind_keys(cx);
             location::bind_keys(cx);
             panels::queue::bind_keys(cx);
             panels::listening::bind_keys(cx);
