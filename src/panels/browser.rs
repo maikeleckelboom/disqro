@@ -10,7 +10,7 @@ use crate::{
     audio::Command,
     browser::{Bookmark, Browser, Location, Route, SavedVisit, SequenceKind, music_home},
     collection::{Page, ViewMode, ViewPrefs},
-    location::LocationBar,
+    location::{LocationBar, TrailWidths},
     player::Player,
     table::{Layouts, queue_targets},
     theme::{materials, size},
@@ -150,7 +150,7 @@ impl BrowserPane {
             b
         });
         // Each browser edits its own path, in its own header.
-        let address = cx.new(|cx| crate::location::LocationBar::new(browser.clone(), window, cx));
+        let address = cx.new(|cx| LocationBar::new(browser.clone(), window, cx));
         browser.update(cx, |b, cx| {
             b.address = Some(address.downgrade());
             b.tree.update(cx, |t, _| {
@@ -541,9 +541,6 @@ const HEADER_INSET: f32 = 8.;
 const BAR_INSET: f32 = 4.;
 const NAV_BUTTON: f32 = 26.;
 const NAV_GAP: f32 = 1.;
-/// The location keeps room for a short name before the controls compress.
-const IDENTITY_MIN: f32 = 140.;
-const IDENTITY_FLOOR: f32 = 84.;
 const SEQUENCE_RAIL: f32 = 64.;
 const VIEW_TAB: f32 = 36.;
 const VIEW_TAB_HEIGHT: f32 = 29.;
@@ -585,22 +582,98 @@ struct ControlWidths {
     picker: Pixels,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeaderFilter {
+    Field(Pixels),
+    Button,
+    InMenu,
+}
+
+#[derive(Debug)]
+struct HeaderLayout {
+    density: HeaderDensity,
+    address: Pixels,
+    filter: HeaderFilter,
+    controls: Pixels,
+    sequence: bool,
+}
+
 impl ControlWidths {
-    fn fit(self, preferred: Pixels, available: Pixels) -> HeaderDensity {
-        if preferred >= self.labels {
-            HeaderDensity::Labels
-        } else if preferred >= self.icons {
-            HeaderDensity::Icons
-        } else if available >= self.picker {
-            HeaderDensity::Picker
+    fn layout(
+        self,
+        width: Pixels,
+        history: Pixels,
+        trail: TrailWidths,
+        editing: bool,
+        has_sequence: bool,
+    ) -> HeaderLayout {
+        let row = (width - px(BAR_INSET + ICON_BUTTON)).max(px(0.));
+        let available = row - history;
+        let minimum_field = px(FILTER_COMPACT);
+        let preferred_field = px(FILTER_FULL);
+        let sequence_rail = px(SEQUENCE_RAIL);
+        let sequence = has_sequence
+            && available >= self.labels + trail.preferred + preferred_field + sequence_rail;
+        let sequence_width = if sequence { sequence_rail } else { px(0.) };
+        let picker_filter = if editing {
+            minimum_field
         } else {
-            HeaderDensity::Menu
+            px(ICON_BUTTON)
+        };
+
+        let (density, fixed, filter_width, address_limit) =
+            if available >= self.labels + trail.preferred + minimum_field {
+                let width = (available - sequence_width - self.labels - trail.preferred)
+                    .min(preferred_field);
+                let limit = if has_sequence && !sequence {
+                    trail.preferred
+                } else {
+                    row
+                };
+                (HeaderDensity::Labels, self.labels, width, limit)
+            } else if available >= self.icons + trail.minimum + minimum_field {
+                (
+                    HeaderDensity::Icons,
+                    self.icons,
+                    minimum_field,
+                    trail.preferred,
+                )
+            } else if available >= self.picker + trail.minimum + picker_filter {
+                (
+                    HeaderDensity::Picker,
+                    self.picker,
+                    picker_filter,
+                    trail.minimum,
+                )
+            } else {
+                return HeaderLayout {
+                    density: HeaderDensity::Menu,
+                    address: row.min(trail.minimum),
+                    filter: HeaderFilter::InMenu,
+                    controls: px(0.),
+                    sequence: false,
+                };
+            };
+        let controls = fixed + filter_width;
+        HeaderLayout {
+            density,
+            // Folding controls can release space all at once. Cap the trail
+            // at the width it had at that boundary so hidden ancestors never
+            // return during a continuous shrink.
+            address: (available - sequence_width - controls).min(address_limit),
+            filter: if density == HeaderDensity::Picker && !editing {
+                HeaderFilter::Button
+            } else {
+                HeaderFilter::Field(filter_width)
+            },
+            controls,
+            sequence,
         }
     }
 }
 
 impl BrowserViews {
-    fn widths(self, editing: bool, labels: Pixels) -> ControlWidths {
+    fn widths(self, labels: Pixels) -> ControlWidths {
         let overhead = px(2. * HEADER_INSET + size::TAB_DROP)
             + if self.subfolders.is_some() {
                 px(ICON_BUTTON + SCOPE_GAP)
@@ -622,9 +695,9 @@ impl BrowserViews {
             (px(0.), px(0.), px(0.))
         };
         ControlWidths {
-            labels: overhead + text + px(FILTER_FULL),
-            icons: overhead + icons + px(FILTER_COMPACT),
-            picker: overhead + picker + px(if editing { FILTER_COMPACT } else { ICON_BUTTON }),
+            labels: overhead + text,
+            icons: overhead + icons,
+            picker: overhead + picker,
         }
     }
 
@@ -729,42 +802,31 @@ impl Browser {
         let input = self.search.read(cx);
         let filter_focused = input.focus_handle(cx).is_focused(window);
         let filter_applied = !input.value().is_empty();
-        let views = self.header_views();
-        let widths = views.widths(
-            filter_focused || self.filter_open || filter_applied,
-            label_widths.into_iter().sum(),
-        );
         let history = px(2. * NAV_BUTTON + NAV_GAP)
             + if self.up_in_toolbar() {
                 px(NAV_BUTTON + NAV_GAP)
             } else {
                 px(0.)
             };
-        let chrome = px(BAR_INSET + ICON_BUTTON);
-        let space = width - chrome - history;
-        let density = widths.fit(space - px(IDENTITY_MIN), space - px(IDENTITY_FLOOR));
+        let sequence = self.sequence_kind();
+        let layout = self
+            .header_views()
+            .widths(label_widths.into_iter().sum())
+            .layout(
+                width,
+                history,
+                TrailWidths::measure(self, window, cx),
+                filter_focused || self.filter_open || filter_applied,
+                sequence.is_some(),
+            );
+        let density = layout.density;
         let compact = density == HeaderDensity::Menu;
-        let controls = match density {
-            HeaderDensity::Labels => widths.labels,
-            HeaderDensity::Icons => widths.icons,
-            HeaderDensity::Picker => widths.picker,
-            HeaderDensity::Menu => px(0.),
-        };
-        let remaining = if compact {
-            width - chrome
-        } else {
-            space - controls
-        };
-        let sequence = self
-            .sequence_kind()
-            .filter(|_| !compact && remaining >= px(SEQUENCE_RAIL + IDENTITY_MIN));
-        let identity = (remaining
-            - px(if sequence.is_some() {
-                SEQUENCE_RAIL
-            } else {
-                0.
-            }))
-        .max(px(0.));
+        let sequence = sequence.filter(|_| layout.sequence);
+        let address = self.address.as_ref().and_then(WeakEntity::upgrade);
+        if let Some(address) = &address {
+            address.update(cx, |bar, cx| bar.set_width(layout.address, cx));
+        }
+        let edit_width = (width - px(BAR_INSET + ICON_BUTTON)).clamp(px(0.), px(FILTER_COMPACT));
         let player = self.table.read(cx).delegate().player.clone();
         h_flex()
             .id("browser-bar")
@@ -789,20 +851,26 @@ impl Browser {
             .when(!compact, |bar| bar.child(self.history(&focus, cx)))
             .child(
                 h_flex()
-                    .w(identity)
+                    .w(if compact && filter_focused {
+                        edit_width
+                    } else {
+                        layout.address
+                    })
+                    .flex_shrink_0()
                     .h_full()
                     .min_w_0()
                     .items_center()
                     .map(|d| {
                         if compact && filter_focused {
                             d.child(self.filter_control(
-                                HeaderDensity::Menu,
+                                HeaderFilter::Field(edit_width),
+                                true,
                                 &focus.filter,
                                 window,
                                 cx,
                             ))
                         } else {
-                            d.children(self.address.as_ref().and_then(WeakEntity::upgrade))
+                            d.children(address)
                         }
                     }),
             )
@@ -845,14 +913,16 @@ impl Browser {
             .when(!compact, |bar| {
                 bar.child(
                     div()
-                        .w(controls)
+                        .ml_auto()
+                        .w(layout.controls)
                         .h_full()
                         .flex_shrink_0()
-                        .child(self.header_controls(density, label_widths, &focus, window, cx)),
+                        .child(self.header_controls(&layout, label_widths, &focus, window, cx)),
                 )
             })
             .child(
                 Button::new("browser-menu")
+                    .when(compact, |button| button.ml_auto())
                     .ghost()
                     .xsmall()
                     .w(px(ICON_BUTTON))
@@ -954,7 +1024,7 @@ impl Browser {
 
     fn header_controls(
         &self,
-        density: HeaderDensity,
+        layout: &HeaderLayout,
         label_widths: [Pixels; VIEW_CHOICES.len()],
         focus: &ViewFocus,
         window: &mut Window,
@@ -962,6 +1032,7 @@ impl Browser {
     ) -> AnyElement {
         let browser = cx.entity();
         let views = self.header_views();
+        let density = layout.density;
         let m = *materials(cx);
         let mode = views.mode.map(|mode| {
             if density == HeaderDensity::Picker {
@@ -1002,7 +1073,13 @@ impl Browser {
             .gap(px(SCOPE_GAP))
             .items_center()
             .justify_end()
-            .child(self.filter_control(density, &focus.filter, window, cx))
+            .child(self.filter_control(
+                layout.filter,
+                density == HeaderDensity::Picker,
+                &focus.filter,
+                window,
+                cx,
+            ))
             .children(scope)
             .children(mode)
             .into_any_element()
@@ -1011,7 +1088,8 @@ impl Browser {
     /// The filter button, or the field once it is open or holds a query.
     fn filter_control(
         &self,
-        density: HeaderDensity,
+        filter: HeaderFilter,
+        tight: bool,
         button_focus: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1020,7 +1098,7 @@ impl Browser {
         let input = self.search.clone();
         let empty = input.read(cx).value().is_empty();
         let focused = input.read(cx).focus_handle(cx).is_focused(window);
-        if density == HeaderDensity::Picker && !self.filter_open && !focused && empty {
+        let HeaderFilter::Field(width) = filter else {
             return Button::new("open-filter")
                 .ghost()
                 .xsmall()
@@ -1038,8 +1116,7 @@ impl Browser {
                 .tooltip("Filter this view · Ctrl+F")
                 .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(true, w, cx)))
                 .into_any_element();
-        }
-        let tight = matches!(density, HeaderDensity::Picker | HeaderDensity::Menu);
+        };
         // Preserve the keyboard target if its icon becomes an inline field.
         if button_focus.is_focused(window) && !focused {
             let browser = cx.entity();
@@ -1051,11 +1128,7 @@ impl Browser {
             .id("browser-filter")
             .flex_shrink(1.)
             .min_w_0()
-            .w(px(if density == HeaderDensity::Labels {
-                FILTER_FULL
-            } else {
-                FILTER_COMPACT
-            }))
+            .w(width)
             .h(px(24.))
             .pl(px(if tight { 2. } else { 7. }))
             .pr(px(2.))
@@ -1401,41 +1474,87 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserState, BrowserViews, FILTER_COMPACT, HeaderDensity, ICON_BUTTON, SCOPE_GAP,
-        ViewMode, px,
+        BrowserState, BrowserViews, HeaderDensity, HeaderFilter, TrailWidths, ViewMode, px,
     };
     use crate::browser::Location;
     use std::path::PathBuf;
 
     #[test]
-    fn controls_fit_the_space_after_history_and_breadcrumbs() {
-        let library = BrowserViews {
-            mode: Some(ViewMode::Albums),
+    fn favorites_shrinks_the_filter_before_folding_the_location() {
+        let views = BrowserViews {
+            mode: None,
             subfolders: None,
         };
-        let folder = BrowserViews {
-            subfolders: Some(false),
-            ..library
+        let layout = |width| {
+            views.widths(px(0.)).layout(
+                px(width),
+                px(53.),
+                TrailWidths {
+                    preferred: px(180.),
+                    minimum: px(115.),
+                },
+                false,
+                false,
+            )
         };
-        let labels = px(235.);
-        let standalone = library.widths(false, labels);
-        let closed = folder.widths(false, labels);
-        let open = folder.widths(true, labels);
-        assert_eq!(
-            closed.picker - standalone.picker,
-            px(ICON_BUTTON + SCOPE_GAP)
-        );
-        assert_eq!(
-            open.picker - closed.picker,
-            px(FILTER_COMPACT - ICON_BUTTON)
-        );
-        assert_eq!(open.fit(open.labels, open.labels), HeaderDensity::Labels);
-        assert_eq!(open.fit(open.icons, open.icons), HeaderDensity::Icons);
-        assert_eq!(
-            open.fit(open.picker - px(1.), open.picker),
-            HeaderDensity::Picker
-        );
-        assert_eq!(open.fit(px(50.), open.picker - px(1.)), HeaderDensity::Menu);
+        let wide = layout(490.);
+        let middle = layout(430.);
+        let narrow = layout(415.);
+        assert!(wide.address >= middle.address);
+        assert_eq!(middle.address, narrow.address);
+        assert_eq!(narrow.address, px(180.));
+        let [
+            HeaderFilter::Field(wide),
+            HeaderFilter::Field(middle),
+            HeaderFilter::Field(narrow),
+        ] = [wide.filter, middle.filter, narrow.filter]
+        else {
+            panic!("filter should stay inline");
+        };
+        assert!(wide > middle && middle > narrow);
+    }
+
+    #[test]
+    fn folding_any_toolbar_control_never_gives_the_breadcrumb_more_room() {
+        for mode in [None, Some(ViewMode::Albums)] {
+            for subfolders in [None, Some(false)] {
+                for editing in [false, true] {
+                    for sequence in [false, true] {
+                        let views = BrowserViews { mode, subfolders };
+                        let mut previous = px(2000.);
+                        let mut previous_filter = px(2000.);
+                        for width in (120..=1000).rev() {
+                            let layout = views.widths(px(235.)).layout(
+                                px(width as f32),
+                                px(53.),
+                                TrailWidths {
+                                    preferred: px(184.),
+                                    minimum: px(115.),
+                                },
+                                editing,
+                                sequence,
+                            );
+                            assert!(layout.address <= previous, "width {width}, {layout:?}");
+                            let filter = match layout.filter {
+                                HeaderFilter::Field(width) => width,
+                                HeaderFilter::Button => px(super::ICON_BUTTON),
+                                HeaderFilter::InMenu => px(0.),
+                            };
+                            assert!(filter <= previous_filter, "width {width}, {layout:?}");
+                            previous_filter = filter;
+                            assert!(layout.address >= px(0.));
+                            if editing {
+                                assert_ne!(layout.filter, HeaderFilter::Button);
+                            }
+                            if layout.density == HeaderDensity::Menu {
+                                assert!(!layout.sequence);
+                            }
+                            previous = layout.address;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

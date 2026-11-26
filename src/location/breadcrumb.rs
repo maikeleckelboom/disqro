@@ -8,13 +8,11 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     base::Popover,
-    component::{
-        ElementExt, Icon, ThemeStyled, h_flex, scroll::ScrollableElement, tooltip::Tooltip,
-    },
+    component::{Icon, ThemeStyled, h_flex, scroll::ScrollableElement, tooltip::Tooltip},
     prelude::*,
     *,
 };
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 gpui_kit::actions!(
     breadcrumb,
@@ -44,6 +42,7 @@ pub(super) fn bind_keys(cx: &mut App) {
 
 const FONT_SIZE: f32 = 13.;
 const INSET: f32 = 3.;
+const FIELD_CHROME: f32 = 2. * INSET + 2.;
 const LABEL_PADDING: f32 = 4.;
 const CHEVRON: f32 = 20.;
 const OVERFLOW: f32 = 22.;
@@ -126,7 +125,7 @@ impl OpenMenu {
 
 pub(super) struct Breadcrumbs {
     browser: Entity<Browser>,
-    width: Rc<Cell<Pixels>>,
+    width: Pixels,
     menu: Option<OpenMenu>,
     request: Option<Task<()>>,
     request_id: u64,
@@ -183,7 +182,7 @@ impl Breadcrumbs {
         .detach();
         Self {
             browser,
-            width: Rc::new(Cell::new(px(0.))),
+            width: px(0.),
             menu: None,
             request: None,
             request_id: 0,
@@ -681,22 +680,60 @@ fn menu_row(
         .tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx))
 }
 
+/// The toolbar reserves space for measured labels and a readable current destination.
+pub(crate) struct TrailWidths {
+    pub(crate) preferred: Pixels,
+    pub(crate) minimum: Pixels,
+}
+
+impl TrailWidths {
+    pub(crate) fn measure(browser: &Browser, window: &Window, cx: &App) -> Self {
+        let routes = browser.ancestors();
+        let widths = measure_trail(browser, &routes, window, cx);
+        let total = px(FIELD_CHROME) + widths.iter().copied().sum::<Pixels>();
+        let earlier = if widths.len() > 1 {
+            px(OVERFLOW)
+        } else {
+            px(0.)
+        };
+        let leaf = widths.last().copied().unwrap_or_default() + earlier + px(FIELD_CHROME);
+        let preferred = total.clamp(px(140.), px(240.));
+        Self {
+            preferred,
+            minimum: leaf.clamp(px(84.), px(120.)).min(preferred),
+        }
+    }
+}
+
+fn measure_trail(browser: &Browser, routes: &[Route], window: &Window, cx: &App) -> Vec<Pixels> {
+    routes
+        .iter()
+        .enumerate()
+        .map(|(index, route)| {
+            let label: SharedString = browser.breadcrumb_label(route, cx).into();
+            label_width(window, *materials(cx), label, index + 1 == routes.len())
+                + px(2. * LABEL_PADDING + CHEVRON + 2.)
+        })
+        .collect()
+}
+
+impl Breadcrumbs {
+    pub(super) fn set_field_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let width = (width - px(FIELD_CHROME)).max(px(0.));
+        if self.width != width {
+            self.width = width;
+            cx.notify();
+        }
+    }
+}
+
 impl Render for Breadcrumbs {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let browser = self.browser.read(cx);
         let routes = browser.ancestors();
         let last = routes.len() - 1;
-        let widths: Vec<_> = routes
-            .iter()
-            .enumerate()
-            .map(|(index, route)| {
-                let label: SharedString = browser.breadcrumb_label(route, cx).into();
-                label_width(window, *materials(cx), label, index == last)
-                    + px(2. * LABEL_PADDING + CHEVRON + 2.)
-            })
-            .collect();
-        let width = self.width.clone();
-        let (hidden, visible) = fit_trail(&widths, width.get());
+        let widths = measure_trail(browser, &routes, window, cx);
+        let (hidden, visible) = fit_trail(&widths, self.width);
         let still_visible = |menu: &OpenMenu| match &menu.source {
             Source::Earlier(earlier) => {
                 earlier.len() == hidden
@@ -728,13 +765,6 @@ impl Render for Breadcrumbs {
             .px(px(INSET))
             .items_center()
             .overflow_hidden()
-            .on_prepaint(move |bounds, w, _| {
-                let available = (bounds.size.width - px(2. * INSET)).max(px(0.));
-                if (available - width.get()).abs() > px(0.5) {
-                    width.set(available);
-                    w.refresh();
-                }
-            })
             .when(hidden > 0, |row| {
                 row.child(self.trigger(
                     Source::Earlier(routes[..hidden].to_vec()),

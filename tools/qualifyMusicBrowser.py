@@ -153,6 +153,75 @@ def favorites_journey(exe, output):
     assert browser_states(workspace_file)[1]["layouts"]["mixed"] == mixed
 
 
+def toolbar_geometry(hwnd):
+    script = r"""
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$ErrorActionPreference = 'Stop'
+$root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$env:DISQRO_RESIZE_WINDOW)
+foreach ($label in @("Location", "Earlier locations", "Filter this view")) {
+    $match = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $label)
+    foreach ($entry in $root.FindAll([Windows.Automation.TreeScope]::Descendants, $match)) {
+        $bounds = $entry.Current.BoundingRectangle
+        if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
+            "{0}|{1}|{2}" -f $label, [int]$bounds.X, [int]$bounds.Width
+        }
+    }
+}
+"""
+    probe = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script],
+        env=dict(os.environ, DISQRO_RESIZE_WINDOW=str(hwnd)),
+        creationflags=subprocess.CREATE_NO_WINDOW, timeout=15, text=True, capture_output=True,
+    )
+    if probe.returncode:
+        raise RuntimeError(probe.stderr.strip())
+    entries = [line.split("|") for line in probe.stdout.splitlines()]
+    location = max((entry for entry in entries if entry[0] == "Location"), key=lambda entry: int(entry[1]))
+    x, width = map(int, location[1:3])
+    earlier = any(entry[0] == "Earlier locations" and int(entry[1]) >= x for entry in entries)
+    filters = [entry for entry in entries if entry[0] == "Filter this view" and int(entry[1]) >= x]
+    filter_entry = max(filters, key=lambda entry: int(entry[2])) if filters else None
+    return dict(address_width=width, earlier_locations=earlier,
+                filter_width=int(filter_entry[2]) if filter_entry else 0)
+
+
+def resize_journey(exe, output, root):
+    settings = profile(root, 510)
+    center = settings["layout"]["center"]
+    primary, sibling = center["children"][1:]
+    primary["children"][0]["info"]["panel"]["state"]["current"].update(location="Liked", query="Opening")
+    sibling["children"][0]["info"]["panel"]["state"]["current"]["location"] = {"Library": None}
+    center["children"][1:] = [sibling, primary]
+    center["info"]["stack"]["sizes"] = [240, 490, 510]
+    process = launch(exe, output, settings)
+    try:
+        hwnd, _ = wait_for(process, "Opening Notes")
+        rect = W.RECT()
+        assert C.windll.user32.GetWindowRect(hwnd, C.byref(rect))
+        scale = C.windll.user32.GetDpiForWindow(hwnd) / 96
+        height = rect.bottom - rect.top
+        states = []
+        for width in range(1240, 749, -35):
+            assert C.windll.user32.SetWindowPos(hwnd, 0, 0, 0, round(width * scale), height, 0x414)
+            # Let the native size notification reach the dock and the UIA tree.
+            time.sleep(0.12)
+            state = toolbar_geometry(hwnd)
+            states.append(dict(window_width=width, **state))
+            if width in (1100, 1065, 1030):
+                screenshot(hwnd, output / f"favorites-resize-{width}.png")
+        widths = [s["address_width"] for s in states]
+        folded = [s["earlier_locations"] for s in states]
+        assert all(after <= before + 1 for before, after in zip(widths, widths[1:])), states
+        assert any(folded) and not all(folded) and folded == sorted(folded), states
+        inline = [s["filter_width"] > 0 for s in states]
+        assert inline[0] and inline == sorted(inline, reverse=True), states
+        (output / "live-resize.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
+    finally:
+        close(process)
+    assert browser_states(output / "workspace-v1.json")[1]["current"]["query"] == "Opening"
+
+
 def journey(exe, test_exe, output):
     output.mkdir(parents=True, exist_ok=False)
     subprocess.run([test_exe, "--ignored", "--exact", "browser::tree::tests::seed_music_browser_qualification"],
@@ -236,11 +305,12 @@ def journey(exe, test_exe, output):
         assert saved[1]["current"]["query"] == query
         assert saved[4]["current"]["location"] == "Liked"
         assert saved[4]["current"]["mode"] == "tracks"
+    resize_journey(exe, output, root)
     favorites_journey(exe, output)
     (output / "result.json").write_text(json.dumps(dict(expanded_nodes=len(expanded),
         route_preserved=True, restart_restored=True, back_forward_restored=True, playback_continued=True,
         independent_splits=True, responsive_cases=5,
-        favorites_column_suppressed=True, multi_remove_preserved_ratings=True), indent=2), encoding="utf-8")
+        favorites_column_suppressed=True, multi_remove_preserved_ratings=True, live_resize=True), indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
