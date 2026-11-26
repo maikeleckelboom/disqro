@@ -53,6 +53,7 @@ def measure(exe, folder, band, control_wav):
     profile = settings(cue, 1)
     def restore(node):
         if node["panel_name"] == "disqro.waveform":
+            # The retired ruler key checks that older workspaces still load.
             node["info"]["panel"]["state"] = {"showSamplePoints": True, "showSampleRuler": True}
         for child in node["children"]:
             restore(child)
@@ -63,12 +64,13 @@ def measure(exe, folder, band, control_wav):
                DISQRO_PRESENTATION_STAGES=str(stages))
     if control_wav:
         env["DISQRO_INSPECTION_MIN_FRAME"] = str(round(3.2 * 44100))
-    captures = ("zoom-editor", "sample-points", "sample-ruler", "sample-inspector", "cue-times", "playback", "sample-narrow")
+    captures = ("zoom-editor", "sample-points", "sample-inspector", "cue-times", "playback", "scrub-markers",
+                "sample-narrow", "lod-close", "lod-threshold", "lod-dense")
     log = folder / "journey.log"
     with log.open("w", encoding="utf-8") as stream:
         player = subprocess.Popen([exe, "--qualify-silent", cue], env=env, stdout=stream, stderr=stream)
         try:
-            deadline = time.monotonic() + 75
+            deadline = time.monotonic() + 100
             while time.monotonic() < deadline and player.poll() is None:
                 records = log.read_text(encoding="utf-8", errors="replace").splitlines()
                 if "inspection-complete" in records:
@@ -98,14 +100,12 @@ def measure(exe, folder, band, control_wav):
                         time.sleep(0.2)
                         handle = find_window(player.pid)
                         screenshot(handle, path)
-                        if name == "playback":
-                            with Image.open(path) as playing:
-                                # Below the traces and above the transport, within the
-                                # fixture's waveform ruler. Exclude the center playhead.
-                                w, h = playing.size
-                                ruler = playing.convert("L").crop((round(w * 0.7), round(h * 0.83),
-                                                                  round(w * 0.97), round(h * 0.85)))
-                                assert sum(ruler.histogram()[52:]) > 100, "Sample ruler lost its ticks during playback"
+                        if name == "scrub-markers":
+                            with Image.open(folder / "sample-points.png") as before, Image.open(path) as after:
+                                # A resting pointer over a marker shows no measurement while scrubbing.
+                                diff = ImageChops.difference(before, after).convert("L")
+                                header = diff.crop((diff.width // 2, 0, diff.width, round(diff.height * 0.09)))
+                                assert sum(header.histogram()[12:]) < 40, "Scrubbing showed a measurement"
                         if name in ("sample-inspector", "cue-times"):
                             baseline = "sample-points" if name == "sample-inspector" else "sample-inspector"
                             with Image.open(folder / (baseline + ".png")) as before, Image.open(path) as after:

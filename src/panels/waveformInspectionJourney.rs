@@ -178,33 +178,6 @@ impl Journey {
         })
         .await?;
         self.capture(cx, "sample-points").await?;
-        cx.update(|_, cx| {
-            self.panel.update(cx, |p, cx| {
-                p.settings.show_sample_points = false;
-                p.position.inspecting = Some(initial.frame_at(0.5).floor() + 0.5);
-                cx.notify();
-            })
-        })??;
-        self.until(cx, "ruler without sample points", |p, _, _| {
-            (p.settings.show_sample_ruler
-                && p.displayed.borrow().as_ref()?.viewport.span == 32.
-                && p.displayed.borrow().as_ref()?.viewport.first.fract().abs() == 0.5
-                && hover_point(p).is_none())
-            .then_some(())
-        })
-        .await?;
-        self.capture(cx, "sample-ruler").await?;
-        cx.update(|_, cx| {
-            self.panel.update(cx, |p, cx| {
-                p.settings.show_sample_points = true;
-                p.position.inspecting = None;
-                cx.notify();
-            })
-        })??;
-        self.until(cx, "points restored alongside ruler", |p, _, _| {
-            hover_point(p)
-        })
-        .await?;
         dispatch(
             cx,
             PlatformInput::MouseMove(MouseMoveEvent {
@@ -267,15 +240,36 @@ impl Journey {
                 Some(gesture)
             })
             .await?;
-        self.until(cx, "suppressed scrub points", |p, _, cx| {
-            (p.player.read(cx).waveform_grabbed() && hover_point(p).is_none()).then_some(())
-        })
-        .await?;
+        // Manual scrubbing keeps the decoded markers but suspends the
+        // measurement, selection ring and guide under a resting pointer.
+        let during = self
+            .until(cx, "scrub markers without measurements", |p, _, cx| {
+                if !p.player.read(cx).waveform_grabbed() {
+                    return None;
+                }
+                let point = hover_point(p)?;
+                (p.requested_points.get() == SamplePoints::Visible).then_some(point)
+            })
+            .await?;
+        dispatch(
+            cx,
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: during,
+                ..Default::default()
+            }),
+        )?;
+        self.capture(cx, "scrub-markers").await?;
+        cx.update(|_, cx| {
+            self.panel.update(cx, |p, cx| {
+                assert!(p.player.read(cx).waveform_grabbed());
+                assert_eq!(p.requested_points.get(), SamplePoints::Visible);
+            })
+        })??;
         gesture.finish(crate::audio::scrub::End::Cancel);
-        self.until(cx, "restored after scrub", |p, _, cx| {
-            (!p.player.read(cx).waveform_grabbed())
-                .then(|| hover_point(p))
-                .flatten()
+        self.until(cx, "measurement restored after scrub", |p, _, cx| {
+            (!p.player.read(cx).waveform_grabbed()
+                && matches!(p.requested_points.get(), SamplePoints::Highlight(_)))
+            .then_some(())
         })
         .await?;
         let previous_width = self
@@ -331,6 +325,40 @@ impl Journey {
             }),
         )?;
         self.capture(cx, "sample-narrow").await?;
+        // Marker size follows the physical frame spacing at each level of
+        // detail, and markers disappear below five logical pixels per frame.
+        let width = self
+            .until(cx, "narrow deck width", |p, _, _| {
+                Some(f32::from(
+                    p.displayed.borrow().as_ref()?.layout.bounds.size.width,
+                ))
+            })
+            .await?;
+        // Twelve, six and three logical pixels per frame.
+        for (spacing, name) in [(12., "lod-close"), (6., "lod-threshold"), (3., "lod-dense")] {
+            let span = (width / spacing).floor().max(32.) as f64;
+            self.edit(cx, &format!("{span} samples")).await?;
+            dispatch(cx, key("enter"))?;
+            let visible = self
+                .until(cx, name, |p, _, _| {
+                    let (viewport, layout) = {
+                        let displayed = p.displayed.borrow();
+                        let shown = displayed.as_ref()?;
+                        (shown.viewport, shown.layout)
+                    };
+                    if viewport.span != span {
+                        return None;
+                    }
+                    let scale = layout.scale;
+                    let spacing = f32::from(layout.bounds.size.width) * scale / span as f32;
+                    let visible = spacing >= 5. * scale;
+                    let requested = p.requested_points.get();
+                    ((requested != SamplePoints::Hidden) == visible).then_some(visible)
+                })
+                .await?;
+            eprintln!("{name} markers {visible}");
+            self.capture(cx, name).await?;
+        }
         eprintln!("inspection-complete");
         Ok(())
     }

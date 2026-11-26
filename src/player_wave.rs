@@ -128,16 +128,22 @@ impl Player {
     }
 
     /// The presentation and evidence must still belong to the displayed source.
-    pub(crate) fn inspection_current(&self, track: &WaveTrack) -> bool {
+    /// The track is the one the transport holds, so its decoded frames may
+    /// be marked, including while the user scrubs it.
+    pub(crate) fn inspection_source(&self, track: &WaveTrack) -> bool {
         self.generation == track.generation
-            && !self.status.playing
-            && !self.waveform_grabbed()
             && self.status.playback_identity() == Some(track.identity)
             && self
                 .program
                 .as_ref()
                 .and_then(|p| p.segments.get(self.segment?))
                 .is_some_and(|s| Arc::ptr_eq(&s.source, &track.source))
+    }
+
+    /// Individual frames may be measured: the transport is stationary and
+    /// no scrub gesture is in progress.
+    pub(crate) fn inspection_current(&self, track: &WaveTrack) -> bool {
+        !self.status.playing && !self.waveform_grabbed() && self.inspection_source(track)
     }
 
     pub(crate) fn inspection_chapter(

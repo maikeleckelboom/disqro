@@ -1,4 +1,4 @@
-//! Transient header measurements and a sample ruler for the displayed native surface.
+//! Transient header measurements for the displayed native surface.
 use super::*;
 use gpui_kit::component::ActiveTheme;
 use waveform::inspection::SampleHit;
@@ -27,131 +27,6 @@ pub(super) fn listen(
             let _ = panel.update(cx, |_, cx| cx.notify());
         }
     });
-}
-
-fn line(window: &Window, text: String, pt: f32, color: Hsla, weight: FontWeight) -> ShapedLine {
-    let mut font = window.text_style().font();
-    font.weight = weight;
-    let run = TextRun {
-        len: text.len(),
-        font,
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    window
-        .text_system()
-        .shape_line(text.into(), px(pt), &[run], None)
-}
-
-const RULER_HEIGHT: f32 = 21.;
-
-pub(super) fn paint_ruler(
-    layout: Layout,
-    view: &waveform::View,
-    first: f64,
-    evidence: &overview::Evidence,
-    hit: Option<SampleHit>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let m = *materials(cx);
-    let b = layout.bounds;
-    let top = b.bottom() - px(RULER_HEIGHT);
-    let device_pixel = px(1. / layout.scale);
-    let visible = (view.width as f64 / view.pixels_per_frame()).ceil() as usize;
-    let widest_label = line(
-        window,
-        "8".repeat(visible.to_string().len()),
-        10.,
-        m.text_muted,
-        FontWeight::NORMAL,
-    );
-    let label_spacing = f64::from(f32::from(widest_label.width + px(9.))) * f64::from(layout.scale);
-    let mut ticks = waveform::inspection::ruler_ticks(view, first, label_spacing)
-        .filter(|t| {
-            evidence
-                .samples
-                .iter()
-                .any(|block| block.sample(t.frame).is_some())
-        })
-        .peekable();
-    window.paint_quad(fill(
-        Bounds::new(point(b.left(), top), size(b.size.width, px(RULER_HEIGHT))),
-        m.chrome.opacity(0.87),
-    ));
-    let mut label_end = b.left();
-    while let Some(tick) = ticks.next() {
-        let x = b.left() + px(tick.x as f32 / layout.scale);
-        let inspected = hit.is_some_and(|h| h.frame == tick.frame);
-        let ink = if inspected {
-            m.accent
-        } else if tick.major {
-            m.text_muted
-        } else {
-            m.text_faint.opacity(0.72)
-        };
-        let h = if tick.major || inspected { 6. } else { 3. };
-        // GPUI snaps quad edges. Split one physical pixel of coverage across
-        // device columns so a fractional vertex and its tick share a center.
-        for (column, coverage) in tick_coverage(tick.x) {
-            if column < 0 || column >= view.width as i64 || coverage <= 0. {
-                continue;
-            }
-            window.paint_quad(fill(
-                Bounds::new(
-                    point(b.left() + device_pixel * column as f32, top),
-                    size(device_pixel, px(h)),
-                ),
-                ink.opacity(coverage),
-            ));
-        }
-        if inspected {
-            let dot = size(px(4.), px(4.));
-            window.paint_quad(quad(
-                Bounds::new(point(x - px(2.), top + px(4.)), dot),
-                px(2.),
-                m.accent,
-                px(0.),
-                m.accent,
-                BorderStyle::Solid,
-            ));
-        }
-        if tick.numbered || tick.number() == 1 || ticks.peek().is_none() {
-            let label = line(
-                window,
-                tick.number().to_string(),
-                10.,
-                if inspected { m.accent } else { m.text_muted },
-                FontWeight::NORMAL,
-            );
-            let Some(left) = centered_label(x, label.width, label_end, b.right()) else {
-                continue;
-            };
-            label_end = left + label.width + px(4.);
-            let _ = label.paint(
-                point(left, top + px(6.)),
-                px(13.),
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-        }
-    }
-}
-
-fn tick_coverage(center: f64) -> [(i64, f32); 2] {
-    let left = center - 0.5;
-    let column = left.floor();
-    let phase = (left - column) as f32;
-    [(column as i64, 1. - phase), (column as i64 + 1, phase)]
-}
-
-fn centered_label(x: Pixels, width: Pixels, start: Pixels, end: Pixels) -> Option<Pixels> {
-    let left = x - width * 0.5;
-    (left >= start && left + width <= end).then_some(left)
 }
 
 /// Size the two channel fields from the visible PCM once per stationary view.
@@ -349,28 +224,7 @@ fn amplitude(value: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{amplitude, centered_label, px, row_start, source_seconds, tick_coverage};
-
-    #[test]
-    fn fractional_ticks_conserve_coverage_and_edge_labels_keep_their_centers() {
-        for x in [0., 0.125, 1.5, 12.75, 900.625] {
-            let pair = tick_coverage(x);
-            assert_eq!(pair[0].1 + pair[1].1, 1.);
-            assert_eq!(
-                pair.iter()
-                    .map(|(i, a)| (*i as f64 + 0.5) * f64::from(*a))
-                    .sum::<f64>(),
-                x
-            );
-        }
-        assert_eq!(
-            centered_label(px(20.5), px(11.), px(0.), px(100.)),
-            Some(px(15.))
-        );
-        for x in [1., 98.] {
-            assert!(centered_label(px(x), px(12.), px(0.), px(100.)).is_none());
-        }
-    }
+    use super::{amplitude, px, row_start, source_seconds};
 
     #[test]
     fn header_keeps_complete_fields_on_one_right_aligned_row() {
