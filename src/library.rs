@@ -224,21 +224,30 @@ pub fn browse_while(
     }
     sort_by_name(&mut folder.dirs, folder_name);
     discs.sort();
-    browse_files(folder, files, &discs, &discs, cache, current)
+    browse_files(
+        folder,
+        files,
+        &discs,
+        &discs,
+        HashSet::new(),
+        cache,
+        current,
+    )
 }
 
 /// Builds the recordings of a folder from some of its files. Only `sheets`
-/// contribute CUE programs, while every sheet in `claims` removes the audio
-/// files it plays from the loose recordings.
+/// contribute CUE programs, while every sheet in `claims` and every file in
+/// `claimed` (canonical paths) is removed from the loose recordings.
 pub fn browse_files(
     mut folder: Folder,
     mut files: Vec<PathBuf>,
     sheets: &[PathBuf],
     claims: &[PathBuf],
+    claimed: HashSet<PathBuf>,
     cache: Option<&crate::cache::Cache>,
     current: impl Fn() -> bool,
 ) -> Result<Folder> {
-    let mut covered = HashSet::new();
+    let mut covered = claimed;
     let mut tracks: Vec<Track> = Vec::new();
     let mut absent = Vec::new();
     for sheet in claims {
@@ -486,12 +495,12 @@ pub enum ListedFiles {
         audio: Vec<PathBuf>,
         sheets: Vec<PathBuf>,
     },
-    /// The next files by name in a folder with too many to group at once,
-    /// with every sheet whose claims keep its audio files out of the list.
+    /// The next files by name in a folder with too many to group at once.
+    /// Sheets on other pages can still play these recordings, which
+    /// `claimed_sources` resolves.
     Page {
         audio: Vec<PathBuf>,
         sheets: Vec<PathBuf>,
-        claims: Vec<PathBuf>,
         /// A resume point when more files follow.
         next: Option<String>,
     },
@@ -512,8 +521,6 @@ pub struct FolderListing {
 
 /// Recordings and sheets a folder groups into albums and programs at once.
 pub const GROUPED_FILES: usize = 4096;
-/// Sheets whose claims a paged folder resolves.
-const CLAIMED_SHEETS: usize = 256;
 
 /// Lists one page of `path` in a single pass over its entries. Only names
 /// are held, at most `limit` of each kind beyond the resume point, so a
@@ -535,8 +542,6 @@ pub fn list_page(
     let mut dirs = Window::new(dirs_after, if listing_dirs { limit } else { 0 });
     let mut files = Window::new(files_after, limit);
     let mut all_files: Option<Vec<PathBuf>> = Some(Vec::new());
-    let mut sheets = Vec::new();
-    let mut too_many_sheets = false;
     let mut cover: Option<PathBuf> = None;
     let mut notices = Vec::new();
     let mut complete = true;
@@ -575,15 +580,7 @@ pub fn list_page(
         if !kind.is_file() || !files_wanted {
             continue;
         }
-        let sheet = p.extension().is_some_and(|s| s.eq_ignore_ascii_case("cue"));
-        if sheet {
-            if sheets.len() < CLAIMED_SHEETS {
-                sheets.push(p.clone());
-            } else {
-                too_many_sheets = true;
-            }
-        }
-        if sheet || is_audio(&p) {
+        if is_sheet(&p) || is_audio(&p) {
             files.offer(NameKey::new(name(&p)), p.clone());
             if let Some(list) = &mut all_files {
                 if list.len() < GROUPED_FILES {
@@ -606,28 +603,21 @@ pub fn list_page(
     let next_dir = more_dirs.then(|| dirs.last().map(|(key, _)| key.as_str().to_owned()));
     let files = (!more_dirs && files_wanted).then(|| match all_files {
         Some(all) if files_after.is_none() => {
-            let (sheets, audio) = all
-                .into_iter()
-                .partition(|p| p.extension().is_some_and(|s| s.eq_ignore_ascii_case("cue")));
+            let (sheets, audio) = all.into_iter().partition(|p| is_sheet(p));
             ListedFiles::All { audio, sheets }
         }
         _ => {
-            if too_many_sheets {
-                notices.push(
-                    "Some recordings played by CUE sheets may also appear on their own.".into(),
-                );
-            }
             let (page, more) = files.finish();
             let next = more
                 .then(|| page.last().map(|(key, _)| key.as_str().to_owned()))
                 .flatten();
-            let (page_sheets, audio) = page.into_iter().map(|(_, p)| p).partition(|p: &PathBuf| {
-                p.extension().is_some_and(|s| s.eq_ignore_ascii_case("cue"))
-            });
+            let (sheets, audio) = page
+                .into_iter()
+                .map(|(_, p)| p)
+                .partition(|p: &PathBuf| is_sheet(p));
             ListedFiles::Page {
                 audio,
-                sheets: page_sheets,
-                claims: sheets,
+                sheets,
                 next,
             }
         }
@@ -640,6 +630,72 @@ pub fn list_page(
         notices,
         complete,
     })
+}
+
+fn is_sheet(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|s| s.eq_ignore_ascii_case("cue"))
+}
+
+/// The recordings among `audio` that a CUE sheet anywhere in `folder` plays,
+/// as canonical paths. Every sheet is read in turn and only matches with
+/// `audio` are kept, so a page of a folder with any number of sheets takes
+/// memory bounded by the page, and no recording a program plays is listed
+/// again on its own.
+pub fn claimed_sources(
+    folder: &Path,
+    audio: &[PathBuf],
+    cache: Option<&crate::cache::Cache>,
+    current: impl Fn() -> bool,
+) -> Result<HashSet<PathBuf>> {
+    let mut claimed = HashSet::new();
+    if audio.is_empty() {
+        return Ok(claimed);
+    }
+    let names: HashSet<String> = audio.iter().map(|p| name_key(p)).collect();
+    let mut page: Option<HashSet<PathBuf>> = None;
+    let mut visited = 0usize;
+    for entry in
+        fs::read_dir(folder).with_context(|| format!("Cannot open {}", folder.display()))?
+    {
+        visited += 1;
+        if visited.is_multiple_of(64) {
+            anyhow::ensure!(current(), crate::store::Cancelled);
+        }
+        let Ok(entry) = entry else { continue };
+        let sheet = entry.path();
+        if !is_sheet(&sheet) || !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Ok(program) = cache.map_or_else(|| crate::cue::read(&sheet), |c| c.program(&sheet))
+        else {
+            continue;
+        };
+        let mut sources: Vec<&Path> = program.iter().map(|t| t.source.as_path()).collect();
+        sources.dedup();
+        for source in sources {
+            if !names.contains(&name_key(source)) {
+                continue;
+            }
+            let Ok(key) = source.canonicalize() else {
+                continue;
+            };
+            let page = page.get_or_insert_with(|| {
+                audio.iter().filter_map(|p| p.canonicalize().ok()).collect()
+            });
+            if page.contains(&key) {
+                claimed.insert(key);
+            }
+        }
+    }
+    anyhow::ensure!(current(), crate::store::Cancelled);
+    Ok(claimed)
+}
+
+fn name_key(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Orders paths by name as Explorer does, so `CD 2` precedes `CD 10`.

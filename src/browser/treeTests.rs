@@ -381,14 +381,12 @@ fn a_folder_with_too_many_recordings_to_group_lists_them_by_page() {
         let Some(crate::library::ListedFiles::Page {
             audio,
             sheets,
-            claims,
             next,
         }) = page.files
         else {
             panic!("Expected a page of files");
         };
         assert!(audio.len() + sheets.len() <= 1000);
-        assert_eq!(claims.len(), 1);
         names.extend(audio.iter().chain(&sheets).map(|p| crate::library::name(p)));
         match next {
             Some(next) => after = Some(crate::library::ListingCursor::Files(next)),
@@ -505,4 +503,63 @@ fn seed_music_browser_qualification() {
         .create_playlist("Evening Session", &keys[..3])
         .unwrap();
     fs::write(profile.join("reference-root.txt"), id.to_string()).unwrap();
+}
+
+#[test]
+fn every_sheet_of_a_paged_folder_owns_its_recordings() {
+    // More files than are grouped at once, with more sheets than any fixed
+    // claim bound, so sheets and the recordings they play fall on
+    // different pages.
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let sheets = 300;
+    for i in 0..sheets {
+        let source = format!("Z Source {i:03}.wav");
+        write_wav(&root.join(&source), 0);
+        fs::write(
+            root.join(format!("A Program {i:03}.cue")),
+            format!(
+                "TITLE \"Program {i:03}\"\nFILE \"{source}\" WAVE\nTRACK 01 AUDIO\nTITLE \"Opening {i:03}\"\nINDEX 01 00:00:00\n"
+            ),
+        )
+        .unwrap();
+    }
+    for i in 0..crate::library::GROUPED_FILES {
+        fs::write(root.join(format!("M Take {i:04}.wav")), b"").unwrap();
+    }
+    let mut after = None;
+    let mut programs = Vec::new();
+    let mut loose = Vec::new();
+    loop {
+        let page = physical_branch(root, after.as_ref(), &|| true).unwrap();
+        for node in page.nodes() {
+            match &node.item {
+                Item::Disc { disc, .. } => programs.push(disc.title.clone()),
+                Item::Track { track, disc: None } => {
+                    loose.push(crate::library::name(&track.source))
+                }
+                _ => {}
+            }
+        }
+        match page.more {
+            Some(Cursor::Listing(next)) => after = Some(next),
+            None => break,
+            Some(other) => panic!("unexpected cursor {other:?}"),
+        }
+    }
+    programs.sort();
+    programs.dedup();
+    assert_eq!(programs.len(), sheets);
+    assert!(
+        loose.iter().all(|name| !name.starts_with("Z Source")),
+        "a recording a sheet plays was listed on its own"
+    );
+    let claimed = crate::library::claimed_sources(
+        root,
+        &[root.join("Z Source 299.wav"), root.join("M Take 0001.wav")],
+        None,
+        || true,
+    )
+    .unwrap();
+    assert_eq!(claimed.len(), 1);
 }

@@ -379,20 +379,21 @@ pub(crate) fn tree_folder(
             notice: None,
         });
     };
-    let (audio, sheets, claims, paged) = match files {
-        library::ListedFiles::All { audio, sheets } => (audio, sheets.clone(), sheets, false),
+    let cache =
+        crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
+    let (audio, sheets, claimed, paged) = match files {
+        library::ListedFiles::All { audio, sheets } => (audio, sheets, HashSet::new(), false),
         library::ListedFiles::Page {
             audio,
             sheets,
-            claims,
             next: resume,
         } => {
             next = resume.map(library::ListingCursor::Files);
-            (audio, sheets, claims, true)
+            // A sheet on any page owns the recordings it plays.
+            let claimed = library::claimed_sources(folder, &audio, cache.as_ref(), alive)?;
+            (audio, sheets, claimed, true)
         }
     };
-    let cache =
-        crate::profile::location().and_then(|p| Cache::open(&p.with_file_name("Cache")).ok());
     let mut page = Some(library::browse_files(
         library::Folder {
             cover: listing.cover,
@@ -402,7 +403,8 @@ pub(crate) fn tree_folder(
         },
         audio,
         &sheets,
-        &claims,
+        &sheets,
+        claimed,
         cache.as_ref(),
         alive,
     )?);
