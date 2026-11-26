@@ -65,6 +65,69 @@ foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
     return [tuple(values[i:i + 4]) for i in range(0, len(values), 4)]
 
 
+def accessibility(hwnd, labels):
+    """Read the patterns Windows exposes for the controls of this window."""
+    script = r"""
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]HWND)
+$states = @{}
+foreach ($label in (ConvertFrom-Json $env:DISQRO_CONTROL_LABELS)) {
+    $name = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $label)
+    $element = $root.FindFirst([Windows.Automation.TreeScope]::Descendants, $name)
+    if ($null -eq $element) { continue }
+    $c = $element.Current
+    $states[$label] = @{name=$c.Name; role=$c.ControlType.ProgrammaticName; enabled=$c.IsEnabled;
+        focusable=$c.IsKeyboardFocusable; focused=$c.HasKeyboardFocus;
+        patterns=@($element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName })}
+    $p = $null
+    if ($element.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$p)) {
+        $states[$label].expanded = $p.Current.ExpandCollapseState.ToString()
+    }
+    if ($element.TryGetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern,[ref]$p)) {
+        $states[$label].selected = $p.Current.IsSelected
+    }
+}
+$states | ConvertTo-Json -Depth 5
+"""
+    raw = subprocess.check_output(
+        ["powershell", "-NoProfile", "-Command", script.replace("HWND", str(hwnd))],
+        env=dict(os.environ, DISQRO_CONTROL_LABELS=json.dumps(labels)),
+        creationflags=subprocess.CREATE_NO_WINDOW, timeout=20)
+    return json.loads(raw)
+
+
+def press(hwnd, key):
+    user32.PostMessageW(hwnd, 0x0100, key, 0)
+    user32.PostMessageW(hwnd, 0x0101, key, 0xC0000000)
+
+
+def reverse_tab(hwnd):
+    # SetKeyboardState is thread-local. Attach only the worker and its private
+    # test window, send Tab synchronously, and restore before detaching.
+    current = C.windll.kernel32.GetCurrentThreadId()
+    target = user32.GetWindowThreadProcessId(hwnd, None)
+    message = W.MSG()
+    user32.PeekMessageW(C.byref(message), None, 0, 0, 0)
+    if not user32.AttachThreadInput(current, target, True):
+        raise C.WinError()
+    saved = (C.c_ubyte * 256)()
+    try:
+        if not user32.GetKeyboardState(saved):
+            raise C.WinError()
+        keys = type(saved).from_buffer_copy(saved)
+        keys[0x10] |= 0x80
+        if not user32.SetKeyboardState(keys):
+            raise C.WinError()
+        try:
+            user32.SendMessageW(hwnd, 0x0100, 0x09, 0x000F0001)
+            user32.SendMessageW(hwnd, 0x0101, 0x09, 0xC00F0001)
+        finally:
+            user32.SetKeyboardState(saved)
+    finally:
+        user32.AttachThreadInput(current, target, False)
+
+
 def try_rect(hwnd, label, min_y=None):
     try:
         return control_rects(hwnd, [label], min_y)[0]
@@ -163,6 +226,7 @@ def capture_states(process, output, prefix, results):
             screenshot(hwnd, output / f"{prefix}locations-chevron-hover.png")
     hover(hwnd, 5, 5)
     if not prefix:
+        results["accessibility"] = accessibility(hwnd, list(rects))
         keyboard_disclosures(process, hwnd)
         results["keyboard_disclosures"] = True
     # Collapsed sections.
@@ -179,6 +243,8 @@ def capture_states(process, output, prefix, results):
 
 def capture_destinations(exe, output, scale, root):
     settings = layout(root, 236, 1004, mode="tracks", location=dict(Library=root))
+    settings["places"] = {"items": [{"path": str(output / "Missing fixture folder"),
+                                     "origin": "Custom", "label": "Offline fixture"}]}
     process = launch(exe, output, settings, scale)
     try:
         hwnd, _ = wait_for(process, "Opening Notes")
@@ -186,13 +252,22 @@ def capture_destinations(exe, output, scale, root):
         for destination, content, key in [
             ("Artists", "Various Artists", 0x0D), ("Releases", "Album Artist", 0x20),
         ]:
-            control_rects(hwnd, [destination], focus=True)
-            user32.PostMessageW(hwnd, 0x0100, key, 0)
-            user32.PostMessageW(hwnd, 0x0101, key, 0xC0000000)
+            if destination == "Artists":
+                control_rects(hwnd, ["All Music"], focus=True)
+                press(hwnd, 0x09)
+            else:
+                control_rects(hwnd, [destination], focus=True)
+            press(hwnd, key)
             wait_for(process, content)
             screenshot(hwnd, output / f"{destination.lower()}.png")
-        hwnd, point = wait_for(process, "Artists")
-        click_control(hwnd, point)
+        control_rects(hwnd, ["Releases"], focus=True)
+        reverse_tab(hwnd)
+        press(hwnd, 0x0D)
+        wait_for(process, "Various Artists")
+        states = accessibility(hwnd, ["Artists", "Releases", "Expand Offline fixture"])
+        offline = states.get("Expand Offline fixture")
+        assert offline and not offline["enabled"] and not offline["focusable"], states
+        (output / "destination-controls.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
         hwnd, point = wait_for(process, "Various Artists")
         click_control(hwnd, W.POINT(point.x, point.y))
         click_control(hwnd, point)

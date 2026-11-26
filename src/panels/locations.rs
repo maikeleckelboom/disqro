@@ -9,7 +9,7 @@ use super::{
     Destination, PaneContent, PanelType, Router, Services,
     nav::{DraggedFolder, INDENT, ROW},
 };
-use crate::disclosure::Disclosure;
+use crate::disclosure::{Disclosure, VirtualFocus};
 use crate::{
     assets::FileIcon,
     catalog::Catalog,
@@ -149,6 +149,7 @@ pub struct LocationsPanel {
     router: Entity<Router>,
     catalog: Entity<Catalog>,
     renaming: Option<(PathBuf, Entity<InputState>)>,
+    row_focus: Rc<VirtualFocus<(SharedString, bool)>>,
     _model_subscription: Subscription,
     focus: FocusHandle,
 }
@@ -162,6 +163,7 @@ impl LocationsPanel {
             catalog: services.catalog.clone(),
             renaming: None,
             _model_subscription: model_subscription,
+            row_focus: Default::default(),
             focus: cx.focus_handle(),
         }
     }
@@ -449,6 +451,7 @@ impl LocationsPanel {
             self.catalog.clone(),
         );
         let model_handle = self.model.clone();
+        let focus = self.row_focus.clone();
         tree(&state, move |_, entry, selected, _, cx| {
             let depth = entry.depth();
             let id = entry.item().id.clone();
@@ -471,10 +474,11 @@ impl LocationsPanel {
                 None if temporary => FileIcon::Drive.icon(),
                 None => FileIcon::Folder.icon(),
             };
-            let expander = if entry.is_folder() {
+            let expander = if entry.is_folder() || !available {
                 let toggle = folders.clone();
                 let toggle_id = id.clone();
                 Disclosure::new("location-disclosure", entry.is_expanded(), label.clone())
+                    .track_focus(focus.handle((id.clone(), true), cx))
                     .disabled(!available)
                     .on_toggle(move |_, cx| toggle.update(cx, |f, cx| f.toggle(&toggle_id, cx)))
                     .into_any_element()
@@ -487,7 +491,7 @@ impl LocationsPanel {
                 .gap(px(4.))
                 .min_w_0()
                 .items_center()
-                .text_size(px(13.))
+                .text_size(px(crate::theme::size::TEXT))
                 .text_color(if selected {
                     m.text
                 } else if temporary {
@@ -527,6 +531,7 @@ impl LocationsPanel {
             } else {
                 let (r, f) = (router.clone(), folders.clone());
                 let (open_root, open_path) = (root.clone(), path.clone());
+                let row_focus = focus.handle((id.clone(), false), cx);
                 let open = move |e: &ClickEvent, window: &mut Window, cx: &mut App| {
                     // The tree's own click handling would select by row
                     // position and toggle expansion. Navigate by path instead.
@@ -535,7 +540,9 @@ impl LocationsPanel {
                     if !new_tab {
                         let state = f.read(cx).state.clone();
                         state.update(cx, |t, cx| {
-                            t.focus(window, cx);
+                            if !matches!(e, ClickEvent::Keyboard(_)) {
+                                t.focus(window, cx);
+                            }
                             t.set_selected_index(t.index_of(&id), cx);
                         });
                     }
@@ -555,6 +562,13 @@ impl LocationsPanel {
                     place: place.is_some(),
                 };
                 content
+                    .role(Role::Button)
+                    .aria_label(format!("Open {label}"))
+                    .aria_selected(selected)
+                    .key_context("NavigationRow")
+                    .track_focus(&row_focus)
+                    .tab_stop(true)
+                    .focus_visible(|d| d.bg(m.control).text_color(m.accent))
                     .child(
                         div()
                             .flex_1()

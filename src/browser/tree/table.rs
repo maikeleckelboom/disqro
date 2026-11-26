@@ -53,6 +53,7 @@ pub(crate) struct TreeTable {
     pub(crate) layout: Layout,
     pub(crate) sort: Option<(Field, ColumnSort)>,
     columns: ColumnInteraction,
+    disclosure_focus: crate::disclosure::VirtualFocus<TreeId>,
     browser: WeakEntity<Browser>,
     pub(crate) router: Option<Entity<Router>>,
     catalog: Entity<Catalog>,
@@ -84,6 +85,7 @@ impl TreeTable {
             sort: None,
             layout,
             columns: ColumnInteraction::default(),
+            disclosure_focus: Default::default(),
             browser,
             catalog,
             player,
@@ -562,6 +564,8 @@ impl TableDelegate for TreeTable {
                         open,
                         label.clone(),
                     )
+                    .track_focus(self.disclosure_focus.handle(id.clone(), cx))
+                    .disabled(matches!(node.item, Item::Collection { online: false, .. }))
                     .on_toggle(move |_, cx| {
                         let _ = browser
                             .update(cx, |b, cx| b.toggle_tree(id.clone(), parent.clone(), cx));
