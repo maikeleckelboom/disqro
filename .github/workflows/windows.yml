@@ -92,7 +92,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings *> $null
       - name: Tests
-        run: cargo test --locked *> $null
+        shell: bash
+        run: |
+          set -eu
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          if ! cargo test --locked --color never >"$log" 2>&1; then
+            # Report failing test identities, locations, and diagnostic codes only.
+            sed -nE 's/^test ([a-zA-Z0-9_:]+) \.\.\. FAILED\r?$/Failed test: \1/p' "$log"
+            grep -Eo 'panicked at src[/\\][a-zA-Z0-9_/\\.]+\.rs:[0-9]+:[0-9]+|LNK[0-9]{4}|error\[E[0-9]{4}\]|os error [0-9]+|STATUS_[A-Z_]+' "$log" | sort -u
+            exit 1
+          fi
+          sed -nE 's/^test result: ok\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored;.*/Tests passed: \1, failed: \2, ignored: \3/p' "$log"
       - name: Build Windows player
         run: .\build.ps1 *> $null
       - name: Build production Windows player and record provenance
