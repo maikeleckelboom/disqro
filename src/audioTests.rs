@@ -1456,7 +1456,7 @@ fn a_release_sequence_opens_each_disc_and_ends_with_the_release() {
 }
 
 #[test]
-fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
+fn program_seek_is_atomic_and_rejects_changed_entries_or_recordings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.wav");
     fixture(&path, 32000, 32000);
@@ -1470,38 +1470,72 @@ fn disc_seek_is_atomic_and_rejects_changed_queue_or_recording() {
     let mut e = Engine::default();
     e.queue.replace(tracks.clone().into(), 0);
     e.select(Some(0), 0.);
-    let origin = e.status.entry;
+    let origin = e.status.entry.unwrap();
     let target = e.queue.entries[1].id;
-    let before = e.queue.revision;
     let stamp = crate::cache::Stamp::read(&path).unwrap();
-    let seek = |revision| Command::SeekOnDisc {
-        target,
-        revision,
-        seconds: 0.125,
-        duration: (32000 - 427) as f64 / 32000.,
-        source_revision: stamp.clone(),
-        sheet_revision: crate::cache::Stamp::read(&sheet),
+    let seek = |origin, seconds| {
+        Command::SeekProgram(Box::new(ProgramSeek {
+            origin,
+            program: tracks.clone(),
+            chapter: 1,
+            source_revision: stamp.clone(),
+            sheet_revision: crate::cache::Stamp::read(&sheet),
+            seconds,
+            duration: (32000 - 427) as f64 / 32000.,
+        }))
     };
     assert!(
         !Pending {
-            entry: origin,
-            command: seek(before)
+            entry: Some(origin),
+            command: seek(origin, 0.125)
         }
         .applies_to(Some(target))
     );
-    e.command(seek(before + 1)).unwrap();
-    assert_eq!(e.status.entry, origin);
-    e.command(seek(before)).unwrap();
+    let revision = e.queue.revision;
+    // A seek aimed from another entry, or beyond the chapter, changes nothing.
+    e.command(seek(target, 0.125)).unwrap();
+    e.command(seek(origin, 2.)).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    e.command(seek(origin, 0.125)).unwrap();
     assert_eq!(
         (e.status.entry, e.status.position, e.status.playing),
         (Some(target), 0.125, false)
     );
-    assert_eq!(e.queue.entries.len(), 2);
+    assert_eq!(e.queue.entries.len(), 2, "the queued chapter is reused");
     assert!(e.device.is_none() && e.voice.is_none());
+
+    // Play Only This Track: the next chapter is not queued, yet reachable.
+    e.queue.replace(tracks[..1].iter().cloned().collect(), 0);
     e.select(Some(0), 0.);
+    let only = e.status.entry.unwrap();
+    e.command(seek(only, 0.25)).unwrap();
+    assert_eq!(e.queue.entries.len(), 2);
+    assert_eq!(e.queue.current, Some(1));
+    assert_eq!(e.queue.entries[0].id, only);
+    assert!(e.status.entry.is_some_and(|id| id != only));
+    assert_eq!(e.status.position, 0.25);
+
+    // A changed recording or sheet rejects the seek before the queue changes.
+    e.queue.replace(tracks[..1].iter().cloned().collect(), 0);
+    e.select(Some(0), 0.);
+    let origin = e.status.entry.unwrap();
+    let revision = e.queue.revision;
     fixture(&path, 32000, 32001);
-    e.command(seek(e.queue.revision)).unwrap();
-    assert_eq!(e.status.entry, origin);
+    e.command(seek(origin, 0.125)).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    let stamp = crate::cache::Stamp::read(&path).unwrap();
+    let mut fresh = seek(origin, 0.125);
+    if let Command::SeekProgram(seek) = &mut fresh {
+        seek.source_revision = stamp;
+    }
+    std::fs::write(
+        &sheet,
+        std::fs::read_to_string(&sheet).unwrap() + "\nREM revised\n",
+    )
+    .unwrap();
+    e.command(fresh).unwrap();
+    assert_eq!((e.status.entry, e.queue.revision), (Some(origin), revision));
+    assert_eq!(e.queue.entries.len(), 1);
 }
 
 #[test]

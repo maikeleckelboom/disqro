@@ -11,8 +11,8 @@ use gpui_kit::component::Selectable;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-const OUTSIDE_QUEUE: &str = "This recording is outside the current queue sequence.";
 const UNAVAILABLE_POSITION: &str = "This waveform position is unavailable.";
+const UNAVAILABLE_RECORDING: &str = "This recording is unavailable.";
 
 #[derive(Clone, Copy)]
 pub(super) struct StripSeek {
@@ -207,7 +207,6 @@ impl Player {
                 }
                 self.shapes = vec![Shape::default(); p.segments.len()];
                 self.program = Some(p);
-                self.update_run();
             }
             Update::Wave(i, shape) => {
                 if let Some(slot) = self.shapes.get_mut(i) {
@@ -242,30 +241,6 @@ impl Player {
             });
             cx.notify()
         }
-    }
-    pub(super) fn update_run(&mut self) {
-        self.run = 0..0;
-        let (Some(p), Some(i), Some(q)) = (&self.program, self.segment, self.queue.current) else {
-            return;
-        };
-        let matches = |n: usize, k: usize| {
-            self.queue.entries.get(k).is_some_and(|e| {
-                e.track.source == p.segments[n].track.source
-                    && e.track.disc == p.segments[n].track.disc
-            })
-        };
-        if !matches(i, q) {
-            return;
-        }
-        let mut left = i;
-        while left > 0 && q > i - left && matches(left - 1, q - (i - left) - 1) {
-            left -= 1;
-        }
-        let mut right = i + 1;
-        while right < p.segments.len() && matches(right, q + (right - i)) {
-            right += 1;
-        }
-        self.run = left..right;
     }
     pub(super) fn overview(&self) -> Option<Overview> {
         self.status
@@ -356,37 +331,26 @@ impl Player {
         // boundary pixel belongs to the chapter which starts there.
         let time = range.start + ((fraction * length as f64).round() as u64).min(length - 1);
         let (i, frame) = p.locate(time).ok_or(UNAVAILABLE_POSITION)?;
-        self.target_frame(p, active, i, frame)
+        self.target_frame(p, i, frame)
     }
 
-    fn target_frame(
-        &self,
-        p: &Program,
-        active: usize,
-        i: usize,
-        frame: usize,
-    ) -> Result<Command, &'static str> {
-        if !self.run.contains(&i) {
-            return Err(OUTSIDE_QUEUE);
-        }
+    /// A seek to `frame` of chapter `i`, anywhere in the authored program.
+    /// The transport decides which queue occurrence it activates.
+    fn target_frame(&self, p: &Program, i: usize, frame: usize) -> Result<Command, &'static str> {
         let seg = &p.segments[i];
         if !seg.source.available {
-            return Err("This recording is unavailable.");
+            return Err(UNAVAILABLE_RECORDING);
         }
-        let target = self
-            .queue
-            .current
-            .and_then(|current| current.checked_add(i)?.checked_sub(active))
-            .and_then(|index| self.queue.entries.get(index))
-            .ok_or(OUTSIDE_QUEUE)?;
-        Ok(Command::SeekOnDisc {
-            target: target.id,
+        let origin = self.status.entry.ok_or(UNAVAILABLE_POSITION)?;
+        Ok(Command::SeekProgram(Box::new(crate::audio::ProgramSeek {
+            origin,
+            program: p.segments.iter().map(|s| s.track.clone()).collect(),
+            chapter: i,
             source_revision: seg.source.stamp.clone(),
             sheet_revision: p.sheet.as_ref().map(|(_, s)| s.stamp.clone()),
-            revision: self.status.queue_revision,
             seconds: (frame - seg.frames.start) as f64 / f64::from(seg.source.rate),
             duration: seg.frames.len() as f64 / f64::from(seg.source.rate),
-        })
+        })))
     }
     fn move_scrub(&mut self, x: Pixels, cx: &mut Context<Self>) {
         let Some(mut seek) = self.scrub.take() else {
@@ -414,7 +378,7 @@ impl Player {
                     crate::diagnostics::stage(
                         crate::diagnostics::begin_stage(),
                         "wave_compact_blocked",
-                        u64::from(reason == OUTSIDE_QUEUE),
+                        u64::from(reason == UNAVAILABLE_RECORDING),
                         0,
                     );
                     cx.emit(PlayerEvent::Notice(reason.into()));
@@ -553,7 +517,7 @@ impl Player {
                     (0., 1.)
                 };
                 let page = &self.shapes[i].track;
-                let can_seek = s.source.available && self.run.contains(&i);
+                let can_seek = s.source.available;
                 let mut part = div()
                     .id(("wave-segment", i))
                     .absolute()
@@ -596,8 +560,6 @@ impl Player {
                     }
                     if !s.source.available {
                         label.push_str(" · Recording unavailable");
-                    } else if !can_seek {
-                        label.push_str(" · Outside the current queue sequence");
                     }
                     part = part.tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx));
                     if i > 0 {

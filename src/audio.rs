@@ -113,6 +113,24 @@ pub(crate) struct WaveSeekAnchor {
     pub sheet: Option<(std::path::PathBuf, crate::cache::Revision)>,
 }
 
+/// An explicit seek within the active recording's authored program. The
+/// program, not the queue, defines where a listener may go; the transport
+/// reconciles the queue only when the destination is committed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProgramSeek {
+    /// The queue entry that was active when the seek was requested.
+    pub origin: u64,
+    /// Every chapter of the program in authored order.
+    pub program: crate::library::TrackList,
+    /// The destination's index in `program`.
+    pub chapter: usize,
+    pub source_revision: crate::cache::Stamp,
+    pub sheet_revision: Option<crate::cache::Stamp>,
+    /// Destination position from the chapter's start, and its length.
+    pub seconds: f64,
+    pub duration: f64,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TransportState {
     Playing,
@@ -171,14 +189,7 @@ pub enum Command {
         frame: usize,
     },
     BeginWaveScrub(Arc<scrub::Gesture>),
-    SeekOnDisc {
-        target: u64,
-        source_revision: crate::cache::Stamp,
-        sheet_revision: Option<crate::cache::Stamp>,
-        revision: u64,
-        seconds: f64,
-        duration: f64,
-    },
+    SeekProgram(Box<ProgramSeek>),
     Step(i8),
     Volume(f32),
     Jump(u64),
@@ -241,7 +252,10 @@ impl Pending {
                 )
         ) || matches!((&self.command, &old.command), (
             Command::SeekWave { anchor, .. }, Command::SeekWave { anchor: previous, .. }
-        ) if anchor == previous);
+        ) if anchor == previous)
+            || matches!((&self.command, &old.command), (
+            Command::SeekProgram(seek), Command::SeekProgram(previous)
+        ) if seek.origin == previous.origin && seek.program == previous.program);
         replace && self.entry == old.entry
     }
     fn applies_to(&self, entry: Option<u64>) -> bool {
@@ -249,7 +263,7 @@ impl Pending {
             self.command,
             Command::Seek(_)
                 | Command::SeekTo(_)
-                | Command::SeekOnDisc { .. }
+                | Command::SeekProgram(_)
                 | Command::SeekWave { .. }
         ) || self.entry == entry
     }
@@ -1414,7 +1428,7 @@ impl Engine {
                 }
                 Command::Seek(_)
                 | Command::SeekTo(_)
-                | Command::SeekOnDisc { .. }
+                | Command::SeekProgram(_)
                 | Command::SeekWave { .. } => return Ok(()),
                 _ => {}
             }
@@ -1426,7 +1440,7 @@ impl Engine {
                 &c,
                 Command::Seek(_)
                     | Command::SeekTo(_)
-                    | Command::SeekOnDisc { .. }
+                    | Command::SeekProgram(_)
                     | Command::SeekWave { .. }
             )
         {
@@ -1556,46 +1570,7 @@ impl Engine {
                     }
                 }
             }
-            Command::SeekOnDisc {
-                target,
-                source_revision,
-                sheet_revision,
-                revision,
-                seconds,
-                duration,
-            } => {
-                if self.queue.revision == revision
-                    && let Some(i) = self.queue.index_of(target)
-                    && crate::cache::Stamp::read(&self.queue.entries[i].track.source)
-                        == Some(source_revision)
-                    && sheet_revision.is_none_or(|s| {
-                        self.queue.entries[i]
-                            .track
-                            .disc
-                            .as_ref()
-                            .is_some_and(|d| crate::cache::Stamp::read(&d.sheet) == Some(s))
-                    })
-                {
-                    if self.status.playing {
-                        if self.queue.current == Some(i) {
-                            self.seek_to(seconds)?;
-                        } else {
-                            self.play(i, seconds)?;
-                        }
-                    } else {
-                        if self.queue.current == Some(i) {
-                            self.detach_voice();
-                            self.flush_occurrence();
-                        } else {
-                            self.end_voice(End::Replaced);
-                        }
-                        self.select(Some(i), 0.);
-                        self.status.seek_revision += 1;
-                        self.status.duration = duration;
-                        self.status.position = seconds;
-                    }
-                }
-            }
+            Command::SeekProgram(seek) => self.seek_program(&seek)?,
             Command::PlayNext(tracks) => {
                 self.queue.play_next(&tracks);
                 self.revalidate();
@@ -1663,6 +1638,51 @@ impl Engine {
         }
         Ok(())
     }
+    /// Validates the destination, then reconciles the queue and commits the
+    /// seek as one transport operation. A stale or changed destination is
+    /// rejected before the queue changes.
+    fn seek_program(&mut self, seek: &ProgramSeek) -> Result<()> {
+        let Some(target) = seek.program.get(seek.chapter) else {
+            return Ok(());
+        };
+        let sheet_unchanged = match (&target.disc, &seek.sheet_revision) {
+            (Some(disc), Some(stamp)) => {
+                crate::cache::Stamp::read(&disc.sheet).as_ref() == Some(stamp)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if self.queue.current_entry().map(|e| e.id) != Some(seek.origin)
+            || crate::cache::Stamp::read(&target.source).as_ref() != Some(&seek.source_revision)
+            || !sheet_unchanged
+            || !(0. ..seek.duration).contains(&seek.seconds)
+        {
+            return Ok(());
+        }
+        let Some(i) = self.queue.program_destination(&seek.program, seek.chapter) else {
+            return Ok(());
+        };
+        if self.status.playing {
+            if self.queue.current == Some(i) {
+                self.seek_to(seek.seconds)?;
+            } else {
+                self.play(i, seek.seconds)?;
+            }
+        } else {
+            if self.queue.current == Some(i) {
+                self.detach_voice();
+                self.flush_occurrence();
+            } else {
+                self.end_voice(End::Replaced);
+            }
+            self.select(Some(i), 0.);
+            self.status.seek_revision += 1;
+            self.status.duration = seek.duration;
+            self.status.position = seek.seconds;
+        }
+        Ok(())
+    }
+
     fn accepts_wave_seek(&self, anchor: &WaveSeekAnchor, frame: usize) -> bool {
         let Some(entry) = self.queue.current_entry() else {
             return false;

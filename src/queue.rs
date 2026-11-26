@@ -328,6 +328,57 @@ impl Queue {
         self.touch();
         true
     }
+    /// The occurrence an explicit seek to `program[chapter]` activates, where
+    /// `program` is the authored chapter order of the active recording.
+    ///
+    /// The queue decides what plays next; it never limits where a listener
+    /// may seek. A destination inside the contiguous program sequence around
+    /// the active entry, in either direction and including History, reuses
+    /// that exact occurrence. Any other destination gets one new occurrence
+    /// inserted right after the active entry. Every other entry keeps its
+    /// identity, playlist occurrence and position. `None` when nothing is
+    /// active or the active entry is not a chapter of `program`; nothing
+    /// changes then.
+    pub fn program_destination(&mut self, program: &[Arc<Track>], chapter: usize) -> Option<usize> {
+        let current = self.current?;
+        let target = program.get(chapter)?;
+        let same = |a: &Track, b: &Track| a.source == b.source && a.disc == b.disc;
+        let at = program
+            .iter()
+            .position(|t| same(t, &self.entries[current].track))?;
+        let mut first = at;
+        while first > 0
+            && current > at - first
+            && same(
+                &self.entries[current - (at - first) - 1].track,
+                &program[first - 1],
+            )
+        {
+            first -= 1;
+        }
+        let mut last = at;
+        while last + 1 < program.len()
+            && self
+                .entries
+                .get(current + (last + 1 - at))
+                .is_some_and(|e| same(&e.track, &program[last + 1]))
+        {
+            last += 1;
+        }
+        if (first..=last).contains(&chapter) {
+            // `first <= chapter` and `at - first <= current`, so this cannot underflow.
+            return Some(current + chapter - at);
+        }
+        let context = self.entries[current].disc_context;
+        let entry = Entry {
+            disc_context: context,
+            ..self.entry(target.clone())
+        };
+        Arc::make_mut(&mut self.entries).insert(current + 1, entry);
+        self.touch();
+        Some(current + 1)
+    }
+
     /// Removes queued and history occurrences. The active occurrence is
     /// never removed: a queue edit cannot stop or replace the recording that
     /// is playing, and a stale request that names it is ignored. Returns
@@ -516,6 +567,93 @@ mod tests {
     }
     fn titles(q: &Queue) -> Vec<String> {
         q.entries.iter().map(|e| e.track.title.clone()).collect()
+    }
+
+    fn disc(n: u8) -> Vec<Arc<Track>> {
+        (1..=n).map(|k| Arc::new(chapter("cd", k))).collect()
+    }
+
+    #[test]
+    fn program_seeks_reuse_the_contiguous_sequence_in_both_directions() {
+        let program = disc(5);
+        let mut q = Queue::default();
+        let selection: Selection = program[1..4].iter().cloned().collect();
+        q.replace(selection, 1);
+        let ids: Vec<u64> = q.entries.iter().map(|e| e.id).collect();
+        let revision = q.revision;
+        // Chapters 2–4 are queued around the active chapter 3.
+        assert_eq!(q.program_destination(&program, 3), Some(2));
+        assert_eq!(q.program_destination(&program, 1), Some(0));
+        assert_eq!(q.program_destination(&program, 2), Some(1));
+        assert_eq!(q.revision, revision, "reuse changes nothing");
+        assert_eq!(q.entries.iter().map(|e| e.id).collect::<Vec<_>>(), ids);
+    }
+
+    #[test]
+    fn program_seeks_outside_the_queue_insert_one_occurrence_after_the_active_entry() {
+        let program = disc(5);
+        let mut q = Queue::default();
+        // Play Only This Track, then unrelated entries were queued after it.
+        let only: Selection = [program[2].clone()].into_iter().collect();
+        q.replace(only, 0);
+        q.add(&[file("a"), file("b")].into_iter().collect());
+        q.set_shuffle(true);
+        q.set_repeat(Repeat::All);
+        let before: Vec<u64> = q.entries.iter().map(|e| e.id).collect();
+        let upcoming: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
+        let destination = q.program_destination(&program, 4).unwrap();
+        assert_eq!(destination, 1);
+        assert_eq!(q.entries[1].track.title, "cd 5");
+        assert!(!before.contains(&q.entries[1].id));
+        assert_eq!(q.entries[0].id, before[0]);
+        let after: Vec<u64> = q.entries[2..].iter().map(|e| e.id).collect();
+        assert_eq!(after, upcoming, "unrelated entries keep identity and order");
+        assert!(q.shuffle && q.repeat == Repeat::All);
+        // Backward, from the newly active chapter: chapter 3 is now history and
+        // not contiguous with chapter 5, so chapter 1 is a new occurrence.
+        q.set_current(Some(1));
+        assert_eq!(q.program_destination(&program, 0), Some(2));
+        assert_eq!(titles(&q)[..3], ["cd 3", "cd 5", "cd 1"]);
+        q.validate().unwrap();
+    }
+
+    #[test]
+    fn program_seeks_never_borrow_a_duplicate_occurrence_elsewhere() {
+        let program = disc(4);
+        let mut q = Queue::default();
+        // A playlist plays chapter 2, then something else, then chapter 4.
+        let playlist = Selection::from_indexed(
+            [
+                program[1].clone(),
+                Arc::new(file("other")),
+                program[3].clone(),
+            ]
+            .into(),
+            Some((9, vec![70, 71, 72])),
+        );
+        q.replace(playlist, 0);
+        let later = q.entries[2].clone();
+        let destination = q.program_destination(&program, 3).unwrap();
+        assert_eq!(destination, 1);
+        assert_ne!(q.entries[1].id, later.id);
+        assert_eq!(q.entries[1].playlist_occurrence, None);
+        assert_eq!(q.entries[3], later, "the playlist occurrence is untouched");
+        assert_eq!(q.entries[0].playlist_occurrence.map(|o| o.entry), Some(70));
+    }
+
+    #[test]
+    fn program_seeks_without_an_active_chapter_change_nothing() {
+        let program = disc(3);
+        let mut q = Queue::default();
+        assert_eq!(q.program_destination(&program, 1), None);
+        q.replace([file("unrelated")].into_iter().collect(), 0);
+        let revision = q.revision;
+        assert_eq!(q.program_destination(&program, 1), None);
+        let single: Selection = [program[0].clone()].into_iter().collect();
+        q.replace(single, 0);
+        assert_eq!(q.program_destination(&program, 7), None);
+        assert_ne!(q.revision, revision);
+        assert_eq!(q.entries.len(), 1);
     }
 
     #[test]

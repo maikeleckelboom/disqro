@@ -195,15 +195,15 @@ def cd_seeks(player, case, rates, output):
         seconds = time - STARTS[chapter] if case == "multiple" else time
         return math.floor(seconds * rates[chapter] + 1e-6)
 
-    def seek_at(x, playing, switch=False):
+    def seek_at(x, playing, switch=False, expected=None, entries=None):
         since = performance_counter()
         if switch:
             click_control(player.hwnd, full)
         player.click_x(x)
         seconds = round((x - left) / width * TOTAL, 9)
         chapter = bisect_right(STARTS, seconds) - 1
-        expected_id = 1 if case == "only" else chapter + 1
-        _, compact = player.scene(True, playing, expected_id, size, since,
+        expected_id = expected if expected is not None else chapter + 1
+        _, compact = player.scene(True, playing, expected_id, entries or size, since,
                                   lambda value: abs(value - seconds) <= (0.22 if playing else 0.00006), TOTAL)
         deck, renderer = player.deck(since, rates[chapter], source_frame(chapter, seconds), playing)
         player.control(TITLES[chapter], compact=True)
@@ -220,16 +220,15 @@ def cd_seeks(player, case, rates, output):
         player.control("Play")
         since = performance_counter()
         click_control(player.hwnd, full)
-        _, before = player.scene(True, False, entry, size, since, lambda seconds: 18 <= seconds < 30, TOTAL)
-        for seconds in (8, 33):
-            since = performance_counter()
-            player.click_x(x_at(seconds))
-            wait_for(lambda: any(row[3] == 1 for row in player.stage("wave_compact_blocked", since)),
-                     "an outside-queue notice")
-            player.scene(True, False, entry, size, since, lambda value: abs(value - before) < 0.05, TOTAL)
-            screenshot(player.hwnd, output / f"blocked-{seconds}.png")
-        seek_at(x_at(23), False)
-        return dict(seeks=outcomes, blocked=2, queue_entries=size)
+        player.scene(True, False, entry, size, since, lambda seconds: 18 <= seconds < 30, TOTAL)
+        # Full CD is freely navigable. Each chapter outside the contiguous
+        # queue sequence becomes one new occurrence after the active entry.
+        for occurrence, seconds in enumerate((8, 33, 23), start=2):
+            seek_at(x_at(seconds), False, expected=occurrence, entries=occurrence)
+            screenshot(player.hwnd, output / f"outside-{seconds}.png")
+        if player.stage("wave_compact_blocked"):
+            raise RuntimeError("a Full CD seek was blocked")
+        return dict(seeks=outcomes, blocked=0, inserted=3, queue_entries=4)
 
     for playing in (True, False):
         if not playing:
