@@ -52,7 +52,8 @@ def replay(exe, fixtures, output):
         subprocess.run([exe, "--render-waveform-cases", error_file, case_file, inputs, target],
                        env=dict(os.environ, DISQRO_PROFILE_DIR=str(profile)), check=True, timeout=90)
     failures = verify(output, recordings)
-    report = {"baseline": manifest["baseline"], "exeSha256": digest(exe), "cases": count,
+    report = {"baseline": manifest["baseline"], "overviewEngine": manifest["overviewEngine"],
+              "exeSha256": digest(exe), "cases": count,
               "filesChecked": count * 2, "differences": failures}
     (output / "result.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     if failures:

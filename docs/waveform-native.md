@@ -39,9 +39,10 @@ $env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
 .\build.ps1
 ```
 
-Public CI cannot fetch a private dependency. This integration must not be
-merged until the engine is reachable by public builds (see the engine's
-`docs/distribution.md`).
+The Windows workflow fetches the locked private dependency with read-only access
+on owner-controlled main builds and trusted same-repository `integrate/` pull
+requests targeting main. Other pull requests run the public source checks.
+[Windows workflow](../.github/workflows/windows.yml)
 
 ## Continuous motion
 
