@@ -1,6 +1,8 @@
 # Native waveform rendering qualification
 
-The accepted visual baseline is the Windows D3D11 output delivered in Disqro PR #41. Each of the 103 Stroke views has two immutable SHA-256 values, one for the encoded PNG and one for the renderer's geometry JSON. The repository manifest contains the view parameters, local evidence filename and both digests. Its source is the accepted PR #41 output. [Native case manifest](../tools/waveform_parity/native_cases.json)
+The current manifest pairs the reviewed signed overview from Waveform Native PR #8 with the detailed Stroke images and geometry from Disqro PR #41. Its 103 Windows D3D11 views each have separate SHA-256 digests for the PNG and geometry JSON. [Current manifest](../tools/waveform_parity/native_cases.json) · [Historical manifest with all RMS-body hashes](https://github.com/maikeleckelboom/disqro/blob/321deed4438add27e66b0f8eaff7b8cefdae9cbd/tools/waveform_parity/native_cases.json)
+
+The signed-envelope replay changed 24 overview PNGs across eight fixture groups at widths of 560, 1,200, and 1,920 physical pixels. All 79 detailed PNGs and all 103 geometry files matched the historical hashes. On the synthetic control, each new overview matched the approved engine image pixel for pixel. The retained-changing recording shows a uniform fill through the loud sections and keeps the gaps visible. The whole-disc and CUE chapter views retain their distinct extents.
 
 ## Replay on Windows
 
@@ -11,7 +13,7 @@ cargo build --locked --release --features qualification
 python -B tools/qualify_waveform_parity.py --exe target/release/disqro.exe --fixtures .local/waveform-parity/checkpoint --output .local/native-waveform-replay
 ~~~
 
-Use a new output directory for each run. The harness creates an isolated profile, starts the headless native renderer on a private desktop, and records the graphics adapter. A missing or different file fails the gate. The result records the tested binary digest, baseline commit, number of comparisons and differing paths. Regenerating expected digests requires independent approval of a new visual baseline.
+Use a new output directory for each run. The harness creates an isolated profile, starts the headless native renderer on a private desktop, and records the graphics adapter. A missing or different file fails the gate. The result records the tested binary digest, baseline revisions, number of comparisons and differing paths. Regenerating expected digests requires independent approval of a new visual baseline.
 
 ## Coverage
 
