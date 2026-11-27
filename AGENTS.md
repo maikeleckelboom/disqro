@@ -15,3 +15,11 @@
 - Audio rendering must avoid blocking, file I/O, heap allocation and unbounded traversal. Decode and prepare evidence on bounded workers. Keep transport position and waveform presentation on the shared clock.
 - Check changed behavior first, then run the locked suite, formatting, all-target all-feature warnings-denied Clippy, source naming and American English checks. Qualify native behavior on the private desktop with physically silent fixtures. Report the measured DPI, memory, workload, image comparisons and limitations.
 - Review the final diff and commit coherent changes separately. Build production and qualification executables separately. Keep private engine access controlled and report hosted CI failures. Merge and release require explicit authorization.
+
+## GitHub spending and merge checks
+
+- Keep GitHub spending at zero. Use only free capacity. Do not purchase subscriptions, additional Actions minutes, or other paid resources.
+- Hosted CI supplements local qualification when free capacity is available. Check the result of each job before integration. An actual compilation, Clippy, test, or qualification failure blocks the merge.
+- If GitHub blocks a job before execution because of billing, record the run link and the billing diagnostic in the PR. Run the equivalent local checks on the exact reviewed revision and record its commit, tree, commands, and results. Revalidate affected checks if the revision changes.
+- Report hosted and local results separately. Passing local evidence on the reviewed revision satisfies a billing-blocked check. This standing exception needs no additional billing approval or job rerun. Preserve independent review, merge authorization, and unrelated branch protections.
+- Keep Waveform Native private and preserve the existing read-only dependency authentication and trusted integration branch restrictions.
