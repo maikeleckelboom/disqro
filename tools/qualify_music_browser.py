@@ -169,6 +169,8 @@ $root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$env:DI
 foreach ($label in @("Location", "Earlier locations", "Filter this view")) {
     $match = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $label)
     foreach ($entry in $root.FindAll([Windows.Automation.TreeScope]::Descendants, $match)) {
+        # The local filter input has the same accessible name as its toolbar button.
+        if ($label -eq "Filter this view" -and $entry.Current.ControlType -ne [Windows.Automation.ControlType]::Button) { continue }
         $bounds = $entry.Current.BoundingRectangle
         if ($bounds.Width -gt 0 -and $bounds.Height -gt 0) {
             "{0}|{1}|{2}" -f $label, [int]$bounds.X, [int]$bounds.Width
@@ -184,13 +186,17 @@ foreach ($label in @("Location", "Earlier locations", "Filter this view")) {
     if probe.returncode:
         raise RuntimeError(probe.stderr.strip())
     entries = [line.split("|") for line in probe.stdout.splitlines()]
-    location = max((entry for entry in entries if entry[0] == "Location"), key=lambda entry: int(entry[1]))
-    x, width = map(int, location[1:3])
-    earlier = any(entry[0] == "Earlier locations" and int(entry[1]) >= x for entry in entries)
-    filters = [entry for entry in entries if entry[0] == "Filter this view" and int(entry[1]) >= x]
-    filter_entry = max(filters, key=lambda entry: int(entry[2])) if filters else None
-    return dict(address_width=width, earlier_locations=earlier,
-                filter_width=int(filter_entry[2]) if filter_entry else 0)
+    # Both browser toolbars share this row. Assign disclosures and filters
+    # to the location on their left, before the next browser's location.
+    locations = sorted((int(x), int(width)) for name, x, width in entries if name == "Location")
+    assert len(locations) == 2, entries
+    result = []
+    for (left, width), right in zip(locations, [locations[1][0], float("inf")]):
+        inside = [(name, int(w)) for name, x, w in entries if left <= int(x) < right]
+        result.append(dict(address_width=width,
+                           earlier_locations=any(name == "Earlier locations" for name, _ in inside),
+                           filter_width=max((w for name, w in inside if name == "Filter this view"), default=0)))
+    return result
 
 
 def resize_journey(exe, output, root):
@@ -198,7 +204,7 @@ def resize_journey(exe, output, root):
     center = settings["layout"]["center"]
     primary, sibling = center["children"][1:]
     primary["children"][0]["info"]["panel"]["state"]["current"].update(location="Liked", query="Opening")
-    sibling["children"][0]["info"]["panel"]["state"]["current"]["location"] = {"Library": None}
+    sibling["children"][0]["info"]["panel"]["state"]["current"]["location"] = {"Library": root}
     center["children"][1:] = [sibling, primary]
     center["info"]["stack"]["sizes"] = [240, 490, 510]
     process = launch(exe, output, settings)
@@ -213,17 +219,20 @@ def resize_journey(exe, output, root):
             assert C.windll.user32.SetWindowPos(hwnd, 0, 0, 0, round(width * scale), height, 0x414)
             # Let the native size notification reach the dock and the UIA tree.
             time.sleep(0.12)
-            state = toolbar_geometry(hwnd)
-            states.append(dict(window_width=width, **state))
+            collection, favorites = toolbar_geometry(hwnd)
+            states.append(dict(window_width=width, collection=collection, favorites=favorites))
             if width in (1100, 1065, 1030):
                 screenshot(hwnd, output / f"favorites-resize-{width}.png")
-        widths = [s["address_width"] for s in states]
-        folded = [s["earlier_locations"] for s in states]
-        assert all(after <= before + 1 for before, after in zip(widths, widths[1:])), states
+        for key in ("collection", "favorites"):
+            widths = [s[key]["address_width"] for s in states]
+            assert all(after <= before + 1 for before, after in zip(widths, widths[1:])), states
+            filters = {s[key]["filter_width"] for s in states}
+            assert len(filters) == 1 and filters.pop() > 0, states
+        # At a legal browser width the short All Music / Favorites trail fits.
+        # The longer collection trail still crosses the ancestor-overflow threshold.
+        assert not any(s["favorites"]["earlier_locations"] for s in states), states
+        folded = [s["collection"]["earlier_locations"] for s in states]
         assert any(folded) and not all(folded) and folded == sorted(folded), states
-        # The filter control keeps its place and size at every width.
-        filters = {s["filter_width"] for s in states}
-        assert len(filters) == 1 and filters.pop() > 0, states
         (output / "live-resize.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
     finally:
         close(process)

@@ -2,6 +2,8 @@
 
 **November 28, 2026 · Windows x64 · Hold integration.** The corrected browser and dock journeys pass. A supported dock layout can still make browser navigation controls unreachable with the pointer. The next development mission should keep the current location identifiable and the controls usable through a divider drag and a restart in a narrow split.
 
+The subsequent panel-sizing mission closed this blocker. The [current handoff](design-review-handoff.md) records its qualification evidence and integration status.
+
 ## Recovered state
 
 The feature worktree had 13 implementation commits and four review corrections above the common base. Its only uncommitted change corrected the Releases destination in the Music Browser journey. The last optimized qualification executable preceded the Python capture-helper commit. Both interrupted journeys had written results by recovery. No qualification worker was still running. The main checkout had an unrelated Python cache, the Waveform Mission 4 branch had its own worktree, and a separate production player was running.

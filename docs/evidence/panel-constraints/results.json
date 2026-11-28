@@ -1,0 +1,157 @@
+{
+  "dpi": 144,
+  "initial_tabs": [
+    "Favorites",
+    "Library",
+    "Listening History",
+    "Queue",
+    "Reference Library"
+  ],
+  "restored_100_px_browser_width": 364.0,
+  "held_horizontal_drag": [
+    {
+      "x": 51.0,
+      "y": 109,
+      "width": 633.3333333333334,
+      "height": 416.0
+    },
+    {
+      "x": 51.0,
+      "y": 109,
+      "width": 530.0,
+      "height": 416.0
+    },
+    {
+      "x": 51.0,
+      "y": 109,
+      "width": 364.0,
+      "height": 416.0
+    },
+    {
+      "x": 51.0,
+      "y": 109,
+      "width": 364.0,
+      "height": 416.0
+    },
+    {
+      "x": 51.0,
+      "y": 109,
+      "width": 364.0,
+      "height": 416.0
+    }
+  ],
+  "held_vertical_drag": [
+    416.0,
+    344.0,
+    201.33333333333334,
+    178.0,
+    178.0
+  ],
+  "constrained_toolbar": [
+    {
+      "name": "Back \u00b7 Alt+Left",
+      "x": 60,
+      "y": 171,
+      "width": 45,
+      "height": 45,
+      "kind": "Button"
+    },
+    {
+      "name": "Forward \u00b7 Alt+Right",
+      "x": 108,
+      "y": 171,
+      "width": 45,
+      "height": 45,
+      "kind": "Button"
+    },
+    {
+      "name": "Location",
+      "x": 166,
+      "y": 171,
+      "width": 196,
+      "height": 46,
+      "kind": "Group"
+    },
+    {
+      "name": "Filter this view",
+      "x": 375,
+      "y": 171,
+      "width": 45,
+      "height": 45,
+      "kind": "Button"
+    },
+    {
+      "name": "View \u00b7 Tracks",
+      "x": 423,
+      "y": 171,
+      "width": 117,
+      "height": 45,
+      "kind": "Button"
+    },
+    {
+      "name": "Panel menu",
+      "x": 543,
+      "y": 171,
+      "width": 45,
+      "height": 45,
+      "kind": "Button"
+    }
+  ],
+  "constrained_navigation": [
+    "ancestor selection",
+    "Back",
+    "Forward",
+    "filter",
+    "view",
+    "panel menu"
+  ],
+  "small_window": {
+    "x": 51.0,
+    "y": 109,
+    "width": 364.0,
+    "height": 178.0
+  },
+  "scrollbars": {
+    "library_right": 980,
+    "viewport": {
+      "name": "Workspace panels",
+      "x": 51,
+      "y": 109,
+      "width": 1080,
+      "height": 411,
+      "kind": "Group"
+    },
+    "vertical_travel": 180.0,
+    "player_position_unchanged": true
+  },
+  "before_small_window_save": {
+    "x": 51.0,
+    "y": 109,
+    "width": 364.0,
+    "height": 178.0
+  },
+  "persisted_sizes": {
+    "horizontal": [
+      228.81947,
+      398.12912,
+      269.05148
+    ],
+    "vertical": [
+      114.3566,
+      339.6434
+    ]
+  },
+  "restart": {
+    "x": 51.0,
+    "y": 109,
+    "width": 364.0,
+    "height": 178.0
+  },
+  "roomy_after_restart": {
+    "x": 51.0,
+    "y": 109,
+    "width": 364.0,
+    "height": 178.0
+  },
+  "restored_topology_and_browser_state": true
+}

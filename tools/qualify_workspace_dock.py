@@ -61,7 +61,8 @@ def journey(exe, test_exe, output):
     try:
         hwnd, _ = wait_for(process, "Opening Notes")
         result["dpi"] = reference.resize(hwnd, 1440, 900)
-        reference.play(process, ["Chapter 05"])
+        # The first chapter is visible above the nested divider at the operating height.
+        reference.play(process, ["Chapter 01"])
         wait_for(process, "Pause")
         start = visible_tabs(hwnd)
         browser = tab(start, "Reference Library")

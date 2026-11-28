@@ -1,0 +1,197 @@
+[
+  {
+    "window_width": 1240,
+    "collection": {
+      "address_width": 332,
+      "earlier_locations": false,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 526,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1205,
+    "collection": {
+      "address_width": 311,
+      "earlier_locations": false,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 505,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1170,
+    "collection": {
+      "address_width": 291,
+      "earlier_locations": false,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 483,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1135,
+    "collection": {
+      "address_width": 270,
+      "earlier_locations": false,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 461,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1100,
+    "collection": {
+      "address_width": 249,
+      "earlier_locations": false,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 440,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1065,
+    "collection": {
+      "address_width": 230,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 418,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 1030,
+    "collection": {
+      "address_width": 209,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 396,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 995,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 374,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 960,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 354,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 925,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 328,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 890,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 316,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 855,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 316,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 820,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 316,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 785,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 316,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  },
+  {
+    "window_width": 750,
+    "collection": {
+      "address_width": 196,
+      "earlier_locations": true,
+      "filter_width": 45
+    },
+    "favorites": {
+      "address_width": 316,
+      "earlier_locations": false,
+      "filter_width": 45
+    }
+  }
+]
