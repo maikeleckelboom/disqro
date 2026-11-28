@@ -12,7 +12,7 @@ import subprocess
 import time
 import sys
 
-from PIL import Image
+from PIL import Image, ImageFilter, ImageStat
 
 user32 = C.windll.user32
 kernel = C.windll.kernel32
@@ -125,7 +125,8 @@ def find_window(pid):
     return next(iter(matches), None)
 
 
-def screenshot(hwnd, destination):
+def print_window(hwnd):
+    """The window as DirectComposition last composed it, cropped to its frame."""
     rect = W.RECT()
     user32.GetWindowRect(hwnd, C.byref(rect))
     width, height = rect.right - rect.left, rect.bottom - rect.top
@@ -147,12 +148,38 @@ def screenshot(hwnd, destination):
         if C.windll.dwmapi.DwmGetWindowAttribute(hwnd, 9, C.byref(visible), C.sizeof(visible)) == 0:
             image = image.crop((visible.left - rect.left, visible.top - rect.top,
                                 visible.right - rect.left, visible.bottom - rect.top))
-        image.save(destination, lossless=True)
+        return image
     finally:
         gdi.SelectObject(mem, previous)
         gdi.DeleteObject(bitmap)
         gdi.DeleteDC(mem)
         user32.ReleaseDC(hwnd, dc)
+
+
+def detail(image):
+    """Edge energy of a reduced grayscale copy: how much the image shows."""
+    return ImageStat.Stat(image.convert("L").reduce(4).filter(ImageFilter.FIND_EDGES)).mean[0]
+
+
+def screenshot(hwnd, destination, attempts=3):
+    """Save the window, from the most complete of a few captures.
+
+    The player composes its window from a base swap chain and overlay swap
+    chains for content above native surfaces. A full-content PrintWindow
+    occasionally returns only the base layer, without the overlays' text and
+    icons, even while the player presents complete frames. Such a capture
+    only ever lacks content, so the most detailed of a few captures taken
+    moments apart is the complete one.
+    """
+    best, best_detail = None, -1.0
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(0.08)
+        image = print_window(hwnd)
+        shown = detail(image)
+        if shown > best_detail:
+            best, best_detail = image, shown
+    best.save(destination, lossless=True)
 
 
 def profile(scenario, source):
