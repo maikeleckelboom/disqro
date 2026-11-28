@@ -18,18 +18,22 @@ fn hover_point(panel: &Waveform) -> Option<Point<Pixels>> {
     // The fixture's signal is near mid-height. Hover well above the trace.
     let frame = shown.viewport.frame_at(0.35).round();
     let column = ((frame + 0.2 - shown.viewport.first) / shown.viewport.span) as f32;
-    let point = layout.bounds.origin
-        + point(
-            layout.bounds.size.width * column,
-            layout.bounds.size.height * 0.12,
-        );
+    let size =
+        [layout.bounds.size.width, layout.bounds.size.height].map(|p| f64::from(f32::from(p)));
+    let [time, amplitude] = layout.axis.dimensions(size);
+    let location = |row: f64| {
+        let [x, y] = layout
+            .axis
+            .to_surface([time * f64::from(column), amplitude * row], size);
+        layout.bounds.origin + point(px(x as f32), px(y as f32))
+    };
+    let point = location(0.12);
     let hit = panel.texture.sample_hit(layout.physical(point))?;
     assert_eq!(hit.frame, frame as u64);
-    let below = Point {
-        y: layout.bounds.bottom() - layout.bounds.size.height * 0.12,
-        ..point
-    };
-    assert_eq!(panel.texture.sample_hit(layout.physical(below)), Some(hit));
+    assert_eq!(
+        panel.texture.sample_hit(layout.physical(location(0.88))),
+        Some(hit)
+    );
     Some(point)
 }
 
@@ -101,8 +105,17 @@ impl Journey {
         .await?;
         let initial = self
             .until(cx, "paused surface", |p, _, cx| {
-                (!p.player.read(cx).status.playing)
-                    .then_some(p.displayed.borrow().as_ref()?.viewport)
+                let track = p.player.read(cx).wave_track()?;
+                let clock = track.position(Instant::now())?;
+                let shown = p.displayed.borrow().as_ref()?.viewport;
+                let held = Viewport::centered(clock.frame, shown.span);
+                // A pause command can be acknowledged while the final
+                // rendered block is still draining to its held position.
+                (!track.playing
+                    && !clock.advancing
+                    && shown == held
+                    && shown == p.position.viewport)
+                    .then_some(shown)
             })
             .await?;
         for (value, dismiss) in [
@@ -116,9 +129,11 @@ impl Journey {
             } else {
                 dispatch(cx, key(dismiss))?;
             }
-            self.until(cx, "uncommitted zoom dismissed", |p, _, _| {
-                (p.zoom_editor.is_none() && p.position.viewport == initial).then_some(())
-            })
+            self.until(
+                cx,
+                &format!("uncommitted zoom dismissed by {dismiss}"),
+                |p, _, _| (p.zoom_editor.is_none() && p.position.viewport == initial).then_some(()),
+            )
             .await?;
         }
         let position = self
@@ -272,21 +287,21 @@ impl Journey {
             .then_some(())
         })
         .await?;
-        let previous_width = self
+        let previous_length = self
             .until(cx, "registered surface before resize", |p, w, _| {
-                let width = p.displayed.borrow().as_ref()?.layout.bounds.size.width;
+                let length = p.displayed.borrow().as_ref()?.layout.time_length();
                 let old = w.viewport_size();
                 w.resize(size(
                     (old.width - px(520.)).max(px(600.)),
                     old.height - px(60.),
                 ));
-                Some(width)
+                Some(length)
             })
             .await?;
         let previous_hit = self
             .until(cx, "new hit transform after resize", |p, _, cx| {
                 let layout = p.displayed.borrow().as_ref()?.layout;
-                if layout.bounds.size.width == previous_width {
+                if layout.time_length() == previous_length {
                     return None;
                 }
                 let point = layout.physical(hover_point(p)?);
@@ -327,16 +342,14 @@ impl Journey {
         self.capture(cx, "sample-narrow").await?;
         // Marker size follows the physical frame spacing at each level of
         // detail, and markers disappear below five logical pixels per frame.
-        let width = self
-            .until(cx, "narrow deck width", |p, _, _| {
-                Some(f32::from(
-                    p.displayed.borrow().as_ref()?.layout.bounds.size.width,
-                ))
+        let length = self
+            .until(cx, "resized time axis", |p, _, _| {
+                Some(p.displayed.borrow().as_ref()?.layout.time_length())
             })
             .await?;
         // Twelve, six and three logical pixels per frame.
         for (spacing, name) in [(12., "lod-close"), (6., "lod-threshold"), (3., "lod-dense")] {
-            let span = (width / spacing).floor().max(32.) as f64;
+            let span = (length / spacing).floor().max(32.);
             self.edit(cx, &format!("{span} samples")).await?;
             dispatch(cx, key("enter"))?;
             let visible = self
@@ -350,7 +363,7 @@ impl Journey {
                         return None;
                     }
                     let scale = layout.scale;
-                    let spacing = f32::from(layout.bounds.size.width) * scale / span as f32;
+                    let spacing = layout.time_length() as f32 * scale / span as f32;
                     let visible = spacing >= 5. * scale;
                     let requested = p.requested_points.get();
                     ((requested != SamplePoints::Hidden) == visible).then_some(visible)

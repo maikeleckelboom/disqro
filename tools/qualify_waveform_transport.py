@@ -23,7 +23,9 @@ from qualify_waveform import performance_counter, settings
 
 CASES = ("replay", "single", "multiple", "only")
 TITLES = ("Chapter Alpha", "Chapter Bravo", "Chapter Charlie")
-DURATIONS = (18, 12, 6)
+# The last playing seek lands at 33 s. Keep the transport active while the
+# probe reads the native trace and issues Pause. Replay covers natural EOF.
+DURATIONS = (18, 12, 30)
 STARTS = (0, 18, 30)
 TOTAL = sum(DURATIONS)
 

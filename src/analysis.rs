@@ -280,7 +280,8 @@ fn analyze(
             {
                 continue;
             }
-            let plan = Plan::overview(segment.source.rate, segment.frames.len(), OVERVIEW_COLUMNS);
+            let plan = Plan::overview(segment.source.rate, segment.frames.len(), OVERVIEW_COLUMNS)
+                .with_channel_power(waveform_source::CHANNEL_POWER);
             let exact = Evidence {
                 playable: segment.frames.clone(),
                 plan,

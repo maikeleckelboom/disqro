@@ -34,6 +34,18 @@ impl Surface {
         waveform::gpui::target(&self.pixels(), bounds, scale)
     }
 
+    pub fn target_on(
+        &self,
+        bounds: Bounds<Pixels>,
+        scale: f32,
+        axis: waveform::TimeAxis,
+    ) -> Option<(Bounds<Pixels>, waveform::OrientedView)> {
+        if self.playable.is_empty() {
+            return None;
+        }
+        waveform::gpui::target_on(&self.pixels(), bounds, scale, axis)
+    }
+
     #[cfg(test)]
     pub fn view(&self, width: usize, height: usize) -> View {
         self.pixels().project(width, height)

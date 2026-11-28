@@ -1,5 +1,7 @@
 # Precision waveform inspection
 
+The same sample inspector works in all four [waveform panel orientations](waveform-panel-orientation.md).
+
 Click the visible-span readout in a Waveform panel, or focus it with Tab and press Enter. Enter applies the requested span around the current inspection center or following playhead. Escape and focus loss discard the edit. Opening the editor selects the full-precision frame span.
 
 | Input | Meaning |

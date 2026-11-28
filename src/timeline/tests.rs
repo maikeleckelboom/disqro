@@ -281,6 +281,17 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     let silent =
         waveform_source::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
     assert!(silent.facts().iter().all(|value| *value == 0.0));
+    let stereo = waveform_source::Evidence {
+        plan: next_chapter
+            .plan
+            .with_channel_power(waveform_source::CHANNEL_POWER),
+        ..next_chapter.clone()
+    };
+    assert!(waveform_source::cached(source, &stereo, Some(&cache)).is_none());
+    waveform_source::load(source, &stereo, Some(&cache), &mut reader, &|| true).unwrap();
+    for profile in [&next_chapter, &stereo] {
+        assert!(waveform_source::cached(source, profile, Some(&cache)).is_some());
+    }
     let samples =
         waveform_source::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true)
             .unwrap();

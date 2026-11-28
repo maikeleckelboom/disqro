@@ -96,7 +96,7 @@ impl Waveform {
                             },
                             layout.scale,
                         )
-                        .map(|registration| registration.width)
+                        .map(|r| layout.axis.dimensions([r.width, r.height])[0])
                         && let Some(zoom) =
                             Zoom::parse(&input.read(cx).value(), current.source.rate, width)
                     {

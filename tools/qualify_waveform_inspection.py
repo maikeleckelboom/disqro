@@ -25,7 +25,7 @@ from qualify_spectrum import find_window, screenshot
 from qualify_waveform import settings
 
 
-def measure(exe, folder, band, control_wav):
+def measure(exe, folder, band, control_wav, axis):
     folder.mkdir(parents=True, exist_ok=False)
     recordings = folder / "Signal studies"
     recordings.mkdir()
@@ -54,7 +54,8 @@ def measure(exe, folder, band, control_wav):
     def restore(node):
         if node["panel_name"] == "disqro.waveform":
             # The retired ruler key checks that older workspaces still load.
-            node["info"]["panel"]["state"] = {"showSamplePoints": True, "showSampleRuler": True}
+            node["info"]["panel"]["state"] = {"showSamplePoints": True, "showSampleRuler": True,
+                "vertical": axis in ("up", "down"), "reverseTimeAxis": axis in ("left", "up")}
         for child in node["children"]:
             restore(child)
     restore(profile["layout"]["center"])
@@ -140,10 +141,11 @@ if __name__ == "__main__":
     parser.add_argument("output", type=lambda p: Path(p).resolve())
     parser.add_argument("--control-wav", type=lambda p: Path(p).resolve(strict=True), help="Use Waveform Native's 24-second synthetic control WAV")
     parser.add_argument("--band", choices=("mid", "bass", "high"), default="mid")
+    parser.add_argument("--axis", choices=("right", "left", "down", "up"), default="right")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
-        measure(args.exe, args.output, args.band, args.control_wav)
+        measure(args.exe, args.output, args.band, args.control_wav, args.axis)
     else:
         fixture = ["--control-wav", str(args.control_wav)] if args.control_wav else []
-        run([sys.executable, "-B", str(Path(__file__).resolve()), str(args.exe), str(args.output), "--band", args.band, *fixture, "--worker"], 90)
+        run([sys.executable, "-B", str(Path(__file__).resolve()), str(args.exe), str(args.output), "--band", args.band, "--axis", args.axis, *fixture, "--worker"], 90)

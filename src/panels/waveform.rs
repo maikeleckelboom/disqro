@@ -27,8 +27,8 @@ use std::{
     sync::{Arc, atomic::Ordering::Relaxed},
     time::Instant,
 };
-use waveform::Role;
 use waveform::analysis::DETAIL_SECONDS;
+use waveform::{Role, TimeAxis};
 
 mod inspection;
 #[cfg(all(windows, feature = "qualification"))]
@@ -218,6 +218,7 @@ impl Motion {
 
 #[derive(Clone, Copy, Default)]
 struct Layout {
+    axis: TimeAxis,
     bounds: Bounds<Pixels>,
     scale: f32,
 }
@@ -228,9 +229,21 @@ impl Layout {
         [delta.x, delta.y].map(|p| f64::from(f32::from(p)) * f64::from(self.scale))
     }
 
-    fn fraction(self, x: Pixels) -> f64 {
-        let width = f64::from(f32::from(self.bounds.size.width)).max(1.);
-        (f64::from(f32::from(x - self.bounds.origin.x)) / width).clamp(0., 1.)
+    fn time_length(self) -> f64 {
+        let [time, _] = self
+            .axis
+            .dimensions([self.bounds.size.width, self.bounds.size.height]);
+        f64::from(f32::from(time)).max(1.)
+    }
+
+    fn fraction(self, position: Point<Pixels>) -> f64 {
+        let delta = position - self.bounds.origin;
+        let size =
+            [self.bounds.size.width, self.bounds.size.height].map(|p| f64::from(f32::from(p)));
+        let [time, _] = self
+            .axis
+            .to_axes([delta.x, delta.y].map(|p| f64::from(f32::from(p))), size);
+        (time / self.time_length()).clamp(0., 1.)
     }
 }
 
@@ -335,6 +348,10 @@ impl DeckPosition {
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     show_sample_points: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    vertical: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reverse_time_axis: bool,
 }
 
 /// What the deck draws over its waveform for the current transport state.
@@ -347,6 +364,15 @@ struct Overlays {
 }
 
 impl Settings {
+    fn axis(self) -> TimeAxis {
+        match (self.vertical, self.reverse_time_axis) {
+            (false, false) => TimeAxis::Right,
+            (false, true) => TimeAxis::Left,
+            (true, false) => TimeAxis::Down,
+            (true, true) => TimeAxis::Up,
+        }
+    }
+
     /// Markers stay visible while the user drags the waveform by hand and
     /// hide during ordinary playback. Measurements wait for the gesture to end.
     fn visible(self, playing: bool, scrubbing: bool) -> Overlays {
@@ -468,12 +494,17 @@ impl Waveform {
         let followed = state.inspecting.is_none();
         if e.modifiers.shift || dx.abs() > dy.abs() {
             let input = if dx.abs() > dy.abs() { dx } else { dy };
-            let width = f64::from(f32::from(layout.bounds.size.width)).max(1.);
+            let width = layout.time_length();
+            let input = if layout.axis.reversed() {
+                -input
+            } else {
+                input
+            };
             let moved = state.viewport.frame_at(0.5) - input * state.viewport.span / width;
             state.inspecting = Some(moved.clamp(0., track.source.frames.saturating_sub(1) as f64));
         } else if dy != 0. {
             let anchor = if state.inspecting.is_some() {
-                layout.fraction(e.position.x)
+                layout.fraction(e.position)
             } else {
                 0.5
             };
@@ -656,9 +687,12 @@ impl Waveform {
         // the texture in this scene. Keep the retained path at wider zooms.
         let start = crate::diagnostics::begin_stage();
         let surface = self.surface(&track);
-        let Some((bounds, view)) = surface.target(layout.bounds, layout.scale) else {
+        let Some((bounds, projection)) =
+            surface.target_on(layout.bounds, layout.scale, layout.axis)
+        else {
             return false;
         };
+        let view = projection.view;
         crate::diagnostics::stage(start, "wave_projection", 0, 0);
         let overlays = self.overlays(&track, cx);
         if overlays.sample_points && sample_spacing(&view, layout.scale) {
@@ -678,9 +712,9 @@ impl Waveform {
         {
             let start = crate::diagnostics::begin_stage();
             self.texture.set_sample_points(SamplePoints::Hidden);
-            let ready = self
-                .texture
-                .repaint(window, cx, view, &evidence, surface.viewport.first);
+            let ready =
+                self.texture
+                    .repaint(window, cx, projection, &evidence, surface.viewport.first);
             crate::diagnostics::stage(start, "wave_retained_submit", u64::from(ready), 0);
             if !ready {
                 *self.displayed.borrow_mut() = None;
@@ -802,16 +836,17 @@ impl Render for Waveform {
         let active = self.presented && window.visibility() == WindowVisibility::Visible;
         let surface = self.surface(&track);
         let shown = self.position.viewport;
+        let axis = self.settings.axis();
         let target = self
             .layout
             .get()
             .filter(|_| active)
-            .and_then(|layout| surface.target(layout.bounds, layout.scale));
+            .and_then(|layout| surface.target_on(layout.bounds, layout.scale, axis));
         let panel_id = cx.entity_id().as_u64();
         let (evidence, coverage) = crate::diagnostics::with_panel(panel_id, || {
             let start = crate::diagnostics::begin_stage();
             let (evidence, coverage) =
-                self.prepare(&track, &surface, target.as_ref().map(|(_, view)| view));
+                self.prepare(&track, &surface, target.as_ref().map(|(_, p)| &p.view));
             crate::diagnostics::stage(
                 start,
                 "wave_scene",
@@ -934,13 +969,20 @@ impl Render for Waveform {
                                     d.frames.fetch_add(1, Relaxed);
                                 }
                                 let scale = window.scale_factor();
-                                let previous = bounds.replace(Some(Layout { bounds: b, scale }));
-                                let Some((target, view)) = surface.target(b, scale) else {
+                                let previous = bounds.replace(Some(Layout {
+                                    bounds: b,
+                                    scale,
+                                    axis,
+                                }));
+                                let Some((target, projection)) = surface.target_on(b, scale, axis)
+                                else {
                                     displayed.borrow_mut().take();
                                     return;
                                 };
                                 let start = crate::diagnostics::begin_stage();
+                                let view = projection.view;
                                 let layout = Layout {
+                                    axis,
                                     bounds: target,
                                     scale,
                                 };
@@ -961,8 +1003,8 @@ impl Render for Waveform {
                                     .as_ref()
                                     .filter(|h| h.is_hovered(window))
                                     .and_then(|_| {
-                                        waveform::inspection::hit_sample(
-                                            &view,
+                                        waveform::inspection::hit_sample_oriented(
+                                            &projection,
                                             f64::from(scale),
                                             surface.viewport.first,
                                             layout.physical(window.mouse_position()),
@@ -984,7 +1026,7 @@ impl Render for Waveform {
                                         window,
                                         cx,
                                         target,
-                                        view,
+                                        projection,
                                         &evidence,
                                         surface.viewport.first,
                                     );
@@ -1065,10 +1107,7 @@ impl Render for Waveform {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
                                         viewport: shown,
-                                        layout: Layout {
-                                            bounds: target,
-                                            scale,
-                                        },
+                                        layout,
                                     })
                                 } else {
                                     None
@@ -1079,9 +1118,9 @@ impl Render for Waveform {
                                     d.wave_input_us
                                         .fetch_max(input.elapsed().as_micros() as u64, Relaxed);
                                 }
-                                if previous
-                                    .is_none_or(|p| p.bounds.size != b.size || p.scale != scale)
-                                    || failed != texture.unavailable()
+                                if previous.is_none_or(|p| {
+                                    p.bounds.size != b.size || p.scale != scale || p.axis != axis
+                                }) || failed != texture.unavailable()
                                     || limited != texture.limited()
                                 {
                                     window.on_next_frame(move |_, cx| {
@@ -1099,11 +1138,20 @@ impl Render for Waveform {
                     .child(
                         div()
                             .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .w(px(1.))
-                            .left(relative(0.5))
-                            .ml(px(-0.5))
+                            .when(axis.vertical(), |line| {
+                                line.left_0()
+                                    .right_0()
+                                    .h(px(1.))
+                                    .top(relative(0.5))
+                                    .mt(px(-0.5))
+                            })
+                            .when(!axis.vertical(), |line| {
+                                line.top_0()
+                                    .bottom_0()
+                                    .w(px(1.))
+                                    .left(relative(0.5))
+                                    .ml(px(-0.5))
+                            })
                             .bg(if inspecting {
                                 material.text_muted
                             } else {
@@ -1112,7 +1160,30 @@ impl Render for Waveform {
                     )
                     .on_scroll(cx.listener(|panel, e, window, cx| panel.wheel(e, window, cx)))
                     .on_mouse_down(MouseButton::Left, cx.listener(Waveform::mouse_down))
-                    .context_menu(move |menu, _, _| {
+                    .context_menu(move |mut menu, _, _| {
+                        for (label, vertical, checked) in [
+                            ("Vertical Time Axis", true, settings.vertical),
+                            ("Reverse Time Axis", false, settings.reverse_time_axis),
+                        ] {
+                            let panel = menu_panel.clone();
+                            menu = menu.item(PopupMenuItem::new(label).checked(checked).on_click(
+                                move |_, window, cx| {
+                                    let _ = panel.update(cx, |panel, cx| {
+                                        panel.cancel_press(window, cx);
+                                        if vertical {
+                                            panel.settings.vertical = !panel.settings.vertical;
+                                        } else {
+                                            panel.settings.reverse_time_axis =
+                                                !panel.settings.reverse_time_axis;
+                                        }
+                                        panel.displayed.borrow_mut().take();
+                                        panel.layout.set(None);
+                                        cx.emit(SettingsChanged);
+                                        cx.notify();
+                                    });
+                                },
+                            ));
+                        }
                         let panel = menu_panel.clone();
                         menu.item(
                             PopupMenuItem::new("Show Sample Points")
@@ -1167,6 +1238,40 @@ mod point_tests {
                 .unwrap()
                 .show_sample_points
         );
+    }
+
+    #[test]
+    fn panel_orientation_roundtrips_and_registers_the_time_dimension() {
+        use super::{Layout, TimeAxis};
+        use gpui_kit::{Bounds, point, px, size};
+
+        for (vertical, reverse, axis) in [
+            (false, false, TimeAxis::Right),
+            (true, false, TimeAxis::Down),
+            (false, true, TimeAxis::Left),
+            (true, true, TimeAxis::Up),
+        ] {
+            let settings = Settings {
+                vertical,
+                reverse_time_axis: reverse,
+                ..Default::default()
+            };
+            let decoded: Settings =
+                serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+            assert_eq!(decoded.axis(), axis);
+            let layout = Layout {
+                axis,
+                bounds: Bounds::new(point(px(10.), px(16.)), size(px(400.), px(200.))),
+                scale: 1.5,
+            };
+            let [time, amplitude] = axis.dimensions([400., 200.]);
+            let [x, y] = axis.to_surface([0.25 * time, 0.7 * amplitude], [400., 200.]);
+            assert_eq!(layout.time_length(), time);
+            assert_eq!(
+                layout.fraction(layout.bounds.origin + point(px(x as f32), px(y as f32))),
+                0.25
+            );
+        }
     }
 
     #[test]
