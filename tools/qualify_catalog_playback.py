@@ -68,7 +68,7 @@ def journey(exe, test_exe, output):
         for actions, content in [(["Artists"], "AA Artist 000001"), (["Releases"], "AA Release 000001"),
                                  (["Open Tree fixture"], "View · Tracks"),
                                  (["View · Tracks", "Tree"], "Folder 00001")]:
-            action = " → ".join(actions)
+            action = " then ".join(actions)
             start = time.monotonic()
             for step in actions:
                 click_control(hwnd, wait_for(process, step)[1])
