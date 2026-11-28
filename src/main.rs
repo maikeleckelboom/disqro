@@ -77,6 +77,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             diagnostics::observe_waveform_surfaces(cx);
+            diagnostics::watch_foreground(cx);
             theme::install(theme::Appearance::Dark, cx);
             workspace::bind_keys(cx);
             disclosure::bind_keys(cx);

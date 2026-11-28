@@ -1,5 +1,12 @@
-"""Exercise large indexed destinations and a paged folder during silent CUE playback."""
+"""Exercise large indexed destinations and a paged folder during silent CUE playback.
+
+Each step is timed twice: from the click until UI Automation finds its
+content, and inside the player, from the navigation until its first render
+that lists rows (the playback trace's navigation_to_rows_max_us). Only the
+second excludes the automation's own process and tree queries.
+"""
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -12,7 +19,7 @@ import traceback
 from capture_interface import layout
 from private_desktop import run
 from qualify_music_browser import close, launch, wait_for
-from qualify_spectrum import click_control
+from qualify_spectrum import click_control, control_centers
 
 CARDINALITY = 40960
 
@@ -59,6 +66,10 @@ def journey(exe, test_exe, output):
     settings = layout(root, 260, 980, mode="tracks", location={"Library": root})
     settings["places"] = {"items": [{"path": str(folders), "origin": "Custom", "label": "Tree fixture"}]}
     elapsed = {}
+    steps = []
+    trace = output / "trace.csv"
+    os.environ["DISQRO_PLAYBACK_TRACE"] = str(trace)
+    launched = time.monotonic()
     process = launch(exe, output, settings)
     try:
         hwnd, chapter = wait_for(process, "Chapter 01")
@@ -69,19 +80,38 @@ def journey(exe, test_exe, output):
                                  (["Open Tree fixture"], "View · Tracks"),
                                  (["View · Tracks", "Tree"], "Folder 00001")]:
             action = " then ".join(actions)
+            # Find every control first, so the timed span starts at the click.
+            points = [control_centers(hwnd, [step])[0] for step in actions[:1]]
             start = time.monotonic()
-            for step in actions:
-                click_control(hwnd, wait_for(process, step)[1])
+            for i, step in enumerate(actions):
+                if i:
+                    time.sleep(0.3)
+                    points.append(control_centers(hwnd, [step])[0])
+                click_control(hwnd, points[i])
+                if i == len(actions) - 1:
+                    steps.append((action, time.monotonic() - launched))
             wait_for(process, content, timeout=20)
             wait_for(process, "Pause")
             elapsed[action] = round(time.monotonic() - start, 3)
+            time.sleep(1.5)
     finally:
         close(process)
+    with trace.open(newline="") as f:
+        samples = [{k: int(v) for k, v in r.items()} for r in csv.DictReader(f)]
+    ends = [at for _, at in steps[1:]] + [steps[-1][1] + 10]
+    internal = {}
+    for (action, at), end in zip(steps, ends):
+        # A trace row covers the second before its timestamp.
+        window = [r for r in samples if at * 1000 < r["ms"] <= end * 1000 and r["navigations"]]
+        # A folder of only subfolders lists no rows in Tracks view: no timing.
+        internal[action] = max((r["navigation_to_rows_max_us"] / 1000 for r in window), default=None)
     queue = json.loads((output / "workspace-v1.json").read_text(encoding="utf-8"))["queue"]
     current = queue["queue"]["current"]
     assert "Chapter" in queue["queue"]["entries"][current]["track"]["title"]
     assert current > 0 or queue["position"] > 0
     report = {"cardinality": CARDINALITY, "treeFolders": 4400, "secondsIncludingUIAutomation": elapsed,
+              "navigationToRowsMs": internal,
+              "foregroundLagMaxMs": max((r["foreground_lag_max_us"] for r in samples), default=0) / 1000,
               "queuePosition": queue["position"], "current": current}
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 

@@ -773,6 +773,7 @@ impl Browser {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.navigation_trace.begin();
         let had_list_focus = self.list_focus(cx).is_focused(window);
         self.cancel_pending(cx);
         self.page = visit

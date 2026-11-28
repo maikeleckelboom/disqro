@@ -152,6 +152,8 @@ pub struct Browser {
     pub notice: Option<String>,
     /// Discovery of the open folder is running.
     pub busy: bool,
+    /// Times navigation to listed rows while the playback trace records.
+    pub(crate) navigation_trace: crate::diagnostics::NavigationTrace,
     /// It has run long enough to say so.
     pub slow: bool,
     /// The open folder is shown with its subfolders, as a collection.
@@ -460,6 +462,7 @@ impl Browser {
             search,
             catalog,
             tree_root: None,
+            navigation_trace: Default::default(),
             active: false,
             folder_ready: false,
             raw: vec![],
@@ -800,6 +803,7 @@ impl Browser {
         if self.presentation() == Some(mode) && self.prefs.mode == mode {
             return;
         }
+        self.navigation_trace.begin();
         let had_list_focus = self.list_focus(cx).is_focused(window);
         let was_tree = self.listing_tree();
         if let Location::Album { root, .. } | Location::Release { root, .. } = self.location {

@@ -741,6 +741,18 @@ impl Browser {
             .into_any_element()
     }
 
+    /// The rows of the table this browser lists in its current view.
+    fn listed_rows(&self, cx: &App) -> usize {
+        use gpui_kit::component::table::TableDelegate as _;
+        if self.listing_tree() {
+            self.tree.read(cx).delegate().rows_count(cx)
+        } else if self.listing_shelf() {
+            self.discs.read(cx).delegate().rows_count(cx)
+        } else {
+            self.table.read(cx).delegate().rows_count(cx)
+        }
+    }
+
     /// Whether the filter row is shown: once asked for, and for as long as
     /// a filter hides rows.
     fn filter_shown(&self, cx: &App) -> bool {
@@ -944,6 +956,8 @@ fn view_picker(
 /// The table of recordings, or of albums and CDs.
 impl Render for Browser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _timer = crate::diagnostics::Timer::measure(|d| &d.browser_render_us);
+        self.navigation_trace.rows(self.listed_rows(cx));
         let m = *materials(cx);
         // Rows follow the Cover column, also while its boundary is dragged:
         // the table's changes re-render this view.

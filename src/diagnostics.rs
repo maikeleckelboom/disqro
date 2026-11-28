@@ -72,6 +72,10 @@ pub struct Counters {
     pub spectrum_paints: AtomicU64,
     pub spectrum_paint_us: AtomicU64,
     pub publish_to_paint_us: AtomicU64,
+    pub navigations: AtomicU64,
+    pub navigation_to_rows_us: AtomicU64,
+    pub browser_render_us: AtomicU64,
+    pub foreground_lag_us: AtomicU64,
 }
 static COUNTERS: OnceLock<Counters> = OnceLock::new();
 pub fn get() -> Option<&'static Counters> {
@@ -260,6 +264,10 @@ pub fn start() {
                 ("spectrum_paints", &d.spectrum_paints),
                 ("spectrum_paint_max_us", &d.spectrum_paint_us),
                 ("publish_to_paint_max_us", &d.publish_to_paint_us),
+                ("navigations", &d.navigations),
+                ("navigation_to_rows_max_us", &d.navigation_to_rows_us),
+                ("browser_render_max_us", &d.browser_render_us),
+                ("foreground_lag_max_us", &d.foreground_lag_us),
             ];
             let mut out = std::io::BufWriter::new(&mut out);
             write!(out, "ms")?;
@@ -290,6 +298,50 @@ impl Drop for Timer {
         self.1
             .fetch_max(self.0.elapsed().as_micros() as u64, Relaxed);
     }
+}
+
+/// Times one Music Browser from the start of a navigation or view change
+/// to the first render that lists rows for it.
+#[derive(Default)]
+pub struct NavigationTrace(std::cell::Cell<Option<Instant>>);
+impl NavigationTrace {
+    pub fn begin(&self) {
+        if get().is_some() {
+            self.0.set(Some(Instant::now()));
+        }
+    }
+    pub fn rows(&self, rows: usize) {
+        if rows == 0 {
+            return;
+        }
+        if let (Some(d), Some(at)) = (get(), self.0.take()) {
+            d.navigations.fetch_add(1, Relaxed);
+            d.navigation_to_rows_us
+                .fetch_max(at.elapsed().as_micros() as u64, Relaxed);
+        }
+    }
+}
+
+/// Measures how late the main thread runs a short recurring timer, which
+/// is how long it was blocked. Lateness within the system timer resolution,
+/// usually up to 16 ms, is not a stall.
+pub fn watch_foreground(cx: &mut gpui_kit::App) {
+    const PERIOD: Duration = Duration::from_millis(8);
+    if get().is_none() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        loop {
+            let at = Instant::now();
+            cx.background_executor().timer(PERIOD).await;
+            if let Some(d) = get() {
+                let late = at.elapsed().saturating_sub(PERIOD);
+                d.foreground_lag_us
+                    .fetch_max(late.as_micros() as u64, Relaxed);
+            }
+        }
+    })
+    .detach();
 }
 
 #[derive(Default)]
