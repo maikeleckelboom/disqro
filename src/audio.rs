@@ -1419,7 +1419,7 @@ impl Engine {
         self.status.skipped = self
             .status
             .entry
-            .map(|id| (id, format!("Skipped recording Â· {error:#}")));
+            .map(|id| (id, format!("Skipped recording · {error:#}")));
         self.retry_next = true;
         self.status.playing = true;
         Ok(())
