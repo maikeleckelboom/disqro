@@ -458,9 +458,10 @@ impl Waveform {
         if !self.presented || layout.scale != window.scale_factor() {
             return;
         }
-        self.position
+        let moving = self
+            .position
             .update(&track, frame_time(Instant::now()), false);
-        self.input_at = crate::diagnostics::get().map(|_| Instant::now());
+        let input_at = crate::diagnostics::get().map(|_| Instant::now());
         let delta = e.delta.pixel_delta(px(40.));
         let (dx, dy) = (f64::from(f32::from(delta.x)), f64::from(f32::from(delta.y)));
         let state = &mut self.position;
@@ -484,13 +485,21 @@ impl Waveform {
                 (rate * DETAIL_SECONDS) as usize,
                 track.source.frames,
             );
+            if zoomed.span == state.viewport.span {
+                cx.stop_propagation();
+                return;
+            }
             state.zoom = zoom::Zoom::frames_at(zoomed.span, track.source.rate);
             if state.inspecting.is_some() {
                 state.inspecting = Some(zoomed.frame_at(0.5));
             }
-            // Keep the status label current without rebuilding the scene for
-            // every fractional wheel or trackpad event.
-            if self.zoom_label.is_none() {
+            // A stationary deck needs its new readout on the same interaction.
+            // During playback the texture moves on retained frames, so coalesce
+            // label updates across fractional wheel events.
+            if !moving {
+                self.zoom_label.take();
+                cx.notify();
+            } else if self.zoom_label.is_none() {
                 let panel = cx.weak_entity();
                 self.zoom_label = Some(window.spawn(cx, async move |cx| {
                     cx.background_executor()
@@ -507,6 +516,7 @@ impl Waveform {
         if followed && state.inspecting.is_some() {
             cx.notify();
         }
+        self.input_at = input_at;
         self.motion.request(cx.weak_entity(), window);
     }
 
