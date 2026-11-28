@@ -220,7 +220,7 @@ impl Render for Spectrum {
             .bg(m.canvas)
             .child(
                 super::header::panel_header()
-                    .child(super::header::title(s.mode.label(), &m))
+                    .child(super::header::summary(s.mode.label(), &m))
                     .child(super::header::detail(unit, &m))
                     .when(s.hold != Hold::Off, |row| {
                         row.child(

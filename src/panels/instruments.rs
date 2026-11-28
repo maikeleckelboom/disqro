@@ -347,7 +347,10 @@ impl Render for Instrument {
             .bg(m.canvas)
             .child(
                 super::header::panel_header()
-                    .child(super::header::title(name, &m))
+                    // The tab already names the default view.
+                    .when(name != config.title(), |row| {
+                        row.child(super::header::summary(name, &m))
+                    })
                     .child(super::header::detail(
                         if self.frozen { "Frozen" } else { detail },
                         &m,
