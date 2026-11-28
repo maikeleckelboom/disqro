@@ -657,8 +657,7 @@ impl Browser {
             .items_center()
             .px(px(BAR_INSET))
             .gap(px(ADDRESS_GAP))
-            // Narrower than its composition, the toolbar keeps its right end,
-            // where the panel menu offers everything, and clips its left.
+            // When the controls exceed the slot, keep the panel menu reachable.
             .justify_end()
             .overflow_hidden()
             .bg(m.canvas)

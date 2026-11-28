@@ -1,5 +1,7 @@
 # Design foundations
 
+Use this specification to scope individual interface missions. Comfortable density, permanent tabs and one browser toolbar composition are approved foundations. The browsing, player and secondary-panel directions below guide subsequent work. Their implementation status and open decisions live in the [review handoff](design-review-handoff.md).
+
 Disqro's interface draws its measurements and colors from one place, [`src/theme.rs`](../src/theme.rs). `Materials` holds the colors and `install` maps them onto GPUI Kit's theme, so Kit components and Disqro's own views share one source. The `size` module holds the geometry and type scale. A surface takes its measurements from there instead of choosing its own, so headers, rows and controls line up across panels that sit side by side.
 
 ## Comfortable density
@@ -42,7 +44,7 @@ The toolbar has one composition at every width:
 Back  Forward  Breadcrumb ………………  Filter  View ▾  More
 ```
 
-Width changes only the breadcrumb. It first folds its earliest ancestors into an Earlier locations menu, then truncates the current location at its end. Back, Forward, Filter, the view picker and the panel menu keep their order, labels and sizes at every width. The view picker has one width for every view, so choosing a view never moves its neighbors. It also holds the folder scope wherever a folder offers one. Up and CD and release stepping are in the panel menu and keep their shortcuts.
+Give available width to the breadcrumb. Fold its earliest ancestors into Earlier locations, then truncate the current location at its end. The picker reserves the same width across view choices. As space tightens it can shorten its label to protect the current location. At still smaller widths the breadcrumb shrinks again. Preserve the control order and access to navigation, filtering and views. Folder scope belongs in the view picker wherever a folder offers one. Up and CD and release stepping are in the panel menu and keep their shortcuts. The dock can currently allocate less space than these controls need.
 
 Filter opens a row below the toolbar, so the field never takes space from the breadcrumb or moves a control. The row stays while a filter hides rows, and Escape or its close button clears and closes it.
 
@@ -52,9 +54,23 @@ Names and titles end in an ellipsis. Middle truncation is kept for folder paths 
 
 ## Color roles
 
-Text has three roles: `text` for primary labels, `text_muted` for secondary metadata, and `text_faint` for column headings, axes and other quiet labels. Faint text keeps at least 4.5:1 contrast against the plain surfaces, from `tab_well` to `overlay`, so quiet never means unreadable. A selected row lowers it to about 3.7:1 and a hovered row to about 4.5:1.
+Use `text` for primary labels, `text_muted` for secondary metadata and `text_faint` for column headings, axes and quiet labels. Target at least 4.5:1 for small text. On the dark canvas, faint text measures 6.46:1 at rest, 5.75:1 on the hover tint and 4.71:1 on the selection tint.
 
 The surfaces stay neutral graphite: `chrome` frames the window, `tab_well` recesses behind tabs, `canvas` holds content and `raised` holds the player. The player's timeline lane, `wave.lane`, is the same black the waveform renderer clears to, so the waveform has no visible plate. Artwork and the musical visualizations supply the color. The play button is the one control with a finish of its own, `Materials::silver`: satin metal with machined rim highlights, which lights a thin ring in the accent color while playing.
+
+## Browsing direction
+
+- **Tree** gives the available width to the item name in a minimal hierarchical list. Use a disclosure for expandable rows, restrained indentation and contextual counts or durations. Remove permanent column headers and repetitive metadata. Keep lazy loading, virtualization, keyboard and range selection, drag and drop, expansion, exact reveal, scroll restoration and independent browser history. In Library, simplify verified musical relationships. In Locations, show the physical hierarchy. Matching titles alone cannot establish identity.
+- **Tracks** provides a flat track table by default, with optional grouping. Preserve configured column order, widths, pinning, sorting, filtering, selection, contextual playback order and each browser’s saved choices.
+- **Releases** centers artwork, release and artist identity, contextual playback actions and a clear disc-to-track hierarchy. Multi-disc releases and CUE chapters keep stable navigation and playback identities. [Browser contracts](unified-music-browser.md) · [Releases](releases.md)
+
+## Workspace and player direction
+
+Listening, Library preparation and Analysis are reference arrangements of the same flexible workspace. Keep groups, splits, multiple independent panel instances, drag targets, keyboard focus and layout restoration available in each. Keep navigation and queue controls reachable while the player spans the full client width.
+
+Give artwork, track identity, Favorite and primary transport clear positions. Keep secondary transport, volume and optional meters accessible. The horizontal player waveform can use the entire window width with either sidebar open. Docked waveforms have independent presentation settings and share the musical clock and analysis data. Future vertical orientation belongs in coordinate mapping and presentation. Preserve source-accurate seeking, pointer-anchored zoom, Track and Full CD scope, continuous playback and queue occurrence identity.
+
+Use list-oriented Queue and History views, readable statistics, and common header, axis and control roles for analyzers. Keep playback, DSP, asynchronous loading, cache ownership and personal-library persistence under their existing domain owners. [Workspace architecture](listening-workspace.md) · [Musical timeline](musical-timeline.md)
 
 ## Qualification
 
