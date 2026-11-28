@@ -48,6 +48,9 @@ pub struct ClosedPanel {
     pub record: PanelRecord,
     #[serde(default)]
     pub beside: Vec<InstanceId>,
+    /// Insert before this former neighbor if it is still open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<InstanceId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -211,6 +214,7 @@ mod tests {
                 ..Default::default()
             },
             beside: vec![InstanceId(4)],
+            before: Some(InstanceId(4)),
         };
         let p = Profile {
             workspace: WorkspaceState {

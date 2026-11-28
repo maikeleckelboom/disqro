@@ -184,7 +184,7 @@ struct Tracked {
 
 /// Where a new pane goes.
 enum Place {
-    Group(NodeId),
+    Group(NodeId, Option<usize>),
     Beside(NodeId, gpui_kit::base::Placement, Option<Pixels>),
 }
 
@@ -354,7 +354,7 @@ impl Workspace {
                             if s.skin.can_open_beside(node) {
                                 Place::Beside(node, gpui_kit::base::Placement::Right, None)
                             } else {
-                                Place::Group(node)
+                                Place::Group(node, None)
                             }
                         });
                     s.open_browser(Some(destination.clone()), None, place, w, cx);
@@ -738,7 +738,7 @@ impl Workspace {
                 .and_then(|p| self.node_of(&p, cx))
                 .or_else(|| group_of(Home::Main))
             {
-                Some(node) => Place::Group(node),
+                Some(node) => Place::Group(node, None),
                 None => match (group_of(Home::Trailing), group_of(Home::Leading)) {
                     (Some(trailing), _) => Place::Beside(trailing, Left, None),
                     (None, Some(leading)) => Place::Beside(leading, Right, None),
@@ -746,11 +746,11 @@ impl Workspace {
                 },
             },
             Home::Leading => match group_of(Home::Leading) {
-                Some(node) => Place::Group(node),
+                Some(node) => Place::Group(node, None),
                 None => Place::Beside(root, Left, Some(px(LEADING_WIDTH))),
             },
             Home::Trailing => match group_of(Home::Trailing) {
-                Some(node) => Place::Group(node),
+                Some(node) => Place::Group(node, None),
                 None => Place::Beside(root, Right, Some(px(TRAILING_WIDTH))),
             },
         })
@@ -776,11 +776,11 @@ impl Workspace {
             d.add_panel(pane.clone(), DockPlacement::Center, None, window, cx);
             if first_group.is_some() {
                 match place {
-                    Some(Place::Group(node)) => d.move_panel(
+                    Some(Place::Group(node, ix)) => d.move_panel(
                         id,
                         InsertTarget::Tabs {
                             node,
-                            ix: None,
+                            ix,
                             activate: true,
                         },
                         window,
@@ -851,13 +851,9 @@ impl Workspace {
             .map(|c| c.record.clone())
             .unwrap_or_default();
         let pane = self.new_pane(ty, record, window, cx);
-        let beside = closed
-            .into_iter()
-            .flat_map(|c| c.beside)
-            .find_map(|id| self.pane_with(id, cx).and_then(|p| self.node_of(&p, cx)));
         let place = node
-            .map(Place::Group)
-            .or(beside.map(Place::Group))
+            .map(|node| Place::Group(node, None))
+            .or_else(|| self.closed_place(closed.as_ref()?, cx))
             .or_else(|| self.home_of(ty, cx));
         self.place(&pane, place, window, cx);
         if let Some(browser) = browser_of(&pane, cx) {
@@ -866,6 +862,22 @@ impl Workspace {
                 .update(cx, |r, cx| r.set_active(Some(&browser), cx));
         }
         pane
+    }
+    fn closed_place(&self, closed: &ClosedPanel, cx: &App) -> Option<Place> {
+        if let Some(next) = closed.before.and_then(|id| self.pane_with(id, cx)) {
+            let id = Self::panel_id(&next);
+            let tree = self.center(cx);
+            if let Some(node) = tree.find_panel_node(id)
+                && let Some(PaneRef::Tabs { panels, .. }) = tree.find_node(node).map(|n| n.kind())
+                && let Some(ix) = panels.iter().position(|peer| *peer == id)
+            {
+                return Some(Place::Group(node, Some(ix)));
+            }
+        }
+        closed.beside.iter().find_map(|id| {
+            let peer = self.pane_with(*id, cx)?;
+            self.node_of(&peer, cx).map(|node| Place::Group(node, None))
+        })
     }
     /// Opens a Music Browser, in `node` or the active content group, showing
     /// `destination` or the view `state` describes.
@@ -903,7 +915,13 @@ impl Workspace {
         match browser_of(pane, cx) {
             Some(browser) => {
                 let state = BrowserPane::new_tab_state(browser.read(cx), cx);
-                self.open_browser(None, Some(state), node.map(Place::Group), window, cx);
+                self.open_browser(
+                    None,
+                    Some(state),
+                    node.map(|node| Place::Group(node, None)),
+                    window,
+                    cx,
+                );
             }
             None => {
                 self.remember_layout(None, cx);
@@ -911,7 +929,7 @@ impl Workspace {
                 let (ty, mut record) = (p.ty, p.record(cx));
                 record.id = None;
                 let copy = self.new_pane(ty, record, window, cx);
-                self.place(&copy, node.map(Place::Group), window, cx);
+                self.place(&copy, node.map(|node| Place::Group(node, None)), window, cx);
             }
         }
     }
@@ -942,18 +960,23 @@ impl Workspace {
     }
     fn remove_pane(&mut self, pane: &Entity<Pane>, window: &mut Window, cx: &mut Context<Self>) {
         let p = pane.read(cx);
-        let beside = self
+        let group = self
             .node_of(pane, cx)
             .map(|node| self.group_members(node, cx))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|other| other != pane)
-            .map(|other| other.read(cx).id)
-            .collect();
+            .unwrap_or_default();
+        let before = group
+            .windows(2)
+            .find(|pair| pair[0] == *pane)
+            .map(|pair| pair[1].read(cx).id);
         let closed = ClosedPanel {
             key: p.ty.key.to_string(),
             record: p.record(cx),
-            beside,
+            before,
+            beside: group
+                .iter()
+                .filter(|other| *other != pane)
+                .map(|other| other.read(cx).id)
+                .collect(),
         };
         // Keep the most recently closed instance of each type in the picker.
         self.closed.retain(|c| c.key != closed.key);
