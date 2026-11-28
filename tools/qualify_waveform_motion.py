@@ -429,7 +429,7 @@ def measure(args):
                 if len(widths) != 1:
                     raise RuntimeError(f"Expected one shared physical deck width, got {sorted(widths)}")
                 for label, span in boundary_spans(widths.pop(), args.source_rate).items():
-                    exact_zoom(hwnd, f"{span} samples", controls)
+                    exact_zoom(hwnd, f"{span / args.source_rate:.17f} s", controls)
                     expected[label] = span
                     hold(label)
             for label, notches in sweep() if args.residency else ():

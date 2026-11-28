@@ -30,10 +30,8 @@ use std::{
 use waveform::analysis::DETAIL_SECONDS;
 use waveform::{Role, TimeAxis};
 
-mod inspection;
 #[cfg(all(windows, feature = "qualification"))]
-mod inspection_journey;
-use waveform::inspection::SamplePoints;
+mod zoom_journey;
 
 mod scrub;
 mod zoom;
@@ -94,23 +92,6 @@ impl Motion {
             state
                 .panels
                 .retain(|view| view.entity_id() != panel.entity_id());
-        }
-    }
-
-    /// Modifier keys follow keyboard focus, which can be in another panel
-    /// while the pointer inspects a sample. Redraw only a registered hit.
-    pub(crate) fn inspection_modifiers(&self, window: &Window, cx: &mut App) {
-        for panel in &self.0.borrow().presented {
-            if let Some(entity) = panel.upgrade() {
-                let deck = entity.read(cx);
-                if deck.layout.get().is_some_and(|layout| {
-                    deck.texture
-                        .sample_hit(layout.physical(window.mouse_position()))
-                        .is_some()
-                }) {
-                    cx.notify(panel.entity_id());
-                }
-            }
         }
     }
 
@@ -224,11 +205,6 @@ struct Layout {
 }
 
 impl Layout {
-    fn physical(self, point: Point<Pixels>) -> [f64; 2] {
-        let delta = point - self.bounds.origin;
-        [delta.x, delta.y].map(|p| f64::from(f32::from(p)) * f64::from(self.scale))
-    }
-
     fn time_length(self) -> f64 {
         let [time, _] = self
             .axis
@@ -342,25 +318,14 @@ impl DeckPosition {
     }
 }
 
-/// Per-panel preferences. Workspaces saved with the retired sample ruler
-/// still load: unknown keys are ignored and dropped on the next save.
+/// The player saves only its time-axis preferences.
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
-    show_sample_points: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     vertical: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     reverse_time_axis: bool,
-}
-
-/// What the deck draws over its waveform for the current transport state.
-#[derive(Clone, Copy, Default, PartialEq, Debug)]
-struct Overlays {
-    /// Markers at decoded frame positions.
-    sample_points: bool,
-    /// Hover measurements, the selection ring and its guide.
-    inspection: bool,
 }
 
 impl Settings {
@@ -370,16 +335,6 @@ impl Settings {
             (false, true) => TimeAxis::Left,
             (true, false) => TimeAxis::Down,
             (true, true) => TimeAxis::Up,
-        }
-    }
-
-    /// Markers stay visible while the user drags the waveform by hand and
-    /// hide during ordinary playback. Measurements wait for the gesture to end.
-    fn visible(self, playing: bool, scrubbing: bool) -> Overlays {
-        let sample_points = self.show_sample_points && (scrubbing || !playing);
-        Overlays {
-            sample_points,
-            inspection: sample_points && !scrubbing,
         }
     }
 }
@@ -399,9 +354,6 @@ struct Waveform {
     coverage: Option<&'static str>,
     presented: bool,
     texture: Texture,
-    channel_widths: Rc<RefCell<inspection::ChannelWidths>>,
-    /// Markers the last deck paint asked the surface to draw.
-    requested_points: Rc<Cell<SamplePoints>>,
     input_at: Option<Instant>,
     zoom_label: Option<Task<()>>,
     zoom_focus: FocusHandle,
@@ -418,7 +370,7 @@ impl Waveform {
         cx: &mut Context<Self>,
     ) -> Self {
         #[cfg(all(windows, feature = "qualification"))]
-        inspection_journey::start(window, cx);
+        zoom_journey::start(window, cx);
         cx.observe_window_activation(window, |panel, window, cx| {
             if !window.is_window_active() {
                 panel.cancel_press(window, cx);
@@ -461,8 +413,6 @@ impl Waveform {
             coverage: None,
             presented: false,
             texture: Default::default(),
-            channel_widths: Default::default(),
-            requested_points: Default::default(),
             input_at: None,
             zoom_label: None,
             zoom_focus: cx.focus_handle().tab_stop(true),
@@ -549,15 +499,6 @@ impl Waveform {
         }
         self.input_at = input_at;
         self.motion.request(cx.weak_entity(), window);
-    }
-
-    fn overlays(&self, track: &WaveTrack, cx: &App) -> Overlays {
-        self.settings.visible(
-            track.playing
-                || (self.settings.show_sample_points
-                    && track.position(Instant::now()).is_some_and(|p| p.advancing)),
-            self.player.read(cx).waveform_grabbed(),
-        )
     }
 
     /// What the deck draws: only the frames a playhead can reach, so audio
@@ -683,8 +624,6 @@ impl Waveform {
         }
         let grabbed = self.grabbed();
         let moving = self.position.update(&track, now, grabbed);
-        // Sample markers and any measurement must use the same viewport as
-        // the texture in this scene. Keep the retained path at wider zooms.
         let start = crate::diagnostics::begin_stage();
         let surface = self.surface(&track);
         let Some((bounds, projection)) =
@@ -694,11 +633,6 @@ impl Waveform {
         };
         let view = projection.view;
         crate::diagnostics::stage(start, "wave_projection", 0, 0);
-        let overlays = self.overlays(&track, cx);
-        if overlays.sample_points && sample_spacing(&view, layout.scale) {
-            cx.notify();
-            return false;
-        }
         let start = crate::diagnostics::begin_stage();
         let (evidence, coverage) = self.prepare(&track, &surface, Some(&view));
         let status = Self::coverage(coverage, track.source.available);
@@ -711,7 +645,6 @@ impl Waveform {
         #[cfg(windows)]
         {
             let start = crate::diagnostics::begin_stage();
-            self.texture.set_sample_points(SamplePoints::Hidden);
             let ready =
                 self.texture
                     .repaint(window, cx, projection, &evidence, surface.viewport.first);
@@ -862,26 +795,11 @@ impl Render for Waveform {
             self.motion.request(cx.weak_entity(), window);
         }
         let seconds = self.position.viewport.span / f64::from(track.source.rate);
-        let title = if seconds < 0.05 {
-            format!(
-                "{} samples visible",
-                self.position.viewport.span.round() as usize
-            )
-        } else {
-            format!("{seconds:.3} s visible")
-        };
+        let title = format!("{} visible", zoom::duration_label(seconds));
         let bounds = self.layout.clone();
         let displayed = self.displayed.clone();
         let panel = cx.weak_entity();
         let texture = self.texture.clone();
-        let overlays = self.overlays(&track, cx);
-        let inspector = overlays
-            .inspection
-            .then(|| Rc::new(RefCell::new(None::<inspection::Reading>)));
-        let measurement = inspector.clone();
-        let channel_widths = self.channel_widths.clone();
-        let requested_points = self.requested_points.clone();
-        let inspection_player = self.player.clone();
         let settings = self.settings;
         let menu_panel = cx.weak_entity();
         let input = self.input_at.take();
@@ -924,23 +842,6 @@ impl Render for Waveform {
                                     cx.notify();
                                 })),
                         )
-                    })
-                    .when_some(inspector, |header, reading| {
-                        // Layout belongs to the header. Paint after the surface has
-                        // confirmed this scene's PCM hit and render succeeded.
-                        header.child(deferred(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, window, cx| {
-                                    if let Some(reading) = reading.borrow_mut().take() {
-                                        reading.paint(bounds, window, cx);
-                                    }
-                                },
-                            )
-                            .flex_1()
-                            .min_w_0()
-                            .h_full(),
-                        ))
                     }),
             )
             .child(
@@ -954,12 +855,8 @@ impl Render for Waveform {
                     .when(!grabbed, |viewport| viewport.cursor_grab())
                     .child(
                         canvas(
-                            move |b, w, _| {
-                                overlays
-                                    .inspection
-                                    .then(|| w.insert_hitbox(b, HitboxBehavior::Normal))
-                            },
-                            move |b, hitbox, window, cx| {
+                            |_, _, _| (),
+                            move |b, _, window, cx| {
                                 if !active {
                                     return;
                                 }
@@ -986,40 +883,6 @@ impl Render for Waveform {
                                     bounds: target,
                                     scale,
                                 };
-                                let points = if overlays.sample_points
-                                    && sample_spacing(&view, scale)
-                                    && !evidence.samples.is_empty()
-                                    && inspection_player.read(cx).inspection_source(&track)
-                                {
-                                    SamplePoints::Visible
-                                } else {
-                                    SamplePoints::Hidden
-                                };
-                                let hitbox = hitbox.filter(|_| {
-                                    points != SamplePoints::Hidden
-                                        && inspection_player.read(cx).inspection_current(&track)
-                                });
-                                let hit = hitbox
-                                    .as_ref()
-                                    .filter(|h| h.is_hovered(window))
-                                    .and_then(|_| {
-                                        waveform::inspection::hit_sample_oriented(
-                                            &projection,
-                                            f64::from(scale),
-                                            surface.viewport.first,
-                                            layout.physical(window.mouse_position()),
-                                            |i| {
-                                                evidence
-                                                    .samples
-                                                    .iter()
-                                                    .find_map(|block| block.sample(i))
-                                            },
-                                        )
-                                    });
-                                let requested =
-                                    hit.map_or(points, |h| SamplePoints::Highlight(h.frame));
-                                requested_points.set(requested);
-                                texture.set_sample_points(requested);
                                 let ready = crate::diagnostics::with_panel(panel_id, || {
                                     #[cfg(windows)]
                                     let ready = texture.paint(
@@ -1070,39 +933,6 @@ impl Render for Waveform {
                                     }
                                     ready
                                 });
-                                if ready && let Some(hitbox) = hitbox {
-                                    inspection::listen(
-                                        &panel,
-                                        texture.clone(),
-                                        layout,
-                                        hitbox,
-                                        hit,
-                                        window,
-                                    );
-                                    if let (Some(hit), Some(measurement)) = (hit, &measurement) {
-                                        let chapter = inspection_player
-                                            .read(cx)
-                                            .inspection_chapter(&track, hit.frame as usize);
-                                        let frames = waveform::inspection::visible_frames(
-                                            &view,
-                                            surface.viewport.first,
-                                        );
-                                        let first = if frames.is_empty() {
-                                            hit.frame
-                                        } else {
-                                            frames.start
-                                        };
-                                        let last = frames.end.saturating_sub(1).max(first);
-                                        *measurement.borrow_mut() = Some(inspection::Reading {
-                                            hit,
-                                            chapter,
-                                            channel_widths,
-                                            samples: evidence.samples,
-                                            first_frame: first,
-                                            last_frame: last.max(hit.frame),
-                                        });
-                                    }
-                                }
                                 *displayed.borrow_mut() = if ready {
                                     track.seek.map(|anchor| Displayed {
                                         anchor,
@@ -1184,61 +1014,15 @@ impl Render for Waveform {
                                 },
                             ));
                         }
-                        let panel = menu_panel.clone();
-                        menu.item(
-                            PopupMenuItem::new("Show Sample Points")
-                                .checked(settings.show_sample_points)
-                                .on_click(move |_, _, cx| {
-                                    let _ = panel.update(cx, |panel, cx| {
-                                        panel.settings.show_sample_points =
-                                            !panel.settings.show_sample_points;
-                                        cx.emit(SettingsChanged);
-                                        cx.notify();
-                                    });
-                                }),
-                        )
+                        menu
                     }),
             )
     }
 }
 
-fn sample_spacing(view: &waveform::View, scale: f32) -> bool {
-    SamplePoints::Visible.for_view(view, f64::from(scale)) == SamplePoints::Visible
-}
-
 #[cfg(test)]
-mod point_tests {
-    use super::{Overlays, Settings};
-
-    #[test]
-    fn settings_restore_per_panel_and_gate_transport_transitions() {
-        let other = Settings::default();
-        let restored: Settings =
-            serde_json::from_value(serde_json::json!({"showSamplePoints": true})).unwrap();
-        for (playing, scrubbing, points, inspection) in [
-            (false, false, true, true),
-            // Ordinary playback hides markers.
-            (true, false, false, false),
-            // Manual scrubbing keeps markers but suspends measurements.
-            (false, true, true, false),
-            (true, true, true, false),
-            (false, false, true, true),
-        ] {
-            let visible = restored.visible(playing, scrubbing);
-            assert_eq!(visible.sample_points, points);
-            assert_eq!(visible.inspection, inspection);
-            assert_eq!(other.visible(playing, scrubbing), Overlays::default());
-        }
-        assert_eq!(
-            serde_json::to_value(restored).unwrap(),
-            serde_json::json!({"showSamplePoints": true})
-        );
-        assert!(
-            !serde_json::from_str::<Settings>("{}")
-                .unwrap()
-                .show_sample_points
-        );
-    }
+mod tests {
+    use super::Settings;
 
     #[test]
     fn panel_orientation_roundtrips_and_registers_the_time_dimension() {
@@ -1254,7 +1038,6 @@ mod point_tests {
             let settings = Settings {
                 vertical,
                 reverse_time_axis: reverse,
-                ..Default::default()
             };
             let decoded: Settings =
                 serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
@@ -1275,20 +1058,20 @@ mod point_tests {
     }
 
     #[test]
-    fn workspaces_with_the_retired_sample_ruler_still_load() {
-        for (saved, points) in [
-            (serde_json::json!({"showSampleRuler": true}), false),
-            (
-                serde_json::json!({"showSamplePoints": true, "showSampleRuler": true}),
-                true,
-            ),
-        ] {
-            let settings: Settings = serde_json::from_value(saved).unwrap();
-            assert_eq!(settings.show_sample_points, points);
-            assert_eq!(
-                serde_json::to_value(settings).unwrap(),
-                serde_json::json!({"showSamplePoints": points})
-            );
-        }
+    fn legacy_inspection_preferences_do_not_change_player_presentation() {
+        let saved = serde_json::json!({
+            "vertical": true, "reverseTimeAxis": true,
+            "showSamplePoints": true, "showSampleRuler": true
+        });
+        let settings: Settings = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.axis(), super::TimeAxis::Up);
+        assert_eq!(
+            serde_json::to_value(settings).unwrap(),
+            serde_json::json!({"vertical": true, "reverseTimeAxis": true})
+        );
+        assert_eq!(
+            serde_json::to_value(Settings::default()).unwrap(),
+            serde_json::json!({})
+        );
     }
 }

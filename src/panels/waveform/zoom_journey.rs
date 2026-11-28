@@ -1,4 +1,4 @@
-//! In-process GPUI input for the isolated, silent inspection qualification.
+//! In-process GPUI input for the isolated, silent player deep-zoom qualification.
 use super::*;
 use crate::audio::Command;
 use std::{path::PathBuf, time::Duration};
@@ -9,32 +9,6 @@ fn key(name: &'static str) -> PlatformInput {
         is_held: false,
         prefer_character_input: false,
     })
-}
-
-fn hover_point(panel: &Waveform) -> Option<Point<Pixels>> {
-    let displayed = panel.displayed.borrow();
-    let shown = displayed.as_ref()?;
-    let layout = shown.layout;
-    // The fixture's signal is near mid-height. Hover well above the trace.
-    let frame = shown.viewport.frame_at(0.35).round();
-    let column = ((frame + 0.2 - shown.viewport.first) / shown.viewport.span) as f32;
-    let size =
-        [layout.bounds.size.width, layout.bounds.size.height].map(|p| f64::from(f32::from(p)));
-    let [time, amplitude] = layout.axis.dimensions(size);
-    let location = |row: f64| {
-        let [x, y] = layout
-            .axis
-            .to_surface([time * f64::from(column), amplitude * row], size);
-        layout.bounds.origin + point(px(x as f32), px(y as f32))
-    };
-    let point = location(0.12);
-    let hit = panel.texture.sample_hit(layout.physical(point))?;
-    assert_eq!(hit.frame, frame as u64);
-    assert_eq!(
-        panel.texture.sample_hit(layout.physical(location(0.88))),
-        Some(hit)
-    );
-    Some(point)
 }
 
 struct Journey {
@@ -67,6 +41,20 @@ impl Journey {
     }
 
     async fn capture(&self, cx: &mut AsyncWindowContext, name: &str) -> anyhow::Result<()> {
+        // Input dispatch can finish before GPUI paints the new focus and hover
+        // styles. Let one requested layout reach the window before PrintWindow.
+        let painted = Rc::new(Cell::new(false));
+        let signal = painted.clone();
+        cx.update(|window, _| {
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |_, _| signal.set(true));
+            });
+            window.refresh();
+        })?;
+        self.until(cx, "paint after input", |_, _, _| {
+            painted.get().then_some(())
+        })
+        .await?;
         eprintln!("capture {name}");
         let path = self.folder.join(format!("{name}.png"));
         self.until(cx, name, |_, _, _| path.is_file().then_some(()))
@@ -85,7 +73,7 @@ impl Journey {
     }
 
     async fn run(self, cx: &mut AsyncWindowContext) -> anyhow::Result<()> {
-        let minimum_frame = std::env::var("DISQRO_INSPECTION_MIN_FRAME")
+        let minimum_frame = std::env::var("DISQRO_ZOOM_MIN_FRAME")
             .ok()
             .map(|v| v.parse::<usize>())
             .transpose()?
@@ -121,7 +109,7 @@ impl Journey {
         for (value, dismiss) in [
             ("145 ms", "escape"),
             ("not a duration", "enter"),
-            ("1400 samples", "blur"),
+            ("1.5 ms", "blur"),
         ] {
             self.edit(cx, value).await?;
             if dismiss == "blur" {
@@ -162,7 +150,7 @@ impl Journey {
         self.until(cx, "clicked zoom editor", |p, w, cx| {
             p.zoom_editor
                 .as_ref()?
-                .update(cx, |input, cx| input.set_value("32 samples", w, cx));
+                .update(cx, |input, cx| input.set_value("0.1 ms", w, cx));
             Some(())
         })
         .await?;
@@ -176,23 +164,40 @@ impl Journey {
         let center_tolerance = 2. * f64::EPSILON * initial.first.abs().max(initial.span);
         let same_center =
             |v: Viewport| (v.frame_at(0.5) - initial.frame_at(0.5)).abs() <= center_tolerance;
-        let pointer = self
-            .until(cx, "decoded sample points", |p, _, _| {
-                let shown = p.displayed.borrow().as_ref()?.viewport;
-                if shown.span != 32. || !same_center(shown) {
+        let (pointer, geometry) = self
+            .until(cx, "resident 32-frame continuous trace", |p, _, _| {
+                let displayed = p.displayed.borrow();
+                let shown = displayed.as_ref()?;
+                if shown.viewport.span != 32. || !same_center(shown.viewport) || p.coverage.is_some() {
                     return None;
                 }
-                hover_point(p)
+                let layout = shown.layout;
+                let b = layout.bounds;
+                let physical = |value: Pixels| (f32::from(value) * layout.scale).round() as i32;
+                let local = [physical(b.size.width) as f64 * 0.35, physical(b.size.height) as f64 * 0.3];
+                assert!(p.texture.sample_hit(local).is_none());
+                let pointer = b.origin + point(b.size.width * 0.35, b.size.height * 0.3);
+                Some((pointer, serde_json::json!({
+                    "first": shown.viewport.first, "span": shown.viewport.span,
+                    "bounds": [physical(b.origin.x), physical(b.origin.y), physical(b.size.width), physical(b.size.height)],
+                    "scale": layout.scale, "axis": format!("{:?}", layout.axis),
+                })))
             })
             .await?;
-        self.edit(cx, "32 samples").await?;
-        self.capture(cx, "zoom-editor").await?;
-        dispatch(cx, key("escape"))?;
-        self.until(cx, "editor dismissed over decoded trace", |p, _, _| {
-            (p.zoom_editor.is_none() && hover_point(p).is_some()).then_some(())
-        })
-        .await?;
-        self.capture(cx, "sample-points").await?;
+        std::fs::write(
+            self.folder.join("projection.json"),
+            serde_json::to_vec(&geometry)?,
+        )?;
+        // Leave the zoom button before taking the stationary control so its
+        // ordinary hover underline cannot enter the waveform comparison.
+        dispatch(
+            cx,
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: pointer + point(px(24.), px(12.)),
+                ..Default::default()
+            }),
+        )?;
+        self.capture(cx, "deep-zoom").await?;
         dispatch(
             cx,
             PlatformInput::MouseMove(MouseMoveEvent {
@@ -200,7 +205,7 @@ impl Journey {
                 ..Default::default()
             }),
         )?;
-        self.capture(cx, "sample-inspector").await?;
+        self.capture(cx, "hover").await?;
         let modifier = |shift| {
             PlatformInput::ModifiersChanged(ModifiersChangedEvent {
                 modifiers: Modifiers {
@@ -211,8 +216,28 @@ impl Journey {
             })
         };
         dispatch(cx, modifier(true))?;
-        self.capture(cx, "cue-times").await?;
+        self.capture(cx, "shift-hover").await?;
         dispatch(cx, modifier(false))?;
+        dispatch(
+            cx,
+            PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Right,
+                position: pointer,
+                click_count: 1,
+                ..Default::default()
+            }),
+        )?;
+        dispatch(
+            cx,
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Right,
+                position: pointer,
+                click_count: 1,
+                ..Default::default()
+            }),
+        )?;
+        self.capture(cx, "panel-menu").await?;
+        dispatch(cx, key("escape"))?;
         cx.update(|_, cx| {
             self.panel.update(cx, |p, cx| {
                 assert!(same_center(p.position.viewport));
@@ -226,7 +251,7 @@ impl Journey {
             (p.player.read(cx).status.playing
                 && view.span == 32.
                 && view.first > initial.frame_at(0.5) + 32.
-                && hover_point(p).is_none())
+                && p.texture.sample_hit([10., 10.]).is_none())
             .then_some(())
         })
         .await?;
@@ -238,10 +263,9 @@ impl Journey {
                 })
             })
         })??;
-        self.until(cx, "restored sample points", |p, _, cx| {
-            (!p.player.read(cx).status.playing)
-                .then(|| hover_point(p))
-                .flatten()
+        self.until(cx, "held playback before scrub", |p, _, cx| {
+            let track = p.player.read(cx).wave_track()?;
+            (!track.playing && !track.position(Instant::now())?.advancing).then_some(())
         })
         .await?;
         let gesture = self
@@ -255,36 +279,18 @@ impl Journey {
                 Some(gesture)
             })
             .await?;
-        // Manual scrubbing keeps the decoded markers but suspends the
-        // measurement, selection ring and guide under a resting pointer.
-        let during = self
-            .until(cx, "scrub markers without measurements", |p, _, cx| {
-                if !p.player.read(cx).waveform_grabbed() {
-                    return None;
-                }
-                let point = hover_point(p)?;
-                (p.requested_points.get() == SamplePoints::Visible).then_some(point)
-            })
-            .await?;
-        dispatch(
-            cx,
-            PlatformInput::MouseMove(MouseMoveEvent {
-                position: during,
-                ..Default::default()
-            }),
-        )?;
-        self.capture(cx, "scrub-markers").await?;
-        cx.update(|_, cx| {
-            self.panel.update(cx, |p, cx| {
-                assert!(p.player.read(cx).waveform_grabbed());
-                assert_eq!(p.requested_points.get(), SamplePoints::Visible);
-            })
-        })??;
-        gesture.finish(crate::audio::scrub::End::Cancel);
-        self.until(cx, "measurement restored after scrub", |p, _, cx| {
-            (!p.player.read(cx).waveform_grabbed()
-                && matches!(p.requested_points.get(), SamplePoints::Highlight(_)))
+        self.until(cx, "scrubbing at deep zoom", |p, _, cx| {
+            let shown = p.displayed.borrow();
+            (p.player.read(cx).waveform_grabbed()
+                && shown.as_ref()?.viewport.span == 32.
+                && p.texture.sample_hit([10., 10.]).is_none())
             .then_some(())
+        })
+        .await?;
+        self.capture(cx, "scrub").await?;
+        gesture.finish(crate::audio::scrub::End::Cancel);
+        self.until(cx, "completed scrub", |p, _, cx| {
+            (!p.player.read(cx).waveform_grabbed()).then_some(())
         })
         .await?;
         let previous_length = self
@@ -298,81 +304,24 @@ impl Journey {
                 Some(length)
             })
             .await?;
-        let previous_hit = self
-            .until(cx, "new hit transform after resize", |p, _, cx| {
-                let layout = p.displayed.borrow().as_ref()?.layout;
-                if layout.time_length() == previous_length {
-                    return None;
-                }
-                let point = layout.physical(hover_point(p)?);
-                assert!(p.texture.sample_hit(point).is_some());
-                // Fail allocation at a stable size. Intermediate resize targets
-                // can legitimately recover on the very next layout.
-                p.texture.clear();
-                waveform::gpui::fail_next_target();
-                cx.notify();
-                Some(point)
-            })
-            .await?;
-        self.until(
-            cx,
-            "failed surface rejects previous hit transform",
-            |p, _, _| {
-                (p.texture.unavailable()
-                    && p.displayed.borrow().is_none()
-                    && p.texture.sample_hit(previous_hit).is_none())
-                .then_some(())
-            },
-        )
-        .await?;
-        self.until(cx, "resident samples after target retry", |p, _, _| {
-            hover_point(p)
+        self.until(cx, "32-frame trace after resize", |p, _, _| {
+            let shown = p.displayed.borrow();
+            let view = shown.as_ref()?;
+            (view.layout.time_length() != previous_length
+                && view.viewport.span == 32.
+                && p.coverage.is_none())
+            .then_some(())
         })
         .await?;
-        let narrow = self
-            .until(cx, "resized sample", |p, _, _| hover_point(p))
-            .await?;
-        dispatch(
-            cx,
-            PlatformInput::MouseMove(MouseMoveEvent {
-                position: narrow,
-                ..Default::default()
-            }),
-        )?;
-        self.capture(cx, "sample-narrow").await?;
-        // Marker size follows the physical frame spacing at each level of
-        // detail, and markers disappear below five logical pixels per frame.
-        let length = self
-            .until(cx, "resized time axis", |p, _, _| {
-                Some(p.displayed.borrow().as_ref()?.layout.time_length())
-            })
-            .await?;
-        // Twelve, six and three logical pixels per frame.
-        for (spacing, name) in [(12., "lod-close"), (6., "lod-threshold"), (3., "lod-dense")] {
-            let span = (length / spacing).floor().max(32.);
-            self.edit(cx, &format!("{span} samples")).await?;
-            dispatch(cx, key("enter"))?;
-            let visible = self
-                .until(cx, name, |p, _, _| {
-                    let (viewport, layout) = {
-                        let displayed = p.displayed.borrow();
-                        let shown = displayed.as_ref()?;
-                        (shown.viewport, shown.layout)
-                    };
-                    if viewport.span != span {
-                        return None;
-                    }
-                    let scale = layout.scale;
-                    let spacing = layout.time_length() as f32 * scale / span as f32;
-                    let visible = spacing >= 5. * scale;
-                    let requested = p.requested_points.get();
-                    ((requested != SamplePoints::Hidden) == visible).then_some(visible)
-                })
-                .await?;
-            eprintln!("{name} markers {visible}");
-            self.capture(cx, name).await?;
-        }
-        eprintln!("inspection-complete");
+        self.capture(cx, "resized").await?;
+        self.edit(cx, "125 ms").await?;
+        dispatch(cx, key("enter"))?;
+        self.until(cx, "time-based zoom", |p, _, cx| {
+            let rate = p.player.read(cx).wave_track()?.source.rate;
+            (p.displayed.borrow().as_ref()?.viewport.span == f64::from(rate) * 0.125).then_some(())
+        })
+        .await?;
+        eprintln!("zoom-complete");
         Ok(())
     }
 }
@@ -384,7 +333,7 @@ fn dispatch(cx: &mut AsyncWindowContext, event: PlatformInput) -> anyhow::Result
 }
 
 pub(super) fn start(window: &Window, cx: &mut Context<Waveform>) {
-    let Some(folder) = std::env::var_os("DISQRO_INSPECTION_JOURNEY").map(PathBuf::from) else {
+    let Some(folder) = std::env::var_os("DISQRO_ZOOM_JOURNEY").map(PathBuf::from) else {
         return;
     };
     if !crate::audio::silent_qualification() {
@@ -397,7 +346,7 @@ pub(super) fn start(window: &Window, cx: &mut Context<Waveform>) {
     window
         .spawn(cx, async move |cx| {
             if let Err(error) = journey.run(cx).await {
-                eprintln!("inspection-failed {error:#}");
+                eprintln!("zoom-failed {error:#}");
             }
         })
         .detach();
