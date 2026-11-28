@@ -1760,12 +1760,6 @@ impl Render for Workspace {
         };
         v_flex()
             .key_context("Disqro")
-            .on_modifiers_changed(cx.listener(|workspace, _, window, cx| {
-                workspace
-                    .services
-                    .wave_motion
-                    .inspection_modifiers(window, cx);
-            }))
             .track_focus(&self.focus)
             .size_full()
             .bg(m.canvas)

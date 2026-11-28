@@ -88,7 +88,12 @@ impl Key {
         }
         planning::detail_requests(rate, segment, range, pixels, seconds)
             .into_iter()
-            .map(|request| Self::new(source, Request::Evidence(request)))
+            .map(|mut request| {
+                request.plan = request
+                    .plan
+                    .with_channel_power(waveform_source::CHANNEL_POWER);
+                Self::new(source, Request::Evidence(request))
+            })
             .collect()
     }
 
@@ -377,7 +382,8 @@ impl View {
             return Evidence::default();
         }
         let id = store::ViewId(self.id);
-        let plan = plan(store.evidence.decode_latency());
+        let plan = plan(store.evidence.decode_latency())
+            .with_channel_power(waveform_source::CHANNEL_POWER);
         let Some(source) = store.register(source) else {
             store.evidence.clear_view(id);
             store.collect_sources();

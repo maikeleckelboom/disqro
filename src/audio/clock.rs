@@ -1,8 +1,10 @@
 //! A bounded view of rendered source time, independent of transport polling.
 use std::{
     sync::atomic::{AtomicU64, Ordering::SeqCst},
-    time::Instant,
+    time::{Duration, Instant},
 };
+
+use waveform::clock::{OutputSpan, OutputTiming, TimeReference};
 
 const HISTORY: usize = 8;
 // A visual estimate can bridge a late publication for at most four milliseconds.
@@ -134,17 +136,39 @@ impl Clock {
             };
             if now >= block.start {
                 let duration = block.end.saturating_sub(block.start).max(1);
-                let prediction_ns = if id == latest {
-                    now.saturating_sub(block.end).min(block.predict_ns)
+                // A voice owns its monotonic origin. Interpolate only within the
+                // selected publication. A short prediction is a separate span
+                // so the rendered endpoint remains exact.
+                let horizon = if id == latest { block.predict_ns } else { 0 };
+                let prediction_ns = now.saturating_sub(block.end).min(horizon);
+                let (start, end, frames) = if now >= block.end && horizon > 0 {
+                    let predicted =
+                        block.to + (block.to - block.from) * horizon as f64 / duration as f64;
+                    (
+                        block.end,
+                        block.end.saturating_add(horizon),
+                        [block.to, predicted],
+                    )
                 } else {
-                    0
+                    (
+                        block.start,
+                        block.start.saturating_add(duration),
+                        [block.from, block.to],
+                    )
                 };
-                let progress = (now.saturating_sub(block.start).min(duration) + prediction_ns)
-                    as f64
-                    / duration as f64;
+                let span = OutputSpan::new(
+                    id,
+                    Duration::from_nanos(start)..Duration::from_nanos(end),
+                    frames,
+                    OutputTiming {
+                        reference: TimeReference::RendererEstimate,
+                        uncertainty: None,
+                    },
+                )?;
+                let position = span.position(id, Duration::from_nanos(now))?;
                 return Some(Position {
-                    frame: block.from + (block.to - block.from) * progress,
-                    advancing: now < block.end + if id == latest { block.predict_ns } else { 0 },
+                    frame: position.frame,
+                    advancing: position.advancing,
                     observation_age_ns: now.saturating_sub(block.observed),
                     phase_ns: block.phase_ns,
                     prediction_ns,

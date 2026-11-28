@@ -32,25 +32,23 @@ impl Zoom {
         }
     }
 
-    fn parse(text: &str, rate: u32, width: usize) -> Option<Self> {
+    fn parse(text: &str, rate: u32) -> Option<Self> {
         let text = text.trim().to_ascii_lowercase();
-        let unit = ["samples/px", "px/s", "samples", "ms", "s"]
-            .into_iter()
-            .find(|unit| text.ends_with(unit))?;
-        let value: f64 = text.strip_suffix(unit)?.trim().parse().ok()?;
-        if !value.is_finite() || value <= 0. || rate == 0 || width == 0 {
-            return None;
-        }
-        let zoom = match unit {
-            "s" => Self::Seconds(value),
-            "ms" => Self::Seconds(value / 1000.),
-            "samples" => Self::frames_at(value, rate),
-            "samples/px" => Self::frames_at(value * width as f64, rate),
-            "px/s" => Self::Seconds(width as f64 / value),
-            _ => unreachable!(),
-        };
-        let frames = zoom.frames(rate);
-        (frames.is_finite() && frames > 0.).then_some(zoom)
+        let (number, unit) = text
+            .strip_suffix("ms")
+            .map(|v| (v, 0.001))
+            .or_else(|| text.strip_suffix('s').map(|v| (v, 1.)))?;
+        let seconds = number.trim().parse::<f64>().ok()? * unit;
+        let frames = seconds * f64::from(rate);
+        (frames.is_finite() && frames > 0.).then_some(Self::Seconds(seconds))
+    }
+}
+
+pub(super) fn duration_label(seconds: f64) -> String {
+    if seconds < 1. {
+        format!("{:.3} ms", seconds * 1000.)
+    } else {
+        format!("{seconds:.3} s")
     }
 }
 
@@ -72,8 +70,8 @@ impl Waveform {
             return;
         };
         let span = self.position.viewport.span;
-        let input =
-            cx.new(|cx| InputState::new(window, cx).default_value(format!("{span} samples")));
+        let initial = duration_label(span / f64::from(track.source.rate));
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(initial.clone()));
         cx.subscribe_in(&input, window, move |panel, input, event, window, cx| {
             if panel.zoom_editor.as_ref() != Some(input) {
                 return;
@@ -83,22 +81,9 @@ impl Waveform {
                     if let Some(current) = panel.player.read(cx).wave_track()
                         && current.source == track.source
                         && current.generation == track.generation
-                        && let Some(layout) = panel
-                            .layout
-                            .get()
-                            .filter(|l| l.scale == window.scale_factor())
-                        && let Some(width) = waveform::PixelViewport::register(
-                            waveform::viewport::LogicalRect {
-                                x: layout.bounds.origin.x.into(),
-                                y: layout.bounds.origin.y.into(),
-                                width: layout.bounds.size.width.into(),
-                                height: layout.bounds.size.height.into(),
-                            },
-                            layout.scale,
-                        )
-                        .map(|registration| registration.width)
+                        && input.read(cx).value().as_ref() != initial
                         && let Some(zoom) =
-                            Zoom::parse(&input.read(cx).value(), current.source.rate, width)
+                            Zoom::parse(&input.read(cx).value(), current.source.rate)
                     {
                         let rate = current.source.rate;
                         let viewport = panel.position.viewport.zoom(
@@ -148,7 +133,7 @@ impl Waveform {
             .hover(|s| s.text_color(material.text))
             .focus_visible(|s| s.underline())
             .tooltip(|w, cx| {
-                Tooltip::new("Edit visible span in s, ms, samples, px/s, or samples/px")
+                Tooltip::new("Edit visible duration in seconds (s) or milliseconds (ms)")
                     .build(w, cx)
             })
             .on_click(cx.listener(|panel, _, w, cx| panel.edit_zoom(w, cx)))
@@ -168,29 +153,27 @@ impl Waveform {
 mod tests {
     use super::Zoom;
     #[test]
-    fn exact_units_use_registered_physical_width_and_source_rate() {
+    fn duration_zoom_preserves_deep_zoom_and_rejects_inspection_units() {
         for rate in [44_100, 48_000, 192_000] {
-            for width in [800, 1200, 1600] {
-                let frames = |s| Zoom::parse(s, rate, width).unwrap().frames(rate);
-                assert_eq!(frames("78.846 s"), 78.846 * f64::from(rate));
-                assert_eq!(frames("145ms"), frames(".145 S"));
-                assert_eq!(frames("1400 samples"), 1400.);
-                assert_eq!(frames(".5 samples/px"), width as f64 * 0.5);
-                assert_eq!(frames("180 px/s"), width as f64 / 180. * f64::from(rate));
-                let span = frames("0.123456789123 samples/px");
-                assert_eq!(frames(&format!("{span} samples")), span);
-            }
+            let frames = |text| Zoom::parse(text, rate).unwrap().frames(rate);
+            assert_eq!(frames("78.846 s"), 78.846 * f64::from(rate));
+            assert_eq!(frames("125 MS"), frames(".125 s"));
+            assert!(frames("0.1 ms") < 32.);
         }
-        for invalid in [
+        for text in [
             "-1 s",
-            "0 samples",
+            "0 ms",
             "NaN ms",
-            "inf px/s",
-            "1e309 samples/px",
+            "inf s",
+            "1e309 s",
+            "1e308 s",
+            "32 samples",
+            "180 px/s",
+            "0.5 samples/px",
             "100",
             "44 kHz",
         ] {
-            assert!(Zoom::parse(invalid, 44100, 800).is_none());
+            assert!(Zoom::parse(text, 48_000).is_none(), "{text}");
         }
     }
 }

@@ -7,6 +7,7 @@ use crate::audio::scrub::{End as ScrubEnd, Gesture};
 /// pointer turns the recording relative to that grip. It never seeks to the
 /// position under the pointer.
 pub(super) struct Press {
+    axis: TimeAxis,
     scale: f32,
     down: Point<Pixels>,
     frames_per_pixel: f64,
@@ -19,7 +20,14 @@ pub(super) struct Press {
 
 impl Press {
     fn travel(&self, position: Point<Pixels>) -> f64 {
-        f64::from(f32::from(position.x - self.down.x)) * f64::from(self.scale)
+        let delta = position - self.down;
+        let [time, _] = self.axis.dimensions([delta.x, delta.y]);
+        let physical = f64::from(f32::from(time)) * f64::from(self.scale);
+        if self.axis.reversed() {
+            -physical
+        } else {
+            physical
+        }
     }
 }
 
@@ -91,7 +99,7 @@ impl Waveform {
                 (shown.anchor.playable.end - 1) as f64,
             );
             let scale = shown.layout.scale;
-            let width = f64::from(f32::from(shown.layout.bounds.size.width) * scale)
+            let width = (shown.layout.time_length() * f64::from(scale))
                 .round()
                 .max(1.);
             let (anchor, was_playing) = (shown.anchor.clone(), track.playing);
@@ -104,6 +112,7 @@ impl Waveform {
                 return;
             };
             self.press = Some(Press {
+                axis: shown.layout.axis,
                 scale,
                 down: event.position,
                 frames_per_pixel,

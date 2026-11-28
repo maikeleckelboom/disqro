@@ -180,17 +180,6 @@ pub struct Program {
     watch: Vec<(PathBuf, Option<Stamp>)>,
 }
 impl Program {
-    pub fn inspection_chapter(&self, source: &Arc<Source>, frame: usize) -> Option<(u8, f64, f64)> {
-        let segment = self
-            .segments
-            .iter()
-            .find(|s| Arc::ptr_eq(&s.source, source) && s.frames.contains(&frame))?;
-        let chapter = segment.track.disc.as_ref()?.number;
-        let elapsed = (frame - segment.frames.start) as f64 / f64::from(source.rate);
-        let time = segment.time.start as f64 / SECOND as f64 + elapsed;
-        Some((chapter, elapsed, time))
-    }
-
     pub fn index(&self, t: &Track) -> Option<usize> {
         self.segments
             .iter()

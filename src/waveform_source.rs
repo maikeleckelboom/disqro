@@ -17,6 +17,10 @@ use waveform::EvidencePage as Page;
 use waveform::analysis::{LEAF, Plan};
 use waveform::{Analyzer, EvidenceRequest, FrameRange, SampleRate, evidence_codec};
 
+/// Preserve channel energy when a stereo recording cancels in the mono sum.
+pub(crate) const CHANNEL_POWER: waveform::analysis::ChannelPower =
+    waveform::analysis::ChannelPower::Stereo;
+
 pub struct Reader {
     path: PathBuf,
     stamp: Stamp,

@@ -66,15 +66,6 @@ fn mixed_rate_program_round_trips_every_decoded_frame_and_excludes_eof() {
     assert_eq!(p.segments.len(), 12);
     let mut count = 0;
     for (i, s) in p.segments.iter().enumerate() {
-        assert_eq!(
-            p.inspection_chapter(&s.source, s.frames.start),
-            Some((
-                s.track.disc.as_ref().unwrap().number,
-                0.,
-                s.time.start as f64 / SECOND as f64
-            ))
-        );
-        assert!(p.inspection_chapter(&s.source, s.source.frames).is_none());
         for f in s.frames.clone() {
             assert_eq!(p.locate(s.at(f)), Some((i, f)));
             assert_eq!(p.locate(s.at(f + 1) - 1), Some((i, f)));
@@ -281,6 +272,17 @@ fn source_page_reused_across_chapters_and_invalidated_on_change() {
     let silent =
         waveform_source::load(source, &next_chapter, Some(&cache), &mut reader, &|| true).unwrap();
     assert!(silent.facts().iter().all(|value| *value == 0.0));
+    let stereo = waveform_source::Evidence {
+        plan: next_chapter
+            .plan
+            .with_channel_power(waveform_source::CHANNEL_POWER),
+        ..next_chapter.clone()
+    };
+    assert!(waveform_source::cached(source, &stereo, Some(&cache)).is_none());
+    waveform_source::load(source, &stereo, Some(&cache), &mut reader, &|| true).unwrap();
+    for profile in [&next_chapter, &stereo] {
+        assert!(waveform_source::cached(source, profile, Some(&cache)).is_some());
+    }
     let samples =
         waveform_source::samples(source, boundary - 1..boundary + 1, &mut reader, &|| true)
             .unwrap();
