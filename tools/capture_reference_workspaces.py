@@ -185,11 +185,17 @@ foreach ($e in $all) {
     return rows
 
 
-def play(process, label):
-    hwnd, point = wait_for(process, label)
-    click_control(hwnd, point)
-    click_control(hwnd, point)
-    return hwnd
+def play(process, labels):
+    """Double-click the first of `labels` the window shows."""
+    for label in labels:
+        try:
+            hwnd, point = wait_for(process, label, timeout=4)
+        except RuntimeError:
+            continue
+        click_control(hwnd, point)
+        click_control(hwnd, point)
+        return label
+    raise RuntimeError(f"None of {labels!r} could start playback")
 
 
 def capture_workspace(exe, output, profile, name, center, scale, results):
@@ -201,7 +207,7 @@ def capture_workspace(exe, output, profile, name, center, scale, results):
             results.setdefault("dpi", dpi)
             time.sleep(0.6)
             if width == 1440:
-                play(process, "Chapter 05")
+                results[f"{name}-played"] = play(process, ["Chapter 05", "Chapter 02", "Opening Notes"])
                 time.sleep(4.0)
             else:
                 time.sleep(1.5)
