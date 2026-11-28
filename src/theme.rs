@@ -239,8 +239,13 @@ pub mod size {
 }
 
 /// Figures that line up in columns: durations, counts, levels and times.
+///
+/// Rows and the player's clock ask for these on every frame, so they share
+/// one allocation.
 pub fn tabular() -> FontFeatures {
-    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
+    static TABULAR: std::sync::LazyLock<FontFeatures> =
+        std::sync::LazyLock::new(|| FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
+    TABULAR.clone()
 }
 
 pub fn materials(cx: &App) -> &Materials {
