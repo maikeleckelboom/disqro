@@ -172,7 +172,7 @@ def resize(hwnd, width, height, move=True):
 def capture(hwnd, path):
     """Save the window as the app drew it. A DPI-unaware window's own
     surface sits unstretched at the top left of the capture."""
-    screenshot(hwnd, path)
+    screenshot(hwnd, path, attempts=3)
     dpi = user32.GetDpiForWindow(hwnd) or 96
     if dpi < SYSTEM_DPI:
         image = Image.open(path)

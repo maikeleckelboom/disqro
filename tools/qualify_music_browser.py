@@ -291,7 +291,8 @@ def journey(exe, test_exe, output):
         click_control(hwnd, chapter)
         click_control(hwnd, chapter)
         wait_for(process, "Pause")
-        choose_view(process, "Tree", "Releases", min_x=sidebar.x + 180)
+        # The Library's Releases destination, so the reveal leaves Library 1.
+        click(process, "Releases")
         wait_for(process, "Album / Disc")
         click(process, "Go to Playing Track")
         wait_for(process, "Pause")

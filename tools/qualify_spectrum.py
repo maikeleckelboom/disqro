@@ -126,7 +126,7 @@ def find_window(pid):
 
 
 def print_window(hwnd):
-    """The window as DirectComposition last composed it, cropped to its frame."""
+    """Take one full-content PrintWindow sample and crop it to the window frame."""
     rect = W.RECT()
     user32.GetWindowRect(hwnd, C.byref(rect))
     width, height = rect.right - rect.left, rect.bottom - rect.top
@@ -161,16 +161,16 @@ def detail(image):
     return ImageStat.Stat(image.convert("L").reduce(4).filter(ImageFilter.FIND_EDGES)).mean[0]
 
 
-def screenshot(hwnd, destination, attempts=3):
-    """Save the window, from the most complete of a few captures.
+def screenshot(hwnd, destination, attempts=1):
+    """Save a raw sample, or choose the highest edge score for a static reference.
 
-    The player composes its window from a base swap chain and overlay swap
-    chains for content above native surfaces. A full-content PrintWindow
-    occasionally returns only the base layer, without the overlays' text and
-    icons, even while the player presents complete frames. Such a capture
-    only ever lacks content, so the most detailed of a few captures taken
-    moments apart is the complete one.
+    Adjacent PrintWindow samples sometimes lose text and icons. An edge
+    score can help select a reference image. It cannot establish which
+    layers were displayed or whether every frame was complete.
     """
+    if attempts == 1:
+        print_window(hwnd).save(destination, lossless=True)
+        return
     best, best_detail = None, -1.0
     for attempt in range(attempts):
         if attempt:
