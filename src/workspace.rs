@@ -684,6 +684,13 @@ impl Workspace {
                 self.close_pane(&pane, window, cx);
             }
             PaneEvent::Duplicate => self.duplicate(&pane, window, cx),
+            PaneEvent::Activated => {
+                let panes: Vec<_> = self.panes.values().map(|t| t.pane.clone()).collect();
+                for other in panes {
+                    let active = other == pane;
+                    other.update(cx, |p, cx| p.set_active(active, cx));
+                }
+            }
         }
     }
     /// Seed future browsers from the most recently used browser.

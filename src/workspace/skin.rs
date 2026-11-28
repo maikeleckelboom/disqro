@@ -231,18 +231,12 @@ impl TabGroupRenderer for Tabs {
             .filter(|(_, panel)| panel.visible(cx))
             .map(|(ix, _)| ix)
             .collect::<Vec<_>>();
-        if tabs.is_empty() {
-            return Empty.into_any_element();
-        }
         let editing = tabs.iter().copied().find(|&ix| {
             pane_of(&group.panels()[ix]).is_some_and(|p| p.read(cx).renaming.is_some())
         });
         let several = tabs.len() > 1;
-        // A tab names one panel among several. A panel alone in its group
-        // shows its own header instead, so ordinary use has no tab strip.
-        // While the layout is being customized every group shows its tabs,
-        // which are the handles for moving panels.
-        if !several && group.is_locked() && editing.is_none() {
+        let tabs = shown_tabs(tabs, editing);
+        if tabs.is_empty() {
             return Empty.into_any_element();
         }
         let utility = tabs.iter().all(|&ix| is_utility(&group.panels()[ix], cx));
@@ -256,7 +250,6 @@ impl TabGroupRenderer for Tabs {
         let shown = editing.unwrap_or(selected);
         let tabs: Vec<_> = tabs
             .into_iter()
-            .filter(|&ix| editing.is_none() || ix == shown)
             .map(|ix| (ix, tabs::label_width(group, ix, window, cx)))
             .collect();
         let group = group.clone();
@@ -488,6 +481,18 @@ fn tab_label(panel: &Arc<dyn gpui_kit::component::dock::BasePanelView>, cx: &App
     )
 }
 
+/// The tabs a group's strip shows, of the visible panels in `visible`.
+///
+/// Tabs are ordinary workspace chrome: every group names its panels,
+/// whether it holds one panel or several, and whether or not the layout is
+/// being customized. While a tab is renamed, its strip shows only that tab.
+fn shown_tabs(visible: Vec<usize>, renaming: Option<usize>) -> Vec<usize> {
+    match renaming {
+        Some(ix) => visible.into_iter().filter(|&v| v == ix).collect(),
+        None => visible,
+    }
+}
+
 fn is_utility(panel: &Arc<dyn gpui_kit::component::dock::BasePanelView>, cx: &App) -> bool {
     pane_of(panel).is_some_and(|p| p.read(cx).ty.home != Home::Main)
 }
@@ -513,6 +518,8 @@ fn tab(
         .as_ref()
         .and_then(|p| super::browser_of(p, cx))
         .is_some_and(|browser| browser.read(cx).active);
+    // The panel the listener is working in; its selected tab carries a rule.
+    let active_pane = pane.as_ref().is_some_and(|p| p.read(cx).is_active());
     let selected = group.active_panel().map(|p| p.panel_id(cx)) == Some(id);
     let (label, icon, renaming, accepts_folder) = match &pane {
         Some(pane) => {
@@ -610,6 +617,18 @@ fn tab(
         .overflow_hidden()
         .text_color(if selected { m.text } else { m.text_muted })
         .when(selected, |d| d.bg(surface))
+        .when(selected && active_pane, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(crate::theme::size::TAB_RADIUS))
+                    .right(px(crate::theme::size::TAB_RADIUS))
+                    .h(px(2.))
+                    .rounded_b(px(1.))
+                    .bg(m.accent),
+            )
+        })
         .hover(move |d| {
             if selected {
                 d
@@ -895,6 +914,19 @@ impl Render for TabPreview {
 #[cfg(test)]
 mod tests {
     use super::Dwell;
+
+    #[test]
+    fn every_group_shows_its_tabs_whether_it_holds_one_panel_or_several() {
+        assert_eq!(super::shown_tabs(vec![0], None), [0]);
+        assert_eq!(super::shown_tabs(vec![0, 2, 3], None), [0, 2, 3]);
+        assert!(super::shown_tabs(vec![], None).is_empty());
+    }
+
+    #[test]
+    fn renaming_a_tab_shows_only_that_tab() {
+        assert_eq!(super::shown_tabs(vec![0, 2, 3], Some(2)), [2]);
+        assert_eq!(super::shown_tabs(vec![4], Some(4)), [4]);
+    }
 
     #[test]
     fn resting_over_a_hidden_tab_opens_it_once() {

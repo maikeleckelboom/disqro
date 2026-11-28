@@ -199,6 +199,8 @@ pub enum PaneEvent {
     Close,
     /// Open the same content in a new instance.
     Duplicate,
+    /// The listener began working in this panel: it took focus or a press.
+    Activated,
 }
 
 /// One panel instance in the dock.
@@ -217,6 +219,8 @@ pub struct Pane {
     pub tab_focus: FocusHandle,
     pub controls_focus: FocusHandle,
     focus: FocusHandle,
+    /// The panel the listener is working in. Its tab says so.
+    active: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl EventEmitter<PanelEvent> for Pane {}
@@ -238,7 +242,8 @@ impl Pane {
         let tab_focus = cx.focus_handle();
         for handle in [&focus, &controls_focus, &tab_focus] {
             subscriptions.push(cx.on_focus_in(handle, window, |pane: &mut Self, w, cx| {
-                pane.content.focused(w, cx)
+                pane.content.focused(w, cx);
+                cx.emit(PaneEvent::Activated);
             }));
         }
         Self {
@@ -254,6 +259,7 @@ impl Pane {
             tab_focus,
             controls_focus,
             focus,
+            active: false,
             _subscriptions: subscriptions,
         }
     }
@@ -274,6 +280,15 @@ impl Pane {
     }
     pub fn icon(&self, cx: &App) -> Icon {
         self.content.icon(self.ty, cx)
+    }
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active != active {
+            self.active = active;
+            self.refresh(cx);
+        }
     }
     /// Redraws the tab as well as the content: the group draws the tab of a
     /// pane that is not displayed, and is not told otherwise.
@@ -421,9 +436,10 @@ impl Render for Pane {
             .track_focus(&self.focus)
             // Seen before the content handles the press, so a click anywhere in
             // the panel makes it the one the workspace addresses.
-            .capture_any_mouse_down(
-                cx.listener(|pane, _, w, cx| pane.content.clone().focused(w, cx)),
-            )
+            .capture_any_mouse_down(cx.listener(|pane, _, w, cx| {
+                pane.content.clone().focused(w, cx);
+                cx.emit(PaneEvent::Activated);
+            }))
             .size_full()
             .relative()
             .overflow_hidden()
