@@ -7,9 +7,12 @@
 //! the active Music Browser whether or not the panel is shown.
 use super::{
     Destination, PaneContent, PanelType, Router, Services,
-    nav::{DraggedFolder, INDENT, ROW},
+    nav::{DraggedFolder, INDENT},
 };
 use crate::disclosure::{Disclosure, VirtualFocus};
+
+/// A folder in the Locations tree.
+const ROW: f32 = crate::theme::size::ROW;
 use crate::{
     assets::FileIcon,
     catalog::Catalog,
@@ -622,7 +625,7 @@ impl LocationsPanel {
             ListItem::new(row_id)
                 .h(px(ROW))
                 .p_0()
-                .rounded(px(5.))
+                .rounded(px(crate::theme::size::RADIUS))
                 .child(content)
         })
         .context_menu(move |_, entry, menu, _, cx| {

@@ -90,9 +90,9 @@ impl Layout {
         if context == ContextKind::Shelf {
             for column in &mut layout.columns {
                 column.width = match column.field {
-                    Title => 290.,
+                    Title => 320.,
                     Artist => 190.,
-                    Path => 230.,
+                    Path => 200.,
                     field => field.width(),
                 };
             }

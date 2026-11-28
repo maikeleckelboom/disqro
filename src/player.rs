@@ -35,9 +35,14 @@ pub(crate) use wave::WaveStrip;
 pub(crate) use wave::WaveTrack;
 
 /// The perspective tabs above the timeline lane.
-const PERSPECTIVE_HEIGHT: f32 = 20.;
-/// The row holding the recording, transport and listening controls.
-const CONTROL_ROW: f32 = 40.;
+const PERSPECTIVE_HEIGHT: f32 = 24.;
+/// The row holding the recording, transport and listening controls. The
+/// artwork fills its height.
+const CONTROL_ROW: f32 = 56.;
+/// The play button, the one control with a finish of its own.
+const PLAY: f32 = 46.;
+/// Previous, Next, Shuffle and Repeat.
+const TRANSPORT_KEY: f32 = 36.;
 
 pub enum PlayerEvent {
     Locate(
@@ -492,8 +497,10 @@ impl Player {
         let m = materials(cx);
         Button::new(id)
             .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(17.)).text_color(m.text))
+            .w(px(TRANSPORT_KEY))
+            .h(px(TRANSPORT_KEY))
+            .rounded_full()
+            .icon(Icon::new(icon).size(px(20.)).text_color(m.text))
             .accessibility_label(label)
             .tooltip(label)
             .disabled(!enabled)
@@ -512,8 +519,10 @@ impl Player {
         let cmd = Rc::new(Cell::new(Some(cmd)));
         Button::new(id)
             .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(15.)).text_color(if on {
+            .w(px(TRANSPORT_KEY))
+            .h(px(TRANSPORT_KEY))
+            .rounded_full()
+            .icon(Icon::new(icon).size(px(17.)).text_color(if on {
                 m.accent
             } else {
                 m.text_faint
@@ -542,7 +551,7 @@ impl Render for Player {
             .size(px(CONTROL_ROW))
             .flex_shrink_0()
             .overflow_hidden()
-            .rounded(px(4.))
+            .rounded(px(crate::theme::size::RADIUS))
             .bg(m.control)
             .flex()
             .justify_center()
@@ -552,7 +561,7 @@ impl Render for Player {
         } else {
             art.child(
                 Icon::new(IconName::Disc3)
-                    .size(px(20.))
+                    .size(px(24.))
                     .text_color(m.text_faint),
             )
         };
@@ -669,24 +678,32 @@ impl Render for Player {
         });
 
         let play_will_pause = s.scrub.map_or(s.playing, |scrub| scrub.was_playing);
+        let lit = s.playing && s.scrub.is_none();
         let play = div()
             .id("play-pause")
             .role(Role::Button)
             .aria_label(if play_will_pause { "Pause" } else { "Play" })
-            .size(px(34.))
+            .size(px(PLAY))
             .flex_shrink_0()
+            .relative()
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(m.control)
-            .text_color(m.text)
+            .bg(m.silver.face())
+            .border_1()
+            .border_color(m.silver.bezel)
+            .text_color(m.silver.ink)
+            // While playing, a ring lights around the button, as on a deck.
+            .shadow(silver_ring(&m, lit))
+            .child(silver_grain(&m))
             .when(active || self.can_start, |d| {
                 d.focusable()
                     .tab_stop(true)
                     .key_context("TransportControl")
-                    .focus_visible(|d| d.border_1().border_color(m.focus_line()))
-                    .hover(|d| d.bg(m.control_hover))
+                    .focus_visible(|d| d.border_2().border_color(m.focus_line()))
+                    .hover(|d| d.bg(m.silver.face_hover()))
+                    .active(|d| d.bg(m.silver.face_pressed()))
                     .on_click(cx.listener(|p, _, _, cx| p.command(Command::Toggle, cx)))
             })
             .when(!active && !self.can_start, |d| {
@@ -700,12 +717,12 @@ impl Render for Player {
                 } else {
                     IconName::Play
                 })
-                .size(px(16.)),
+                .size(px(20.)),
             );
 
         let transport = h_flex()
             .flex_shrink_0()
-            .gap(px(2.))
+            .gap(px(6.))
             .items_center()
             .child(self.mode(
                 "shuffle",
@@ -727,7 +744,7 @@ impl Render for Player {
                 || Command::Step(-1),
                 cx,
             ))
-            .child(div().px(px(4.)).child(play))
+            .child(div().px(px(10.)).child(play))
             .child(self.key(
                 "next",
                 IconName::SkipForward,
@@ -783,7 +800,7 @@ impl Render for Player {
                 div()
                     .id("volume")
                     .relative()
-                    .w(px(84.))
+                    .w(px(104.))
                     .h(px(20.))
                     .cursor_pointer()
                     .tooltip(move |w, cx| {
@@ -867,8 +884,9 @@ impl Render for Player {
         let time = |t: f64| {
             div()
                 .flex_shrink_0()
-                .w(px(44.))
+                .w(px(52.))
                 .text_size(px(crate::theme::size::TEXT_SMALL))
+                .font_features(crate::theme::tabular())
                 .text_color(m.text_faint)
                 .child(clock(t))
         };
@@ -914,13 +932,13 @@ impl Render for Player {
             .flex_1()
             .flex_basis(px(0.))
             .min_w_0()
-            .gap(px(10.))
+            .gap(px(14.))
             .items_center()
             .child(art)
             .child(
                 v_flex()
                     .min_w_0()
-                    .gap(px(1.))
+                    .gap(px(3.))
                     .child(
                         h_flex()
                             .min_w_0()
@@ -932,7 +950,7 @@ impl Render for Player {
                                     .role(Role::Label)
                                     .aria_value(title.clone())
                                     .truncate()
-                                    .text_size(px(13.5))
+                                    .text_size(px(crate::theme::size::TITLE))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(m.text)
                                     .child(title),
@@ -955,7 +973,7 @@ impl Render for Player {
             .flex_1()
             .flex_basis(px(0.))
             .min_w_0()
-            .gap(px(6.))
+            .gap(px(12.))
             .items_center()
             .justify_end()
             .child(queue)
@@ -977,9 +995,9 @@ impl Render for Player {
             .w_full()
             .h(self.panel_height.get().unwrap_or(px(100.)))
             .bg(m.raised)
-            .px(px(12.))
-            .pt(px(6.))
-            .pb(px(8.))
+            .px(px(16.))
+            .pt(px(10.))
+            .pb(px(10.))
             .child(
                 h_flex()
                     .w_full()
@@ -991,7 +1009,7 @@ impl Render for Player {
                     .child(transport)
                     .child(listening),
             )
-            .child(div().mt(px(4.)).flex_shrink_0().child(self.perspectives(
+            .child(div().mt(px(6.)).flex_shrink_0().child(self.perspectives(
                 self.overview(),
                 &m,
                 cx,
@@ -1005,4 +1023,53 @@ impl Render for Player {
             .child(measure)
             .child(content)
     }
+}
+
+/// The play button's resting lift, and the ring that lights around it while
+/// playing.
+fn silver_ring(m: &crate::theme::Materials, lit: bool) -> Vec<BoxShadow> {
+    let lift = BoxShadow {
+        color: black().opacity(0.45),
+        offset: point(px(0.), px(1.)),
+        blur_radius: px(3.),
+        spread_radius: px(0.),
+        inset: false,
+    };
+    if !lit {
+        return vec![lift];
+    }
+    let ring = |spread: f32, blur: f32, alpha: f32| BoxShadow {
+        color: m.accent.opacity(alpha),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(blur),
+        spread_radius: px(spread),
+        inset: false,
+    };
+    vec![lift, ring(2., 0., 0.85), ring(3., 8., 0.35)]
+}
+
+/// Concentric machining on the button face: a few faint rings.
+fn silver_grain(m: &crate::theme::Materials) -> impl IntoElement {
+    let (light, dark) = (m.silver.grain_light, m.silver.grain_dark);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = bounds.size.width.min(bounds.size.height) * 0.5;
+            for i in 1..9 {
+                let r = radius * (i as f32 / 9.);
+                let ring = Bounds::new(center - point(r, r), size(r * 2., r * 2.));
+                window.paint_quad(quad(
+                    ring,
+                    r,
+                    transparent_black(),
+                    px(1.),
+                    if i % 2 == 0 { light } else { dark },
+                    BorderStyle::Solid,
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }

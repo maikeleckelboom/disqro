@@ -47,15 +47,15 @@ use std::{
 };
 pub use transfer::{DraggedTracks, playlist_target};
 
-/// The compact row, which holds a default 24-pixel cover.
-pub(crate) const ROW_HEIGHT: f32 = 28.;
-const CELL_X: f32 = 10.;
+/// The standard row, which holds a default 24-pixel cover.
+pub(crate) const ROW_HEIGHT: f32 = crate::theme::size::ROW;
+const CELL_X: f32 = crate::theme::size::INSET;
 /// Cover thumbnails fill the column between its padding, from compact to
 /// large. Rows grow to keep a larger cover whole.
 pub(crate) const COVER_X: f32 = 8.;
 const THUMBNAIL: f32 = 24.;
 const LARGE_THUMBNAIL: f32 = 96.;
-const COVER_Y: f32 = 2.;
+const COVER_Y: f32 = (ROW_HEIGHT - THUMBNAIL) / 2.;
 pub(crate) const COVER_WIDTH: f32 = THUMBNAIL + 2. * COVER_X;
 pub(crate) const COVER_MAX_WIDTH: f32 = LARGE_THUMBNAIL + 2. * COVER_X;
 /// The width saved for the original heart-only column. The text heading
@@ -218,7 +218,7 @@ impl Field {
             Self::Cover => self.width(),
             Self::Favorite => 66.,
             Self::Number => 36.,
-            Self::Title => 142.,
+            Self::Title => 146.,
             Self::Year | Self::Disc | Self::Count => 48.,
             Self::Rating => 96.,
             Self::Length | Self::Format => 48.,
@@ -1829,6 +1829,9 @@ impl TableDelegate for MusicTable {
                     Field::Number | Field::Format => m.text_faint,
                     _ => m.text_muted,
                 })
+                .when(f.right_aligned(), |d| {
+                    d.font_features(crate::theme::tabular())
+                })
                 .when(f == Field::Format, |d| {
                     d.text_size(px(crate::theme::size::TEXT_SMALL))
                 })
@@ -2010,7 +2013,7 @@ impl TableDelegate for MusicTable {
                         .w_full()
                         .max_w(px(320.))
                         .text_center()
-                        .text_size(px(13.))
+                        .text_size(px(crate::theme::size::TEXT))
                         .text_color(m.text_muted)
                         .role(Role::Label)
                         .aria_value(self.empty.clone())

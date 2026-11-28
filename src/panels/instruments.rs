@@ -12,7 +12,6 @@ use gpui_kit::{
     component::{
         Icon, Sizable,
         button::{Button, ButtonVariants},
-        h_flex,
         menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         v_flex,
     },
@@ -347,21 +346,12 @@ impl Render for Instrument {
             .track_focus(&self.focus)
             .bg(m.canvas)
             .child(
-                h_flex()
-                    .h(px(32.))
-                    .flex_shrink_0()
-                    .px(px(9.))
-                    .gap(px(8.))
-                    .child(div().text_sm().text_color(m.text).child(name))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(m.text_muted)
-                            .child(if self.frozen { "Frozen" } else { detail }),
-                    )
+                super::header::panel_header()
+                    .child(super::header::title(name, &m))
+                    .child(super::header::detail(
+                        if self.frozen { "Frozen" } else { detail },
+                        &m,
+                    ))
                     .when(matches!(config, Config::Spectral(_)), |row| {
                         row.child(
                             Button::new("history-freeze")

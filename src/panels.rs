@@ -20,6 +20,7 @@
 //! [`PaneContent`] implementation, plus one line in [`TYPES`]. The workspace
 //! creates, places, closes, saves and restores it without knowing the type.
 pub mod browser;
+pub mod header;
 mod instruments;
 pub mod library;
 pub(crate) mod listening;

@@ -524,23 +524,23 @@ fn compact_header_menu(
 }
 
 const HEADER_INSET: f32 = 8.;
-const BAR_INSET: f32 = 4.;
-const NAV_BUTTON: f32 = 26.;
+const BAR_INSET: f32 = 6.;
+const NAV_BUTTON: f32 = size::ICON_BUTTON;
 const NAV_GAP: f32 = 1.;
 const SEQUENCE_RAIL: f32 = 64.;
-const VIEW_TAB: f32 = 36.;
-const VIEW_TAB_HEIGHT: f32 = 29.;
-const ICON_BUTTON: f32 = 28.;
+const VIEW_TAB: f32 = 40.;
+const VIEW_TAB_HEIGHT: f32 = size::BAR - 7.;
+const ICON_BUTTON: f32 = size::ICON_BUTTON;
 const SCOPE_GAP: f32 = 3.;
-const FILTER_COMPACT: f32 = 100.;
-const FILTER_FULL: f32 = 175.;
+const FILTER_COMPACT: f32 = 112.;
+const FILTER_FULL: f32 = 200.;
 const VIEW_CHOICES: [(ViewMode, &str, IconName); 3] = [
     (ViewMode::Tracks, "Tracks", IconName::ListMusic),
     (ViewMode::Albums, "Releases", IconName::Disc3),
     (ViewMode::Tree, "Tree", IconName::ListTree),
 ];
-const VIEW_LABEL_SIZE: f32 = 12.;
-const VIEW_LABEL_CHROME: f32 = 39.;
+const VIEW_LABEL_SIZE: f32 = size::TEXT_SMALL;
+const VIEW_LABEL_CHROME: f32 = 44.;
 const PICKER_WIDTH: f32 = 46.;
 const SCOPE_CHOICES: [(bool, &str, IconName); 2] = [
     (false, "This folder only", IconName::Folder),
@@ -1110,7 +1110,7 @@ impl Browser {
                         .text_color(m.text_muted),
                 )
                 .w(px(ICON_BUTTON))
-                .h(px(24.))
+                .h(px(size::CONTROL - 4.))
                 .track_focus(button_focus)
                 .tab_stop(true)
                 .text_color(m.text_muted)
@@ -1137,7 +1137,7 @@ impl Browser {
             .flex_shrink(1.)
             .min_w_0()
             .w(width)
-            .h(px(24.))
+            .h(px(size::CONTROL - 4.))
             .pl(px(if tight { 2. } else { 7. }))
             .pr(px(2.))
             .gap(px(5.))
@@ -1344,7 +1344,7 @@ impl Render for Browser {
                     .gap(px(8.))
                     .rounded(px(5.))
                     .bg(m.warning.opacity(0.08))
-                    .text_size(px(12.))
+                    .text_size(px(crate::theme::size::LABEL))
                     .text_color(m.warning)
                     .child(Icon::new(IconName::TriangleAlert).size(px(13.)))
                     .child(div().truncate().child(notice.clone())),
@@ -1466,7 +1466,7 @@ impl Render for Browser {
                 .key_context("MusicTracks")
                 .flex_1()
                 .min_h_0()
-                .text_size(px(13.))
+                .text_size(px(crate::theme::size::TEXT))
                 .child(crate::table::browser_table(
                     &self.table,
                     row_height,

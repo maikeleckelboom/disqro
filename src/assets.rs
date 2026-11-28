@@ -63,7 +63,6 @@ impl AssetSource for Assets {
             ($($name:literal),*)=>{match path {$($name=>Some(include_bytes!(concat!("../assets/",$name)).as_slice()),)* _=>None}}
         }
         let custom = embedded!(
-            "brand/compact.png",
             "icons/heart-fill.svg",
             "files/16/folder.svg",
             "files/20/folder-music.svg",

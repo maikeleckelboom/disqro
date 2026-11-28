@@ -51,6 +51,44 @@ pub struct Materials {
     pub danger: Hsla,
     pub warning: Hsla,
     pub wave: Wave,
+    pub silver: Silver,
+}
+
+/// The brushed metal of the play button, the one control with a finish of
+/// its own. Everything around it stays flat.
+#[derive(Clone, Copy)]
+pub struct Silver {
+    pub light: Hsla,
+    pub dark: Hsla,
+    /// The rim around the face.
+    pub bezel: Hsla,
+    /// The glyph on the face.
+    pub ink: Hsla,
+    pub grain_light: Hsla,
+    pub grain_dark: Hsla,
+}
+
+impl Silver {
+    fn shade(&self, amount: f32) -> Background {
+        let tone = |c: Hsla| Hsla {
+            l: (c.l - amount).clamp(0., 1.),
+            ..c
+        };
+        linear_gradient(
+            160.,
+            linear_color_stop(tone(self.light), 0.),
+            linear_color_stop(tone(self.dark), 1.),
+        )
+    }
+    pub fn face(&self) -> Background {
+        self.shade(0.)
+    }
+    pub fn face_hover(&self) -> Background {
+        self.shade(-0.04)
+    }
+    pub fn face_pressed(&self) -> Background {
+        self.shade(0.08)
+    }
 }
 
 /// The waveform keeps its own colors so it never tints the interface.
@@ -79,9 +117,11 @@ impl Materials {
             overlay: hex(0x242428),
             line: hex(0x2a2a2f),
             control_line: hex(0x34343a),
-            text: hex(0xe8e8eb),
-            text_muted: hex(0xa3a3ab),
-            text_faint: hex(0x707078),
+            // Faint text still labels columns and axes, so it keeps at least
+            // 4.5:1 against every surface it sits on.
+            text: hex(0xececef),
+            text_muted: hex(0xadadb5),
+            text_faint: hex(0x8a8a93),
             accent: hex(0x91afcb),
             on_accent: hex(0x0e1217),
             hover: hexa(0xffffff, 0.045),
@@ -92,6 +132,14 @@ impl Materials {
             warning: hex(0xd8ad5c),
             wave: Wave {
                 cursor: hex(0xf1f1f3),
+            },
+            silver: Silver {
+                light: hex(0xe9eaed),
+                dark: hex(0x9a9ca3),
+                bezel: hex(0x5d5f66),
+                ink: hex(0x17181b),
+                grain_light: hexa(0xffffff, 0.10),
+                grain_dark: hexa(0x000000, 0.06),
             },
         }
     }
@@ -120,25 +168,68 @@ impl Materials {
     }
 }
 
-/// The geometry and type scale every panel shares.
+/// The geometry and type scale every surface shares, in logical pixels.
+///
+/// These are the Comfortable density: generous enough for long listening
+/// sessions, while a dense library still fits. Surfaces take their
+/// measurements from here rather than choosing their own, so headers,
+/// rows and controls line up across panels that sit side by side.
 pub mod size {
-    /// Every panel header: tab strips, the browser bar and table headings
-    /// share one height, so their edges line up across the window.
-    pub const HEADER: f32 = 30.;
-    /// A content panel's own header, such as the Music Browser's: its
-    /// history, location and view controls in one row.
-    pub const BAR: f32 = 36.;
+    // Type scale.
+    /// Rows, tab labels, menus and body text.
+    pub const TEXT: f32 = 14.;
+    /// Secondary text: artists beside titles, durations, counts and status.
+    pub const TEXT_SMALL: f32 = 13.;
+    /// Table column headings, section headings, axis and measurement labels.
+    pub const LABEL: f32 = 12.;
+    /// The recording that is playing, and other single prominent titles.
+    pub const TITLE: f32 = 16.;
+
+    // Heights.
+    /// The window's title bar.
+    pub const TITLE_BAR: f32 = 46.;
+    /// Tab strips and panel headers share one height, so their edges line
+    /// up across the window.
+    pub const HEADER: f32 = 36.;
+    /// A content panel's own toolbar, such as the Music Browser's location
+    /// and view controls.
+    pub const BAR: f32 = 42.;
+    /// Table column headings.
+    pub const HEADING: f32 = 32.;
+    /// Table, tree and list rows.
+    pub const ROW: f32 = 32.;
+    /// Destinations in the Library sidebar.
+    pub const NAV_ROW: f32 = 34.;
+    /// A standard control, such as a text field or labeled button.
+    pub const CONTROL: f32 = 32.;
+    /// An icon button inside a toolbar or header.
+    pub const ICON_BUTTON: f32 = 30.;
+
+    // Icons.
+    pub const ICON: f32 = 16.;
+    pub const ICON_SMALL: f32 = 14.;
+
+    // Spacing.
+    /// The horizontal inset of panel content from its edges.
+    pub const INSET: f32 = 12.;
+    /// Space between groups of related controls.
+    pub const GAP: f32 = 8.;
+    /// Space between sections of a list, such as Library's.
+    pub const SECTION: f32 = 16.;
+
+    // Shape.
+    /// Controls, rows and selection.
+    pub const RADIUS: f32 = 6.;
+    pub const TAB_RADIUS: f32 = 6.;
     /// Minimum usable space for appending a dragged tab to a group.
     pub const TAB_DROP: f32 = 8.;
-    pub const TAB_RADIUS: f32 = 4.;
-    /// Rows, tab labels and menus.
-    pub const TEXT: f32 = 13.;
-    /// Secondary text: artists beside titles, durations, counts and status.
-    pub const TEXT_SMALL: f32 = 12.;
-    /// Table column headings.
-    pub const LABEL: f32 = 12.;
     /// The inset of a drop preview from the region it describes.
     pub const PREVIEW_INSET: f32 = 4.;
+}
+
+/// Figures that line up in columns: durations, counts, levels and times.
+pub fn tabular() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)]))
 }
 
 pub fn materials(cx: &App) -> &Materials {
@@ -183,7 +274,7 @@ pub fn install(appearance: Appearance, cx: &mut App) {
     Theme::update(cx, |t| {
         t.font_family = interface_font().into();
         t.font_size = px(14.);
-        t.radius = px(5.);
+        t.radius = px(size::RADIUS);
         t.radius_lg = px(8.);
         t.shadow = true;
         t.list.active_highlight = true;

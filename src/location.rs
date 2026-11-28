@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 gpui_kit::actions!(location, [CancelEdit, ActivateLocationControl]);
 
 /// Both fields in a Music Browser's navigation row use its original address height.
-pub const NAV_FIELD_HEIGHT: f32 = 28.;
+pub const NAV_FIELD_HEIGHT: f32 = crate::theme::size::CONTROL;
 
 pub fn bind_keys(cx: &mut App) {
     breadcrumb::bind_keys(cx);
@@ -281,7 +281,7 @@ impl Render for LocationBar {
             .h(px(NAV_FIELD_HEIGHT))
             .items_center()
             .gap(px(4.))
-            .rounded(px(6.))
+            .rounded(px(crate::theme::size::RADIUS))
             .border_1()
             .on_action(cx.listener(|bar, _: &CancelEdit, w, cx| bar.cancel(w, cx)));
         if self.editing.is_some() {
@@ -308,7 +308,7 @@ impl Render for LocationBar {
                 .when(self.pending, |d| {
                     d.child(
                         div()
-                            .text_size(px(12.))
+                            .text_size(px(crate::theme::size::LABEL))
                             .text_color(m.text_faint)
                             .pr(px(6.))
                             .child("Opening…"),
@@ -321,7 +321,7 @@ impl Render for LocationBar {
                             .max_w(relative(0.5))
                             .gap_1()
                             .pr(px(6.))
-                            .text_size(px(12.))
+                            .text_size(px(crate::theme::size::LABEL))
                             .text_color(m.danger)
                             .child(Icon::new(IconName::CircleAlert).size(px(13.)))
                             .child(div().truncate().text_ellipsis_middle().child(e)),
@@ -332,9 +332,10 @@ impl Render for LocationBar {
         let browser = self.browser.read(cx);
         let address = physical_address(&browser.location, browser.page.as_ref())
             .map(|path| path.display().to_string());
-        base.bg(m.field())
-            .border_color(gpui::transparent_black())
-            .hover(|d| d.border_color(m.control_line))
+        // At rest the trail reads as the panel's title; the field appears
+        // under the pointer, where it can be edited.
+        base.border_color(gpui::transparent_black())
+            .hover(|d| d.bg(m.field()))
             .when(address.is_some(), |d| {
                 d.cursor_text()
                     .on_click(cx.listener(|bar, _, w, cx| bar.edit(w, cx)))

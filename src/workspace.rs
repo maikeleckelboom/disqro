@@ -170,9 +170,9 @@ pub fn bind_keys(cx: &mut App) {
 /// Layouts written with another version are replaced by the default layout;
 /// the rest of the profile is kept.
 const LAYOUT_VERSION: usize = 3;
-const PLAYER_HEIGHT: f32 = 112.;
-const PLAYER_MIN: f32 = 96.;
-const PLAYER_MAX: f32 = 200.;
+const PLAYER_HEIGHT: f32 = 140.;
+const PLAYER_MIN: f32 = 128.;
+const PLAYER_MAX: f32 = 240.;
 const LEADING_WIDTH: f32 = 232.;
 const TRAILING_WIDTH: f32 = 300.;
 
@@ -1569,14 +1569,6 @@ impl Workspace {
                     .min_w_0()
                     .h_full()
                     .items_center()
-                    .child(
-                        h_flex()
-                            .w(px(38.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .items_center()
-                            .child(img("brand/compact.png").size(px(18.))),
-                    )
                     .child(leading),
             )
             .child(
@@ -1937,7 +1929,12 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
-            .child(TitleBar::new().h(px(40.)).pl(px(10.)).child(title))
+            .child(
+                TitleBar::new()
+                    .h(px(crate::theme::size::TITLE_BAR))
+                    .pl(px(6.))
+                    .child(title),
+            )
             .child(div().flex_1().min_h_0().relative().map(|area| {
                 if full_results {
                     area.bg(m.canvas).child(self.search.clone())

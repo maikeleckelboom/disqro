@@ -35,14 +35,14 @@ use std::{
 
 /// How long an item dragged over a tab rests there before the tab opens.
 const DWELL: Duration = Duration::from_millis(550);
-const PREVIEW_HEIGHT: f32 = 24.;
+const PREVIEW_HEIGHT: f32 = 28.;
 pub const STRIP_HEIGHT: f32 = crate::theme::size::HEADER;
 /// The text inset on either side of a tab label.
-pub const TAB_X: f32 = 10.;
-const TAB_ICON: f32 = 14.;
-const TAB_GAP: f32 = 6.;
-const TAB_CLOSE: f32 = 18.;
-const TAB_END: f32 = 4.;
+pub const TAB_X: f32 = 12.;
+const TAB_ICON: f32 = crate::theme::size::ICON_SMALL;
+const TAB_GAP: f32 = 8.;
+const TAB_CLOSE: f32 = 20.;
+const TAB_END: f32 = 6.;
 
 /// Shared panel commands and hover activation for all dock groups.
 pub struct SkinState {
@@ -642,7 +642,7 @@ fn tab(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(4.))
+                    .rounded(px(crate::theme::size::RADIUS - 2.))
                     .hover(|d| d.bg(m.chrome.blend(m.control_hover)))
                     .invisible()
                     .group_hover(hover_group, |s| s.visible())

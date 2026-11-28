@@ -10,7 +10,8 @@ use gpui_kit::{
 };
 use std::path::PathBuf;
 
-pub const ROW: f32 = 26.;
+/// Library destinations, playlists and section headings.
+pub const ROW: f32 = crate::theme::size::NAV_ROW;
 /// Each level of the Locations filesystem tree.
 pub const INDENT: f32 = 14.;
 
@@ -34,20 +35,20 @@ pub fn chip(label: SharedString, cx: &App) -> Div {
     let m = materials(cx);
     div()
         .px(px(10.))
-        .py(px(4.))
-        .rounded(px(5.))
+        .py(px(5.))
+        .rounded(px(crate::theme::size::RADIUS))
         .bg(m.overlay)
         .border_1()
         .border_color(m.control_line)
-        .text_size(px(13.))
+        .text_size(px(crate::theme::size::TEXT))
         .text_color(m.text)
         .child(label)
 }
 
 /// The leading icon column every navigation row shares.
-pub const ICON: f32 = 16.;
+pub const ICON: f32 = crate::theme::size::ICON;
 /// Space between the leading icon column and the label.
-const ICON_GAP: f32 = 2.;
+const ICON_GAP: f32 = 4.;
 
 /// The surface every navigation row shares: height, insets, hover,
 /// selection and keyboard focus. Rows add their own leading column and label.
@@ -66,10 +67,10 @@ pub fn nav_surface(
         .focusable()
         .tab_stop(true)
         .h(px(ROW))
-        .mx(px(6.))
-        .px(px(8.))
-        .gap(px(4.))
-        .rounded(px(5.))
+        .mx(px(8.))
+        .px(px(10.))
+        .gap(px(6.))
+        .rounded(px(crate::theme::size::RADIUS))
         .flex_shrink_0()
         .items_center()
         .text_size(px(crate::theme::size::TEXT))

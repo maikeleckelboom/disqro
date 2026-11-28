@@ -74,21 +74,22 @@ impl Workspace {
             .occlude()
             .relative()
             .flex_shrink_0()
-            .w(px(if narrow { 156. } else { 280. }))
+            .w(px(if narrow { 180. } else { 320. }))
             .h(px(crate::location::NAV_FIELD_HEIGHT))
-            .pl(px(9.))
-            .pr(px(4.))
-            .gap(px(6.))
+            .pl(px(10.))
+            .pr(px(6.))
+            .gap(px(8.))
             .items_center()
-            .rounded(px(6.))
+            .rounded(px(crate::theme::size::RADIUS))
             .border_1()
             .map(|d| {
                 if focused {
                     d.bg(m.canvas).border_color(m.accent.opacity(0.6))
                 } else {
-                    d.bg(m.field())
-                        .border_color(transparent_black())
-                        .hover(|d| d.border_color(m.control_line))
+                    // A hairline at rest: findable without a filled block in
+                    // the title bar.
+                    d.border_color(m.line)
+                        .hover(|d| d.bg(m.field()).border_color(m.control_line))
                 }
             })
             .child(
@@ -111,7 +112,7 @@ impl Workspace {
                     div()
                         .flex_shrink_0()
                         .pr(px(4.))
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::size::LABEL))
                         .text_color(m.text_faint)
                         .child("Ctrl+K"),
                 )
@@ -383,7 +384,7 @@ impl LibrarySearch {
                         .px(px(8.))
                         .pt(px(8.))
                         .pb(px(3.))
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::size::LABEL))
                         .text_color(m.text_faint)
                         .child(group),
                 )
@@ -425,14 +426,14 @@ impl LibrarySearch {
                                     .child(
                                         div()
                                             .truncate()
-                                            .text_size(px(13.))
+                                            .text_size(px(crate::theme::size::TEXT))
                                             .child(hit.title.clone()),
                                     )
                                     .when(!hit.context.is_empty(), |d| {
                                         d.child(
                                             div()
                                                 .truncate()
-                                                .text_size(px(11.))
+                                                .text_size(px(crate::theme::size::LABEL))
                                                 .text_color(m.text_muted)
                                                 .child(hit.context.clone()),
                                         )
@@ -533,7 +534,7 @@ impl Render for LibrarySearch {
                     div()
                         .px(px(8.))
                         .py(px(10.))
-                        .text_size(px(12.))
+                        .text_size(px(crate::theme::size::LABEL))
                         .text_color(m.text_muted)
                         .child(self.status.clone()),
                 )

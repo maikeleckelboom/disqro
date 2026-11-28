@@ -40,14 +40,14 @@ pub(super) fn bind_keys(cx: &mut App) {
     ]);
 }
 
-const FONT_SIZE: f32 = 13.;
+const FONT_SIZE: f32 = crate::theme::size::TEXT;
 const INSET: f32 = 3.;
 const FIELD_CHROME: f32 = 2. * INSET + 2.;
 const LABEL_PADDING: f32 = 4.;
 const CHEVRON: f32 = 20.;
 const OVERFLOW: f32 = 22.;
-const CONTROL_HEIGHT: f32 = 22.;
-const MENU_ROW: f32 = 26.;
+const CONTROL_HEIGHT: f32 = 26.;
+const MENU_ROW: f32 = 30.;
 const MENU_VISIBLE_ROWS: usize = 10;
 const MENU_MIN_WIDTH: f32 = 156.;
 const MENU_MAX_WIDTH: f32 = 340.;

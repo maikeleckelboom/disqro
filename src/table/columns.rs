@@ -38,7 +38,7 @@ pub(crate) fn browser_table<D: TableDelegate>(
         .fixed_cols_border(false)
         .bordered(false)
         .stripe(false)
-        .header_row_height(px(crate::theme::size::HEADER))
+        .header_row_height(px(crate::theme::size::HEADING))
         .with_size(Size::Size(px(height)))
 }
 

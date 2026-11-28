@@ -744,7 +744,7 @@ impl Disc {
                     .truncate()
                     .text_ellipsis_middle()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_size(px(13.))
+                    .text_size(px(crate::theme::size::TEXT))
                     .text_color(m.text)
                     .child(self.title.clone()),
             )
@@ -992,7 +992,7 @@ impl TableDelegate for Discs {
             .justify_center()
             .items_center()
             .px(px(12.))
-            .text_size(px(13.))
+            .text_size(px(crate::theme::size::TEXT))
             .text_color(materials(cx).text_muted)
             .child(self.empty.clone())
     }
@@ -1022,8 +1022,10 @@ impl TableDelegate for Discs {
             .size_full()
             .min_w_0()
             .gap(px(10.))
-            .text_size(px(13.))
-            .when(field.right_aligned(), |d| d.justify_end())
+            .text_size(px(crate::theme::size::TEXT))
+            .when(field.right_aligned(), |d| {
+                d.justify_end().font_features(crate::theme::tabular())
+            })
             .text_color(if field == Field::Title {
                 m.text
             } else {
@@ -1141,7 +1143,7 @@ impl TableDelegate for Discs {
             d.child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(11.5))
+                    .text_size(px(crate::theme::size::LABEL))
                     .text_color(m.text_faint)
                     .child(format!("{n} CDs")),
             )

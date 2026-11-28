@@ -14,7 +14,6 @@ use gpui_kit::{
     component::{
         Sizable,
         button::{Button, ButtonVariants},
-        h_flex,
         menu::{ContextMenuExt, PopupMenuItem},
         v_flex,
     },
@@ -853,10 +852,7 @@ impl Render for Waveform {
         let inspecting = self.position.inspecting.is_some() && !grabbed;
         layout
             .child(
-                h_flex()
-                    .h(px(32.))
-                    .px_2()
-                    .gap_2()
+                super::header::panel_header()
                     .border_b_1()
                     .border_color(material.line)
                     .child(self.zoom_control(title, cx))
@@ -868,15 +864,7 @@ impl Render for Waveform {
                         } else {
                             self.coverage
                         },
-                        |header, status| {
-                            header.child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(material.text_muted)
-                                    .child(status),
-                            )
-                        },
+                        |header, status| header.child(super::header::detail(status, &material)),
                     )
                     .when(inspecting, |header| {
                         header.child(

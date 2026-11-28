@@ -77,9 +77,9 @@ struct LibraryChanged;
 impl EventEmitter<LibraryChanged> for LibraryPanel {}
 
 /// Space above a section heading, separating it from the previous section.
-const SECTION_GAP: f32 = 8.;
+const SECTION_GAP: f32 = crate::theme::size::SECTION;
 /// Space between exploring the library and personal listening destinations.
-const GROUP_GAP: f32 = 8.;
+const GROUP_GAP: f32 = 12.;
 
 pub struct LibraryPanel {
     catalog: Entity<Catalog>,
@@ -457,7 +457,7 @@ impl LibraryPanel {
                 d.child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(11.))
+                        .text_size(px(crate::theme::size::LABEL))
                         .text_color(m.text_faint)
                         .child(if status.starts_with("Reading") {
                             "Reading"
@@ -618,10 +618,10 @@ impl LibraryPanel {
                 rows.push(
                     h_flex()
                         .h(px(ROW))
-                        .mx(px(6.))
-                        .pl(px(8.))
-                        .pr(px(8.))
-                        .gap(px(4.))
+                        .mx(px(8.))
+                        .pl(px(10.))
+                        .pr(px(10.))
+                        .gap(px(6.))
                         .flex_shrink_0()
                         .items_center()
                         .key_context("LocationBar")
@@ -634,7 +634,7 @@ impl LibraryPanel {
                         .child(
                             Icon::new(IconName::Music2)
                                 .size(px(ICON))
-                                .mr(px(2.))
+                                .mr(px(4.))
                                 .text_color(m.accent),
                         )
                         .child(
@@ -800,9 +800,9 @@ impl Render for LibraryPanel {
                     .id("library")
                     .flex_1()
                     .min_h_0()
-                    .pt(px(4.))
-                    .pb(px(6.))
-                    .gap(px(1.))
+                    .pt(px(8.))
+                    .pb(px(8.))
+                    .gap(px(2.))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .children(self.render_rows(cx)),

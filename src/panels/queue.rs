@@ -67,7 +67,7 @@ pub static HISTORY: PanelType = PanelType {
     build: |services, _, _, cx| Rc::new(cx.new(|cx| Entries::new(Mode::History, services, cx))),
 };
 
-const ROW: f32 = 30.;
+const ROW: f32 = size::ROW;
 
 #[derive(Clone)]
 struct DraggedEntry {
@@ -301,9 +301,9 @@ impl Entries {
             .aria_label(title.clone())
             .w_full()
             .h(px(ROW))
-            .px(px(10.))
+            .px(px(size::INSET))
             .gap(px(10.))
-            .rounded(px(5.))
+            .rounded(px(size::RADIUS))
             .items_center()
             .text_size(px(size::TEXT))
             .when(selected, |d| d.bg(m.selected))
@@ -334,7 +334,7 @@ impl Entries {
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(size::TEXT_SMALL))
-                                .text_color(m.text_faint)
+                                .text_color(m.text_muted)
                                 .child(artist),
                         )
                     })
@@ -343,6 +343,7 @@ impl Entries {
                 div()
                     .flex_shrink_0()
                     .text_size(px(size::TEXT_SMALL))
+                    .font_features(crate::theme::tabular())
                     .text_color(m.text_faint)
                     .child(duration),
             )
@@ -400,7 +401,7 @@ impl Render for Entries {
                 .child(Icon::new(icon).size(px(26.)).text_color(m.text_faint))
                 .child(
                     div()
-                        .text_size(px(13.))
+                        .text_size(px(crate::theme::size::TEXT))
                         .text_color(m.text_muted)
                         .child(text),
                 )

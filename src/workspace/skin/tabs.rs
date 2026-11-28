@@ -248,9 +248,9 @@ mod tests {
     fn music_tab_fits_its_name_and_close_slot_at_the_last_inline_pixel() {
         let music = tab_width(px(35.), false, px);
         // Text plus focus edges, insets, folder icon, two gaps and close target.
-        assert_eq!(music, px(95.));
+        assert_eq!(music, px(105.));
         let library = tab_width(px(35.), true, px);
-        assert_eq!(library, px(57.));
+        assert_eq!(library, px(61.));
         let labels = TabLabels::new(&[(0, music), (2, library)], px(SPACING));
         let needed = music + library + px(SPACING + crate::theme::size::TAB_DROP);
         assert!(!labels.fit(needed, px).overflow);

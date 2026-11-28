@@ -219,33 +219,20 @@ impl Render for Spectrum {
             .track_focus(&self.focus)
             .bg(m.canvas)
             .child(
-                h_flex()
-                    .h(px(32.))
-                    .px(px(9.))
-                    .gap(px(8.))
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_sm()
-                            .text_color(m.text)
-                            .child(s.mode.label()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(m.text_muted)
-                            .child(unit),
-                    )
+                super::header::panel_header()
+                    .child(super::header::title(s.mode.label(), &m))
+                    .child(super::header::detail(unit, &m))
                     .when(s.hold != Hold::Off, |row| {
                         row.child(
                             h_flex()
                                 .gap(px(4.))
                                 .child(div().w(px(10.)).h(px(1.)).bg(m.text_muted))
-                                .child(div().text_xs().text_color(m.text_muted).child("Hold")),
+                                .child(
+                                    div()
+                                        .text_size(px(crate::theme::size::TEXT_SMALL))
+                                        .text_color(m.text_muted)
+                                        .child("Hold"),
+                                ),
                         )
                     })
                     .child(
