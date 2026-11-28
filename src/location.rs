@@ -6,7 +6,6 @@ use crate::{
     theme::materials,
 };
 use breadcrumb::Breadcrumbs;
-pub(crate) use breadcrumb::TrailWidths;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     component::{

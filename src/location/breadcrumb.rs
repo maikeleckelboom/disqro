@@ -680,31 +680,6 @@ fn menu_row(
         .tooltip(move |w, cx| Tooltip::new(label.clone()).build(w, cx))
 }
 
-/// The toolbar reserves space for measured labels and a readable current destination.
-pub(crate) struct TrailWidths {
-    pub(crate) preferred: Pixels,
-    pub(crate) minimum: Pixels,
-}
-
-impl TrailWidths {
-    pub(crate) fn measure(browser: &Browser, window: &Window, cx: &App) -> Self {
-        let routes = browser.ancestors();
-        let widths = measure_trail(browser, &routes, window, cx);
-        let total = px(FIELD_CHROME) + widths.iter().copied().sum::<Pixels>();
-        let earlier = if widths.len() > 1 {
-            px(OVERFLOW)
-        } else {
-            px(0.)
-        };
-        let leaf = widths.last().copied().unwrap_or_default() + earlier + px(FIELD_CHROME);
-        let preferred = total.clamp(px(140.), px(240.));
-        Self {
-            preferred,
-            minimum: leaf.clamp(px(84.), px(120.)).min(preferred),
-        }
-    }
-}
-
 fn measure_trail(browser: &Browser, routes: &[Route], window: &Window, cx: &App) -> Vec<Pixels> {
     routes
         .iter()

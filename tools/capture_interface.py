@@ -155,7 +155,7 @@ def keyboard_disclosures(process, hwnd):
         user32.PostMessageW(hwnd, 0x0100, key, 0)
         user32.PostMessageW(hwnd, 0x0101, key, 0xC0000000)
         wait_for(process, after)
-        wait_for(process, "Tree")
+        wait_for(process, "View · Tree")
 
 
 def resize(hwnd, width, height):
@@ -273,10 +273,11 @@ def capture_destinations(exe, output, scale, root):
         hwnd, point = wait_for(process, "Various Artists")
         click_control(hwnd, W.POINT(point.x, point.y))
         click_control(hwnd, point)
-        wait_for(process, "Tracks")
+        hwnd, picker = wait_for(process, "View · Tracks")
         screenshot(hwnd, output / "album-artist-tracks.png")
+        click_control(hwnd, picker)
+        # The menu opens beside the picker, to the right of the sidebar's Releases.
         rects = control_rects(hwnd, ["Releases"], min_y=0)
-        # The toolbar's presentation is to the right of the sidebar label.
         title, _, width, _ = rects[0]
         hwnd, point = wait_for(process, "Releases", min_x=title + width)
         click_control(hwnd, point)

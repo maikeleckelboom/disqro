@@ -60,6 +60,13 @@ def click(process, label, **bounds):
     return hwnd
 
 
+def choose_view(process, current, view, **bounds):
+    """Open the toolbar's view picker, which names the current view, and choose `view`."""
+    click(process, f"View · {current}", **bounds)
+    time.sleep(0.2)
+    return click(process, view, **bounds)
+
+
 def close(process):
     hwnd = find_window(process.pid)
     if hwnd:
@@ -214,8 +221,9 @@ def resize_journey(exe, output, root):
         folded = [s["earlier_locations"] for s in states]
         assert all(after <= before + 1 for before, after in zip(widths, widths[1:])), states
         assert any(folded) and not all(folded) and folded == sorted(folded), states
-        inline = [s["filter_width"] > 0 for s in states]
-        assert inline[0] and inline == sorted(inline, reverse=True), states
+        # The filter control keeps its place and size at every width.
+        filters = {s["filter_width"] for s in states}
+        assert len(filters) == 1 and filters.pop() > 0, states
         (output / "live-resize.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
     finally:
         close(process)
@@ -231,16 +239,16 @@ def journey(exe, test_exe, output):
     try:
         hwnd, _ = wait_for(process, "Browse Collections")
         wait_for(process, "Browse Playlists")
-        wait_for(process, "Tracks")
+        wait_for(process, "View · Tracks")
         screenshot(hwnd, output / "library-sidebar.png")
 
         _, sidebar = wait_for(process, "Browse Collections")
-        click(process, "Releases", min_x=sidebar.x + 180)
+        choose_view(process, "Tracks", "Releases", min_x=sidebar.x + 180)
         wait_for(process, "Album / Disc")
         time.sleep(0.25)
         screenshot(hwnd, output / "releases.png")
 
-        click(process, "Tree")
+        choose_view(process, "Releases", "Tree")
         click(process, "Expand Live Set")
         click(process, "Expand Live Set")
         click(process, "Expand CD 1")
@@ -273,7 +281,8 @@ def journey(exe, test_exe, output):
         click_control(hwnd, back)
         wait_for(process, "Collapse CD 1")
         dpi = C.windll.user32.GetDpiForWindow(hwnd)
-        forward = W.POINT(back.x + round(27 * dpi / 96), back.y)
+        # Forward sits beside Back: a 30 px button and a 2 px gap.
+        forward = W.POINT(back.x + round(32 * dpi / 96), back.y)
         click_control(hwnd, forward)
         wait_for(process, "Recordings")
         click_control(hwnd, back)
@@ -282,7 +291,7 @@ def journey(exe, test_exe, output):
         click_control(hwnd, chapter)
         click_control(hwnd, chapter)
         wait_for(process, "Pause")
-        click(process, "Releases")
+        choose_view(process, "Tree", "Releases", min_x=sidebar.x + 180)
         wait_for(process, "Album / Disc")
         click(process, "Go to Playing Track")
         wait_for(process, "Pause")
@@ -323,10 +332,10 @@ def journey(exe, test_exe, output):
     assert after["entries"] == queue["entries"] and after["current"] == queue["current"]
 
     for name, width, label, query in [
-        ("wide", 760, "Releases", ""),
-        ("medium", 505, "Releases", ""),
-        ("narrow", 375, "Choose view · Releases", ""),
-        ("filtered-narrow", 418, "Choose view · Releases", "Chapter 02"),
+        ("wide", 760, "View · Releases", ""),
+        ("medium", 505, "View · Releases", ""),
+        ("narrow", 375, "View · Releases", ""),
+        ("filtered-narrow", 418, "View · Releases", "Chapter 02"),
         ("extreme", 240, "Panel menu", "Chapter 02"),
     ]:
         process = launch(exe, output, profile(root, width, "albums", query))

@@ -65,10 +65,13 @@ def journey(exe, test_exe, output):
         click_control(hwnd, chapter)
         click_control(hwnd, chapter)
         wait_for(process, "Pause")
-        for action, content in [("Artists", "AA Artist 000001"), ("Releases", "AA Release 000001"),
-                                ("Open Tree fixture", "Tree"), ("Tree", "Folder 00001")]:
+        for actions, content in [(["Artists"], "AA Artist 000001"), (["Releases"], "AA Release 000001"),
+                                 (["Open Tree fixture"], "View · Tracks"),
+                                 (["View · Tracks", "Tree"], "Folder 00001")]:
+            action = " → ".join(actions)
             start = time.monotonic()
-            click_control(hwnd, wait_for(process, action)[1])
+            for step in actions:
+                click_control(hwnd, wait_for(process, step)[1])
             wait_for(process, content, timeout=20)
             wait_for(process, "Pause")
             elapsed[action] = round(time.monotonic() - start, 3)

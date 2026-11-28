@@ -10,7 +10,7 @@ use crate::{
     audio::Command,
     browser::{Browser, Location, Route, SavedVisit, SequenceKind, music_home},
     collection::{ViewMode, ViewPrefs},
-    location::{LocationBar, TrailWidths},
+    location::LocationBar,
     player::Player,
     table::{Layouts, queue_targets},
     theme::{materials, size},
@@ -18,7 +18,7 @@ use crate::{
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, ElementExt, Icon, Selectable, Sizable,
+        Disableable, ElementExt, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
@@ -143,22 +143,6 @@ impl BrowserPane {
             _address: address,
         }
     }
-    fn nav_button(
-        id: &'static str,
-        icon: IconName,
-        label: &'static str,
-        enabled: bool,
-        cx: &App,
-    ) -> Button {
-        let m = materials(cx);
-        Button::new(id)
-            .ghost()
-            .small()
-            .icon(Icon::new(icon).size(px(16.)).text_color(m.text_muted))
-            .accessibility_label(label)
-            .tooltip(label)
-            .disabled(!enabled)
-    }
     /// What this instance saves, and what a new instance opened from it
     /// starts with.
     pub fn state(browser: &Browser, cx: &App) -> BrowserState {
@@ -206,8 +190,6 @@ fn browser_menu(
     browser: &Entity<Browser>,
     player: &Entity<Player>,
     mut menu: PopupMenu,
-    inline_sequence: bool,
-    compact: bool,
     cx: &App,
 ) -> PopupMenu {
     use crate::collection::{DiscId, Page};
@@ -221,8 +203,17 @@ fn browser_menu(
         .collections
         .iter()
         .any(|c| b.path.starts_with(&c.root.path));
-    if compact {
-        menu = compact_header_menu(b, browser, menu, cx);
+    if let Some(target) = b.up_in_toolbar().then(|| b.up_label(cx)) {
+        let up = browser.clone();
+        let label = target.map_or_else(|| "Up".to_owned(), |target| format!("Up · {target}"));
+        menu = menu
+            .item(
+                PopupMenuItem::new(label)
+                    .icon(IconName::ArrowUp)
+                    .disabled(!b.can_go_up())
+                    .on_click(move |_, w, cx| up.update(cx, |b, cx| b.up(w, cx))),
+            )
+            .separator();
     }
     if b.listing_tree() {
         let targets = b.tree_visible_tracks(cx);
@@ -267,11 +258,7 @@ fn browser_menu(
     let extra_axis = axis
         .filter(|kind| *kind == SequenceKind::Disc)
         .map(|_| SequenceKind::Release);
-    for kind in axis
-        .filter(|_| !inline_sequence)
-        .into_iter()
-        .chain(extra_axis)
-    {
+    for kind in axis.into_iter().chain(extra_axis) {
         for next in [false, true] {
             let Some(target) = b.sequence_label(kind, next) else {
                 continue;
@@ -481,79 +468,24 @@ impl PaneContent for BrowserPane {
     }
 }
 
-fn compact_header_menu(
-    browser: &Browser,
-    entity: &Entity<Browser>,
-    mut menu: PopupMenu,
-    cx: &App,
-) -> PopupMenu {
-    let steps = [
-        (
-            "Back",
-            browser.history_label(false, cx),
-            Browser::back as fn(&mut Browser, &mut Window, &mut Context<Browser>),
-        ),
-        ("Forward", browser.history_label(true, cx), Browser::forward),
-    ];
-    let up = browser
-        .up_in_toolbar()
-        .then(|| ("Up", browser.up_label(cx), Browser::up as _));
-    for (name, target, step) in steps.into_iter().chain(up) {
-        let browser = entity.clone();
-        let enabled = target.is_some();
-        let label = target.map_or_else(|| name.to_owned(), |target| format!("{name} · {target}"));
-        menu = menu.item(
-            PopupMenuItem::new(label)
-                .disabled(!enabled)
-                .on_click(move |_, w, cx| browser.update(cx, |b, cx| step(b, w, cx))),
-        );
-    }
-    let filter = entity.clone();
-    menu = menu.separator().item(
-        PopupMenuItem::new("Filter this view")
-            .on_click(move |_, w, cx| filter.update(cx, |b, cx| b.set_filter_open(true, w, cx))),
-    );
-    if !browser.search.read(cx).value().is_empty() {
-        let filter = entity.clone();
-        menu = menu.item(
-            PopupMenuItem::new("Clear filter")
-                .on_click(move |_, w, cx| filter.update(cx, |b, cx| b.dismiss_filter(w, cx))),
-        );
-    }
-    browser.header_views().menu(menu, entity).separator()
-}
-
-const HEADER_INSET: f32 = 8.;
+/// The space between the toolbar's edge and its first and last controls.
 const BAR_INSET: f32 = 6.;
-const NAV_BUTTON: f32 = size::ICON_BUTTON;
-const NAV_GAP: f32 = 1.;
-const SEQUENCE_RAIL: f32 = 64.;
-const VIEW_TAB: f32 = 40.;
-const VIEW_TAB_HEIGHT: f32 = size::BAR - 7.;
+/// The space between neighboring toolbar controls.
+const CONTROL_GAP: f32 = 2.;
+/// The space between the breadcrumb and the controls on either side.
+const ADDRESS_GAP: f32 = size::GAP;
 const ICON_BUTTON: f32 = size::ICON_BUTTON;
-const SCOPE_GAP: f32 = 3.;
-const FILTER_COMPACT: f32 = 112.;
-const FILTER_FULL: f32 = 200.;
+/// The view picker's chrome around its label: padding, icon, gaps and caret.
+const PICKER_CHROME: f32 = 58.;
 const VIEW_CHOICES: [(ViewMode, &str, IconName); 3] = [
     (ViewMode::Tracks, "Tracks", IconName::ListMusic),
     (ViewMode::Albums, "Releases", IconName::Disc3),
     (ViewMode::Tree, "Tree", IconName::ListTree),
 ];
-const VIEW_LABEL_SIZE: f32 = size::TEXT_SMALL;
-const VIEW_LABEL_CHROME: f32 = 44.;
-const PICKER_WIDTH: f32 = 46.;
 const SCOPE_CHOICES: [(bool, &str, IconName); 2] = [
     (false, "This folder only", IconName::Folder),
     (true, "Include subfolders", IconName::Folders),
 ];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HeaderDensity {
-    Labels,
-    Icons,
-    Picker,
-    Menu,
-}
 
 #[derive(Clone, Copy)]
 struct BrowserViews {
@@ -564,140 +496,17 @@ struct BrowserViews {
 }
 
 impl BrowserViews {
-    /// The view tabs the destination offers, in their usual order.
+    /// The views the destination offers, in their usual order.
     fn offered(self) -> impl Iterator<Item = (usize, (ViewMode, &'static str, IconName))> {
         VIEW_CHOICES
             .into_iter()
             .enumerate()
             .filter(move |(_, (mode, _, _))| self.choices.contains(mode))
     }
-}
 
-#[derive(Clone, Copy)]
-struct ControlWidths {
-    labels: Pixels,
-    icons: Pixels,
-    picker: Pixels,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum HeaderFilter {
-    Field(Pixels),
-    Button,
-    InMenu,
-}
-
-#[derive(Debug)]
-struct HeaderLayout {
-    density: HeaderDensity,
-    address: Pixels,
-    filter: HeaderFilter,
-    controls: Pixels,
-    sequence: bool,
-}
-
-impl ControlWidths {
-    fn layout(
-        self,
-        width: Pixels,
-        history: Pixels,
-        trail: TrailWidths,
-        editing: bool,
-        has_sequence: bool,
-    ) -> HeaderLayout {
-        let row = (width - px(BAR_INSET + ICON_BUTTON)).max(px(0.));
-        let available = row - history;
-        let minimum_field = px(FILTER_COMPACT);
-        let preferred_field = px(FILTER_FULL);
-        let sequence_rail = px(SEQUENCE_RAIL);
-        let sequence = has_sequence
-            && available >= self.labels + trail.preferred + preferred_field + sequence_rail;
-        let sequence_width = if sequence { sequence_rail } else { px(0.) };
-        let picker_filter = if editing {
-            minimum_field
-        } else {
-            px(ICON_BUTTON)
-        };
-
-        let (density, fixed, filter_width, address_limit) =
-            if available >= self.labels + trail.preferred + minimum_field {
-                let width = (available - sequence_width - self.labels - trail.preferred)
-                    .min(preferred_field);
-                let limit = if has_sequence && !sequence {
-                    trail.preferred
-                } else {
-                    row
-                };
-                (HeaderDensity::Labels, self.labels, width, limit)
-            } else if available >= self.icons + trail.minimum + minimum_field {
-                (
-                    HeaderDensity::Icons,
-                    self.icons,
-                    minimum_field,
-                    trail.preferred,
-                )
-            } else if available >= self.picker + trail.minimum + picker_filter {
-                (
-                    HeaderDensity::Picker,
-                    self.picker,
-                    picker_filter,
-                    trail.minimum,
-                )
-            } else {
-                return HeaderLayout {
-                    density: HeaderDensity::Menu,
-                    address: row.min(trail.minimum),
-                    filter: HeaderFilter::InMenu,
-                    controls: px(0.),
-                    sequence: false,
-                };
-            };
-        let controls = fixed + filter_width;
-        HeaderLayout {
-            density,
-            // Folding controls can release space all at once. Cap the trail
-            // at the width it had at that boundary so hidden ancestors never
-            // return during a continuous shrink.
-            address: (available - sequence_width - controls).min(address_limit),
-            filter: if density == HeaderDensity::Picker && !editing {
-                HeaderFilter::Button
-            } else {
-                HeaderFilter::Field(filter_width)
-            },
-            controls,
-            sequence,
-        }
-    }
-}
-
-impl BrowserViews {
-    fn widths(self, labels: [Pixels; VIEW_CHOICES.len()]) -> ControlWidths {
-        let labels: Pixels = self.offered().map(|(i, _)| labels[i]).sum();
-        let overhead = px(2. * HEADER_INSET + size::TAB_DROP)
-            + if self.subfolders.is_some() {
-                px(ICON_BUTTON + SCOPE_GAP)
-            } else {
-                px(0.)
-            }
-            + if self.mode.is_some() {
-                px(SCOPE_GAP)
-            } else {
-                px(0.)
-            };
-        let (text, icons, picker) = if self.mode.is_some() {
-            (
-                labels,
-                px(self.offered().count() as f32 * VIEW_TAB),
-                px(PICKER_WIDTH),
-            )
-        } else {
-            (px(0.), px(0.), px(0.))
-        };
-        ControlWidths {
-            labels: overhead + text,
-            icons: overhead + icons,
-            picker: overhead + picker,
-        }
+    /// Whether the destination has a view or folder scope to choose.
+    fn has_picker(self) -> bool {
+        self.mode.is_some() || self.subfolders.is_some()
     }
 
     fn menu(self, mut menu: PopupMenu, browser: &Entity<Browser>) -> PopupMenu {
@@ -738,216 +547,204 @@ impl BrowserViews {
     }
 }
 
-#[derive(Clone)]
-struct ViewFocus {
-    tracks: FocusHandle,
-    albums: FocusHandle,
-    tree: FocusHandle,
-    folders: FocusHandle,
-    filter: FocusHandle,
-    back: FocusHandle,
-    forward: FocusHandle,
-    up: FocusHandle,
+/// The Music Browser toolbar has one composition at every width:
+///
+/// ```text
+/// Back  Forward  Breadcrumb ……………………  Filter  View ▾  More
+/// ```
+///
+/// Width changes sizes, never the controls. The breadcrumb takes every
+/// pixel the controls leave: it folds its earliest ancestors into a menu,
+/// then truncates the current location. Once the breadcrumb reaches
+/// [`ADDRESS_MIN`], so the current location stays identifiable, the view
+/// picker's label truncates instead, down to [`PICKER_MIN`]. Below that the
+/// toolbar keeps its composition and the breadcrumb gives way, and in a
+/// panel narrower than the controls themselves, Back is the first to clip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ToolbarLayout {
+    /// The breadcrumb's width.
+    address: Pixels,
+    /// The view picker's width, when the destination offers one.
+    picker: Option<Pixels>,
 }
 
-impl ViewFocus {
-    fn choice(&self, mode: ViewMode) -> &FocusHandle {
-        match mode {
-            ViewMode::Tracks => &self.tracks,
-            ViewMode::Tree => &self.tree,
-            ViewMode::Albums => &self.albums,
+/// The narrowest breadcrumb before the view picker gives way: room for the
+/// Earlier locations button and the start of the current location.
+const ADDRESS_MIN: f32 = 132.;
+/// The narrowest view picker: its icon, caret and the start of its label.
+const PICKER_MIN: f32 = PICKER_CHROME + 20.;
+
+impl ToolbarLayout {
+    /// Everything but the breadcrumb and the view picker: insets, gaps,
+    /// Back and Forward, Filter and the panel menu.
+    fn fixed(picker: bool) -> Pixels {
+        let history = px(2. * ICON_BUTTON + CONTROL_GAP);
+        let controls =
+            px(2. * ICON_BUTTON + CONTROL_GAP) + if picker { px(CONTROL_GAP) } else { px(0.) };
+        px(2. * BAR_INSET + 2. * ADDRESS_GAP) + history + controls
+    }
+
+    /// `picker` is the view picker's full width, when the destination
+    /// offers one.
+    fn new(width: Pixels, picker: Option<Pixels>) -> Self {
+        let available = (width - Self::fixed(picker.is_some())).max(px(0.));
+        let picker =
+            picker.map(|full| (available - px(ADDRESS_MIN)).clamp(px(PICKER_MIN).min(full), full));
+        Self {
+            address: (available - picker.unwrap_or_default()).max(px(0.)),
+            picker,
         }
     }
 
-    fn focused(&self, window: &Window) -> Option<&FocusHandle> {
-        [
-            &self.tracks,
-            &self.albums,
-            &self.tree,
-            &self.folders,
-            &self.filter,
-            &self.back,
-            &self.forward,
-            &self.up,
-        ]
-        .into_iter()
-        .find(|handle| handle.is_focused(window))
+    /// The controls to the right of the breadcrumb.
+    fn controls(self) -> Pixels {
+        px(2. * ICON_BUTTON + CONTROL_GAP)
+            + self
+                .picker
+                .map_or(px(0.), |picker| picker + px(CONTROL_GAP))
     }
 }
 
+#[derive(Clone)]
+struct ViewFocus {
+    view: FocusHandle,
+    filter: FocusHandle,
+    back: FocusHandle,
+    forward: FocusHandle,
+}
+
 impl Browser {
-    /// The shared header for standalone and tabbed browsers. History and
-    /// view controls fold into the panel menu as the dock narrows.
+    /// The view picker's width, the same for every view, so choosing one
+    /// never moves the controls beside it.
+    fn picker_width(window: &Window) -> Pixels {
+        VIEW_CHOICES
+            .iter()
+            .map(|(_, name, _)| {
+                crate::theme::label_width((*name).into(), px(size::TEXT_SMALL), window)
+            })
+            .fold(px(0.), Pixels::max)
+            + px(PICKER_CHROME)
+    }
+
+    /// The shared toolbar for standalone and tabbed browsers.
     fn bar(&self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let m = *materials(cx);
         let browser = cx.entity();
         let focus = window
             .use_keyed_state(("view-focus", browser.entity_id()), cx, |_, cx| ViewFocus {
-                tracks: cx.focus_handle(),
-                albums: cx.focus_handle(),
-                tree: cx.focus_handle(),
-                folders: cx.focus_handle(),
+                view: cx.focus_handle(),
                 filter: cx.focus_handle(),
                 back: cx.focus_handle(),
                 forward: cx.focus_handle(),
-                up: cx.focus_handle(),
             })
             .read(cx)
             .clone();
-        let label_widths = VIEW_CHOICES.map(|(_, name, _)| {
-            crate::theme::label_width(name.into(), px(VIEW_LABEL_SIZE), window)
-                + px(VIEW_LABEL_CHROME)
-        });
-        let input = self.search.read(cx);
-        let filter_focused = input.focus_handle(cx).is_focused(window);
-        let filter_applied = !input.value().is_empty();
-        let history = px(2. * NAV_BUTTON + NAV_GAP)
-            + if self.up_in_toolbar() {
-                px(NAV_BUTTON + NAV_GAP)
-            } else {
-                px(0.)
-            };
-        let sequence = self.sequence_kind();
-        let layout = self.header_views().widths(label_widths).layout(
-            width,
-            history,
-            TrailWidths::measure(self, window, cx),
-            filter_focused || self.filter_open || filter_applied,
-            sequence.is_some(),
-        );
-        let density = layout.density;
-        let compact = density == HeaderDensity::Menu;
-        let sequence = sequence.filter(|_| layout.sequence);
-        let address = self.address.as_ref().and_then(WeakEntity::upgrade);
-        if let Some(address) = &address {
+        let views = self.header_views();
+        let picker = views.has_picker().then(|| Self::picker_width(window));
+        let layout = ToolbarLayout::new(width, picker);
+        if let Some(address) = self.address.as_ref().and_then(WeakEntity::upgrade) {
             address.update(cx, |bar, cx| bar.set_width(layout.address, cx));
         }
-        let edit_width = (width - px(BAR_INSET + ICON_BUTTON)).clamp(px(0.), px(FILTER_COMPACT));
+        let address = self.address.as_ref().and_then(WeakEntity::upgrade);
         let player = self.table.read(cx).delegate().player.clone();
+        let filter_applied = !self.search.read(cx).value().is_empty();
+        let filter_shown = self.filter_shown(cx);
         h_flex()
             .id("browser-bar")
             .w(width)
             .h(px(size::BAR))
             .flex_shrink_0()
             .items_center()
-            .pl(px(BAR_INSET))
-            .relative()
+            .px(px(BAR_INSET))
+            .gap(px(ADDRESS_GAP))
+            // Narrower than its composition, the toolbar keeps its right end,
+            // where the panel menu offers everything, and clips its left.
+            .justify_end()
+            .overflow_hidden()
             .bg(m.canvas)
-            // The bottom rule is drawn first, so the selected view tab can
-            // open through it into the table.
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(1.))
-                    .bg(m.line),
-            )
-            .when(!compact, |bar| bar.child(self.history(&focus, cx)))
+            .when(!filter_shown, |bar| bar.border_b_1().border_color(m.line))
+            .child(self.history(&focus, cx))
             .child(
                 h_flex()
-                    .w(if compact && filter_focused {
-                        edit_width
-                    } else {
-                        layout.address
-                    })
+                    .w(layout.address)
                     .flex_shrink_0()
                     .h_full()
                     .min_w_0()
                     .items_center()
-                    .map(|d| {
-                        if compact && filter_focused {
-                            d.child(self.filter_control(
-                                HeaderFilter::Field(edit_width),
-                                true,
-                                &focus.filter,
-                                window,
-                                cx,
-                            ))
-                        } else {
-                            d.children(address)
-                        }
-                    }),
+                    .children(address),
             )
-            .when_some(sequence, |bar, kind| {
-                bar.child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .gap(px(2.))
-                        .children([false, true].map(|next| {
-                            let browser = browser.clone();
-                            let target = self.sequence_label(kind, next);
-                            let action = kind.action(next);
-                            let shortcut = if next { "Alt+Page Down" } else { "Alt+Page Up" };
-                            let tooltip = target.as_ref().map_or_else(
-                                || action.to_owned(),
-                                |title| format!("{action} · {title} · {shortcut}"),
-                            );
-                            BrowserPane::nav_button(
-                                if next {
-                                    "sequence-next"
-                                } else {
-                                    "sequence-previous"
-                                },
-                                if next {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronLeft
-                                },
-                                action,
-                                target.is_some(),
-                                cx,
-                            )
-                            .tooltip(tooltip)
-                            .on_click(move |_, w, cx| {
-                                browser.update(cx, |b, cx| b.step_sequence(Some(kind), next, w, cx))
-                            })
-                        })),
-                )
-            })
-            .when(!compact, |bar| {
-                bar.child(
-                    div()
-                        .ml_auto()
-                        .w(layout.controls)
-                        .h_full()
-                        .flex_shrink_0()
-                        .child(self.header_controls(&layout, label_widths, &focus, window, cx)),
-                )
-            })
             .child(
-                Button::new("browser-menu")
-                    .when(compact, |button| button.ml_auto())
-                    .ghost()
-                    .xsmall()
-                    .w(px(ICON_BUTTON))
-                    .icon(IconName::Ellipsis)
-                    .accessibility_label("Panel menu")
-                    .tab_stop(true)
-                    .when_some(
-                        compact.then(|| focus.focused(window)).flatten(),
-                        |button, handle| button.track_focus(handle).tab_stop(true),
+                h_flex()
+                    .id("browser-controls")
+                    .ml_auto()
+                    .w(layout.controls())
+                    .flex_shrink_0()
+                    .gap(px(CONTROL_GAP))
+                    .items_center()
+                    .child(
+                        Button::new("open-filter")
+                            .ghost()
+                            .w(px(ICON_BUTTON))
+                            .h(px(ICON_BUTTON))
+                            .icon(
+                                Icon::new(IconName::ListFilter)
+                                    .size(px(size::ICON))
+                                    // A filter that hides rows stays visible.
+                                    .text_color(if filter_applied {
+                                        m.accent
+                                    } else {
+                                        m.text_muted
+                                    }),
+                            )
+                            // Pressed while the filter row is shown; the name
+                            // stays the same in every state.
+                            .toggled(filter_shown)
+                            .track_focus(&focus.filter)
+                            .tab_stop(true)
+                            .accessibility_label("Filter this view")
+                            .tooltip(if filter_applied {
+                                "Filter this view · A filter hides rows · Ctrl+F"
+                            } else {
+                                "Filter this view · Ctrl+F"
+                            })
+                            .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(true, w, cx))),
                     )
-                    .when(compact && filter_applied, |button| {
-                        button.text_color(m.accent)
+                    .when_some(layout.picker, |row, picker| {
+                        row.child(view_picker(&browser, views, picker, &focus.view, m))
                     })
-                    .tooltip(if compact && filter_applied {
-                        "Panel menu · Filter active"
-                    } else {
-                        "Panel menu"
-                    })
-                    .dropdown_menu(move |menu, w, cx| {
-                        let menu =
-                            browser_menu(&browser, &player, menu, sequence.is_some(), compact, cx);
-                        let pane = browser.read(cx).pane.as_ref().and_then(WeakEntity::upgrade);
-                        match (pane, cx.try_global::<super::PaneMenus>().cloned()) {
-                            (Some(pane), Some(menus)) => (menus.0)(&pane, menu.separator(), w, cx),
-                            _ => menu,
-                        }
-                    }),
+                    .child(
+                        Button::new("browser-menu")
+                            .ghost()
+                            .w(px(ICON_BUTTON))
+                            .h(px(ICON_BUTTON))
+                            .icon(
+                                Icon::new(IconName::Ellipsis)
+                                    .size(px(size::ICON))
+                                    .text_color(m.text_muted),
+                            )
+                            .accessibility_label("Panel menu")
+                            .tab_stop(true)
+                            .tooltip("Panel menu")
+                            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, w, cx| {
+                                let menu = browser_menu(&browser, &player, menu, cx);
+                                let pane =
+                                    browser.read(cx).pane.as_ref().and_then(WeakEntity::upgrade);
+                                match (pane, cx.try_global::<super::PaneMenus>().cloned()) {
+                                    (Some(pane), Some(menus)) => {
+                                        (menus.0)(&pane, menu.separator(), w, cx)
+                                    }
+                                    _ => menu,
+                                }
+                            }),
+                    ),
             )
             .into_any_element()
+    }
+
+    /// Whether the filter row is shown: once asked for, and for as long as
+    /// a filter hides rows.
+    fn filter_shown(&self, cx: &App) -> bool {
+        self.filter_open || !self.search.read(cx).value().is_empty()
     }
 
     fn history(&self, focus: &ViewFocus, cx: &mut Context<Self>) -> AnyElement {
@@ -964,10 +761,13 @@ impl Browser {
             );
             Button::new(id)
                 .ghost()
-                .xsmall()
-                .w(px(NAV_BUTTON))
-                .h(px(NAV_BUTTON))
-                .icon(Icon::new(icon).size(px(15.)).text_color(m.text_muted))
+                .w(px(ICON_BUTTON))
+                .h(px(ICON_BUTTON))
+                .icon(
+                    Icon::new(icon)
+                        .size(px(size::ICON))
+                        .text_color(m.text_muted),
+                )
                 .accessibility_label(label.clone())
                 .tooltip(label)
                 .tab_stop(true)
@@ -978,7 +778,7 @@ impl Browser {
             .role(Role::Group)
             .aria_label("History")
             .flex_shrink_0()
-            .gap(px(NAV_GAP))
+            .gap(px(CONTROL_GAP))
             .child(
                 button(
                     "back",
@@ -1001,13 +801,6 @@ impl Browser {
                 .track_focus(&focus.forward)
                 .on_click(cx.listener(|b, _, w, cx| b.forward(w, cx))),
             )
-            .when(self.up_in_toolbar(), |bar| {
-                bar.child(
-                    button("up", IconName::ArrowUp, "Up", "Alt+Up", self.up_label(cx))
-                        .track_focus(&focus.up)
-                        .on_click(cx.listener(|b, _, w, cx| b.up(w, cx))),
-                )
-            })
             .into_any_element()
     }
 
@@ -1022,270 +815,129 @@ impl Browser {
         }
     }
 
-    fn header_controls(
-        &self,
-        layout: &HeaderLayout,
-        label_widths: [Pixels; VIEW_CHOICES.len()],
-        focus: &ViewFocus,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let browser = cx.entity();
-        let views = self.header_views();
-        let density = layout.density;
-        let m = *materials(cx);
-        let mode = views.mode.map(|mode| {
-            if density == HeaderDensity::Picker {
-                let handle = VIEW_CHOICES
-                    .iter()
-                    .map(|(choice, _, _)| focus.choice(*choice))
-                    .find(|handle| handle.is_focused(window))
-                    .unwrap_or_else(|| focus.choice(mode));
-                view_menu(
-                    &browser,
-                    BrowserViews {
-                        mode: Some(mode),
-                        subfolders: None,
-                        choices: views.choices,
-                    },
-                    handle,
-                    m,
-                )
-            } else {
-                view_tabs(&browser, views, mode, focus, density, label_widths, m)
-            }
-        });
-        let scope = views.subfolders.map(|include| {
-            view_menu(
-                &browser,
-                BrowserViews {
-                    mode: None,
-                    subfolders: Some(include),
-                    choices: &[],
-                },
-                &focus.folders,
-                m,
-            )
-        });
-        h_flex()
-            .id("browser-controls")
-            .w_full()
-            .h_full()
-            .px(px(HEADER_INSET))
-            .gap(px(SCOPE_GAP))
-            .items_center()
-            .justify_end()
-            .child(self.filter_control(
-                layout.filter,
-                density == HeaderDensity::Picker,
-                &focus.filter,
-                window,
-                cx,
-            ))
-            .children(scope)
-            .children(mode)
-            .into_any_element()
-    }
-
-    /// The filter button, or the field once it is open or holds a query.
-    fn filter_control(
-        &self,
-        filter: HeaderFilter,
-        tight: bool,
-        button_focus: &FocusHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The filter field, in its own row below the toolbar, so opening it
+    /// never moves the toolbar's controls.
+    fn filter_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.filter_shown(cx) {
+            return None;
+        }
         let m = *materials(cx);
         let input = self.search.clone();
         let empty = input.read(cx).value().is_empty();
-        let focused = input.read(cx).focus_handle(cx).is_focused(window);
-        let HeaderFilter::Field(width) = filter else {
-            return Button::new("open-filter")
-                .ghost()
-                .xsmall()
-                .icon(
-                    Icon::new(IconName::ListFilter)
-                        .size(px(14.))
-                        .text_color(m.text_muted),
-                )
-                .w(px(ICON_BUTTON))
-                .h(px(size::CONTROL - 4.))
-                .track_focus(button_focus)
-                .tab_stop(true)
-                .text_color(m.text_muted)
-                .accessibility_label("Filter this view")
-                .tooltip("Filter this view · Ctrl+F")
-                .on_click(cx.listener(|b, _, w, cx| b.set_filter_open(true, w, cx)))
-                .into_any_element();
-        };
-        // Preserve the keyboard target if its icon becomes an inline field.
-        if button_focus.is_focused(window) && !focused {
-            let browser = cx.entity();
-            cx.defer_in(window, move |_, window, cx| {
-                browser.update(cx, |b, cx| b.set_filter_open(true, window, cx));
-            });
-        }
         let scope = self.tree_filter_scope();
-        h_flex()
-            .id("browser-filter")
-            .when_some(scope, |d, scope| {
-                d.tooltip(move |w, cx| {
-                    gpui_kit::component::tooltip::Tooltip::new(scope).build(w, cx)
+        Some(
+            h_flex()
+                .id("browser-filter")
+                .w_full()
+                .h(px(size::HEADER))
+                .flex_shrink_0()
+                .pl(px(size::INSET))
+                .pr(px(BAR_INSET))
+                .gap(px(size::GAP))
+                .items_center()
+                .bg(m.canvas)
+                .border_b_1()
+                .border_color(m.line)
+                .when_some(scope, |d, scope| {
+                    d.tooltip(move |w, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(scope).build(w, cx)
+                    })
                 })
-            })
-            .flex_shrink(1.)
-            .min_w_0()
-            .w(width)
-            .h(px(size::CONTROL - 4.))
-            .pl(px(if tight { 2. } else { 7. }))
-            .pr(px(2.))
-            .gap(px(5.))
-            .items_center()
-            .rounded(px(5.))
-            .border_1()
-            .map(|d| {
-                if focused {
-                    d.bg(m.canvas).border_color(m.accent.opacity(0.6))
-                } else {
-                    d.bg(m.field())
-                        .border_color(transparent_black())
-                        .hover(|d| d.border_color(m.control_line))
-                }
-            })
-            .when(!tight, |d| {
-                d.child(
+                .child(
                     Icon::new(IconName::ListFilter)
-                        .size(px(13.))
+                        .size(px(size::ICON_SMALL))
                         .flex_shrink_0()
-                        // A filter that hides rows stays visible, even unfocused.
                         .text_color(if empty { m.text_faint } else { m.accent }),
                 )
-            })
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&input)
-                        .xsmall()
-                        .appearance(false)
-                        .cleanable(!tight)
-                        .aria_label(scope.unwrap_or("Filter this view")),
-                ),
-            )
-            .capture_key_down(cx.listener(|b, e: &KeyDownEvent, w, cx| {
-                if e.keystroke.key == "escape" && !e.keystroke.modifiers.modified() {
-                    b.dismiss_filter(w, cx);
-                    w.prevent_default();
-                    cx.stop_propagation();
-                }
-            }))
-            .into_any_element()
+                .child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&input)
+                            .small()
+                            .appearance(false)
+                            .aria_label(scope.unwrap_or("Filter this view")),
+                    ),
+                )
+                .child(
+                    Button::new("close-filter")
+                        .ghost()
+                        .w(px(ICON_BUTTON))
+                        .h(px(ICON_BUTTON))
+                        .icon(
+                            Icon::new(IconName::X)
+                                .size(px(size::ICON_SMALL))
+                                .text_color(m.text_muted),
+                        )
+                        .accessibility_label("Clear and close filter")
+                        .tooltip("Clear and close filter · Esc")
+                        .on_click(cx.listener(|b, _, w, cx| b.dismiss_filter(w, cx))),
+                )
+                .capture_key_down(cx.listener(|b, e: &KeyDownEvent, w, cx| {
+                    if e.keystroke.key == "escape" && !e.keystroke.modifiers.modified() {
+                        b.dismiss_filter(w, cx);
+                        w.prevent_default();
+                        cx.stop_propagation();
+                    }
+                }))
+                .into_any_element(),
+        )
     }
 }
 
-fn view_tabs(
+/// The view picker: the current view's name, and a menu of the views and
+/// folder scope this destination offers. Its width never changes.
+fn view_picker(
     browser: &Entity<Browser>,
     views: BrowserViews,
-    mode: ViewMode,
-    focus: &ViewFocus,
-    density: HeaderDensity,
-    label_widths: [Pixels; VIEW_CHOICES.len()],
-    m: crate::theme::Materials,
-) -> AnyElement {
-    // Connected tabs: the selected view takes the table's surface and opens
-    // into it through the header's bottom rule, like the dock's own tabs.
-    h_flex()
-        .id("browser-views")
-        .h_full()
-        .items_end()
-        .flex_shrink_0()
-        .role(Role::Group)
-        .aria_label("View")
-        .children(
-            views
-                .offered()
-                .map(|(i, choice)| (choice, label_widths[i]))
-                .map(|((value, name, icon), label_width)| {
-                    let browser = browser.clone();
-                    let selected = mode == value;
-                    let labeled = density == HeaderDensity::Labels;
-                    Button::new(name)
-                        .ghost()
-                        .xsmall()
-                        .w(if labeled { label_width } else { px(VIEW_TAB) })
-                        .h(px(VIEW_TAB_HEIGHT))
-                        .rounded(px(0.))
-                        .rounded_t(px(size::TAB_RADIUS + 1.))
-                        .px(px(0.))
-                        .selected(selected)
-                        .toggled(selected)
-                        .border_t_1()
-                        .border_l_1()
-                        .border_r_1()
-                        .border_color(if selected {
-                            m.line
-                        } else {
-                            transparent_black()
-                        })
-                        .when(selected, |b| b.bg(m.canvas))
-                        .child(Icon::new(icon).size(px(15.)).text_color(if selected {
-                            m.text
-                        } else {
-                            m.text_faint
-                        }))
-                        .when(labeled, |b| b.text_size(px(VIEW_LABEL_SIZE)).child(name))
-                        .accessibility_label(name)
-                        .tooltip(name)
-                        .track_focus(focus.choice(value))
-                        .tab_stop(true)
-                        .on_click(move |_, w, cx| browser.update(cx, |b, cx| b.view(value, w, cx)))
-                }),
-        )
-        .into_any_element()
-}
-
-/// A standalone folder scope menu, or a shared picker when the view tabs
-/// cannot fit beside the scope and filter.
-fn view_menu(
-    browser: &Entity<Browser>,
-    views: BrowserViews,
+    width: Pixels,
     focus: &FocusHandle,
     m: crate::theme::Materials,
 ) -> AnyElement {
     let browser = browser.clone();
-    let (id, icon, description, anchor, width) = if let Some(mode) = views.mode {
-        let (_, name, icon) = VIEW_CHOICES
+    let (name, icon) = match views.mode {
+        Some(mode) => VIEW_CHOICES
             .into_iter()
             .find(|(choice, _, _)| *choice == mode)
-            .unwrap_or(VIEW_CHOICES[0]);
-        (
-            "browser-view-menu",
-            icon,
-            format!("Choose view · {name}"),
-            Anchor::TopLeft,
-            PICKER_WIDTH,
-        )
-    } else {
-        let include = views.subfolders.unwrap_or_default();
-        let (_, name, icon) = SCOPE_CHOICES[usize::from(include)];
-        (
-            "browser-folder-scope",
-            icon,
-            format!("Folder scope · {name}"),
-            Anchor::TopRight,
-            ICON_BUTTON,
-        )
+            .map(|(_, name, icon)| (name, icon))
+            .unwrap_or(("Tracks", IconName::ListMusic)),
+        None => {
+            let (_, name, icon) = SCOPE_CHOICES[usize::from(views.subfolders.unwrap_or_default())];
+            (name, icon)
+        }
     };
-    Button::new(id)
+    let description = if views.mode.is_some() {
+        format!("View · {name}")
+    } else {
+        format!("Folder scope · {name}")
+    };
+    Button::new("browser-view")
         .ghost()
-        .small()
-        .w(px(width))
-        .dropdown_caret(views.mode.is_some())
-        .icon(Icon::new(icon).text_color(m.text_muted))
+        .w(width)
+        .h(px(ICON_BUTTON))
+        .px(px(8.))
+        .justify_start()
+        .gap(px(6.))
+        .icon(
+            Icon::new(icon)
+                .size(px(size::ICON))
+                .text_color(m.text_muted),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(size::TEXT_SMALL))
+                .text_color(m.text)
+                .child(if views.mode.is_some() { name } else { "Scope" }),
+        )
+        .dropdown_caret(true)
         .track_focus(focus)
         .tab_stop(true)
         .accessibility_label(description.clone())
         .tooltip(description)
-        .dropdown_menu_with_anchor(anchor, move |menu, _, _| views.menu(menu, &browser))
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            views.menu(menu, &browser)
+        })
         .into_any_element()
 }
 
@@ -1325,6 +977,9 @@ impl Render for Browser {
             .h(px(size::BAR))
             .flex_shrink_0(),
         );
+        if let Some(row) = self.filter_row(cx) {
+            view = view.child(row);
+        }
         if let Some(message) = status(self, cx) {
             view = view.child(
                 div()
@@ -1497,94 +1152,50 @@ fn focus_outline(focused: bool, m: &crate::theme::Materials) -> Option<Div> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BrowserState, BrowserViews, HeaderDensity, HeaderFilter, TrailWidths, ViewMode, px,
-    };
+    use super::{ADDRESS_MIN, BrowserState, PICKER_MIN, ToolbarLayout, ViewMode, px};
     use crate::browser::Location;
     use crate::browser::{Route, SavedVisit};
     use std::path::PathBuf;
 
     #[test]
-    fn favorites_shrinks_the_filter_before_folding_the_location() {
-        let views = BrowserViews {
-            mode: None,
-            subfolders: None,
-            choices: &[],
-        };
-        let layout = |width| {
-            views.widths([px(0.); 3]).layout(
-                px(width),
-                px(53.),
-                TrailWidths {
-                    preferred: px(180.),
-                    minimum: px(115.),
-                },
-                false,
-                false,
-            )
-        };
-        let wide = layout(490.);
-        let middle = layout(430.);
-        let narrow = layout(415.);
-        assert!(wide.address >= middle.address);
-        assert_eq!(middle.address, narrow.address);
-        assert_eq!(narrow.address, px(180.));
-        let [
-            HeaderFilter::Field(wide),
-            HeaderFilter::Field(middle),
-            HeaderFilter::Field(narrow),
-        ] = [wide.filter, middle.filter, narrow.filter]
-        else {
-            panic!("filter should stay inline");
-        };
-        assert!(wide > middle && middle > narrow);
+    fn every_width_keeps_the_same_controls_and_narrowing_only_shrinks_them() {
+        for full in [None, Some(px(130.))] {
+            let mut previous: Option<ToolbarLayout> = None;
+            for width in (100..=2400).rev() {
+                let layout = ToolbarLayout::new(px(width as f32), full);
+                // The same controls at every width: the picker never leaves.
+                assert_eq!(layout.picker.is_some(), full.is_some(), "width {width}");
+                if let Some(previous) = previous {
+                    assert!(layout.address <= previous.address, "width {width}");
+                    assert!(layout.picker <= previous.picker, "width {width}");
+                }
+                previous = Some(layout);
+            }
+        }
     }
 
     #[test]
-    fn folding_any_toolbar_control_never_gives_the_breadcrumb_more_room() {
-        for mode in [None, Some(ViewMode::Albums)] {
-            for subfolders in [None, Some(false)] {
-                for editing in [false, true] {
-                    for sequence in [false, true] {
-                        let views = BrowserViews {
-                            mode,
-                            subfolders,
-                            choices: &[ViewMode::Tracks, ViewMode::Albums, ViewMode::Tree],
-                        };
-                        let mut previous = px(2000.);
-                        let mut previous_filter = px(2000.);
-                        for width in (120..=1000).rev() {
-                            let layout = views.widths([px(235. / 3.); 3]).layout(
-                                px(width as f32),
-                                px(53.),
-                                TrailWidths {
-                                    preferred: px(184.),
-                                    minimum: px(115.),
-                                },
-                                editing,
-                                sequence,
-                            );
-                            assert!(layout.address <= previous, "width {width}, {layout:?}");
-                            let filter = match layout.filter {
-                                HeaderFilter::Field(width) => width,
-                                HeaderFilter::Button => px(super::ICON_BUTTON),
-                                HeaderFilter::InMenu => px(0.),
-                            };
-                            assert!(filter <= previous_filter, "width {width}, {layout:?}");
-                            previous_filter = filter;
-                            assert!(layout.address >= px(0.));
-                            if editing {
-                                assert_ne!(layout.filter, HeaderFilter::Button);
-                            }
-                            if layout.density == HeaderDensity::Menu {
-                                assert!(!layout.sequence);
-                            }
-                            previous = layout.address;
-                        }
-                    }
-                }
+    fn the_breadcrumb_keeps_the_current_location_before_the_picker_gives_way() {
+        let full = Some(px(130.));
+        let wide = ToolbarLayout::new(px(900.), full);
+        let narrower = ToolbarLayout::new(px(800.), full);
+        assert_eq!(wide.picker, full);
+        assert_eq!(wide.address - narrower.address, px(100.));
+        for width in 100..900 {
+            let layout = ToolbarLayout::new(px(width as f32), full);
+            if layout.picker < full {
+                // The picker shrinks only once the breadcrumb is at its minimum.
+                assert!(
+                    layout.address >= px(ADDRESS_MIN) || layout.picker == Some(px(PICKER_MIN)),
+                    "width {width}: {layout:?}"
+                );
             }
         }
+        let tight = ToolbarLayout::new(px(10.), full);
+        assert_eq!(
+            (tight.address, tight.picker),
+            (px(0.), Some(px(PICKER_MIN)))
+        );
     }
 
     #[test]
