@@ -124,7 +124,7 @@ impl Materials {
             line: hex(0x2a2a2f),
             control_line: hex(0x34343a),
             // Faint text still labels columns and axes, so it keeps at least
-            // 4.5:1 against every surface it sits on.
+            // 4.5:1 against the plain surfaces, `tab_well` through `overlay`.
             text: hex(0xececef),
             text_muted: hex(0xadadb5),
             text_faint: hex(0x8a8a93),

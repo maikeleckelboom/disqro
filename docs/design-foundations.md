@@ -52,7 +52,7 @@ Names and titles end in an ellipsis. Middle truncation is kept for folder paths 
 
 ## Color roles
 
-Text has three roles: `text` for primary labels, `text_muted` for secondary metadata, and `text_faint` for column headings, axes and other quiet labels. Faint text keeps at least 4.5:1 contrast against every surface it sits on, so quiet never means unreadable.
+Text has three roles: `text` for primary labels, `text_muted` for secondary metadata, and `text_faint` for column headings, axes and other quiet labels. Faint text keeps at least 4.5:1 contrast against the plain surfaces, from `tab_well` to `overlay`, so quiet never means unreadable. A selected row lowers it to about 3.7:1 and a hovered row to about 4.5:1.
 
 The surfaces stay neutral graphite: `chrome` frames the window, `tab_well` recesses behind tabs, `canvas` holds content and `raised` holds the player. The player's timeline lane, `wave.lane`, is the same black the waveform renderer clears to, so the waveform has no visible plate. Artwork and the musical visualizations supply the color. The play button is the one control with a finish of its own, `Materials::silver`: satin metal with machined rim highlights, which lights a thin ring in the accent color while playing.
 
