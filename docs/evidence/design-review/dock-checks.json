@@ -1,0 +1,251 @@
+{
+  "checks": {
+    "two visible browser instances": true,
+    "mixed group keeps its companion": true,
+    "restored tab order and geometry": true,
+    "playing after toggles": true,
+    "reordered within the group": true,
+    "Queue split below browser and above its former companion": true,
+    "Done kept all instances": true,
+    "playing after dock edits": true,
+    "restart restored tab geometry": true,
+    "restart restored split axes, tab order, selection and IDs": true
+  },
+  "dpi": 144,
+  "before_hide": [
+    [
+      "Library",
+      51,
+      109,
+      101,
+      54
+    ],
+    [
+      "Listening Statistics",
+      526,
+      791,
+      275,
+      53
+    ],
+    [
+      "Queue",
+      422,
+      791,
+      101,
+      53
+    ],
+    [
+      "Reference Library",
+      422,
+      109,
+      265,
+      54
+    ],
+    [
+      "Reference Library",
+      690,
+      109,
+      265,
+      54
+    ],
+    [
+      "Spectrogram",
+      1253,
+      472,
+      224,
+      54
+    ],
+    [
+      "Spectrum",
+      1480,
+      472,
+      194,
+      54
+    ],
+    [
+      "Stereo Field",
+      1743,
+      472,
+      214,
+      54
+    ],
+    [
+      "Waveform",
+      1253,
+      109,
+      200,
+      54
+    ]
+  ],
+  "after_show": [
+    [
+      "Library",
+      51,
+      109,
+      101,
+      54
+    ],
+    [
+      "Listening Statistics",
+      526,
+      791,
+      275,
+      53
+    ],
+    [
+      "Queue",
+      422,
+      791,
+      101,
+      53
+    ],
+    [
+      "Reference Library",
+      422,
+      109,
+      265,
+      54
+    ],
+    [
+      "Reference Library",
+      690,
+      109,
+      265,
+      54
+    ],
+    [
+      "Spectrogram",
+      1253,
+      472,
+      224,
+      54
+    ],
+    [
+      "Spectrum",
+      1480,
+      472,
+      194,
+      54
+    ],
+    [
+      "Stereo Field",
+      1743,
+      472,
+      214,
+      54
+    ],
+    [
+      "Waveform",
+      1253,
+      109,
+      200,
+      54
+    ]
+  ],
+  "layout": [
+    "split",
+    0,
+    [
+      [
+        "tabs",
+        0,
+        [
+          [
+            "disqro.library",
+            2
+          ]
+        ]
+      ],
+      [
+        "split",
+        1,
+        [
+          [
+            "tabs",
+            1,
+            [
+              [
+                "disqro.browser",
+                1
+              ],
+              [
+                "disqro.browser",
+                5696519979399919
+              ]
+            ]
+          ],
+          [
+            "tabs",
+            0,
+            [
+              [
+                "disqro.queue",
+                3
+              ]
+            ]
+          ],
+          [
+            "tabs",
+            0,
+            [
+              [
+                "disqro.listening-statistics",
+                4
+              ]
+            ]
+          ]
+        ]
+      ],
+      [
+        "split",
+        1,
+        [
+          [
+            "tabs",
+            0,
+            [
+              [
+                "disqro.waveform",
+                5
+              ]
+            ]
+          ],
+          [
+            "split",
+            0,
+            [
+              [
+                "tabs",
+                0,
+                [
+                  [
+                    "disqro.spectrogram",
+                    6
+                  ],
+                  [
+                    "disqro.spectrum",
+                    7
+                  ]
+                ]
+              ],
+              [
+                "tabs",
+                0,
+                [
+                  [
+                    "disqro.stereo-field",
+                    8
+                  ]
+                ]
+              ]
+            ]
+          ]
+        ]
+      ]
+    ]
+  ],
+  "browser_ids": [
+    1,
+    5696519979399919
+  ]
+}
