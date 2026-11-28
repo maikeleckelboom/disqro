@@ -123,11 +123,10 @@ impl Materials {
             overlay: hex(0x242428),
             line: hex(0x2a2a2f),
             control_line: hex(0x34343a),
-            // Faint text still labels columns and axes, so it keeps at least
-            // 4.5:1 against the plain surfaces, `tab_well` through `overlay`.
+            // Track numbers and formats must stay readable on a selected row.
             text: hex(0xececef),
             text_muted: hex(0xadadb5),
-            text_faint: hex(0x8a8a93),
+            text_faint: hex(0x9e9ea6),
             accent: hex(0x91afcb),
             on_accent: hex(0x0e1217),
             hover: hexa(0xffffff, 0.045),
@@ -402,4 +401,38 @@ pub fn install(appearance: Appearance, cx: &mut App) {
     // fade-while-scrolling mode keeps requesting frames for the folder tree,
     // which would cost CPU in an idle window.
     Theme::set_scrollbar_mode(gpui_kit::component::scroll::ScrollbarMode::Hover, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Hsla, Materials};
+
+    fn luminance(color: Hsla) -> f32 {
+        let linear = |channel: f32| {
+            if channel <= 0.04045 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let rgb = color.to_rgb();
+        0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+    }
+
+    #[test]
+    fn quiet_labels_keep_contrast_on_plain_surfaces_and_browser_rows() {
+        let m = Materials::dark();
+        for surface in [
+            m.chrome,
+            m.tab_well,
+            m.canvas,
+            m.raised,
+            m.overlay,
+            m.canvas.blend(m.hover),
+            m.canvas.blend(m.selected),
+        ] {
+            let contrast = (luminance(m.text_faint) + 0.05) / (luminance(surface) + 0.05);
+            assert!(contrast >= 4.5, "{contrast}:1 on {surface:?}");
+        }
+    }
 }
