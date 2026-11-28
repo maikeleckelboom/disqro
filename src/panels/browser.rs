@@ -33,6 +33,10 @@ use std::{path::PathBuf, rc::Rc};
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.browser",
+    minimum_content: size(
+        MIN_WIDTH,
+        size::BAR + size::HEADER + size::HEADING + size::ROW,
+    ),
     title: "Music Browser",
     icon: IconName::Library,
     instances: super::Instances::Multiple,
@@ -557,9 +561,8 @@ impl BrowserViews {
 /// pixel the controls leave: it folds its earliest ancestors into a menu,
 /// then truncates the current location. Once the breadcrumb reaches
 /// [`ADDRESS_MIN`], so the current location stays identifiable, the view
-/// picker's label truncates instead, down to [`PICKER_MIN`]. Below that the
-/// toolbar keeps its composition and the breadcrumb gives way, and in a
-/// panel narrower than the controls themselves, Back is the first to clip.
+/// picker's label truncates instead, down to [`PICKER_MIN`]. The dock
+/// reserves both floors even while a different tab is selected.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ToolbarLayout {
     /// The breadcrumb's width.
@@ -574,20 +577,22 @@ const ADDRESS_MIN: f32 = 132.;
 /// The narrowest view picker: its icon, caret and the start of its label.
 const PICKER_MIN: f32 = PICKER_CHROME + 20.;
 
+const MIN_WIDTH: f32 = ToolbarLayout::fixed(true) + PICKER_MIN + ADDRESS_MIN;
+
 impl ToolbarLayout {
     /// Everything but the breadcrumb and the view picker: insets, gaps,
     /// Back and Forward, Filter and the panel menu.
-    fn fixed(picker: bool) -> Pixels {
-        let history = px(2. * ICON_BUTTON + CONTROL_GAP);
-        let controls =
-            px(2. * ICON_BUTTON + CONTROL_GAP) + if picker { px(CONTROL_GAP) } else { px(0.) };
-        px(2. * BAR_INSET + 2. * ADDRESS_GAP) + history + controls
+    const fn fixed(picker: bool) -> f32 {
+        2. * BAR_INSET
+            + 2. * ADDRESS_GAP
+            + 4. * ICON_BUTTON
+            + (if picker { 3. } else { 2. }) * CONTROL_GAP
     }
 
     /// `picker` is the view picker's full width, when the destination
     /// offers one.
     fn new(width: Pixels, picker: Option<Pixels>) -> Self {
-        let available = (width - Self::fixed(picker.is_some())).max(px(0.));
+        let available = (width - px(Self::fixed(picker.is_some()))).max(px(0.));
         let picker =
             picker.map(|full| (available - px(ADDRESS_MIN)).clamp(px(PICKER_MIN).min(full), full));
         Self {
@@ -657,8 +662,6 @@ impl Browser {
             .items_center()
             .px(px(BAR_INSET))
             .gap(px(ADDRESS_GAP))
-            // When the controls exceed the slot, keep the panel menu reachable.
-            .justify_end()
             .overflow_hidden()
             .bg(m.canvas)
             .when(!filter_shown, |bar| bar.border_b_1().border_color(m.line))
@@ -1169,6 +1172,13 @@ mod tests {
     use crate::browser::Location;
     use crate::browser::{Route, SavedVisit};
     use std::path::PathBuf;
+
+    #[test]
+    fn panel_minimum_fits_the_leaf_ancestor_overflow_and_all_controls() {
+        let layout = ToolbarLayout::new(px(super::TYPE.minimum_content.width), Some(px(130.)));
+        assert_eq!(layout.address, px(ADDRESS_MIN));
+        assert_eq!(layout.picker, Some(px(PICKER_MIN)));
+    }
 
     #[test]
     fn every_width_keeps_the_same_controls_and_narrowing_only_shrinks_them() {

@@ -40,6 +40,7 @@ pub fn bind_keys(cx: &mut App) {
 
 pub static HISTORY: PanelType = PanelType {
     key: "disqro.listening-history",
+    minimum_content: size(272., 240.),
     title: "Listening History",
     icon: IconName::Clock,
     instances: super::Instances::Single,
@@ -51,6 +52,7 @@ pub static HISTORY: PanelType = PanelType {
 
 pub static STATISTICS: PanelType = PanelType {
     key: "disqro.listening-statistics",
+    minimum_content: size(224., 164.),
     title: "Listening Statistics",
     icon: IconName::AudioLines,
     instances: super::Instances::Single,

@@ -26,6 +26,7 @@ use plot::Plot;
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.spectrum",
+    minimum_content: size(224., 128.),
     title: "Spectrum",
     icon: IconName::AudioLines,
     instances: Instances::Multiple,

@@ -1,3 +1,4 @@
+// Disqro change: propagate operating sizes through visible dock groups and splits.
 //! The dock area: the trees, the entity cache that mirrors them, and the
 //! reconciliation that keeps the two in step.
 
@@ -10,10 +11,10 @@ use std::{
 
 use anyhow::Result;
 use gpui::{
-    AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, Point, Render, SharedString, Stateful, Styled as _, Subscription, WeakEntity, Window,
-    div, prelude::FluentBuilder as _, px,
+    Along as _, AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div, Empty,
+    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, Point, Render, SharedString, Size, Stateful, Styled as _, Subscription,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px, size,
 };
 
 use crate::{
@@ -891,7 +892,9 @@ impl DockArea {
     /// measurement while its untouched siblings kept file-era numbers, so the
     /// written ratio would match neither the file nor the screen. Reading the
     /// measurement for every slot of a split writes one internally consistent
-    /// set, which is what the old `StackPanel::dump` did.
+    /// set, which is what the old `StackPanel::dump` did. When a slot is
+    /// hidden or clamped, save the split's preferred bases if known, so
+    /// reopening in a larger viewport restores the user's proportions.
     pub fn dump(&self, cx: &App) -> DockAreaState {
         let source = LivePanels::new(&self.panels, cx);
 
@@ -926,12 +929,7 @@ impl DockArea {
     }
 
     fn resolve_sizes(&self, node: &mut PaneNode, cx: &App) {
-        let measured = self
-            .splits
-            .get(&node.id())
-            .map(|cached| cached.entity.read(cx).sizes().clone())
-            .unwrap_or_default();
-
+        let node_id = node.id();
         let NodeKind::Split {
             children, sizes, ..
         } = node.kind_mut()
@@ -939,14 +937,23 @@ impl DockArea {
             return;
         };
 
+        let resolved = self
+            .splits
+            .get(&node_id)
+            .map(|cached| {
+                let hidden = children.iter().any(|child| !self.is_node_visible(child, cx));
+                cached.entity.read(cx).sizes_to_restore(hidden)
+            })
+            .unwrap_or_default();
+
         for (ix, size) in sizes.iter_mut().enumerate() {
             // A slot already holding zero is exactly as unsafe as an absent
             // one: it is the same byte in the file and the same zero-pixel
             // panel in an older build. So both the measurement and the stored
             // value have to clear zero before they can be written.
-            let on_screen = measured.get(ix).copied().filter(|size| *size > px(0.));
+            let live = resolved.get(ix).copied().filter(|size| *size > px(0.));
             let stored = (*size).filter(|size| *size > px(0.));
-            *size = Some(on_screen.or(stored).unwrap_or(PANEL_MIN_SIZE));
+            *size = Some(live.or(stored).unwrap_or(PANEL_MIN_SIZE));
         }
 
         for child in children.iter_mut() {
@@ -1387,39 +1394,26 @@ impl DockArea {
                 // A container whose every panel is hidden must not keep
                 // occupying its slot. No renderer hook could supply this:
                 // only the area can see the panels behind a node.
-                let shown: Vec<bool> = children
+                let minimums: Vec<_> = children
                     .iter()
-                    .map(|child| self.is_node_visible(child, cx))
+                    .map(|child| self.node_min_size(child, cx))
                     .collect();
-                // The slot that absorbs the leftover has to be one that is
-                // actually drawn. A hidden slot renders nothing and grows
-                // nothing, so making it the flexible one leaves every drawn
-                // slot rigid and the split ends short of its container — the
-                // empty strip this picks the *last shown* slot to avoid.
-                let grows = shown.iter().rposition(|shown| *shown);
+                let grows = minimums.iter().rposition(Option::is_some);
                 let panels: Vec<_> = children
                     .iter()
                     .zip(sizes.iter())
                     .enumerate()
                     .map(|(ix, (child, size))| {
                         resizable_panel()
-                            .visible(shown[ix])
+                            .visible(minimums[ix].is_some())
+                            .size_range(minimums[ix].unwrap_or_default().along(axis)..Pixels::MAX)
                             .child(self.render_node(child, window, cx))
-                            // `flex_none` is what makes the size stick.
-                            // `ResizablePanel` sets `flex_grow: 1` on itself,
-                            // so a slot given a size would otherwise treat it
-                            // as a flex-basis and still absorb an equal share
-                            // of the leftover — a 200px sidebar rendering
-                            // 1075px wide in a 1950px split.
-                            // The growth slot absorbs container growth. A
-                            // drag records every measured size as pixels; if
-                            // all of them became `flex_none`, a later viewport
-                            // resize would leave an empty strip after the
-                            // split instead of keeping the Dock filled.
+                            // Only the last shown slot grows. Sized siblings can
+                            // still yield space to another slot at its minimum.
                             .when_some(*size, |panel, size| {
-                                panel
-                                    .size(size)
-                                    .when(Some(ix) != grows, |panel| panel.flex_none())
+                                panel.size(size).when(Some(ix) != grows, |panel| {
+                                    panel.flex_grow_0().flex_shrink_1()
+                                })
                             })
                     })
                     .collect();
@@ -1456,6 +1450,32 @@ impl DockArea {
                 Some(cached) => cached.entity.clone().into_any_element(),
                 None => Empty.into_any_element(),
             },
+        }
+    }
+
+    /// Extent needed to keep every visible center group operable. A host can
+    /// put the center tree in a scrolling viewport when its window is smaller.
+    pub fn center_min_size(&self, cx: &App) -> Size<Pixels> {
+        self.node_min_size(self.center.root(), cx)
+            .unwrap_or_default()
+    }
+
+    fn node_min_size(&self, node: &PaneNode, cx: &App) -> Option<Size<Pixels>> {
+        match node.kind() {
+            PaneRef::Tabs { panels, .. } => panels
+                .iter()
+                .filter_map(|id| self.panel(*id))
+                .filter(|panel| panel.visible(cx))
+                .map(|panel| self.renderer.panel_min_size(panel.as_ref(), cx))
+                .reduce(|a, b| size(a.width.max(b.width), a.height.max(b.height))),
+            // Resize handles overlay their slots, so contribute no extent.
+            PaneRef::Split { axis, children, .. } => children
+                .iter()
+                .filter_map(|child| self.node_min_size(child, cx))
+                .reduce(|a, b| match axis {
+                    Axis::Horizontal => size(a.width + b.width, a.height.max(b.height)),
+                    Axis::Vertical => size(a.width.max(b.width), a.height + b.height),
+                }),
         }
     }
 
@@ -1909,6 +1929,11 @@ pub fn dock_frame(dock: &DockContext, size: Pixels) -> Div {
 /// [`DockContext::resize_to`].
 #[allow(unused_variables)]
 pub trait DockAreaRenderer: 'static {
+    /// Minimum slot extent, including this skin's tab bar and panel chrome.
+    fn panel_min_size(&self, _panel: &dyn PanelView, _cx: &App) -> Size<Pixels> {
+        size(PANEL_MIN_SIZE, PANEL_MIN_SIZE)
+    }
+
     /// The area's outer frame, which base records its bounds on.
     /// Appearance only. The area is laid out as a row around whatever this
     /// returns, because that is what makes a dock a column beside the centre

@@ -35,6 +35,7 @@ use gpui_kit::{
         button::*,
         dock::*,
         menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+        scroll::{Scrollbar, ScrollbarMode},
         *,
     },
     prelude::*,
@@ -206,6 +207,7 @@ impl Render for PlayerResize {
 pub struct Workspace {
     services: Services,
     dock: Entity<DockArea>,
+    dock_scroll: ScrollHandle,
     skin: Rc<SkinState>,
     panes: HashMap<PanelId, Tracked>,
     undo: Option<recovery::Checkpoint>,
@@ -438,6 +440,7 @@ impl Workspace {
         let mut app = Self {
             services,
             dock,
+            dock_scroll: ScrollHandle::default(),
             skin,
             panes: HashMap::new(),
             undo: None,
@@ -1772,6 +1775,7 @@ impl Render for Workspace {
         let empty = self.dock.read(cx).is_empty(DockPlacement::Center, cx);
         let title = self.title_bar(window, cx);
         let player_height = self.player_height;
+        let minimum = self.dock.read(cx).center_min_size(cx);
         let dock = AnyView::from(self.dock.clone());
         // Cached drawing omits descendants from subsequent accessibility trees.
         let dock = if window.is_a11y_active() {
@@ -1969,8 +1973,30 @@ impl Render for Workspace {
                 if full_results {
                     area.bg(m.canvas).child(self.search.clone())
                 } else {
-                    area.child(dock)
-                        .when(empty, |d| d.child(self.empty_state(cx)))
+                    area.child(
+                        div()
+                            .id("workspace-viewport")
+                            .role(Role::Group)
+                            .aria_label("Workspace panels")
+                            .size_full()
+                            .overflow_scroll()
+                            .track_scroll(&self.dock_scroll)
+                            .child(
+                                div()
+                                    .size_full()
+                                    .min_w(minimum.width)
+                                    .min_h(minimum.height)
+                                    .child(dock),
+                            ),
+                    )
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::new(&self.dock_scroll)
+                                .mode(ScrollbarMode::Always)
+                                .viewport_from_layout(),
+                        ),
+                    )
+                    .when(empty, |d| d.child(self.empty_state(cx)))
                 }
             }))
             .child(

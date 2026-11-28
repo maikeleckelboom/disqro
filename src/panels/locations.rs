@@ -38,6 +38,7 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.locations",
+    minimum_content: size(160., 104.),
     title: "Locations",
     icon: IconName::FolderOpen,
     instances: super::Instances::Single,

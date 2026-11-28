@@ -10,6 +10,8 @@ def main():
     invalid = []
     for filename in tracked.split("\0"):
         path = PurePosixPath(filename)
+        if path.is_relative_to("vendor"):
+            continue
         if path.suffix not in {".rs", ".py"}:
             continue
         parts = (*path.parts[:-1], path.stem)

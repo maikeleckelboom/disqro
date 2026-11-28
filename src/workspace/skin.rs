@@ -105,10 +105,9 @@ impl SkinState {
     }
     pub fn can_open_beside(&self, node: NodeId) -> bool {
         // Keep both tables readable when opening a browser beside this group.
-        self.widths
-            .borrow()
-            .get(&node)
-            .is_some_and(|width| *width >= px(2. * 320. + 4.))
+        self.widths.borrow().get(&node).is_some_and(|width| {
+            *width >= px(2. * crate::panels::browser::TYPE.minimum_content.width)
+        })
     }
     pub fn retain_groups(&self, tree: &gpui_kit::component::dock::PaneTree) {
         self.widths
@@ -157,6 +156,18 @@ impl Skin {
 }
 
 impl DockAreaRenderer for Skin {
+    fn panel_min_size(
+        &self,
+        panel: &dyn gpui_kit::component::dock::BasePanelView,
+        cx: &App,
+    ) -> Size<Pixels> {
+        if let Some(pane) = panel.as_any().downcast_ref::<Entity<Pane>>() {
+            let content = pane.read(cx).ty.minimum_content;
+            size(px(content.width), px(content.height + STRIP_HEIGHT))
+        } else {
+            self.inner.panel_min_size(panel, cx)
+        }
+    }
     fn frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         self.inner.frame(window, cx).bg(materials(cx).canvas)
     }

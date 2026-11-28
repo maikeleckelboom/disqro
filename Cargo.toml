@@ -63,6 +63,8 @@ embed-resource = "3"
 # Cargo applies patches only from the root workspace. Waveform Native carries
 # the single copy of GPUI's same-device texture bridge.
 [patch.crates-io]
+# Slot ranges and center minimum for the native workspace. See vendor/README.md.
+gpui-base = { path = "vendor/gpui-base-0.10.0" }
 gpui-fast-windows = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "4b4330c107bf05b6fd3b27e165c66213b485c727" }
 
 [profile.dev]

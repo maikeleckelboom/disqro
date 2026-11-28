@@ -40,6 +40,7 @@ use scrub::Press;
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.waveform",
+    minimum_content: size(256., 108.),
     title: "Waveform",
     icon: IconName::AudioLines,
     instances: Instances::Multiple,

@@ -24,6 +24,7 @@ use plot::Plot;
 
 pub static SPECTROGRAM: PanelType = PanelType {
     key: "disqro.spectrogram",
+    minimum_content: size(208., 128.),
     title: "Spectrogram",
     icon: IconName::Layers,
     instances: Instances::Multiple,
@@ -34,6 +35,7 @@ pub static SPECTROGRAM: PanelType = PanelType {
 };
 pub static STEREO_FIELD: PanelType = PanelType {
     key: "disqro.stereo-field",
+    minimum_content: size(176., 128.),
     title: "Stereo Field",
     icon: IconName::Radar,
     instances: Instances::Multiple,

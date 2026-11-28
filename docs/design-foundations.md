@@ -36,6 +36,23 @@ Every dock group shows its tab strip, whether it holds one panel or several. Tab
 
 Tabs distinguish four states. The selected tab takes its panel's surface and opens into it. The selected tab of the panel the listener is working in also carries an accent rule along its top edge. Hover lightens an unselected tab, and keyboard focus outlines the tab inside a border it always reserves.
 
+### Panel sizing
+
+Each panel type declares its operating width and content height. The dock adds the 36 px tab strip once per group. Starting sizes and saved divider positions are preferences. Dragging can give space to a neighbor down to these operating sizes.
+
+| Panel | Minimum width × height including tabs, logical px | Space reserved for |
+| --- | --- | --- |
+| Music Browser | 364 × 178 | History, interactive location, Filter, View and menu, with room for an open filter row, heading and recording |
+| Library / Locations | 168 × 140 / 160 × 140 | Destination or folder label, icon, disclosure and multiple rows |
+| Queue / Queue History | 176 × 132 | Title and duration in a compact list |
+| Listening History / Listening Statistics | 272 × 276 / 224 × 200 | Wrapped period controls, search or rankings and result content |
+| Spectrogram / Spectrum / Stereo Field | 208 × 164 / 224 × 164 / 176 × 164 | Settings and measurement header above the plot |
+| Waveform | 256 × 144 | Zoom, Follow playback and the waveform lane |
+
+A group reserves the largest width and height of its visible members, including inactive tabs. A horizontal split adds child widths and takes the tallest child. A vertical split adds heights and takes the widest child. Handles overlay their shared edges. All-hidden groups occupy zero space.
+
+When the window cannot fit the resulting minimum, scroll the dock horizontally or vertically. Scrollbars appear on the overflowing axes. The title bar and full-width player stay in place. Widening or raising the window makes the panels visible together again. Selecting a tab never changes the group's minimum. Saving in a constrained window retains the preferred proportions, so restoring the larger window also restores its divider positions.
+
 ## Music Browser toolbar
 
 The toolbar has one composition at every width:
@@ -44,7 +61,7 @@ The toolbar has one composition at every width:
 Back  Forward  Breadcrumb ………………  Filter  View ▾  More
 ```
 
-Give available width to the breadcrumb. Fold its earliest ancestors into Earlier locations, then truncate the current location at its end. The picker reserves the same width across view choices. As space tightens it can shorten its label to protect the current location. At still smaller widths the breadcrumb shrinks again. Preserve the control order and access to navigation, filtering and views. Folder scope belongs in the view picker wherever a folder offers one. Up and CD and release stepping are in the panel menu and keep their shortcuts. The dock can currently allocate less space than these controls need.
+Give available width to the breadcrumb. Fold its earliest ancestors into Earlier locations, then truncate the current location at its end. The picker reserves the same width across view choices. As space tightens it can shorten its label to protect the current location. Preserve the control order and access to navigation, filtering and views. Folder scope belongs in the view picker wherever a folder offers one. Up and CD and release stepping are in the panel menu and keep their shortcuts. Reserve 132 logical pixels for the location and at least 78 for the picker. Together with the four icon buttons, insets and gaps, the browser needs 364 logical pixels across. A tab that shares its group keeps that space when selected.
 
 Filter opens a row below the toolbar, so the field never takes space from the breadcrumb or moves a control. The row stays while a filter hides rows, and Escape or its close button clears and closes it.
 

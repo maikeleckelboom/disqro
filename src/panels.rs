@@ -95,6 +95,8 @@ pub struct PanelType {
     pub icon: IconName,
     pub instances: Instances,
     pub home: Home,
+    /// Operating width and height in logical pixels, below the group's tab strip.
+    pub minimum_content: Size<f32>,
     /// Builds an instance from its saved record; a fresh one gets a default
     /// record.
     pub build: fn(&Services, &PanelRecord, &mut Window, &mut App) -> Rc<dyn PaneContent>,

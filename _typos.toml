@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["/.local/", "/target/", "/docs/evidence/", "Cargo.lock"]
+extend-exclude = ["/.local/", "/target/", "/docs/evidence/", "/vendor/gpui-base-0.10.0/", "Cargo.lock"]
 [default]
 locale = "en-us"
 extend-ignore-re = [

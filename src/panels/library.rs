@@ -36,6 +36,7 @@ use std::{path::PathBuf, rc::Rc, sync::Arc};
 
 pub static TYPE: PanelType = PanelType {
     key: "disqro.library",
+    minimum_content: size(168., 104.),
     title: "Library",
     icon: IconName::Library,
     instances: super::Instances::Single,

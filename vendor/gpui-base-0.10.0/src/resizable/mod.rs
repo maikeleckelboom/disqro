@@ -1,3 +1,4 @@
+// Disqro change: distinguish measured slot extents from preferred resize proportions.
 use std::ops::Range;
 
 use gpui::{
@@ -57,6 +58,26 @@ impl ResizableState {
     /// Get the size of the panels.
     pub fn sizes(&self) -> &Vec<Pixels> {
         &self.sizes
+    }
+
+    /// Saving while a sibling is hidden or a preferred basis is below its
+    /// operating floor must not replace the user's proportions with the
+    /// temporarily fitted ones. Use a complete set from the same layout.
+    pub(crate) fn sizes_to_restore(&self, has_hidden_slot: bool) -> Vec<Pixels> {
+        let clamped = self
+            .panels
+            .iter()
+            .any(|p| p.size.is_some_and(|basis| basis < p.size_range.start));
+        if (clamped || has_hidden_slot)
+            && let Some(bases) = self
+                .panels
+                .iter()
+                .map(|p| p.size.filter(|size| *size > Pixels::ZERO))
+                .collect::<Option<Vec<_>>>()
+        {
+            return bases;
+        }
+        self.sizes.clone()
     }
 
     /// Programmatically resize the panel at `ix` to `size`, redistributing
@@ -213,7 +234,7 @@ impl ResizableState {
         let Some(panel) = self.panels.get(panel_ix) else {
             return true;
         };
-        self.sizes.get(panel_ix).map(|size| size.as_f32()) == Some(PANEL_MIN_SIZE.as_f32())
+        self.sizes.get(panel_ix).copied() != Some(bounds.size.along(self.axis))
             || panel.bounds != bounds
             || panel.size_range != *size_range
             || panel.fixed != fixed
@@ -229,13 +250,14 @@ impl ResizableState {
     ) {
         self.panels[panel_ix].fixed = fixed;
         let size = bounds.size.along(self.axis);
-        // This check is only necessary to stop the very first panel from resizing on its own
-        // it needs to be passed when the panel is freshly created so we get the initial size,
-        // but its also fine when it sometimes passes later.
-        if self.sizes[panel_ix].as_f32() == PANEL_MIN_SIZE.as_f32() {
-            self.sizes[panel_ix] = size;
+        // Initialize an unsized slot from its first layout. Keep the flex
+        // basis separate from the measured extent: a sibling at its floor
+        // can make the latter smaller on resize or restore. Drags and the
+        // dock's snapshot both read the measured sizes.
+        if self.panels[panel_ix].size.is_none() && self.sizes[panel_ix] == PANEL_MIN_SIZE {
             self.panels[panel_ix].size = Some(size);
         }
+        self.sizes[panel_ix] = size;
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
         cx.notify();
@@ -404,9 +426,9 @@ impl ResizableState {
         let sum = |fixed: bool| {
             self.panels
                 .iter()
-                .zip(&self.sizes)
-                .filter(|(panel, _)| panel.fixed == fixed)
-                .map(|(_, size)| size.as_f32())
+                .filter(|panel| panel.fixed == fixed)
+                .filter_map(|panel| panel.size)
+                .map(|size| size.as_f32())
                 .sum::<f32>()
         };
         let (fixed_size, total) = (px(sum(true)), sum(false));
@@ -419,17 +441,19 @@ impl ResizableState {
             return;
         }
 
-        for i in 0..self.panels.len() {
-            if self.panels[i].fixed {
-                self.panels[i].size = Some(self.sizes[i]);
-                continue;
+        // Scale the preferred bases. Measured bounds include temporary
+        // clamping and the growth slot's leftover from the first resize
+        // frame. Feeding that back here would move dividers on a round trip.
+        for (panel, measured) in self.panels.iter_mut().zip(&mut self.sizes) {
+            if let Some(basis) = panel.size {
+                let next = if panel.fixed {
+                    basis
+                } else {
+                    available * (basis / total_size)
+                };
+                panel.size = Some(next);
+                *measured = next;
             }
-            let size = self.sizes[i];
-            let ratio = size / total_size;
-            let new_size = available * ratio;
-
-            self.sizes[i] = new_size;
-            self.panels[i].size = Some(new_size);
         }
         cx.notify();
     }

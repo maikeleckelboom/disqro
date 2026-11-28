@@ -51,6 +51,7 @@ pub fn bind_keys(cx: &mut App) {
 
 pub static QUEUE: PanelType = PanelType {
     key: "disqro.queue",
+    minimum_content: size(176., 96.),
     title: "Queue",
     icon: IconName::ListMusic,
     instances: super::Instances::Single,
@@ -60,6 +61,7 @@ pub static QUEUE: PanelType = PanelType {
 
 pub static HISTORY: PanelType = PanelType {
     key: "disqro.history",
+    minimum_content: size(176., 96.),
     title: "Queue History",
     icon: IconName::Clock,
     instances: super::Instances::Single,
