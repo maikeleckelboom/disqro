@@ -1,8 +1,8 @@
 # Native waveform rendering qualification
 
-The current manifest pairs the reviewed signed overview from Waveform Native PR #8 with the detailed Stroke images and geometry from Disqro PR #41. Its 103 Windows D3D11 views each have separate SHA-256 digests for the PNG and geometry JSON. [Current manifest](../tools/waveform_parity/native_cases.json) · [Historical manifest with all RMS-body hashes](https://github.com/maikeleckelboom/disqro/blob/321deed4438add27e66b0f8eaff7b8cefdae9cbd/tools/waveform_parity/native_cases.json)
+The current manifest uses the source-centered overview color from Waveform Native Mission 3A. All 24 overview PNGs were reviewed at 560, 1,200 and 1,920 physical pixels. All three synthetic controls match the approved engine RGB values exactly. Across all eight fixture groups, the 79 detailed Stroke PNGs and all 103 geometry files retain their production hashes.
 
-The signed-envelope replay changed 24 overview PNGs across eight fixture groups at widths of 560, 1,200, and 1,920 physical pixels. All 79 detailed PNGs and all 103 geometry files matched the historical hashes. On the synthetic control, each new overview matched the approved engine image pixel for pixel. The retained-changing recording shows a uniform fill through the loud sections and keeps the gaps visible. The whole-disc and CUE chapter views retain their distinct extents.
+[Current manifest](../tools/waveform_parity/native_cases.json) · [Previous signed overview with end-anchored color](https://github.com/maikeleckelboom/disqro/blob/a0cdcbf1d775204d7f9aced77937194de4198400/tools/waveform_parity/native_cases.json) · [Historical RMS-body manifest](https://github.com/maikeleckelboom/disqro/blob/321deed4438add27e66b0f8eaff7b8cefdae9cbd/tools/waveform_parity/native_cases.json)
 
 ## Replay on Windows
 

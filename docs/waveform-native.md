@@ -53,6 +53,20 @@ origin, paces frames on the Windows 11 compositor clock, and no longer draws
 
 [Playback presentation timing and foreground capture](playback-presentation.md)
 
+Disqro's frame coordinator samples the window's compositor tick once for moving
+panels and the compact cursor. A stationary panel invalidates its zoom readout
+when a wheel event changes the span. During playback it still coalesces label
+updates while drawing the waveform on retained frames.
+
+With a qualification release build, run the following from the repository
+root. The probe pauses the actual player on a private desktop and times 24
+wheel events against the first changed viewport and the scene paint carrying
+that span. It writes the raw QPC trace and per-event results to a fresh profile.
+
+```powershell
+python -B tools/qualify_waveform_wheel.py target/release/disqro.exe .local/paused-wheel
+```
+
 ## Derived data
 
 Disqro opens the current rebuildable cache in `music-cache-v2.sqlite3`. The database filename versions the complete schema. Older cache files can be removed independently of the library and workspace.

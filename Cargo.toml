@@ -16,7 +16,7 @@ qualification = [
 # Waveform Native: analysis, evidence, Stroke projection, the D3D11 renderer
 # and GPUI surfaces. The same pinned revision supplies the GPUI platform
 # patch below (docs/waveform-native.md).
-waveform-native = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "6840e4e36b7fed8a165d54c60487dad37f3b3556", features = ["gpui"] }
+waveform-native = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "4b4330c107bf05b6fd3b27e165c66213b485c727", features = ["gpui"] }
 async-lock = "3.5"
 hashlink = "0.12"
 gpui-kit = { version = "=0.10.0", features = ["gpui-fast"] }
@@ -63,7 +63,7 @@ embed-resource = "3"
 # Cargo applies patches only from the root workspace. Waveform Native carries
 # the single copy of GPUI's same-device texture bridge.
 [patch.crates-io]
-gpui-fast-windows = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "6840e4e36b7fed8a165d54c60487dad37f3b3556" }
+gpui-fast-windows = { git = "https://github.com/maikeleckelboom/waveform-native", rev = "4b4330c107bf05b6fd3b27e165c66213b485c727" }
 
 [profile.dev]
 debug = 0
