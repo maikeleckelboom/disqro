@@ -572,14 +572,7 @@ impl LocationsPanel {
                     .track_focus(&row_focus)
                     .tab_stop(true)
                     .focus_visible(|d| d.bg(m.control).text_color(m.accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_ellipsis_middle()
-                            .child(label.clone()),
-                    )
+                    .child(div().flex_1().min_w_0().truncate().child(label.clone()))
                     .on_click(open)
                     .when(available && !temporary, |d| {
                         let tip = path.display().to_string();

@@ -742,7 +742,6 @@ impl Disc {
                     .min_w_0()
                     .flex_shrink(1.)
                     .truncate()
-                    .text_ellipsis_middle()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(crate::theme::size::TEXT))
                     .text_color(m.text)
@@ -1075,10 +1074,11 @@ impl TableDelegate for Discs {
             }
         };
         if field != Field::Title {
+            // Names end in an ellipsis; a folder path keeps both ends.
             return cell.child(
                 div()
                     .truncate()
-                    .text_ellipsis_middle()
+                    .when(field == Field::Path, |d| d.text_ellipsis_middle())
                     .child(row.label(field)),
             );
         }
@@ -1096,7 +1096,6 @@ impl TableDelegate for Discs {
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_ellipsis_middle()
                             .text_color(m.text_faint)
                             .child(subtitle.to_owned()),
                     )
@@ -1130,7 +1129,6 @@ impl TableDelegate for Discs {
                 .id(("disc-title", crate::table::stable_element_key(row.key())))
                 .min_w_0()
                 .truncate()
-                .text_ellipsis_middle()
                 .child(label.clone())
                 .tooltip(move |w, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(w, cx)
