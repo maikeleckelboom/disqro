@@ -712,12 +712,13 @@ impl Render for Player {
             })
             .tooltip(|w, cx| Tooltip::new("Play or pause · Space").build(w, cx))
             .child(
-                Icon::new(if play_will_pause {
-                    IconName::Pause
-                } else {
-                    IconName::Play
-                })
-                .size(px(20.)),
+                Icon::default()
+                    .path(if play_will_pause {
+                        crate::assets::PAUSE_FILL
+                    } else {
+                        crate::assets::PLAY_FILL
+                    })
+                    .size(px(18.)),
             );
 
         let transport = h_flex()
@@ -985,8 +986,8 @@ impl Render for Player {
             .px(px(10.))
             .gap(px(8.))
             .items_center()
-            .bg(m.canvas)
-            .rounded(px(6.))
+            .bg(m.wave.lane)
+            .rounded(px(crate::theme::size::RADIUS))
             .rounded_tl(px(0.))
             .child(time(shown_position).text_color(m.text_muted))
             .child(seek)
@@ -1028,24 +1029,27 @@ impl Render for Player {
 /// The play button's resting lift, and the ring that lights around it while
 /// playing.
 fn silver_ring(m: &crate::theme::Materials, lit: bool) -> Vec<BoxShadow> {
-    let lift = BoxShadow {
-        color: black().opacity(0.45),
-        offset: point(px(0.), px(1.)),
-        blur_radius: px(3.),
-        spread_radius: px(0.),
-        inset: false,
-    };
-    if !lit {
-        return vec![lift];
-    }
-    let ring = |spread: f32, blur: f32, alpha: f32| BoxShadow {
-        color: m.accent.opacity(alpha),
-        offset: point(px(0.), px(0.)),
+    let shadow = |color: Hsla, y: f32, blur: f32, spread: f32, inset: bool| BoxShadow {
+        color,
+        offset: point(px(0.), px(y)),
         blur_radius: px(blur),
         spread_radius: px(spread),
-        inset: false,
+        inset,
     };
-    vec![lift, ring(2., 0., 0.85), ring(3., 8., 0.35)]
+    let mut shadows = vec![
+        // A machined edge: light catches the upper rim, the lower rim falls
+        // into shade.
+        shadow(m.silver.edge_light, 1., 0., 0., true),
+        shadow(m.silver.edge_dark, -1., 0., 0., true),
+        // The button stands slightly proud of the player.
+        shadow(black().opacity(0.4), 1., 2., 0., false),
+    ];
+    if lit {
+        // A thin lit ring, close to the rim, with only a trace of glow.
+        shadows.push(shadow(m.accent.opacity(0.75), 0., 0., 1.5, false));
+        shadows.push(shadow(m.accent.opacity(0.14), 0., 6., 1.5, false));
+    }
+    shadows
 }
 
 /// Concentric machining on the button face: a few faint rings.

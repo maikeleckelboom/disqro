@@ -66,6 +66,9 @@ pub struct Silver {
     pub ink: Hsla,
     pub grain_light: Hsla,
     pub grain_dark: Hsla,
+    /// Highlights and shade on the rim of the face.
+    pub edge_light: Hsla,
+    pub edge_dark: Hsla,
 }
 
 impl Silver {
@@ -95,6 +98,9 @@ impl Silver {
 #[derive(Clone, Copy)]
 pub struct Wave {
     pub cursor: Hsla,
+    /// The player's timeline lane. It matches the black the waveform
+    /// renderer clears to, so the waveform has no visible plate.
+    pub lane: Hsla,
 }
 
 impl Global for Materials {}
@@ -132,14 +138,19 @@ impl Materials {
             warning: hex(0xd8ad5c),
             wave: Wave {
                 cursor: hex(0xf1f1f3),
+                lane: hex(0x000000),
             },
+            // Satin rather than mirror: a narrower range of tones than a
+            // polished face, so the button reads as metal without glare.
             silver: Silver {
-                light: hex(0xe9eaed),
-                dark: hex(0x9a9ca3),
-                bezel: hex(0x5d5f66),
-                ink: hex(0x17181b),
-                grain_light: hexa(0xffffff, 0.10),
-                grain_dark: hexa(0x000000, 0.06),
+                light: hex(0xdcdde1),
+                dark: hex(0xa4a6ad),
+                bezel: hex(0x4c4e55),
+                ink: hex(0x1b1c20),
+                grain_light: hexa(0xffffff, 0.07),
+                grain_dark: hexa(0x000000, 0.045),
+                edge_light: hexa(0xffffff, 0.55),
+                edge_dark: hexa(0x000000, 0.18),
             },
         }
     }

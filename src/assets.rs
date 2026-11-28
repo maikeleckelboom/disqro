@@ -56,6 +56,10 @@ gpui_kit::assets::icon_assets!(
 );
 /// A filled variant of Lucide's heart (ISC license), for liked tracks.
 pub const HEART_FILL: &str = "icons/heart-fill.svg";
+/// Filled variants of Lucide's play and pause (ISC license), for the play
+/// button's metal face.
+pub const PLAY_FILL: &str = "icons/play-fill.svg";
+pub const PAUSE_FILL: &str = "icons/pause-fill.svg";
 pub struct Assets;
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
@@ -64,6 +68,8 @@ impl AssetSource for Assets {
         }
         let custom = embedded!(
             "icons/heart-fill.svg",
+            "icons/play-fill.svg",
+            "icons/pause-fill.svg",
             "files/16/folder.svg",
             "files/20/folder-music.svg",
             "files/20/drive.svg"
